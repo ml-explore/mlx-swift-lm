@@ -431,6 +431,11 @@ public class Gemma3TextModel: Module, LLMModel {
         return out
     }
 
+    /// Get hidden states before the language modeling head for embedding use cases
+    public func getHiddenStates(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        return model(inputs, mask: nil, cache: cache)
+    }
+
     public func sanitize(
         weights: [String: MLXArray],
         quantizationConfig: BaseConfiguration.Quantization? = nil
