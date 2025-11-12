@@ -3,8 +3,8 @@
 import Foundation
 @preconcurrency import Hub
 import MLX
-import MLXNN
 import MLXLMCommon
+import MLXNN
 import Tokenizers
 
 struct EmbedderError: Error {

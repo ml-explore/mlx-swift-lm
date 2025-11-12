@@ -1,7 +1,7 @@
 import MLX
-import MLXNN
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 
 public class EmbeddingGemma: Module, EmbeddingModel {
     @ModuleInfo private var model: Gemma3TextModel
@@ -14,7 +14,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         self.config = config
         self.model = Gemma3TextModel(config)
         self.dense = [
-            Linear(768, 3072, bias: false), Linear(3072, 768, bias: false)
+            Linear(768, 3072, bias: false), Linear(3072, 768, bias: false),
         ]
     }
 
@@ -26,7 +26,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
 
         // mean pooling
         let notPadding = inputs .!= 0
-        let sum = (out * notPadding[.ellipsis, .newAxis]).sum(axis:1)
+        let sum = (out * notPadding[.ellipsis, .newAxis]).sum(axis: 1)
         let nonMasked = notPadding.sum(axis: -1, keepDims: true)
         out = sum / nonMasked
 
@@ -40,31 +40,38 @@ public class EmbeddingGemma: Module, EmbeddingModel {
 
         // normalize
         out = out.asType(Float32.self)
-        let norm = maximum(norm(out, ord:2.0, axis:-1, keepDims: true), MLXArray(1e-6))
+        let norm = maximum(norm(out, ord: 2.0, axis: -1, keepDims: true), MLXArray(1e-6))
         let pooledOutput = out / norm
 
         return EmbeddingModelOutput(hiddenStates: out, pooledOutput: pooledOutput)
     }
-    
+
     /// Get hidden states before the dense projection head
-    public func getHiddenStates(_ inputs: MLXArray,  mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil, cache: [KVCache]? = nil) -> MLXArray {
+    public func getHiddenStates(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache]? = nil
+    ) -> MLXArray {
         return model(inputs, mask: mask, cache: cache)
     }
 
-
-    public func sanitize(weights: [String: MLXArray], quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization? = nil)
+    public func sanitize(
+        weights: [String: MLXArray],
+        quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization? = nil
+    )
         -> [String: MLXArray]
     {
-        var processedWeights = model.sanitize(weights: weights, quantizationConfig: quantizationConfig)
+        var processedWeights = model.sanitize(
+            weights: weights, quantizationConfig: quantizationConfig)
 
         // 1. Add a model. prefix to all model. weights
-        processedWeights = Dictionary(uniqueKeysWithValues: processedWeights.map { key, value in
-            if key.hasPrefix("model.") || key.hasPrefix("lm_head.") {
-                return ("model.\(key)", value)
-            } else {
-                return (key, value)
-            }
-        })
+        processedWeights = Dictionary(
+            uniqueKeysWithValues: processedWeights.map { key, value in
+                if key.hasPrefix("model.") || key.hasPrefix("lm_head.") {
+                    return ("model.\(key)", value)
+                } else {
+                    return (key, value)
+                }
+            })
 
         // 2. Apply quantization to dense layers, if needed
         let hasQuantizedDense = hasQuantizedWeights(layerPath: "dense.0", in: processedWeights)
@@ -85,11 +92,11 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         }
     }
 
-    public func sanitize(weights: [String : MLXArray]) -> [String : MLXArray] {
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         sanitize(weights: weights, quantizationConfig: nil)
     }
 
-        /// Check if a layer has quantized weights
+    /// Check if a layer has quantized weights
     private func hasQuantizedWeights(layerPath: String, in weights: [String: MLXArray]) -> Bool {
         let scalesKey = "\(layerPath).scales"
         let biasesKey = "\(layerPath).biases"

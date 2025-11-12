@@ -24,18 +24,20 @@ public func createBidirectionalSlidingWindowMask(
     var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
     linds = linds[0..., .newAxis]
     let rindsBcast = rinds[.newAxis]
-    
+
     // Create mask where abs(q_idx - kv_idx) < windowSize (bidirectional window)
     let distance = abs(linds - rindsBcast)
     let mask = distance .< windowSize
-    
+
     return mask
 }
 
-func simpleSDPA(queries: MLXArray, keys: MLXArray, values: MLXArray, mask: MLXArray, scale: Float) -> MLXArray {
+func simpleSDPA(queries: MLXArray, keys: MLXArray, values: MLXArray, mask: MLXArray, scale: Float)
+    -> MLXArray
+{
     var attn = matmul(queries, keys.transposed(0, 1, 3, 2))
     attn = attn - (1 - mask) * 1e6
-    let weights = softmax(scale * attn, axis:-1)
+    let weights = softmax(scale * attn, axis: -1)
     return matmul(weights, values)
 }
 
@@ -80,7 +82,13 @@ public struct Gemma3TextConfiguration: Codable {
         case textConfig = "text_config"
     }
 
-    public init(modelType: String, hiddenSize: Int, hiddenLayers: Int, intermediateSize: Int, attentionHeads: Int, headDim: Int, rmsNormEps: Float, vocabularySize: Int, kvHeads: Int, ropeGlobalBaseFreq: Float, ropeLocalBaseFreq: Float, ropeTraditional: Bool, queryPreAttnScalar: Float, slidingWindow: Int, slidingWindowPattern: Int, useBidirectionalAttention: Bool, quantizationConfig: QuantizationConfig? = nil) {
+    public init(
+        modelType: String, hiddenSize: Int, hiddenLayers: Int, intermediateSize: Int,
+        attentionHeads: Int, headDim: Int, rmsNormEps: Float, vocabularySize: Int, kvHeads: Int,
+        ropeGlobalBaseFreq: Float, ropeLocalBaseFreq: Float, ropeTraditional: Bool,
+        queryPreAttnScalar: Float, slidingWindow: Int, slidingWindowPattern: Int,
+        useBidirectionalAttention: Bool, quantizationConfig: QuantizationConfig? = nil
+    ) {
         self.modelType = modelType
         self.hiddenSize = hiddenSize
         self.hiddenLayers = hiddenLayers
@@ -128,10 +136,11 @@ public struct Gemma3TextConfiguration: Codable {
             try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
         queryPreAttnScalar =
             try container.decodeIfPresent(Float.self, forKey: .queryPreAttnScalar) ?? 256
-        useBidirectionalAttention = 
+        useBidirectionalAttention =
             try container.decodeIfPresent(Bool.self, forKey: .useBidirectionalAttention) ?? false
-        
-        let rawSlidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
+
+        let rawSlidingWindow =
+            try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
         // Apply sliding window adjustment for bidirectional attention (from patch: (sliding_window // 2) + 1)
         slidingWindow = useBidirectionalAttention ? (rawSlidingWindow / 2) + 1 : rawSlidingWindow
         slidingWindowPattern =
@@ -249,11 +258,13 @@ private class Attention: Module {
         } else {
             fatalError("oh noes")
         }
-        let output = simpleSDPA(queries: queries,
-                                keys: keys,
-                                values: values,
-                                mask: maskArr,
-                                scale: scale)
+        let output = simpleSDPA(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: maskArr,
+            scale: scale
+        )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
         return outputProj(output)
@@ -374,7 +385,7 @@ private class Gemma3Model: Module {
         } else {
             globalLayerCache = []
         }
-        
+
         if config.useBidirectionalAttention {
             // For bidirectional attention: full attention for global layers, bidirectional sliding window for others
             var fullMaskArray = MLXArray.ones([h.dim(1), h.dim(1)], dtype: .bool)
@@ -382,7 +393,7 @@ private class Gemma3Model: Module {
                 fullMaskArray = fullMaskArray & maskArray
             }
             fullMask = .array(fullMaskArray)
-            
+
             let t = h.dim(1)
             var offset = 0
             if let cache = layerCache?.compactMap({ $0 }).first {
@@ -393,7 +404,7 @@ private class Gemma3Model: Module {
             if case .array(let maskArray) = mask {
                 slidingWindowMaskArray = slidingWindowMaskArray & maskArray
             }
-            slidingWindowMask = .array(slidingWindowMaskArray) 
+            slidingWindowMask = .array(slidingWindowMaskArray)
         } else {
             // Standard causal attention
             // TODO: probably need to merge the custom mask in
@@ -431,7 +442,10 @@ public class Gemma3TextModel: Module, LLMModel {
         super.init()
     }
 
-    public func callAsFunction(_ inputs: MLXArray,  mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil, cache: [KVCache]? = nil) -> MLXArray {
+    public func callAsFunction(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache]? = nil
+    ) -> MLXArray {
         var out = model(inputs, mask: mask, cache: cache)
 
         // Call the lmHead (works whether it's Linear or QuantizedLinear)
@@ -447,7 +461,10 @@ public class Gemma3TextModel: Module, LLMModel {
     }
 
     /// Get hidden states before the language modeling head for embedding use cases
-    public func getHiddenStates(_ inputs: MLXArray,  mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil, cache: [KVCache]? = nil) -> MLXArray {
+    public func getHiddenStates(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache]? = nil
+    ) -> MLXArray {
         return model(inputs, mask: mask, cache: cache)
     }
 

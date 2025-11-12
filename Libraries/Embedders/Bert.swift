@@ -1,8 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import MLX
-import MLXNN
 import MLXLMCommon
+import MLXNN
 
 extension MLXArray {
     public static func arange(_ size: Int) -> MLXArray {
@@ -198,7 +198,9 @@ public class BertModel: Module, EmbeddingModel {
         }.filter { key, _ in key != "embeddings.position_ids" }
     }
 
-    public func sanitize(weights: [String : MLXArray], quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization?) -> [String : MLXArray] {
+    public func sanitize(
+        weights: [String: MLXArray], quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization?
+    ) -> [String: MLXArray] {
         fatalError("Bert does not support quantization")
     }
 }
