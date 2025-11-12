@@ -1,6 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
+import MLXLLM
 
 public enum StringOrNumber: Codable, Equatable, Sendable {
     case string(String)
@@ -74,6 +75,13 @@ private class ModelTypeRegistry: @unchecked Sendable {
             let configuration = try JSONDecoder().decode(
                 Qwen3Configuration.self, from: Data(contentsOf: url))
             let model = Qwen3Model(configuration)
+            return model
+        },
+        "gemma3_text": {
+            url in
+            let configuration = try JSONDecoder().decode(
+                Gemma3TextConfiguration.self, from: Data(contentsOf: url))
+            let model = EmbeddingGemma(configuration)
             return model
         },
     ]

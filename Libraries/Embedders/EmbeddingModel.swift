@@ -3,6 +3,7 @@
 import Foundation
 @preconcurrency import Hub
 import MLX
+import MLXLMCommon
 import MLXNN
 import Tokenizers
 
@@ -87,8 +88,8 @@ extension Module {
 }
 
 public struct EmbeddingModelOutput {
-    let hiddenStates: MLXArray?
-    let pooledOutput: MLXArray?
+    public let hiddenStates: MLXArray?
+    public let pooledOutput: MLXArray?
 }
 
 public protocol EmbeddingModel: Module {
@@ -99,6 +100,9 @@ public protocol EmbeddingModel: Module {
     ) -> EmbeddingModelOutput
     /// Optionally preprocess the weights and modify / remove values as needed.
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
+    func sanitize(
+        weights: [String: MLXArray], quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization?
+    ) -> [String: MLXArray]
 }
 
 extension EmbeddingModel {
