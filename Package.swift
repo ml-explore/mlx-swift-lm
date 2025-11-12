@@ -19,6 +19,9 @@ let package = Package(
         .library(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
+        .executable(
+            name: "test-embedding-gemma",
+            targets: ["TestEmbeddingGemma"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.29.1")),
@@ -26,6 +29,7 @@ let package = Package(
             url: "https://github.com/huggingface/swift-transformers",
             .upToNextMinor(from: "1.1.0")
         ),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
         .target(
@@ -107,6 +111,7 @@ let package = Package(
         .target(
             name: "MLXEmbedders",
             dependencies: [
+                "MLXLLM",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -118,6 +123,17 @@ let package = Package(
             exclude: [
                 "README.md"
             ]
+        ),
+        .executableTarget(
+            name: "TestEmbeddingGemma",
+            dependencies: [
+                "MLXEmbedders",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Tools/TestEmbeddingGemma"
         ),
     ]
 )

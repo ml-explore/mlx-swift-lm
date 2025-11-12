@@ -31,7 +31,6 @@ public struct Gemma3TextConfiguration: Codable {
     public let slidingWindow: Int
     public let slidingWindowPattern: Int
     public let useBidirectionalAttention: Bool
-    public let quantizationConfig: QuantizationConfig?
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -50,7 +49,6 @@ public struct Gemma3TextConfiguration: Codable {
         case slidingWindow = "sliding_window"
         case slidingWindowPattern = "sliding_window_pattern"
         case useBidirectionalAttention = "use_bidirectional_attention"
-        case quantizationConfig = "quantization"
     }
 
     enum VLMCodingKeys: String, CodingKey {
@@ -74,7 +72,6 @@ public struct Gemma3TextConfiguration: Codable {
         self.slidingWindow = slidingWindow
         self.slidingWindowPattern = slidingWindowPattern
         self.useBidirectionalAttention = useBidirectionalAttention
-        self.quantizationConfig = quantizationConfig
     }
 
     public init(from decoder: Decoder) throws {
@@ -109,8 +106,6 @@ public struct Gemma3TextConfiguration: Codable {
         slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
         slidingWindowPattern =
             try container.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 6
-
-        quantizationConfig = try container.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig)
     }
 }
 
@@ -398,7 +393,7 @@ public class Gemma3TextModel: Module, LLMModel {
 
     public func sanitize(
         weights: [String: MLXArray],
-        quantizationConfig: QuantizationConfig? = nil
+        quantizationConfig: BaseConfiguration.Quantization? = nil
     ) -> [String: MLXArray] {
         var processedWeights = weights
 

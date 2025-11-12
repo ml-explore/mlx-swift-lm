@@ -112,6 +112,12 @@ extension ModelConfiguration {
         id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
     public static let embeddinggemma_300m = ModelConfiguration(
         id: "mlx-community/embeddinggemma-300m-bf16")
+    public static let embeddinggemma_300m_8bit = ModelConfiguration(
+        id: "mlx-community/embeddinggemma-300m-8bit")
+    public static let embeddinggemma_300m_6bit = ModelConfiguration(
+        id: "mlx-community/embeddinggemma-300m-6bit")
+    public static let embeddinggemma_300m_4bit = ModelConfiguration(
+        id: "mlx-community/embeddinggemma-300m-4bit")
 
     private enum BootstrapState: Sendable {
         case idle
@@ -144,6 +150,9 @@ extension ModelConfiguration {
                 mixedbread_large,
                 qwen3_embedding,
                 embeddinggemma_300m,
+                embeddinggemma_300m_8bit,
+                embeddinggemma_300m_6bit,
+                embeddinggemma_300m_4bit,
             ])
             bootstrapState = .bootstrapped
 
