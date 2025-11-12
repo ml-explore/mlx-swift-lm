@@ -212,6 +212,10 @@ public class Qwen3Model: Module, EmbeddingModel {
 
         return sanitizedWeights
     }
+
+    public func sanitize(weights: [String: MLXArray], quantizationConfig: MLXLMCommon.BaseConfiguration.Quantization?) -> [String: MLXArray] {
+        fatalError("Qwen3 does not support quantization")
+    }
 }
 
 public struct Qwen3Configuration: Codable, Sendable {
