@@ -7,7 +7,73 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
+
+class Llama3RoPE: Module {
+    let dims: Int
+    let maxPositionEmbeddings: Int
+    let traditional: Bool
+    let freqs: MLXArray
+
+    init(
+        dims: Int,
+        maxPositionEmbeddings: Int = 2048,
+        traditional: Bool = false,
+        base: Float = 10000,
+        scalingConfig: [String: StringOrNumber]? = nil
+    ) {
+        self.dims = dims
+        self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.traditional = traditional
+
+        guard let scalingConfig = scalingConfig else {
+            fatalError("Llama3RoPE requires scaling_config")
+        }
+
+        let factor = scalingConfig["factor"]?.asFloat() ?? 1.0
+        let lowFreqFactor = scalingConfig["low_freq_factor"]?.asFloat() ?? 1.0
+        let highFreqFactor = scalingConfig["high_freq_factor"]?.asFloat() ?? 4.0
+        let oldContextLen = scalingConfig["original_max_position_embeddings"]?.asFloat() ?? 8192.0
+
+        let lowFreqWavelen = oldContextLen / lowFreqFactor
+        let highFreqWavelen = oldContextLen / highFreqFactor
+
+        let indices = MLXArray(stride(from: 0, to: dims, by: 2))
+        var frequencies = MLX.pow(base, indices / Float(dims))
+        let wavelens = 2 * Float.pi * frequencies
+
+        frequencies = MLX.where(
+            wavelens .> MLXArray(lowFreqWavelen),
+            frequencies * factor,
+            frequencies
+        )
+
+        let isMediumFreq = MLX.logicalAnd(
+            wavelens .> MLXArray(highFreqWavelen),
+            wavelens .< MLXArray(lowFreqWavelen)
+        )
+
+        let smoothFactors =
+            (oldContextLen / wavelens - lowFreqFactor) / (highFreqFactor - lowFreqFactor)
+        let smoothFreqs = frequencies / ((1 - smoothFactors) / factor + smoothFactors)
+
+        self.freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+        MLXFast.RoPE(
+            x,
+            dimensions: dims,
+            traditional: traditional,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: freqs
+        )
+    }
+}
 
 public class YarnRoPE: Module {
     let dimensions: Int
@@ -116,5 +182,63 @@ public class YarnRoPE: Module {
             offset: offset,
             freqs: self._freqs
         )
+    }
+}
+
+func initializeRope(
+    dims: Int,
+    base: Float,
+    traditional: Bool,
+    scalingConfig: [String: StringOrNumber]?,
+    maxPositionEmbeddings: Int?
+) -> Module {
+    let ropeType: String = {
+        if let config = scalingConfig,
+            let typeValue = config["type"] ?? config["rope_type"],
+            case .string(let s) = typeValue
+        {
+            return s
+        }
+        return "default"
+    }()
+
+    if ropeType == "default" || ropeType == "linear" {
+        let scale: Float
+        if ropeType == "linear", let factor = scalingConfig?["factor"]?.asFloat() {
+            scale = 1 / factor
+        } else {
+            scale = 1.0
+        }
+        return RoPE(dimensions: dims, traditional: traditional, base: base, scale: scale)
+    } else if ropeType == "llama3" {
+        return Llama3RoPE(
+            dims: dims,
+            maxPositionEmbeddings: maxPositionEmbeddings ?? 2048,
+            traditional: traditional,
+            base: base,
+            scalingConfig: scalingConfig
+        )
+    } else if ropeType == "yarn" {
+        let factor = scalingConfig?["factor"]?.asFloat() ?? 32.0
+        let origMax = scalingConfig?["original_max_position_embeddings"]?.asInt() ?? 4096
+        let betaFast = scalingConfig?["beta_fast"]?.asFloat() ?? 32.0
+        let betaSlow = scalingConfig?["beta_slow"]?.asFloat() ?? 1.0
+        let mscale = scalingConfig?["mscale"]?.asFloat() ?? 1.0
+        let mscaleAllDim = scalingConfig?["mscale_all_dim"]?.asFloat() ?? 0.0
+
+        return YarnRoPE(
+            dimensions: dims,
+            traditional: traditional,
+            maxPositionEmbeddings: maxPositionEmbeddings ?? 2048,
+            base: base,
+            scalingFactor: factor,
+            originalMaxPositionEmbeddings: origMax,
+            betaFast: betaFast,
+            betaSlow: betaSlow,
+            mscale: mscale,
+            mscaleAllDim: mscaleAllDim
+        )
+    } else {
+        fatalError("Unsupported RoPE type: \(ropeType)")
     }
 }

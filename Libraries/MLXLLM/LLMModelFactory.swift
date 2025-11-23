@@ -63,6 +63,7 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "lille-130m": create(Lille130mConfiguration.self, Lille130mModel.init),
             "olmoe": create(OlmoEConfiguration.self, OlmoEModel.init),
             "olmo2": create(Olmo2Configuration.self, Olmo2Model.init),
+            "olmo3": create(Olmo3Configuration.self, Olmo3Model.init),
             "bailing_moe": create(BailingMoeConfiguration.self, BailingMoeModel.init),
             "lfm2_moe": create(LFM2MoEConfiguration.self, LFM2MoEModel.init),
             "nanochat": create(NanoChatConfiguration.self, NanoChatModel.init),
