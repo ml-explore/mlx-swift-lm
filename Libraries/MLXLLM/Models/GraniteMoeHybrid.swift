@@ -473,7 +473,7 @@ private class GraniteMoeHybridModelInner: Module {
                 let cache = cache,
                 index < cache.count
             else { return .none }
-            return createAttentionMask(h: hidden, cache: [cache[index]])
+            return createAttentionMask(h: hidden, cache: cache[index])
         }()
 
         let ssmMask = createSSMMask(

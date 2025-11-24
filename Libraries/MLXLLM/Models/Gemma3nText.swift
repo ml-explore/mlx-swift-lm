@@ -795,12 +795,11 @@ private class LanguageModel: Module {
         var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
 
         if mask == nil {
-            let fullCacheSlice = Array(cacheArray[firstFullIdx...]).compactMap { $0 }
-            fullMask = createAttentionMask(h: h, cache: fullCacheSlice, returnArray: true)
+            fullMask = createAttentionMask(h: h, cache: cacheArray[firstFullIdx])
 
-            let slidingCacheSlice = Array(cacheArray[firstSlidingIdx...]).compactMap { $0 }
+            let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
             slidingWindowMask = createAttentionMask(
-                h: h, cache: slidingCacheSlice, returnArray: true)
+                h: h, cache: cacheArray[firstSlidingIdx], windowSize: slidingWindow)
         }
 
         let h0 = h

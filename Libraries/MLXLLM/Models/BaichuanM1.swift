@@ -219,7 +219,7 @@ private class BaichuanM1ModelInner: Module {
     ) -> MLXArray {
         var x = embedTokens(inputs)
 
-        let mask = mask ?? createAttentionMask(h: x, cache: cache)
+        let mask = mask ?? createAttentionMask(h: x, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             x = layer(x, mask: mask, cache: cache?[i])
