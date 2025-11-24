@@ -474,7 +474,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             // Put the keys/values in temporal order to preserve context
             self.keys = temporalOrder(self.keys!)
             self.values = temporalOrder(self.values!)
-            let trimSize = idx - maxCacheSize
+            idx = self.keys!.dim(2)
+
+            // Allow temporary cache growth during multi-token processing (e.g., prompt prefill).
+            // The largest size is maxCacheSize + S - 1 to ensure
+            // every token gets at least maxCacheSize context
+            let trimSize = idx - maxCacheSize + 1
             self.keys = trim(trimSize: trimSize, self.keys!, append: keys)
             self.values = trim(trimSize: trimSize, self.values!, append: values)
         }
@@ -1126,7 +1131,11 @@ public class CacheList: BaseKVCache {
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
-        return caches.first?.trim(n) ?? 0
+        var result = 0
+        for cache in caches {
+            result = cache.trim(n)
+        }
+        return result
     }
 }
 
