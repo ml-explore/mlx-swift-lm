@@ -139,7 +139,7 @@ public class CohereModelInner: Module {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let mask = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

@@ -172,7 +172,7 @@ public class PhiModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let mask = createAttentionMask(h: x, cache: cache)
+        let mask = createAttentionMask(h: x, cache: cache?.first)
 
         let y = model(x, mask: mask, cache: cache)
         return lmHead(y)

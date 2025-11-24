@@ -484,7 +484,7 @@ private class DeepseekV3ModelInner: Module {
     func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
         var h = embedTokens(x)
 
-        let attentionMask = createAttentionMask(h: h, cache: cache)
+        let attentionMask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: attentionMask, cache: cache?[i])

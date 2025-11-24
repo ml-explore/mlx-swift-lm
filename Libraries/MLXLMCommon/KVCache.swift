@@ -57,6 +57,20 @@ public protocol KVCache: Evaluatable {
     /// trim n tokens from the cache, returning actual number trimmed
     @discardableResult
     func trim(_ n: Int) -> Int
+
+    /// Create an attention mask for this cache
+    ///
+    /// This method encapsulates cache-specific mask creation logic. Implementations should handle offset capping, window size logic,
+    /// and optimization decisions (symbolic vs array masks).
+    ///
+    /// - Parameters:
+    ///   - n: The sequence length for the new tokens
+    ///   - windowSize: Optional sliding window size
+    ///   - returnArray: Force return of array mask instead of symbolic
+    /// - Returns: Attention mask mode for scaled dot product attention
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode
 }
 
 /// Protocol for caches that support efficient quantized operations
@@ -138,6 +152,23 @@ open class BaseKVCache: KVCache {
 
     @discardableResult
     open func trim(_ n: Int) -> Int { 0 }
+
+    /// Default implementation for caches without special mask requirements
+    open func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        // For single token, no mask needed
+        if n == 1 {
+            return .none
+        }
+
+        // For multi-token sequences
+        if returnArray || (windowSize != nil && n > windowSize!) {
+            return .array(createCausalMask(n: n, offset: offset, windowSize: windowSize))
+        }
+
+        return .causal
+    }
 }
 
 public func createCausalMask(
@@ -153,7 +184,7 @@ public func createCausalMask(
     var mask = linds .>= rinds
 
     if let windowSize {
-        mask = mask & (linds .<= rinds + windowSize)
+        mask = mask & (linds .< rinds + windowSize)
     }
 
     if var lengths {
@@ -181,6 +212,10 @@ public func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
     return nil
 }
 
+@available(
+    *, deprecated,
+    message: "Use createAttentionMask(h:cache:windowSize:returnArray:) with a single cache instead"
+)
 public func createAttentionMask(h: MLXArray, cache: [KVCache]?, returnArray: Bool = false)
     -> MLXFast.ScaledDotProductAttentionMaskMode
 {
@@ -193,7 +228,7 @@ public func createAttentionMask(h: MLXArray, cache: [KVCache]?, returnArray: Boo
             offset = c.offset
             if let maxSize = c.maxSize {
                 windowSize = maxSize
-                offset = min(maxSize, offset)
+                offset = min(maxSize - 1, offset)
                 if !returnArray {
                     returnArray = offset + t > maxSize
                 }
@@ -207,6 +242,37 @@ public func createAttentionMask(h: MLXArray, cache: [KVCache]?, returnArray: Boo
         }
     }
     return .none
+}
+
+/// Create an attention mask with explicit window size parameter.
+///
+/// - Parameters:
+///   - h: The input array (used to determine sequence length)
+///   - cache: Optional single KV cache
+///   - windowSize: Optional sliding window size (if provided, creates windowed attention)
+///   - returnArray: Force return of array mask instead of symbolic "causal"
+/// - Returns: Attention mask mode for scaled dot product attention
+public func createAttentionMask(
+    h: MLXArray,
+    cache: KVCache?,
+    windowSize: Int? = nil,
+    returnArray: Bool = false
+) -> MLXFast.ScaledDotProductAttentionMaskMode {
+    let n = h.dim(1)
+
+    // Delegate to cache's makeMask if available
+    if let cache = cache {
+        return cache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    // Fallback for no cache
+    if n == 1 {
+        return .none
+    }
+    if returnArray || (windowSize != nil && n > windowSize!) {
+        return .array(createCausalMask(n: n, offset: 0, windowSize: windowSize))
+    }
+    return .causal
 }
 
 public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
@@ -408,7 +474,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             // Put the keys/values in temporal order to preserve context
             self.keys = temporalOrder(self.keys!)
             self.values = temporalOrder(self.values!)
-            let trimSize = idx - maxCacheSize
+            idx = self.keys!.dim(2)
+
+            // Allow temporary cache growth during multi-token processing (e.g., prompt prefill).
+            // The largest size is maxCacheSize + S - 1 to ensure
+            // every token gets at least maxCacheSize context
+            let trimSize = idx - maxCacheSize + 1
             self.keys = trim(trimSize: trimSize, self.keys!, append: keys)
             self.values = trim(trimSize: trimSize, self.values!, append: values)
         }
@@ -551,6 +622,46 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         offset -= trimmed
         idx -= trimmed
         return trimmed
+    }
+
+    /// Optimized mask creation for rotating cache with offset capping
+    public override func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n > 1 {
+            // Multi-token case
+            let actualWindowSize = windowSize ?? maxCacheSize
+            let cappedOffset = min(maxCacheSize - 1, offset)
+
+            // Decide if we need an array mask
+            if cappedOffset + n > actualWindowSize || returnArray {
+                return .array(
+                    createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+            }
+            return .causal
+        } else {
+            // Single token case (n == 1)
+            guard let windowSize = windowSize else {
+                return .none
+            }
+
+            // May need a mask when window_size < max_size and cache has wrapped
+            if offset >= windowSize, maxCacheSize > windowSize {
+                var currentIdx = idx
+                if currentIdx >= maxCacheSize {
+                    currentIdx = 0
+                }
+
+                let maskSize = offset < maxCacheSize ? offset + 1 : maxCacheSize
+                let mask = MLXArray(0 ..< Int32(maskSize)) .>= Int32(maskSize - windowSize)
+
+                // Roll the mask to account for rotation
+                let rolledMask = roll(mask, shift: currentIdx + 1)
+
+                return .array(rolledMask)
+            }
+            return .none
+        }
     }
 
     public var debugDescription: String {
@@ -1020,7 +1131,11 @@ public class CacheList: BaseKVCache {
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
-        return caches.first?.trim(n) ?? 0
+        var result = 0
+        for cache in caches {
+            result = cache.trim(n)
+        }
+        return result
     }
 }
 

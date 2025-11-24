@@ -394,7 +394,7 @@ private class LFM2MoEModelInner: Module {
                 let cache,
                 index < cache.count
             else { return .none }
-            return createAttentionMask(h: hidden, cache: [cache[index]])
+            return createAttentionMask(h: hidden, cache: cache[index])
         }()
 
         let ssmMask: MLXArray? = {
