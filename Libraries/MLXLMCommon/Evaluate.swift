@@ -284,6 +284,9 @@ public struct TokenIterator: Sequence, IteratorProtocol {
     let kvGroupSize: Int
     let quantizedKVStart: Int
 
+    // Internal metrics
+    var promptPrefillTime: TimeInterval = 0.0
+
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:parameters:)``.
     ///
@@ -309,7 +312,9 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
 
-        try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
+        self.promptPrefillTime = try measure {
+            try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
+        }
     }
 
     /// Initialize a `TokenIterator` with the given input.
@@ -340,7 +345,9 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
 
-        try prepare(input: input, windowSize: parameters.prefillStepSize)
+        self.promptPrefillTime = try measure {
+            try prepare(input: input, windowSize: parameters.prefillStepSize)
+        }
     }
 
     /// Initialize a `TokenIterator` with the given input and logit handling.
@@ -371,7 +378,9 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.kvGroupSize = 64
         self.quantizedKVStart = 0
 
-        try prepare(input: input, windowSize: prefillStepSize)
+        self.promptPrefillTime = try measure {
+            try prepare(input: input, windowSize: prefillStepSize)
+        }
     }
 
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
@@ -503,7 +512,7 @@ public struct GenerateResult: Sendable {
 
     public func summary() -> String {
         """
-        Prompt:     \(promptTokenCount) tokens, \(promptTokensPerSecond.formatted()) tokens/s
+        Prompt:     \(promptTokenCount) tokens, \(promptTokensPerSecond.formatted()) tokens/s, \(promptTime.formatted())s
         Generation: \(generationTokenCount) tokens, \(tokensPerSecond.formatted()) tokens/s, \(generateTime.formatted())s
         """
     }
@@ -646,7 +655,9 @@ public func generate(
     return GenerateResult(
         inputText: input.text, tokens: tokens,
         output: context.tokenizer.decode(tokens: tokens),
-        promptTime: promptTime, generateTime: generateTime)
+        promptTime: promptTime + iterator.promptPrefillTime,
+        generateTime: generateTime
+    )
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
@@ -733,7 +744,7 @@ public func generate(
     return GenerateCompletionInfo(
         promptTokenCount: input.text.tokens.size,
         generationTokenCount: tokenCount,
-        promptTime: promptTime,
+        promptTime: promptTime + iterator.promptPrefillTime,
         generationTime: generateTime
     )
 }
@@ -847,7 +858,7 @@ public func generate(
             let info = GenerateCompletionInfo(
                 promptTokenCount: input.text.tokens.size,
                 generationTokenCount: tokenCount,
-                promptTime: promptTime,
+                promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime
             )
             continuation.yield(.info(info))
@@ -906,7 +917,7 @@ public struct GenerateCompletionInfo: Sendable {
 
     public func summary() -> String {
         """
-        Prompt:     \(promptTokenCount) tokens, \(promptTokensPerSecond.formatted()) tokens/s
+        Prompt:     \(promptTokenCount) tokens, \(promptTokensPerSecond.formatted()) tokens/s, \(promptTime.formatted())s
         Generation: \(generationTokenCount) tokens, \(tokensPerSecond.formatted()) tokens/s, \(generateTime.formatted())s
         """
     }
@@ -959,4 +970,11 @@ public enum Generation: Sendable {
     public static func collect(_ batch: [Generation]?, _ element: Generation) -> [Generation] {
         (batch ?? []) + [element]
     }
+}
+
+/// Measures the execution time of a closure.
+private func measure(_ closure: () throws -> Void) rethrows -> TimeInterval {
+    let start = Date.timeIntervalSinceReferenceDate
+    try closure()
+    return Date.timeIntervalSinceReferenceDate - start
 }
