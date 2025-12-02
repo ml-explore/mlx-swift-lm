@@ -66,6 +66,7 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "bailing_moe": create(BailingMoeConfiguration.self, BailingMoeModel.init),
             "lfm2_moe": create(LFM2MoEConfiguration.self, LFM2MoEModel.init),
             "nanochat": create(NanoChatConfiguration.self, NanoChatModel.init),
+            "jamba_3b": create(JambaConfiguration.self, JambaModel.init),
         ]
     }
 }
@@ -345,6 +346,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Why is the sky blue?"
     )
 
+    static public let jamba_3b = ModelConfiguration(
+        id: "mlx-community/AI21-Jamba-Reasoning-3B-bf16",
+        defaultPrompt: ""
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -395,6 +401,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             lfm2_8b_a1b_3bit_mlx,
             nanochat_d20_mlx,
             gpt_oss_20b_MXFP4_Q8,
+            jamba_3b,
         ]
     }
 
