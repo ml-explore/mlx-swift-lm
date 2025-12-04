@@ -3,7 +3,7 @@
 @preconcurrency import AVFoundation
 import CoreImage
 import Foundation
-@preconcurrency import MLX
+import MLX
 import Tokenizers
 
 public typealias Message = [String: Any]

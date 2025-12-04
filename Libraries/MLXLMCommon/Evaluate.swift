@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-@preconcurrency import MLX
+import MLX
 import Tokenizers
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
