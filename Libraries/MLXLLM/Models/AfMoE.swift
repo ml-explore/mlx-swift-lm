@@ -498,14 +498,13 @@ private class AfMoEModelInner: Module {
         }
 
         // Create attention masks
-        let faCache: [KVCache]? = layerCache.map { [$0[faIdx]] }
-        let faMask = createAttentionMask(h: h, cache: faCache)
+        let faMask = createAttentionMask(h: h, cache: layerCache?[faIdx])
 
         var swaMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
         if let swaIdx = swaIdx, let layerCache = layerCache {
-            let swaCache = [layerCache[swaIdx]]
             // Create mask with sliding window
-            swaMask = createSlidingWindowMask(h: h, cache: swaCache, windowSize: slidingWindow)
+            swaMask = createAttentionMask(
+                h: h, cache: layerCache[swaIdx], windowSize: slidingWindow)
         }
 
         for (i, layer) in layers.enumerated() {
@@ -514,25 +513,6 @@ private class AfMoEModelInner: Module {
         }
 
         return norm(h)
-    }
-
-    // Helper to create sliding window mask
-    private func createSlidingWindowMask(
-        h: MLXArray, cache: [KVCache]?, windowSize: Int
-    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        let t = h.dim(1)
-        if t > 1 {
-            var offset = 0
-            if let c = cache?.first {
-                offset = c.offset
-                if let maxSize = c.maxSize {
-                    offset = min(maxSize, offset)
-                }
-            }
-            let mask = createCausalMask(n: t, offset: offset, windowSize: windowSize)
-            return .array(mask)
-        }
-        return .none
     }
 }
 

@@ -60,7 +60,7 @@ private class Attention: Module {
 
         if let ropeScaling = args.ropeScaling,
             ropeScaling.type == "su" || ropeScaling.type == "longrope",
-            let shortFactor = ropeScaling.shortFactor, let longFactor = ropeScaling.longFactor
+            let longFactor = ropeScaling.longFactor
         {
             self.rope = .suScaledRotaryEmbedding(
                 SuScaledRotaryEmbedding(

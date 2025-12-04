@@ -212,7 +212,7 @@ private class BailingMoeGate: Module, UnaryLayer {
     }
 
     func groupSelect(_ x: MLXArray) -> (inds: MLXArray, scores: MLXArray) {
-        let (bsz, seqLen, h) = (x.dim(0), x.dim(1), x.dim(2))
+        let (bsz, seqLen, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         let logits = gate(x)
         var scores = sigmoid(logits.asType(.float32))
@@ -221,14 +221,14 @@ private class BailingMoeGate: Module, UnaryLayer {
 
         let topKGroup = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
         var k = nGroup - topkGroup
-        var groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
+        let groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
         scores = putAlong(groupScores, groupIdx, values: MLXArray(0.0), axis: -2)
         scores = flattened(scores, start: -2, end: -1)
 
         k = topK
         let inds = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
         scores = takeAlong(scores, inds, axis: -1)
-        if topK ?? 1 > 1, normTopkProb {
+        if topK > 1, normTopkProb {
             let denominator = scores.sum(axis: -1, keepDims: true) + 1e-20
             scores = scores / denominator
         }

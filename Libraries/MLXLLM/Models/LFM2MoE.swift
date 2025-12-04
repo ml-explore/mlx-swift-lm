@@ -206,7 +206,7 @@ private class ShortConv: Module {
     ) -> MLXArray {
         let BCx = inProj(x)
         let parts = BCx.split(parts: 3, axis: -1)
-        var B = parts[0]
+        let B = parts[0]
         let C = parts[1]
         let xComp = parts[2]
         var Bx = B * xComp
@@ -293,7 +293,7 @@ private class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
         }
 
         let k = topK
-        var indices = argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+        let indices = argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k]
         var scores = takeAlong(gates, indices, axis: -1)
         if normTopKProb {
             let denom = scores.sum(axis: -1, keepDims: true) + 1e-20

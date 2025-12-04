@@ -901,11 +901,6 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
             }
 
             self.offset = Int(newValue[1]) ?? 0
-
-            // Validate that step, groupSize, and bits match current instance
-            let expectedStep = Int(newValue[0]) ?? 256
-            let expectedGroupSize = Int(newValue[2]) ?? 64
-            let expectedBits = Int(newValue[3]) ?? 8
         }
     }
 

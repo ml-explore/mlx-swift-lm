@@ -301,7 +301,6 @@ public enum MediaProcessing {
 
         let durationInSeconds = duration.seconds
         let samplesPerSecond = Double(samplesPerSecond)
-        let secondsPerSample = 1.0 / samplesPerSecond
         let totalFramesToSample = durationInSeconds * samplesPerSecond
         let durationTimeValue = duration.value
         let sampledTimeValues = MLXArray.linspace(
@@ -314,13 +313,13 @@ public enum MediaProcessing {
 
         // Collect the frames
         var ciImages: [CIImage] = []
-        for await result in await generator.images(for: sampledTimes) {
+        for await result in generator.images(for: sampledTimes) {
             switch result {
-            case .success(requestedTime: let requested, let image, actualTime: let actual):
+            case .success(requestedTime: _, let image, actualTime: _):
                 let ciImage = CIImage(
                     cgImage: image, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
                 ciImages.append(ciImage)
-            case .failure(requestedTime: let requested, let error):
+            case .failure(requestedTime: _, _):
                 break
             }
         }
@@ -355,7 +354,7 @@ public enum MediaProcessing {
         let fps = targetFPS(duration)
         // Note: the round was not present in `asCIImageSequence`, so we may now be passing 1 more frame to Qwen depending on video duration.
         let estimatedFrames = Int(round(fps * duration.seconds))
-        var desiredFrames = min(estimatedFrames, maxFrames)
+        let desiredFrames = min(estimatedFrames, maxFrames)
         let finalFrameCount = max(desiredFrames, 1)
 
         let sampledTimeValues = MLXArray.linspace(
@@ -370,17 +369,15 @@ public enum MediaProcessing {
         var ciImages: [CIImage] = []
         var timestamps: [CMTime] = []
 
-        var frames: [VideoFrame] = []
-
-        for await result in await generator.images(for: sampledTimes) {
+        for await result in generator.images(for: sampledTimes) {
             switch result {
-            case .success(requestedTime: let requested, let image, actualTime: let actual):
+            case .success(requestedTime: _, let image, actualTime: let actual):
                 let ciImage = CIImage(
                     cgImage: image, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
                 let frame = try frameProcessing(.init(frame: ciImage, timeStamp: actual))
                 ciImages.append(frame.frame)
                 timestamps.append(frame.timeStamp)
-            case .failure(requestedTime: let requested, let error):
+            case .failure(requestedTime: _, _):
                 break
             }
         }

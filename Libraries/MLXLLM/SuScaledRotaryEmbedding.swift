@@ -39,7 +39,7 @@ public class SuScaledRotaryEmbedding: Module {
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         // Apply scaling only to the dimensions that will be rotated
-        var scaledX = x
+        let scaledX = x
         let sliceToScale = scaledX[.ellipsis, 0 ..< dimensions]
         scaledX[.ellipsis, 0 ..< dimensions] = scale * sliceToScale
 

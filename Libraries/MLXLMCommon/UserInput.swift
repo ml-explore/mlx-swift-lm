@@ -1,6 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreImage
 import Foundation
 import MLX
@@ -104,11 +104,10 @@ public struct UserInput: Sendable {
                 default:
                     throw UserInputError.arrayError(
                         "channel dimension must be last and 3/4: \(array.shape)")
-                    break
                 }
 
                 let arrayData = array.asData()
-                let (H, W, C) = array.shape3
+                let (H, W, _) = array.shape3
                 let cs = CGColorSpace(name: CGColorSpace.sRGB)!
 
                 return CIImage(

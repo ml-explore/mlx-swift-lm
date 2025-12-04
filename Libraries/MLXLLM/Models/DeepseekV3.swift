@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXFast
-import MLXLLM
 import MLXLMCommon
 import MLXNN
 
@@ -354,7 +353,7 @@ private class MoEGate: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        let (bsz, seqLen, h) = (x.dim(0), x.dim(1), x.dim(2))
+        let (bsz, seqLen, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         let hiddenStates = x.matmul(weight.T)
         var scores = sigmoid(hiddenStates)
