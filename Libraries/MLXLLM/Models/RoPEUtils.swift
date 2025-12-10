@@ -167,8 +167,6 @@ public class YarnRoPE: Module {
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        var x = x
-
         if _mscale != 1.0 {
             x[.ellipsis, 0 ..< dimensions] = _mscale * x[.ellipsis, 0 ..< dimensions]
         }

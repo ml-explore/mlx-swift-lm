@@ -69,7 +69,7 @@ private class MultiHeadCausalAttention: Module {
         let qkvSplit = split(qkv, indices: [heads, heads + kvHeads], axis: 1)
         var queries = qkvSplit[0]
         var keys = qkvSplit[1]
-        var values = qkvSplit[2]
+        let values = qkvSplit[2]
 
         if let qNorm, let kNorm {
             queries = qNorm(queries)

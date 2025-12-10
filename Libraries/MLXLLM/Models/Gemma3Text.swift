@@ -10,7 +10,6 @@
 import Foundation
 import MLX
 import MLXFast
-import MLXLLM
 import MLXLMCommon
 import MLXNN
 

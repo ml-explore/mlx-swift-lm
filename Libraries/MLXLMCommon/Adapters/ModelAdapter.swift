@@ -17,7 +17,7 @@ public enum ModelAdapterError: Error {
 }
 
 /// Protocol defining an adapter that can modify a `LanguageModel`.
-public protocol ModelAdapter: Sendable {
+public protocol ModelAdapter {
 
     /// Loads the adapter into the specified model.
     func load(into model: LanguageModel) throws

@@ -8,7 +8,7 @@ import Tokenizers
 /// a ``LanguageModel`` to produce a token.
 ///
 /// See also: ``LogitProcessor``
-public protocol LogitSampler: Sendable {
+public protocol LogitSampler {
 
     /// Given `logits` produce a new `MLXArray` with the token.
     func sample(logits: MLXArray) -> MLXArray
@@ -453,7 +453,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 }
 
 /// Result of a call to ``generate(input:parameters:context:didGenerate:)``.
-public struct GenerateResult: Sendable {
+public struct GenerateResult {
 
     /// Initializes a new `GenerateResult` instance.
     ///
@@ -616,7 +616,7 @@ public func generate(
     var promptTime: TimeInterval = 0
 
     let additionalEOSTokenIds = Set(
-        (context.configuration.extraEOSTokens ?? [])
+        (context.configuration.extraEOSTokens)
             .compactMap {
                 context.tokenizer.convertTokenToId($0)
             })
@@ -705,7 +705,7 @@ public func generate(
     var promptTime: TimeInterval = 0
 
     let additionalEOSTokenIds = Set(
-        (context.configuration.extraEOSTokens ?? [])
+        (context.configuration.extraEOSTokens)
             .compactMap {
                 context.tokenizer.convertTokenToId($0)
             })
@@ -801,80 +801,81 @@ public func generate(
     iterator: TokenIterator
 ) -> AsyncStream<Generation> {
 
-    AsyncStream { continuation in
+    let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
-        // Launch a Task to perform iteration asynchronously.
-        let task = Task {
-            var start = Date.timeIntervalSinceReferenceDate
-            var promptTime: TimeInterval = 0
+    // Launch a Task to perform iteration asynchronously.
+    let task = Task {
+        var start = Date.timeIntervalSinceReferenceDate
+        var promptTime: TimeInterval = 0
 
-            let additionalEOSTokenIds = Set(
-                context.configuration.extraEOSTokens
-                    .compactMap {
-                        context.tokenizer.convertTokenToId($0)
-                    })
+        let additionalEOSTokenIds = Set(
+            context.configuration.extraEOSTokens
+                .compactMap {
+                    context.tokenizer.convertTokenToId($0)
+                })
 
-            var tokenCount = 0
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
-            let toolCallProcessor = ToolCallProcessor()
+        var tokenCount = 0
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        let toolCallProcessor = ToolCallProcessor()
 
-            for token in iterator {
+        for token in iterator {
 
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled { break }
+            // Check for cancellation on every loop iteration.
+            if Task.isCancelled { break }
 
-                if promptTime == 0 {
-                    let now = Date.timeIntervalSinceReferenceDate
-                    promptTime = now - start
-                    start = now
-                }
-
-                if token == context.tokenizer.unknownTokenId
-                    || token == context.tokenizer.eosTokenId
-                    || additionalEOSTokenIds.contains(token)
-                {
-                    break
-                }
-
-                detokenizer.append(token: token)
-                if let chunk = detokenizer.next() {
-                    tokenCount += 1
-
-                    // Process chunk through the tool call processor
-                    if let textToYield = toolCallProcessor.processChunk(chunk) {
-                        continuation.yield(.chunk(textToYield))
-                    }
-
-                    // Check if we have a complete tool call
-                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                        continuation.yield(.toolCall(toolCall))
-                    }
-                }
+            if promptTime == 0 {
+                let now = Date.timeIntervalSinceReferenceDate
+                promptTime = now - start
+                start = now
             }
 
-            let now = Date.timeIntervalSinceReferenceDate
-            let generateTime = now - start
+            if token == context.tokenizer.unknownTokenId
+                || token == context.tokenizer.eosTokenId
+                || additionalEOSTokenIds.contains(token)
+            {
+                break
+            }
 
-            let info = GenerateCompletionInfo(
-                promptTokenCount: input.text.tokens.size,
-                generationTokenCount: tokenCount,
-                promptTime: promptTime + iterator.promptPrefillTime,
-                generationTime: generateTime
-            )
-            continuation.yield(.info(info))
+            detokenizer.append(token: token)
+            if let chunk = detokenizer.next() {
+                tokenCount += 1
 
-            // Synchronize with the stream to ensure tasks are completed
-            Stream().synchronize()
+                // Process chunk through the tool call processor
+                if let textToYield = toolCallProcessor.processChunk(chunk) {
+                    continuation.yield(.chunk(textToYield))
+                }
 
-            // Finalize the stream
-            continuation.finish()
+                // Check if we have a complete tool call
+                if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                    continuation.yield(.toolCall(toolCall))
+                }
+            }
         }
-        // When the consumer cancels (or ends) the stream,
-        // cancel our underlying task.
-        continuation.onTermination = { _ in
-            task.cancel()
-        }
+
+        let now = Date.timeIntervalSinceReferenceDate
+        let generateTime = now - start
+
+        let info = GenerateCompletionInfo(
+            promptTokenCount: input.text.tokens.size,
+            generationTokenCount: tokenCount,
+            promptTime: promptTime + iterator.promptPrefillTime,
+            generationTime: generateTime
+        )
+        continuation.yield(.info(info))
+
+        // Synchronize with the stream to ensure tasks are completed
+        Stream().synchronize()
+
+        // Finalize the stream
+        continuation.finish()
     }
+
+    // When the consumer cancels (or ends) the stream, cancel our underlying task.
+    continuation.onTermination = { _ in
+        task.cancel()
+    }
+
+    return stream
 }
 
 /// Represents metadata and statistics related to token generation.

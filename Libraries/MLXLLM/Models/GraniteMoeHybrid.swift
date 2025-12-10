@@ -119,7 +119,7 @@ private class GraniteMoeHybridMamba2Mixer: Module {
             }
         }
 
-        var padded = concatenated([convState!, input], axis: 1)
+        let padded = concatenated([convState!, input], axis: 1)
 
         if let cache {
             let end = padded.dim(1)
@@ -136,12 +136,12 @@ private class GraniteMoeHybridMamba2Mixer: Module {
         mask: MLXArray?,
         cache: MambaCache?
     ) -> MLXArray {
-        var projected = inProj(hiddenStates)
+        let projected = inProj(hiddenStates)
         let splits = split(
             projected, indices: [intermediateSize, intermediateSize + convDim], axis: -1)
-        var gate = splits[0]
+        let gate = splits[0]
         var convInput = splits[1]
-        var dt = splits[2]
+        let dt = splits[2]
 
         if let mask {
             let expandedMask = expandedDimensions(mask, axis: -1)
@@ -551,7 +551,7 @@ public class GraniteMoeHybridModel: Module, LLMModel, KVCacheDimensionProvider {
             for layerIndex in 0 ..< configuration.hiddenLayers {
                 let prefix = "model.layers.\(layerIndex).block_sparse_moe"
                 guard
-                    var inputWeight = sanitized.removeValue(forKey: "\(prefix).input_linear.weight")
+                    let inputWeight = sanitized.removeValue(forKey: "\(prefix).input_linear.weight")
                 else { continue }
 
                 let expertHidden = inputWeight.dim(1)

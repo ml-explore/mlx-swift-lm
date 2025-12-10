@@ -272,7 +272,7 @@ private class JambaMambaMixer: Module {
 
         delta = softplus(dtProj(delta))
 
-        var newState = expandedDimensions(delta * x, axis: -1) * expandedDimensions(B, axis: -2)
+        let newState = expandedDimensions(delta * x, axis: -1) * expandedDimensions(B, axis: -2)
         let dtA = exp(expandedDimensions(delta, axis: -1) * A)
 
         var currentState = state
@@ -451,7 +451,7 @@ private class JambaModelInner: Module {
 
         let cacheArray = cache ?? Array(repeating: nil, count: layers.count)
 
-        let attnMask = createAttentionMask(h: h, cache: [cacheArray[attnIdx]!])
+        let attnMask = createAttentionMask(h: h, cache: cacheArray[attnIdx])
 
         for (i, layer) in layers.enumerated() {
             if layer.isAttn {

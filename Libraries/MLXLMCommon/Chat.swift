@@ -46,7 +46,7 @@ public enum Chat {
             Self(role: .tool, content: content)
         }
 
-        public enum Role: String {
+        public enum Role: String, Sendable {
             case user
             case assistant
             case system
@@ -71,10 +71,10 @@ public protocol MessageGenerator {
     /// Generates messages from the input.
     func generate(from input: UserInput) -> [Message]
 
-    /// Returns array of `[String: Any]` aka ``Message``
+    /// Returns array of `[String: any Sendable]` aka ``Message``
     func generate(messages: [Chat.Message]) -> [Message]
 
-    /// Returns `[String: Any]` aka ``Message``.
+    /// Returns `[String: any Sendable]`, aka ``Message``.
     func generate(message: Chat.Message) -> Message
 }
 

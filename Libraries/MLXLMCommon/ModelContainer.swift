@@ -52,7 +52,7 @@ public actor ModelContainer {
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     @available(*, deprecated, message: "prefer perform(values:_:) that uses a ModelContext")
-    public func perform<V, R>(
+    public func perform<V: Sendable, R>(
         values: V, _ action: @Sendable (any LanguageModel, Tokenizer, V) throws -> R
     ) rethrows -> R {
         try action(context.model, context.tokenizer, values)
@@ -60,16 +60,20 @@ public actor ModelContainer {
 
     /// Perform an action on the ``ModelContext``. Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
-    public func perform<R>(_ action: @Sendable (ModelContext) async throws -> R) async rethrows -> R
-    {
+    ///
+    /// - Note: The closure receives `ModelContext` which is not `Sendable`. This is intentional -
+    ///   the closure runs within the actor's isolation, ensuring thread-safe access to the model.
+    public func perform<R>(
+        _ action: (ModelContext) async throws -> R
+    ) async rethrows -> R {
         try await action(context)
     }
 
     /// Perform an action on the ``ModelContext`` with additional context values.
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
-    public func perform<V, R>(
-        values: V, _ action: @Sendable (ModelContext, V) async throws -> R
+    public func perform<V: Sendable, R>(
+        values: V, _ action: (ModelContext, V) async throws -> R
     ) async rethrows -> R {
         try await action(context, values)
     }

@@ -35,13 +35,13 @@ private struct ModelAdapterBaseConfiguration: Decodable {
 }
 
 /// A factory responsible for loading and creating model adapters from hub configurations.
-public final class ModelAdapterFactory {
+public final class ModelAdapterFactory: Sendable {
 
     /// Shared instance of the adapter factory.
     public static let shared = ModelAdapterFactory(
         registry: ModelAdapterTypeRegistry(creators: [
-            "lora": LoRAContainer.from(directory:),
-            "dora": LoRAContainer.from(directory:),
+            "lora": { try LoRAContainer.from(directory: $0) },
+            "dora": { try LoRAContainer.from(directory: $0) },
         ])
     )
 

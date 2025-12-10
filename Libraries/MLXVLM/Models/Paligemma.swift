@@ -159,7 +159,7 @@ private enum Language {
 
             let mask =
                 if mask == nil || (cache?[0].offset ?? 0) > 0 {
-                    createAttentionMask(h: h, cache: cache)
+                    createAttentionMask(h: h, cache: cache?.first)
                 } else {
                     MLXFast.ScaledDotProductAttentionMaskMode.none
                 }
@@ -456,7 +456,7 @@ public class PaliGemmaProcessor: UserInputProcessor {
         // apply user instructions
         image = MediaProcessing.apply(image, processing: processing)
 
-        image = try MediaProcessing.resampleBicubic(image, to: config.size.cgSize)
+        image = MediaProcessing.resampleBicubic(image, to: config.size.cgSize)
         image = MediaProcessing.normalize(
             image, mean: config.imageMeanTuple, std: config.imageStdTuple)
 
@@ -479,7 +479,7 @@ public class PaliGemmaProcessor: UserInputProcessor {
             Array(repeating: "<image>", count: count).joined() + (tokenizer.bosToken ?? "") + prompt
             + "\n"
 
-        let promptTokens = try tokenizer.encode(text: prompt)
+        let promptTokens = tokenizer.encode(text: prompt)
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
 
@@ -568,8 +568,6 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
         imageFeatures: MLXArray, inputEmbedding: MLXArray, inputIds: MLXArray,
         attentionMask: MLXArray
     ) -> (MLXArray, MLXArray) {
-        let embedDimension = imageFeatures.dim(2)
-        let (batchSize, sequenceLength) = inputIds.shape2
         var scaledImageFeatures = imageFeatures / pow(Float(config.hiddenSize), 0.5)
 
         let textMask = (inputIds .!= config.imageTokenIndex) & (inputIds .!= config.padTokenId)
@@ -577,8 +575,8 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
         let padMask = inputIds .== config.padTokenId
 
         // expand masks to match embedding dimension
-        var textMaskExpanded = expandedDimensions(textMask, axis: -1)
-        var padMaskExpanded = expandedDimensions(padMask, axis: -1)
+        let textMaskExpanded = expandedDimensions(textMask, axis: -1)
+        let padMaskExpanded = expandedDimensions(padMask, axis: -1)
 
         // insert padding and text token embeddings
         var finalEmbedding = which(textMaskExpanded, inputEmbedding, 0)
@@ -588,7 +586,7 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
         scaledImageFeatures = padded(scaledImageFeatures, widths: [0, .init((0, padSize)), 0])
 
         // insert image embeddings - the image mask is always less or equal to the sentence in length
-        var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
+        let imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
         finalEmbedding = which(imageMaskExpanded, scaledImageFeatures, finalEmbedding)
 
         finalEmbedding = which(padMaskExpanded, 0, finalEmbedding)

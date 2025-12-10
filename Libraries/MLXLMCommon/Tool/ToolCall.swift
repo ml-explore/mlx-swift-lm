@@ -11,7 +11,7 @@ public struct ToolCall: Hashable, Codable, Sendable {
         /// The arguments passed to the function
         public let arguments: [String: JSONValue]
 
-        public init(name: String, arguments: [String: Any]) {
+        public init(name: String, arguments: [String: any Sendable]) {
             self.name = name
             self.arguments = arguments.mapValues { JSONValue.from($0) }
         }

@@ -55,7 +55,7 @@ public class SuScaledRoPE: Module {
         }
 
         // Apply scaling only to the dimensions that will be rotated
-        var scaledX = x
+        let scaledX = x
         scaledX[.ellipsis, 0 ..< dimensions] = scale * scaledX[.ellipsis, 0 ..< dimensions]
 
         return MLXFast.RoPE(
@@ -71,4 +71,5 @@ public class SuScaledRoPE: Module {
 }
 
 /// Backward compatibility alias.
+@available(*, deprecated, renamed: "SuScaledRoPE")
 public typealias SuScaledRotaryEmbedding = SuScaledRoPE

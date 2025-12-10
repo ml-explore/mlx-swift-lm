@@ -89,7 +89,7 @@ private class Attention: Module {
         // Prepare the queries, keys and values for the attention computation
         var q = queries.reshaped(B, L, args.attentionHeads, -1).transposed(0, 2, 1, 3)
         var k = keys.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
-        var v = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
+        let v = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
         if let cache {
             q = rope(q, offset: cache.offset)
