@@ -12,7 +12,7 @@ import Tokenizers
 import XCTest
 
 /// Tests for the streamlined API using real models
-public class StreamlinedTests: XCTestCase {
+public class ChatSessionTests: XCTestCase {
 
     static let llmModelId = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     static let vlmModelId = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
