@@ -287,7 +287,7 @@ public class SmolVLMProcessor: UserInputProcessor {
             }
 
             // Insert a default system message if the input doesn't have one
-            func messagesWithSystem(_ messages: [Message]) -> [Message] {
+            func messagesWithSystem(_ messages: [MLXLMCommon.Message]) -> [MLXLMCommon.Message] {
                 guard messages.filter({ $0["role"] as? String == "system" }).isEmpty else {
                     return messages
                 }

@@ -904,7 +904,7 @@ public struct Qwen2VLProcessorConfiguration: Codable, Sendable {
 public struct Qwen2VLMessageGenerator: MessageGenerator {
     public init() {}
 
-    public func generate(message: Chat.Message) -> Message {
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         [
             "role": message.role.rawValue,
             "content": [

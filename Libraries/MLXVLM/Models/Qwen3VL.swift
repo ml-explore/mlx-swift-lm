@@ -1749,7 +1749,7 @@ extension Qwen3VL {
 public struct Qwen3VLMessageGenerator: MessageGenerator {
     public init() {}
 
-    public func generate(message: Chat.Message) -> Message {
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         let imageContent = message.images.map { _ in
             ["type": "image"]
         }
