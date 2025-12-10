@@ -8,7 +8,7 @@ import Tokenizers
 /// a ``LanguageModel`` to produce a token.
 ///
 /// See also: ``LogitProcessor``
-public protocol LogitSampler: Sendable {
+public protocol LogitSampler {
 
     /// Given `logits` produce a new `MLXArray` with the token.
     func sample(logits: MLXArray) -> MLXArray
@@ -453,7 +453,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 }
 
 /// Result of a call to ``generate(input:parameters:context:didGenerate:)``.
-public struct GenerateResult: Sendable {
+public struct GenerateResult {
 
     /// Initializes a new `GenerateResult` instance.
     ///

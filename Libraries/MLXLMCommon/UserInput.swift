@@ -6,26 +6,26 @@ import Foundation
 import MLX
 import Tokenizers
 
-public typealias Message = [String: Any]
+public typealias Message = [String: any Sendable]
 
 /// Container for raw user input.
 ///
 /// A ``UserInputProcessor`` can convert this to ``LMInput``.
 /// See also ``ModelContext``.
-public struct UserInput: Sendable {
+public struct UserInput {
 
     /// Representation of a prompt or series of messages (conversation).
     ///
     /// This may be a single string with a user prompt or a series of back
     /// and forth responses representing a conversation.
-    public enum Prompt: Sendable, CustomStringConvertible {
-        /// a single string
+    public enum Prompt: CustomStringConvertible {
+        /// A single string
         case text(String)
 
-        /// model specific array of dictionaries
+        /// Model-specific array of dictionaries
         case messages([Message])
 
-        /// model agnostic structured chat (series of messages)
+        /// Model-agnostic structured chat (series of messages)
         case chat([Chat.Message])
 
         public var description: String {
@@ -41,7 +41,7 @@ public struct UserInput: Sendable {
     }
 
     /// Representation of a video resource.
-    public enum Video: Sendable {
+    public enum Video {
         case avAsset(AVAsset)
         case url(URL)
 
@@ -56,7 +56,7 @@ public struct UserInput: Sendable {
     }
 
     /// Representation of an image resource.
-    public enum Image: Sendable {
+    public enum Image {
         case ciImage(CIImage)
         case url(URL)
         case array(MLXArray)

@@ -46,7 +46,7 @@ public enum Chat {
             Self(role: .tool, content: content)
         }
 
-        public enum Role: String {
+        public enum Role: String, Sendable {
             case user
             case assistant
             case system
