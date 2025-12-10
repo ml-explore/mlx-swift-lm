@@ -227,7 +227,7 @@ public typealias ModelRegistry = VLMRegistry
 /// let modelContainer = try await VLMModelFactory.shared.loadContainer(
 ///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
-public class VLMModelFactory: ModelFactory {
+public final class VLMModelFactory: ModelFactory {
 
     public init(
         typeRegistry: ModelTypeRegistry, processorRegistry: ProcessorTypeRegistry,
