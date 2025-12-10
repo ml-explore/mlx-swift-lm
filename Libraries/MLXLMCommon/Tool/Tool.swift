@@ -48,9 +48,9 @@ public struct Tool<Input: Codable, Output: Codable>: ToolProtocol {
                     "type": "object",
                     "properties": properties,
                     "required": requiredParams,
-                ],
-            ],
-        ]
+                ] as [String: any Sendable],
+            ] as [String: any Sendable],
+        ] as ToolSpec
 
         self.handler = handler
     }
