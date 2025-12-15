@@ -292,13 +292,13 @@ public final class VLMModelFactory: ModelFactory {
             hub: hub
         )
 
-        // Support both processor_config.json and preprocessor_config.json
+        // Support both processor_config.json and preprocessor_config.json (prefer preprocessor_config.json)
         let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
         let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
         let processorConfigurationURL =
-            FileManager.default.fileExists(atPath: processorConfigURL.path)
-            ? processorConfigURL
-            : preprocessorConfigURL
+            FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
+            ? preprocessorConfigURL
+            : processorConfigURL
 
         let baseProcessorConfig: BaseProcessorConfiguration
         do {
