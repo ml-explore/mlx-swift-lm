@@ -538,7 +538,11 @@ public enum GenerateDisposition: Sendable {
 ///   - tokenizer: tokenizer to convert tokens back into strings and recognize special tokens
 ///   - extraEOSTokens: any additional stop tokens
 ///   - didGenerate: visitor for the tokens as they are generated
-@available(*, deprecated, message: "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support")
+@available(
+    *, deprecated,
+    message:
+        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+)
 public func generate(
     promptTokens: [Int], parameters: GenerateParameters, model: any LanguageModel,
     tokenizer: Tokenizer,
@@ -571,7 +575,11 @@ public func generate(
 ///   - context: model context (model and tokenizer)
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
-@available(*, deprecated, message: "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support")
+@available(
+    *, deprecated,
+    message:
+        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+)
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
     didGenerate: ([Int]) -> GenerateDisposition
@@ -592,7 +600,11 @@ public func generate(
 ///   - iterator: token iterator
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
-@available(*, deprecated, message: "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support")
+@available(
+    *, deprecated,
+    message:
+        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+)
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
@@ -656,7 +668,11 @@ public func generate(
 ///   - context: model context (model and tokenizer)
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
-@available(*, deprecated, message: "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support")
+@available(
+    *, deprecated,
+    message:
+        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+)
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
     didGenerate: (Int) -> GenerateDisposition
@@ -677,7 +693,11 @@ public func generate(
 ///   - iterator: token iterator
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
-@available(*, deprecated, message: "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support")
+@available(
+    *, deprecated,
+    message:
+        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+)
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,

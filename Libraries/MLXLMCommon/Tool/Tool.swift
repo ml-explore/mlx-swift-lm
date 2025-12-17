@@ -39,18 +39,19 @@ public struct Tool<Input: Codable, Output: Codable>: ToolProtocol {
             }
         }
 
-        self.schema = [
-            "type": "function",
-            "function": [
-                "name": name,
-                "description": description,
-                "parameters": [
-                    "type": "object",
-                    "properties": properties,
-                    "required": requiredParams,
+        self.schema =
+            [
+                "type": "function",
+                "function": [
+                    "name": name,
+                    "description": description,
+                    "parameters": [
+                        "type": "object",
+                        "properties": properties,
+                        "required": requiredParams,
+                    ] as [String: any Sendable],
                 ] as [String: any Sendable],
-            ] as [String: any Sendable],
-        ] as ToolSpec
+            ] as ToolSpec
 
         self.handler = handler
     }
