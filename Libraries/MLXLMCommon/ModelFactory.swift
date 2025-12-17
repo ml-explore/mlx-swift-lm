@@ -54,7 +54,7 @@ public enum ModelFactoryError: LocalizedError {
 /// This contains the following:
 ///
 /// - ``ModelConfiguration`` -- identifier for the model
-/// - ``LanguageModel`` -- the model itself, see ``generate(input:parameters:context:didGenerate:)``
+/// - ``LanguageModel`` -- the model itself, see ``generate(input:cache:parameters:context:)``
 /// - ``UserInputProcessor`` -- can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///
