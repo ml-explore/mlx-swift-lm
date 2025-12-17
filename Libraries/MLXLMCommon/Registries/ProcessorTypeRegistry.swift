@@ -31,7 +31,7 @@ public actor ProcessorTypeRegistry {
 
     /// Given a `processorType` and configuration file instantiate a new `UserInputProcessor`.
     public func createModel(configuration: URL, processorType: String, tokenizer: any Tokenizer)
-        throws -> any UserInputProcessor
+        throws -> sending any UserInputProcessor
     {
         guard let creator = creators[processorType] else {
             throw ModelFactoryError.unsupportedProcessorType(processorType)

@@ -24,7 +24,7 @@ public actor ModelTypeRegistry {
     }
 
     /// Given a `modelType` and configuration file instantiate a new `LanguageModel`.
-    public func createModel(configuration: URL, modelType: String) throws -> LanguageModel {
+    public func createModel(configuration: URL, modelType: String) throws -> sending LanguageModel {
         guard let creator = creators[modelType] else {
             throw ModelFactoryError.unsupportedModelType(modelType)
         }

@@ -473,7 +473,7 @@ public final class LLMModelFactory: ModelFactory {
     public func _load(
         hub: HubApi, configuration: ModelConfiguration,
         progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> sending ModelContext {
+    ) async throws -> ModelContext {
         // download weights and config
         let modelDirectory = try await downloadModel(
             hub: hub, configuration: configuration, progressHandler: progressHandler)

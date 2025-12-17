@@ -63,9 +63,11 @@ public actor ModelContainer {
     ///
     /// - Note: The closure receives `ModelContext` which is not `Sendable`. This is intentional -
     ///   the closure runs within the actor's isolation, ensuring thread-safe access to the model.
+    /// - Note: The `sending` keyword indicates the return value is transferred (not shared) across
+    ///   isolation boundaries, allowing non-Sendable types to be safely returned.
     public func perform<R>(
-        _ action: (ModelContext) async throws -> R
-    ) async rethrows -> R {
+        _ action: (ModelContext) async throws -> sending R
+    ) async rethrows -> sending R {
         try await action(context)
     }
 
@@ -73,8 +75,8 @@ public actor ModelContainer {
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<V: Sendable, R>(
-        values: V, _ action: (ModelContext, V) async throws -> R
-    ) async rethrows -> R {
+        values: V, _ action: (ModelContext, V) async throws -> sending R
+    ) async rethrows -> sending R {
         try await action(context, values)
     }
 
