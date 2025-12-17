@@ -85,4 +85,78 @@ public actor ModelContainer {
     public func update(_ action: @Sendable (inout ModelContext) -> Void) {
         action(&context)
     }
+
+    // MARK: - Thread-safe convenience methods
+
+    /// Prepare user input for generation.
+    ///
+    /// This method safely prepares input within the actor's isolation,
+    /// avoiding the need for closure-based `perform` calls.
+    ///
+    /// - Parameter input: The user input to prepare
+    /// - Returns: Prepared language model input (transferred via `sending`)
+    /// - Note: The `sending` keyword indicates the return value is transferred (not shared),
+    ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
+    public func prepare(input: UserInput) async throws -> sending LMInput {
+        try await context.processor.prepare(input: input)
+    }
+
+    /// Generate tokens from prepared input, returning an AsyncStream.
+    ///
+    /// This method provides a thread-safe way to generate tokens without
+    /// needing to use closure-based `perform` calls.
+    ///
+    /// Example:
+    /// ```swift
+    /// let input = try await modelContainer.prepare(input: userInput)
+    /// let stream = try modelContainer.generate(input: input, parameters: parameters)
+    /// for await generation in stream {
+    ///     switch generation {
+    ///     case .chunk(let text): print(text)
+    ///     case .info(let info): print(info.tokensPerSecond)
+    ///     case .toolCall(let call): handleToolCall(call)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - input: Prepared language model input (transferred via `sending`)
+    ///   - parameters: Generation parameters
+    /// - Returns: An AsyncStream of generation events
+    /// - Note: The `sending` parameter indicates the input is transferred (not shared),
+    ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
+    public func generate(
+        input: sending LMInput,
+        parameters: GenerateParameters
+    ) throws -> AsyncStream<Generation> {
+        try MLXLMCommon.generate(
+            input: input,
+            parameters: parameters,
+            context: context
+        )
+    }
+
+    /// Decode token IDs to a string.
+    ///
+    /// - Parameter tokens: Array of token IDs
+    /// - Returns: Decoded string
+    public func decode(tokens: [Int]) -> String {
+        context.tokenizer.decode(tokens: tokens)
+    }
+
+    /// Encode a string to token IDs.
+    ///
+    /// - Parameter text: Text to encode
+    /// - Returns: Array of token IDs
+    public func encode(_ text: String) -> [Int] {
+        context.tokenizer.encode(text: text)
+    }
+
+    /// Apply chat template to messages and return token IDs.
+    ///
+    /// - Parameter messages: Array of message dictionaries with "role" and "content" keys
+    /// - Returns: Array of token IDs
+    public func applyChatTemplate(messages: [[String: String]]) throws -> [Int] {
+        try context.tokenizer.applyChatTemplate(messages: messages)
+    }
 }
