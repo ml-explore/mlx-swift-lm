@@ -64,17 +64,28 @@ public class EvalTests: XCTestCase {
         // This ensures all weight promises are realized and avoids race conditions
         eval(model)
 
+        let processor = TestInputProcessor()
+        let container = ModelContainer(
+            context: .init(
+                configuration: processor.configuration, model: model, processor: processor,
+                tokenizer: processor.tokenizer))
+
         let numTasks = 3
-        let results = await withTaskGroup(of: MLXArray.self) { group in
-            var allResults: [MLXArray] = []
+        let shapes = await withTaskGroup(of: [Int].self) { group in
+            var allResults: [[Int]] = []
 
             for taskId in 0 ..< numTasks {
                 group.addTask {
-                    let input = MLXArray([
-                        1 + taskId, 2 + taskId, 3 + taskId, 4 + taskId, 5 + taskId,
-                    ])[.newAxis, .ellipsis]
-                    let output = model.callAsFunction(input, cache: nil)
-                    return output
+                    await container.perform { context in
+                        let input = MLXArray([
+                            1 + taskId, 2 + taskId, 3 + taskId, 4 + taskId, 5 + taskId,
+                        ])[.newAxis, .ellipsis]
+
+                        let output = context.model.callAsFunction(input, cache: nil)
+                        eval(output)
+
+                        return output.shape
+                    }
                 }
             }
 
@@ -85,16 +96,15 @@ public class EvalTests: XCTestCase {
             return allResults
         }
 
-        XCTAssertEqual(results.count, numTasks)
+        XCTAssertEqual(shapes.count, numTasks)
 
-        for (index, result) in results.enumerated() {
-            XCTAssertEqual(result.shape, [1, 5, 100])
+        for result in shapes {
+            XCTAssertEqual(result, [1, 5, 100])
         }
     }
 
     func testConcurrentSampling() async throws {
         let vocabSize = 100
-        let logits = MLXRandom.normal([1, vocabSize])
 
         let numSamplers = 4
         let results = try await withThrowingTaskGroup(of: Int.self) { group in
@@ -102,7 +112,8 @@ public class EvalTests: XCTestCase {
 
             for samplerId in 0 ..< numSamplers {
                 group.addTask {
-                    return try withRandomState(MLXRandom.RandomState(seed: UInt64(samplerId))) {
+                    let logits = MLXRandom.normal([1, vocabSize])
+                    return withRandomState(MLXRandom.RandomState(seed: UInt64(samplerId))) {
                         if samplerId % 2 == 0 {
                             return categorical(logits).item(Int.self)
                         } else {
@@ -128,16 +139,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testRandomStateIsolation() async throws {
-        let config = LlamaConfiguration(
-            hiddenSize: 32, hiddenLayers: 2, intermediateSize: 64, attentionHeads: 4,
-            rmsNormEps: 0.00001, vocabularySize: 50, kvHeads: 2)
-
-        // Force evaluation of all model weights before concurrent usage
-        // This ensures all weight promises are realized and avoids race conditions
-        let model = LlamaModel(config)
-        eval(model)
-
-        let sharedLogits = MLXArray.ones([1, 50])
+        // the logit sampler will not use shared random state
         let numSamplers = 5
         let samplesPerTask = 10
 
@@ -146,14 +148,15 @@ public class EvalTests: XCTestCase {
 
             for samplerId in 0 ..< numSamplers {
                 group.addTask {
+                    let logits = MLXArray.ones([1, 50])
                     var taskResults: [Int] = []
                     let sampler = CategoricalSampler(temperature: 1.0)
 
                     for sampleId in 0 ..< samplesPerTask {
-                        let token = try withRandomState(
+                        let token = withRandomState(
                             MLXRandom.RandomState(seed: UInt64(samplerId * 1000 + sampleId))
                         ) {
-                            return sampler.sample(logits: sharedLogits)
+                            return sampler.sample(logits: logits)
                         }
                         taskResults.append(token.item(Int.self))
                     }
