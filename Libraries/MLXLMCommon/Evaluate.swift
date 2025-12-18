@@ -758,6 +758,12 @@ public func generate(
 /// instances of the `Generation` enum, which can represent text chunks, tool calls, or summary
 /// completion information.
 ///
+/// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
+/// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
+/// one-shot calls, but for "chat session" type calls consider using
+/// ``generateTask(promptTokenCount:context:iterator:)``
+/// so that the end of the generation task can be observed.
+///
 /// - Parameters:
 ///   - input: The input for the language model.
 ///   - cache: optional ``KVCache``
@@ -796,43 +802,60 @@ public func generate(
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
-    return generate(
-        input: input, context: context, iterator: iterator)
+    let (stream, _) = generateTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator)
+    return stream
 }
 
-/// Low-level token generation using a ``TokenIterator``, returning an `AsyncStream<Generation>`.
+/// Low-level token generation using a ``TokenIterator``, returning an
+/// `AsyncStream<Generation>` and a `Task`.
+///
+/// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
+/// using the model, parameters, KVCache, etc. for some time (typically a few ms).  Callers can await
+/// the `task` to observe when the use of the parameters is complete.
 ///
 /// - Parameters:
-///   - input: prepared language model input
+///   - promptTokenCount: number of tokens in the prompt
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
-/// - Returns: An `AsyncStream` that emits `Generation` values
-public func generate(
-    input: LMInput, context: ModelContext,
-    iterator: TokenIterator
-) -> AsyncStream<Generation> {
+/// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
+public func generateTask(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming TokenIterator
+) -> (AsyncStream<Generation>, Task<Void, Never>) {
 
     let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
+    let iterator = SendableBox(iterator)
+
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
+        let iterator = iterator.consume()
+
         var start = Date.timeIntervalSinceReferenceDate
         var promptTime: TimeInterval = 0
 
         let additionalEOSTokenIds = Set(
-            context.configuration.extraEOSTokens
+            modelConfiguration.extraEOSTokens
                 .compactMap {
-                    context.tokenizer.convertTokenToId($0)
+                    tokenizer.convertTokenToId($0)
                 })
 
         var tokenCount = 0
-        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         let toolCallProcessor = ToolCallProcessor()
 
         for token in iterator {
 
             // Check for cancellation on every loop iteration.
-            if Task.isCancelled { break }
+            if Task.isCancelled {
+                break
+            }
 
             if promptTime == 0 {
                 let now = Date.timeIntervalSinceReferenceDate
@@ -840,8 +863,8 @@ public func generate(
                 start = now
             }
 
-            if token == context.tokenizer.unknownTokenId
-                || token == context.tokenizer.eosTokenId
+            if token == tokenizer.unknownTokenId
+                || token == tokenizer.eosTokenId
                 || additionalEOSTokenIds.contains(token)
             {
                 break
@@ -853,12 +876,16 @@ public func generate(
 
                 // Process chunk through the tool call processor
                 if let textToYield = toolCallProcessor.processChunk(chunk) {
-                    continuation.yield(.chunk(textToYield))
+                    if case .terminated = continuation.yield(.chunk(textToYield)) {
+                        break
+                    }
                 }
 
                 // Check if we have a complete tool call
                 if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                    continuation.yield(.toolCall(toolCall))
+                    if case .terminated = continuation.yield(.toolCall(toolCall)) {
+                        break
+                    }
                 }
             }
         }
@@ -867,7 +894,7 @@ public func generate(
         let generateTime = now - start
 
         let info = GenerateCompletionInfo(
-            promptTokenCount: input.text.tokens.size,
+            promptTokenCount: promptTokenCount,
             generationTokenCount: tokenCount,
             promptTime: promptTime + iterator.promptPrefillTime,
             generationTime: generateTime
@@ -886,7 +913,7 @@ public func generate(
         task.cancel()
     }
 
-    return stream
+    return (stream, task)
 }
 
 /// Represents metadata and statistics related to token generation.

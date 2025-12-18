@@ -314,7 +314,7 @@ public struct UserInput {
 /// Protocol for a type that can convert ``UserInput`` to ``LMInput``.
 ///
 /// See also ``ModelContext``.
-public protocol UserInputProcessor {
+public protocol UserInputProcessor: Sendable {
     func prepare(input: UserInput) async throws -> LMInput
 }
 
