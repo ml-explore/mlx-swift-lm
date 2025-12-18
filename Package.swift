@@ -21,7 +21,8 @@ let package = Package(
             targets: ["MLXEmbedders"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.29.1")),
+        .package(path: "../mlx-swift"),
+        //        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.29.1")),
         .package(
             url: "https://github.com/huggingface/swift-transformers",
             revision: "573e5c9"
@@ -97,6 +98,26 @@ let package = Package(
                 "MLXVLM",
             ],
             path: "Tests/MLXLMTests",
+            exclude: [
+                "README.md"
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .testTarget(
+            name: "MLXLMIntegrationTests",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXOptimizers", package: "mlx-swift"),
+                .product(name: "MLXRandom", package: "mlx-swift"),
+                .product(name: "Transformers", package: "swift-transformers"),
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+            ],
+            path: "Tests/MLXLMIntegrationTests",
             exclude: [
                 "README.md"
             ],

@@ -32,7 +32,7 @@ import Tokenizers
 /// }
 /// ```
 public actor ModelContainer {
-    var context: ModelContext
+    public internal(set) var context: ModelContext
     public var configuration: ModelConfiguration { context.configuration }
 
     public init(context: ModelContext) {
@@ -69,6 +69,23 @@ public actor ModelContainer {
         _ action: (ModelContext) async throws -> sending R
     ) async rethrows -> sending R {
         try await action(context)
+    }
+
+    // TODO dkoski
+    public func perform<R>(
+        _ action: (isolated ModelContainer, ModelContext) async throws -> sending R
+    ) async rethrows -> sending R {
+        try await action(self, context)
+    }
+
+    public func perform<R>(
+        _ action: @Sendable (isolated ModelContainer) async throws -> sending R
+    ) async rethrows -> sending R {
+        try await action(self)
+    }
+
+    public func synchronize() {
+        Stream().synchronize()
     }
 
     /// Perform an action on the ``ModelContext`` with additional context values.

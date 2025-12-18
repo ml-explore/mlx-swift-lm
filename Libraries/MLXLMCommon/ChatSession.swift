@@ -20,12 +20,7 @@ import MLX
 ///   model operations.
 public final class ChatSession {
 
-    private enum Model {
-        case container(ModelContainer)
-        case context(ModelContext)
-    }
-
-    private let model: Model
+    private let model: ModelContainer
     private var messages: [Chat.Message]
     private var cache: [KVCache]
     private let processing: UserInput.Processing
@@ -47,7 +42,7 @@ public final class ChatSession {
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil
     ) {
-        self.model = .container(model)
+        self.model = model
         self.messages = instructions.map { [.system($0)] } ?? []
         self.cache = []
         self.processing = processing
@@ -70,7 +65,7 @@ public final class ChatSession {
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil
     ) {
-        self.model = .context(model)
+        self.model = ModelContainer(context: model)
         self.messages = instructions.map { [.system($0)] } ?? []
         self.cache = []
         self.processing = processing
@@ -87,12 +82,16 @@ public final class ChatSession {
     /// - Returns: the model's response
     public func respond(
         to prompt: String,
-        images: [UserInput.Image],
-        videos: [UserInput.Video]
+        images: consuming [UserInput.Image],
+        videos: consuming [UserInput.Video]
     ) async throws -> String {
         messages.append(.user(prompt, images: images, videos: videos))
 
-        func generate(context: ModelContext) async throws -> String {
+        // TODO dkoski
+        // TODO dkoski -- images and videos are not Sendable because they might be MLXArray
+        // TODO dkoski -- also the messages passed should just be system prompt + user message.  kvcache handles the rest
+        let output = try await model.perform { container in
+            let context = container.context
             let userInput = UserInput(
                 chat: messages, processing: processing, additionalContext: additionalContext)
             let input = try await context.processor.prepare(input: userInput)
@@ -114,17 +113,6 @@ public final class ChatSession {
 
             return output
         }
-
-        let output: String
-        switch model {
-        case .container(let container):
-            output = try await container.perform { context in
-                try await generate(context: context)
-            }
-        case .context(let context):
-            output = try await generate(context: context)
-        }
-
         messages.append(.assistant(output))
         return output
     }
@@ -209,7 +197,12 @@ public final class ChatSession {
     private func performStreaming(
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
-        func stream(context: ModelContext) async throws {
+        // TODO dkoski
+        // TODO dkoski -- images and videos are not Sendable because they might be MLXArray
+        // TODO dkoski -- also the messages passed should just be system prompt + user message.  kvcache handles the rest
+        try await model.perform { container in
+            print("START")
+            let context = container.context
             let userInput = UserInput(
                 chat: messages, processing: processing, additionalContext: additionalContext)
             let input = try await context.processor.prepare(input: userInput)
@@ -218,29 +211,28 @@ public final class ChatSession {
                 cache = context.model.newCache(parameters: generateParameters)
             }
 
+            // TODO dkoski get the task so we can wait
             var fullResponse = ""
             for await item in try MLXLMCommon.generate(
                 input: input, cache: cache, parameters: generateParameters, context: context
             ) {
                 if let chunk = item.chunk {
                     fullResponse += chunk
-                    continuation.yield(chunk)
+                    if case .terminated = continuation.yield(chunk) {
+                        break
+                    }
                 }
             }
 
             Stream().synchronize()
 
             messages.append(.assistant(fullResponse))
+            print("END")
             continuation.finish()
         }
+    }
 
-        switch model {
-        case .container(let container):
-            try await container.perform { context in
-                try await stream(context: context)
-            }
-        case .context(let context):
-            try await stream(context: context)
-        }
+    public func synchronize() async {
+        await model.synchronize()
     }
 }

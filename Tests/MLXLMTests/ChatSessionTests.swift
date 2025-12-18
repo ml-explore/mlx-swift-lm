@@ -1,93 +1,194 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreImage
 import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
-import MLXVLM
 import Tokenizers
 import XCTest
 
-/// Tests for the streamlined API using real models
+/// See also ChatSessionIntegrationTests
 public class ChatSessionTests: XCTestCase {
 
-    static let llmModelId = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-    static let vlmModelId = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
-    static var llmContainer: ModelContainer!
-    static var vlmContainer: ModelContainer!
+    private func model() -> ModelContext {
+        let config = Gemma3TextConfiguration(
+            modelType: "text",
+            hiddenSize: 64, hiddenLayers: 8, intermediateSize: 128, attentionHeads: 8,
+            headDim: 256,
+            rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 4,
+            ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000,
+            ropeTraditional: false, queryPreAttnScalar: 256,
+            slidingWindow: 512, slidingWindowPattern: 6,
+            maxPositionEmbeddings: 32768
+        )
+        let model = Gemma3TextModel(config)
+        quantize(model: model, groupSize: 64, bits: 4)
 
-    override public class func setUp() {
-        super.setUp()
-        // Load models once for all tests
-        let llmExpectation = XCTestExpectation(description: "Load LLM")
-        let vlmExpectation = XCTestExpectation(description: "Load VLM")
+        // Force evaluation of all model weights before concurrent usage
+        // This ensures all weight promises are realized and avoids race conditions
+        eval(model)
 
-        Task {
-            llmContainer = try await LLMModelFactory.shared.loadContainer(
-                configuration: .init(id: llmModelId)
-            )
-            llmExpectation.fulfill()
+        let configuration = ModelConfiguration(id: "test")
+        let tokenizer = TestTokenizer()
+        let messageGenerator = DefaultMessageGenerator()
+
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: configuration, messageGenerator: messageGenerator)
+
+        return .init(
+            configuration: configuration,
+            model: model,
+            processor: processor,
+            tokenizer: tokenizer)
+    }
+
+    private let targetLength = 1
+
+    func testChatSessionSync() async throws {
+        let model = model()
+        let session = ChatSession(model)
+
+        let result1 = try await session.respond(to: "hello")
+        XCTAssertGreaterThan(result1.count, targetLength, result1)
+        let result2 = try await session.respond(to: "hello again")
+        XCTAssertGreaterThan(result2.count, targetLength, result2)
+    }
+
+    func testChatSessionAsync() async throws {
+        let model = model()
+        let session = ChatSession(model)
+
+        var result1 = ""
+        for try await part in session.streamResponse(to: "hello") {
+            result1 += part
+        }
+        XCTAssertGreaterThan(result1.count, targetLength, result1)
+
+        var result2 = ""
+        for try await part in session.streamResponse(to: "hello again") {
+            result2 += part
+        }
+        XCTAssertGreaterThan(result2.count, targetLength, result2)
+    }
+
+    func testChatSessionAsyncInterrupt() async throws {
+        // interrupt the streamResponse and continue with another request
+        let model = model()
+        let session = ChatSession(model)
+
+        for _ in 0 ..< 10 {
+            var result1 = ""
+            for try await part in session.streamResponse(to: "hello") {
+                result1 += part
+                break
+            }
+
+            // at this point the performStreaming/generate code may still be running.
+            // the next call can corrupt the state if not thread safe
+
+            var result2 = ""
+            for try await part in session.streamResponse(to: "hello again") {
+                result2 += part
+                if result2.count > 100 {
+                    break
+                }
+            }
         }
 
-        Task {
-            vlmContainer = try await VLMModelFactory.shared.loadContainer(
-                configuration: .init(id: vlmModelId)
-            )
-            vlmExpectation.fulfill()
+        // since we are interrupting we need to wait for everything to finish
+        // (avoids shutdown issues if this is the last/only test). because the
+        // streaming task is not a synchronous shutdown
+        await session.synchronize()
+        //        Stream().synchronize()
+    }
+
+    /// something that looks like a view model
+    @MainActor class ChatModel {
+        let session: ChatSession
+
+        public var messages = [Chat.Message]()
+
+        private var task: Task<Void, Error>?
+        public var isBusy: Bool {
+            task != nil
         }
 
-        _ = XCTWaiter.wait(for: [llmExpectation, vlmExpectation], timeout: 300)
-    }
-
-    func testOneShot() async throws {
-        let session = ChatSession(Self.llmContainer)
-        let result = try await session.respond(to: "What is 2+2? Reply with just the number.")
-        print("One-shot result:", result)
-        XCTAssertTrue(result.contains("4") || result.lowercased().contains("four"))
-    }
-
-    func testOneShotStream() async throws {
-        let session = ChatSession(Self.llmContainer)
-        var result = ""
-        for try await token in session.streamResponse(
-            to: "What is 2+2? Reply with just the number.")
-        {
-            print(token, terminator: "")
-            result += token
+        init(model: ModelContext) {
+            self.session = ChatSession(model)
         }
-        print()  // newline
-        XCTAssertTrue(result.contains("4") || result.lowercased().contains("four"))
+
+        public func cancel() {
+            task?.cancel()
+        }
+
+        public func respond(_ message: String) {
+            guard task == nil else { return }
+
+            self.messages.append(.init(role: .user, content: message))
+            self.messages.append(.init(role: .assistant, content: "..."))
+            let lastIndex = self.messages.count - 1
+
+            self.task = Task {
+                var first = true
+                for try await item in session.streamResponse(to: message) {
+                    if first {
+                        self.messages[lastIndex].content = item
+                        first = false
+                    } else {
+                        self.messages[lastIndex].content += item
+                    }
+                }
+                self.task = nil
+            }
+        }
     }
 
-    func testMultiTurnConversation() async throws {
-        let session = ChatSession(
-            Self.llmContainer, instructions: "You are a helpful assistant. Keep responses brief.")
+    @MainActor
+    func testViewModel() async throws {
+        let model = ChatModel(model: model())
 
-        let response1 = try await session.respond(to: "My name is Alice.")
-        print("Response 1:", response1)
+        // start producing a response but interrupt it
+        // triggers https://github.com/ml-explore/mlx-swift/pull/323
+        model.respond("message1")
+        try await Task.sleep(for: .milliseconds(50))
+        model.cancel()
 
-        let response2 = try await session.respond(to: "What is my name?")
-        print("Response 2:", response2)
+        // wait for it to finish
+        while model.isBusy {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
-        // If multi-turn works, response2 should mention "Alice"
-        XCTAssertTrue(
-            response2.lowercased().contains("alice"),
-            "Model should remember the name 'Alice' from previous turn")
+        // try another message, wait for full completion
+        model.respond("message2")
+        while model.isBusy {
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
-    func testVisionModel() async throws {
-        let session = ChatSession(Self.vlmContainer)
+}
 
-        // Create a simple red image for testing
-        let redImage = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+private struct TestInputProcessor: UserInputProcessor {
 
-        let result = try await session.respond(
-            to: "What color is this image? Reply with just the color name.",
-            image: .ciImage(redImage))
-        print("Vision result:", result)
-        XCTAssertTrue(result.lowercased().contains("red"))
+    let tokenizer: Tokenizer
+    let configuration: ModelConfiguration
+    let messageGenerator: MessageGenerator
+
+    internal init(
+        tokenizer: any Tokenizer, configuration: ModelConfiguration,
+        messageGenerator: MessageGenerator
+    ) {
+        self.tokenizer = tokenizer
+        self.configuration = configuration
+        self.messageGenerator = messageGenerator
+    }
+
+    func prepare(input: UserInput) throws -> LMInput {
+        let messages = messageGenerator.generate(from: input)
+        let promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+
+        return LMInput(tokens: MLXArray(promptTokens))
     }
 }
