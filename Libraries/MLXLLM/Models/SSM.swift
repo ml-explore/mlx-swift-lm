@@ -7,7 +7,6 @@
 
 import Foundation
 import MLX
-import MLXFast
 import MLXNN
 
 public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Float, Float))

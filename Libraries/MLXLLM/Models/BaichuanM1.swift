@@ -7,10 +7,8 @@
 
 import Foundation
 import MLX
-import MLXFast
 import MLXLMCommon
 import MLXNN
-import MLXRandom
 
 public struct BaichuanM1Configuration: Codable, Sendable {
     var vocabularySize: Int
