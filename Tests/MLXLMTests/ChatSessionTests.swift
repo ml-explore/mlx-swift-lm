@@ -101,7 +101,6 @@ public class ChatSessionTests: XCTestCase {
         // (avoids shutdown issues if this is the last/only test). because the
         // streaming task is not a synchronous shutdown
         await session.synchronize()
-        //        Stream().synchronize()
     }
 
     /// something that looks like a view model

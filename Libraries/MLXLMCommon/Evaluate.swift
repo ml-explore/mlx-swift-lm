@@ -816,14 +816,21 @@ public func generate(
 ///   - iterator: token iterator
 /// - Returns: An `AsyncStream` that emits `Generation` values
 public func generateTask(
-    input: LMInput, context: ModelContext,
-    iterator: TokenIterator
+    input: consuming LMInput, context: consuming ModelContext,
+    iterator: consuming TokenIterator
 ) -> (AsyncStream<Generation>, Task<Void, Never>) {
 
     let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
+    let promptTokenCount = input.text.tokens.size
+    let context = SendableBox(context)
+    let iterator = SendableBox(iterator)
+
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
+        let context = context.consume()
+        let iterator = iterator.consume()
+
         var start = Date.timeIntervalSinceReferenceDate
         var promptTime: TimeInterval = 0
 
@@ -881,7 +888,7 @@ public func generateTask(
         let generateTime = now - start
 
         let info = GenerateCompletionInfo(
-            promptTokenCount: input.text.tokens.size,
+            promptTokenCount: promptTokenCount,
             generationTokenCount: tokenCount,
             promptTime: promptTime + iterator.promptPrefillTime,
             generationTime: generateTime

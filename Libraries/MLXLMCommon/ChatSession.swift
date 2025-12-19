@@ -21,8 +21,8 @@ import MLX
 public final class ChatSession {
 
     private let model: ModelContainer
-    private var messages: [Chat.Message]
-    private var cache: [KVCache]
+    private let instructions: String?
+    private let cache: SerialAccessContainer<[KVCache]>
     private let processing: UserInput.Processing
     private let generateParameters: GenerateParameters
     private let additionalContext: [String: any Sendable]?
@@ -43,8 +43,8 @@ public final class ChatSession {
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = model
-        self.messages = instructions.map { [.system($0)] } ?? []
-        self.cache = []
+        self.instructions = instructions
+        self.cache = .init([])
         self.processing = processing
         self.generateParameters = generateParameters
         self.additionalContext = additionalContext
@@ -66,8 +66,8 @@ public final class ChatSession {
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = ModelContainer(context: model)
-        self.messages = instructions.map { [.system($0)] } ?? []
-        self.cache = []
+        self.instructions = instructions
+        self.cache = .init([])
         self.processing = processing
         self.generateParameters = generateParameters
         self.additionalContext = additionalContext
@@ -85,35 +85,51 @@ public final class ChatSession {
         images: consuming [UserInput.Image],
         videos: consuming [UserInput.Video]
     ) async throws -> String {
-        messages.append(.user(prompt, images: images, videos: videos))
+        // images and videos are not Sendable (MLXArray) but they are consumed
+        // and are only being sent to the inner async
+        let message = SendableBox<Chat.Message>(
+            .user(prompt, images: images, videos: videos)
+        )
 
-        // TODO dkoski
-        // TODO dkoski -- images and videos are not Sendable because they might be MLXArray
-        // TODO dkoski -- also the messages passed should just be system prompt + user message.  kvcache handles the rest
-        let output = try await model.perform { container in
-            let context = container.context
-            let userInput = UserInput(
-                chat: messages, processing: processing, additionalContext: additionalContext)
-            let input = try await context.processor.prepare(input: userInput)
+        let output = try await model.perform {
+            [
+                instructions, processing, additionalContext, cache, generateParameters
+            ] context in
+            // wrap this to hop to the inner async
+            let context = SendableBox(context)
 
-            if cache.isEmpty {
-                cache = context.model.newCache(parameters: generateParameters)
-            }
+            // with exclusive access to the cache
+            return try await cache.update { cache in
+                let context = context.consume()
 
-            var output = ""
-            for await generation in try MLXLMCommon.generate(
-                input: input, cache: cache, parameters: generateParameters, context: context
-            ) {
-                if let chunk = generation.chunk {
-                    output += chunk
+                var messages: [Chat.Message] = []
+                if let instructions {
+                    messages.append(.system(instructions))
                 }
+                messages.append(message.consume())
+
+                let userInput = UserInput(
+                    chat: messages, processing: processing, additionalContext: additionalContext)
+                let input = try await context.processor.prepare(input: userInput)
+
+                if cache.isEmpty {
+                    cache = context.model.newCache(parameters: generateParameters)
+                }
+
+                var output = ""
+                for await generation in try MLXLMCommon.generate(
+                    input: input, cache: cache, parameters: generateParameters, context: context
+                ) {
+                    if let chunk = generation.chunk {
+                        output += chunk
+                    }
+                }
+
+                Stream().synchronize()
+
+                return output
             }
-
-            Stream().synchronize()
-
-            return output
         }
-        messages.append(.assistant(output))
         return output
     }
 
@@ -145,16 +161,71 @@ public final class ChatSession {
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
-        images: [UserInput.Image],
-        videos: [UserInput.Video]
+        images: consuming [UserInput.Image],
+        videos: consuming [UserInput.Video]
     ) -> AsyncThrowingStream<String, Error> {
-        messages.append(.user(prompt, images: images, videos: videos))
-
         let (stream, continuation) = AsyncThrowingStream<String, Error>.makeStream()
 
+        // images and videos are not Sendable (MLXArray) but they are consumed
+        // and are only being sent to the inner async
+        let message = SendableBox<Chat.Message>(
+            .user(prompt, images: images, videos: videos)
+        )
+
         let task = Task {
+            [
+                model,
+                instructions, processing, additionalContext, cache, generateParameters
+            ] in
             do {
-                try await self.performStreaming(continuation: continuation)
+                try await model.perform {
+                    [
+                        instructions, processing, additionalContext, cache, generateParameters
+                    ] context in
+                    // wrap this to hop to the inner async
+                    let context = SendableBox(context)
+
+                    try await cache.update { cache in
+                        let context = context.consume()
+
+                        var messages: [Chat.Message] = []
+                        if let instructions {
+                            messages.append(.system(instructions))
+                        }
+                        messages.append(message.consume())
+
+                        let userInput = UserInput(
+                            chat: messages, processing: processing,
+                            additionalContext: additionalContext)
+                        let input = try await context.processor.prepare(input: userInput)
+
+                        if cache.isEmpty {
+                            cache = context.model.newCache(parameters: generateParameters)
+                        }
+
+                        let iterator = try TokenIterator(
+                            input: input, model: context.model, cache: cache,
+                            parameters: generateParameters)
+
+                        let (stream, task) = MLXLMCommon.generateTask(
+                            input: input, context: context, iterator: iterator
+                        )
+
+                        var fullResponse = ""
+                        for await item in stream {
+                            if let chunk = item.chunk {
+                                fullResponse += chunk
+                                if case .terminated = continuation.yield(chunk) {
+                                    break
+                                }
+                            }
+                        }
+
+                        await task.value
+
+                        continuation.finish()
+                    }
+                }
             } catch {
                 continuation.finish(throwing: error)
             }
@@ -187,52 +258,13 @@ public final class ChatSession {
     }
 
     /// Clear the session history and cache, preserving system instructions.
-    public func clear() {
-        messages = messages.filter { $0.role == .system }
-        cache = []
-    }
-
-    // MARK: - Private
-
-    private func performStreaming(
-        continuation: AsyncThrowingStream<String, Error>.Continuation
-    ) async throws {
-        // TODO dkoski
-        // TODO dkoski -- images and videos are not Sendable because they might be MLXArray
-        // TODO dkoski -- also the messages passed should just be system prompt + user message.  kvcache handles the rest
-        try await model.perform { container in
-            print("START")
-            let context = container.context
-            let userInput = UserInput(
-                chat: messages, processing: processing, additionalContext: additionalContext)
-            let input = try await context.processor.prepare(input: userInput)
-
-            if cache.isEmpty {
-                cache = context.model.newCache(parameters: generateParameters)
-            }
-
-            // TODO dkoski get the task so we can wait
-            var fullResponse = ""
-            for await item in try MLXLMCommon.generate(
-                input: input, cache: cache, parameters: generateParameters, context: context
-            ) {
-                if let chunk = item.chunk {
-                    fullResponse += chunk
-                    if case .terminated = continuation.yield(chunk) {
-                        break
-                    }
-                }
-            }
-
-            Stream().synchronize()
-
-            messages.append(.assistant(fullResponse))
-            print("END")
-            continuation.finish()
+    public func clear() async {
+        await cache.update { cache in
+            cache = []
         }
     }
 
     public func synchronize() async {
-        await model.synchronize()
+        await cache.read { _ in }
     }
 }
