@@ -30,18 +30,13 @@ public class ChatSessionTests: XCTestCase {
         // This ensures all weight promises are realized and avoids race conditions
         eval(model)
 
-        let configuration = ModelConfiguration(id: "test")
-        let tokenizer = TestTokenizer()
-        let messageGenerator = DefaultMessageGenerator()
-
-        let processor = TestInputProcessor(
-            tokenizer: tokenizer, configuration: configuration, messageGenerator: messageGenerator)
+        let processor = TestInputProcessor()
 
         return .init(
-            configuration: configuration,
+            configuration: processor.configuration,
             model: model,
             processor: processor,
-            tokenizer: tokenizer)
+            tokenizer: processor.tokenizer)
     }
 
     private let targetLength = 1
@@ -166,28 +161,4 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
-}
-
-private struct TestInputProcessor: UserInputProcessor {
-
-    let tokenizer: Tokenizer
-    let configuration: ModelConfiguration
-    let messageGenerator: MessageGenerator
-
-    internal init(
-        tokenizer: any Tokenizer, configuration: ModelConfiguration,
-        messageGenerator: MessageGenerator
-    ) {
-        self.tokenizer = tokenizer
-        self.configuration = configuration
-        self.messageGenerator = messageGenerator
-    }
-
-    func prepare(input: UserInput) throws -> LMInput {
-        let messages = messageGenerator.generate(from: input)
-        let promptTokens = try tokenizer.applyChatTemplate(
-            messages: messages, tools: input.tools, additionalContext: input.additionalContext)
-
-        return LMInput(tokens: MLXArray(promptTokens))
-    }
 }
