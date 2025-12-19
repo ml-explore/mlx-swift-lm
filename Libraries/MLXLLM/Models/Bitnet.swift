@@ -62,7 +62,7 @@ private func makeBitLinearKernel() -> MLXFast.MLXFastKernel {
     )
 }
 
-private final class BitLinearKernelManager: @unchecked Sendable {
+private final class BitLinearKernelManager: Sendable {
     static let shared = BitLinearKernelManager()
 
     let bitlinearKernel: MLXFast.MLXFastKernel

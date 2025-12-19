@@ -65,7 +65,7 @@ private func makeSSMKernel() -> MLXFast.MLXFastKernel? {
     )
 }
 
-private final class SSMKernelManager: @unchecked Sendable {
+private final class SSMKernelManager: Sendable {
     static let shared = SSMKernelManager()
 
     let ssmKernel: MLXFast.MLXFastKernel?
