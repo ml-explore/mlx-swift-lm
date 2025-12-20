@@ -1,6 +1,5 @@
 import Foundation
 import MLX
-import MLXFast
 
 /// Attention utilities that match Python mlx-lm's interface
 ///
@@ -67,6 +66,8 @@ public func attentionWithCacheUpdate(
         )
     } else {
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        // TODO dkoski
+        //        print("\(cachedKeys.shape) \(cachedValues.shape) \(queries.shape), \(mask.masks?[0].shape ?? [])")
         return MLXFast.scaledDotProductAttention(
             queries: queries,
             keys: cachedKeys,

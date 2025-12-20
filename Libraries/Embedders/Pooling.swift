@@ -2,7 +2,6 @@
 
 import Foundation
 import MLX
-import MLXLinalg
 import MLXNN
 
 public struct PoolingConfiguration: Codable {

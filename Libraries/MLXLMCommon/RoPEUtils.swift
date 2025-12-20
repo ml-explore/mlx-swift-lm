@@ -7,10 +7,9 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 
-class Llama3RoPE: Module {
+class Llama3RoPE: Module, OffsetLayer {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -75,7 +74,7 @@ class Llama3RoPE: Module {
     }
 }
 
-public class YarnRoPE: Module {
+public class YarnRoPE: Module, OffsetLayer {
     let dimensions: Int
     let traditional: Bool
     let maxPositionEmbeddings: Int
@@ -183,13 +182,13 @@ public class YarnRoPE: Module {
     }
 }
 
-func initializeRope(
+public func initializeRope(
     dims: Int,
     base: Float,
     traditional: Bool,
     scalingConfig: [String: StringOrNumber]?,
     maxPositionEmbeddings: Int?
-) -> Module {
+) -> OffsetLayer {
     let ropeType: String = {
         if let config = scalingConfig,
             let typeValue = config["type"] ?? config["rope_type"],

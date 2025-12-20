@@ -800,6 +800,14 @@ public func generate(
         input: input, context: context, iterator: iterator)
 }
 
+// TODO dkoski
+public func generate(
+    input: LMInput, context: ModelContext,
+    iterator: TokenIterator
+) -> AsyncStream<Generation> {
+    generateTask(input: input, context: context, iterator: iterator).0
+}
+
 /// Low-level token generation using a ``TokenIterator``, returning an `AsyncStream<Generation>`.
 ///
 /// - Parameters:
@@ -807,15 +815,22 @@ public func generate(
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
 /// - Returns: An `AsyncStream` that emits `Generation` values
-public func generate(
-    input: LMInput, context: ModelContext,
-    iterator: TokenIterator
-) -> AsyncStream<Generation> {
+public func generateTask(
+    input: consuming LMInput, context: consuming ModelContext,
+    iterator: consuming TokenIterator
+) -> (AsyncStream<Generation>, Task<Void, Never>) {
 
     let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
+    let promptTokenCount = input.text.tokens.size
+    let context = SendableBox(context)
+    let iterator = SendableBox(iterator)
+
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
+        let context = context.consume()
+        let iterator = iterator.consume()
+
         var start = Date.timeIntervalSinceReferenceDate
         var promptTime: TimeInterval = 0
 
@@ -832,7 +847,9 @@ public func generate(
         for token in iterator {
 
             // Check for cancellation on every loop iteration.
-            if Task.isCancelled { break }
+            if Task.isCancelled {
+                break
+            }
 
             if promptTime == 0 {
                 let now = Date.timeIntervalSinceReferenceDate
@@ -853,12 +870,16 @@ public func generate(
 
                 // Process chunk through the tool call processor
                 if let textToYield = toolCallProcessor.processChunk(chunk) {
-                    continuation.yield(.chunk(textToYield))
+                    if case .terminated = continuation.yield(.chunk(textToYield)) {
+                        break
+                    }
                 }
 
                 // Check if we have a complete tool call
                 if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                    continuation.yield(.toolCall(toolCall))
+                    if case .terminated = continuation.yield(.toolCall(toolCall)) {
+                        break
+                    }
                 }
             }
         }
@@ -867,7 +888,7 @@ public func generate(
         let generateTime = now - start
 
         let info = GenerateCompletionInfo(
-            promptTokenCount: input.text.tokens.size,
+            promptTokenCount: promptTokenCount,
             generationTokenCount: tokenCount,
             promptTime: promptTime + iterator.promptPrefillTime,
             generationTime: generateTime
@@ -886,7 +907,7 @@ public func generate(
         task.cancel()
     }
 
-    return stream
+    return (stream, task)
 }
 
 /// Represents metadata and statistics related to token generation.
