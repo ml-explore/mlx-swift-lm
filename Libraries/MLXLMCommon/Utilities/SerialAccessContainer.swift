@@ -24,7 +24,7 @@ actor AsyncMutex {
         }
     }
 
-    func withLock<T>(_ body: @Sendable () async throws -> sending T) async rethrows -> sending T {
+    func withLock<T>(_ body: () async throws -> sending T) async rethrows -> sending T {
         await lock()
         defer { unlock() }
         return try await body()
@@ -37,16 +37,19 @@ final public class SerialAccessContainer<T>: @unchecked Sendable {
     private let lock = AsyncMutex()
 
     public init(_ value: consuming T) {
-        self.value = value
+        self.value = consume value
     }
 
-    public func read<R>(_ body: @Sendable (T) async throws -> sending R) async rethrows -> R {
-        try await lock.withLock { [self] in
+    public func read<R>(_ body: @Sendable (T) async throws -> sending R) async rethrows -> sending R
+    {
+        try await lock.withLock {
             try await body(value)
         }
     }
 
-    public func update<R>(_ body: @Sendable (inout T) async throws -> R) async rethrows -> R {
+    public func update<R>(_ body: @Sendable (inout T) async throws -> sending R) async rethrows
+        -> sending R
+    {
         try await lock.withLock {
             try await body(&value)
         }
@@ -56,10 +59,14 @@ final public class SerialAccessContainer<T>: @unchecked Sendable {
 
 final class SendableBox<T>: @unchecked Sendable {
     private var value: T?
-    init(_ value: T) { self.value = value }
-    func consume() -> T {
+
+    init(_ value: consuming T) {
+        self.value = consume value
+    }
+
+    consuming func consume() -> T {
         guard let value else {
-            fatalError("SendableBox: value consumed twice")
+            fatalError("value already consumed")
         }
         self.value = nil
         return value

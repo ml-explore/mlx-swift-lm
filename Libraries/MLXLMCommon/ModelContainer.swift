@@ -31,24 +31,26 @@ import Tokenizers
 ///     }
 /// }
 /// ```
-public class ModelContainer: @unchecked Sendable {
-    public internal(set) var context: SerialAccessContainer<ModelContext>
+public final class ModelContainer: Sendable {
+    private let context: SerialAccessContainer<ModelContext>
     public var configuration: ModelConfiguration {
         get async {
             await context.read { $0.configuration }
         }
     }
 
-    public init(context: ModelContext) {
+    public init(context: consuming ModelContext) {
         self.context = .init(context)
     }
 
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     @available(*, deprecated, message: "prefer perform(_:) that uses a ModelContext")
-    public func perform<R: Sendable>(_ action: @Sendable (any LanguageModel, Tokenizer) throws -> R)
+    public func perform<R: Sendable>(
+        _ action: @Sendable (any LanguageModel, Tokenizer) throws -> sending R
+    )
         async rethrows
-        -> R
+        -> sending R
     {
         try await context.read {
             try action($0.model, $0.tokenizer)
@@ -60,8 +62,8 @@ public class ModelContainer: @unchecked Sendable {
     /// `MLXArray` is not `Sendable`.
     @available(*, deprecated, message: "prefer perform(values:_:) that uses a ModelContext")
     public func perform<V: Sendable, R: Sendable>(
-        values: V, _ action: @Sendable (any LanguageModel, Tokenizer, V) throws -> R
-    ) async rethrows -> R {
+        values: V, _ action: @Sendable (any LanguageModel, Tokenizer, V) throws -> sending R
+    ) async rethrows -> sending R {
         try await context.read {
             try action($0.model, $0.tokenizer, values)
         }
@@ -75,28 +77,11 @@ public class ModelContainer: @unchecked Sendable {
     /// - Note: The `sending` keyword indicates the return value is transferred (not shared) across
     ///   isolation boundaries, allowing non-Sendable types to be safely returned.
     public func perform<R: Sendable>(
-        _ action: @Sendable (ModelContext) async throws -> R
+        _ action: @Sendable (ModelContext) async throws -> sending R
     ) async rethrows -> sending R {
         try await context.read {
             try await action($0)
         }
-    }
-
-    // TODO dkoski
-    //    public func perform<R>(
-    //        _ action: (isolated ModelContainer, ModelContext) async throws -> sending R
-    //    ) async rethrows -> sending R {
-    //        try await action(self, context)
-    //    }
-    //
-    //    public func perform<R>(
-    //        _ action: @Sendable (isolated ModelContainer) async throws -> sending R
-    //    ) async rethrows -> sending R {
-    //        try await action(self)
-    //    }
-
-    public func synchronize() {
-        Stream().synchronize()
     }
 
     /// Perform an action on the ``ModelContext`` with additional context values.
@@ -129,7 +114,7 @@ public class ModelContainer: @unchecked Sendable {
     /// - Returns: Prepared language model input (transferred via `sending`)
     /// - Note: The `sending` keyword indicates the return value is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
-    public func prepare(input: sending UserInput) async throws -> LMInput {
+    public func prepare(input: consuming sending UserInput) async throws -> sending LMInput {
         let input = SendableBox(input)
         return try await context.read {
             SendableBox(try await $0.processor.prepare(input: input.consume()))
@@ -161,7 +146,7 @@ public class ModelContainer: @unchecked Sendable {
     /// - Note: The `sending` parameter indicates the input is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
     public func generate(
-        input: consuming LMInput,
+        input: consuming sending LMInput,
         parameters: GenerateParameters
     ) async throws -> AsyncStream<Generation> {
         let input = SendableBox(input)
