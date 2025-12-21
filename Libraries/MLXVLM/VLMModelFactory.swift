@@ -88,6 +88,8 @@ public enum VLMTypeRegistry {
         // TODO: see if we can make it work with fastvlm rather than llava_qwen2
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
+        "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
+        "mistral3": create(Mistral3VLMConfiguration.self, Mistral3VLM.init),
     ])
 }
 
@@ -111,6 +113,10 @@ public enum VLMProcessorTypeRegistry {
             SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         "FastVLMProcessor": create(
             FastVLMProcessorConfiguration.self, FastVLMProcessor.init),
+        "PixtralProcessor": create(
+            PixtralProcessorConfiguration.self, PixtralProcessor.init),
+        "Mistral3Processor": create(
+            Mistral3VLMProcessorConfiguration.self, Mistral3VLMProcessor.init),
     ])
 }
 
@@ -153,6 +159,11 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let smolvlminstruct4bit = ModelConfiguration(
         id: "mlx-community/SmolVLM-Instruct-4bit",
         defaultPrompt: "Describe the image in English"
+    )
+
+    static public let mistral3_3B_Instruct_4bit = ModelConfiguration(
+        id: "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+        defaultPrompt: ""
     )
 
     static public let gemma3_4B_qat_4bit = ModelConfiguration(
@@ -280,9 +291,13 @@ public final class VLMModelFactory: ModelFactory {
             hub: hub
         )
 
-        let processorConfigurationURL = modelDirectory.appending(
-            component: "preprocessor_config.json"
-        )
+        // Support both processor_config.json and preprocessor_config.json (prefer preprocessor_config.json)
+        let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
+        let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
+        let processorConfigurationURL =
+            FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
+            ? preprocessorConfigURL
+            : processorConfigURL
 
         let baseProcessorConfig: BaseProcessorConfiguration
         do {
@@ -295,9 +310,18 @@ public final class VLMModelFactory: ModelFactory {
                 processorConfigurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // Override processor type based on model type for models that need special handling
+        // Mistral3 model ship with "PixtralProcessor" in their config but need Mistral3Processor
+        // to handle spatial merging correctly
+        let processorTypeOverrides: [String: String] = [
+            "mistral3": "Mistral3Processor"
+        ]
+        let processorType =
+            processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
+
         let processor = try await processorRegistry.createModel(
             configuration: processorConfigurationURL,
-            processorType: baseProcessorConfig.processorClass, tokenizer: tokenizer)
+            processorType: processorType, tokenizer: tokenizer)
 
         return .init(
             configuration: configuration, model: model, processor: processor, tokenizer: tokenizer)

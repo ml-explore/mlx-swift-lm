@@ -7,10 +7,9 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 
-class Llama3RoPE: Module {
+public class Llama3RoPE: Module {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -62,7 +61,7 @@ class Llama3RoPE: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         MLXFast.RoPE(
             x,
             dimensions: dims,
@@ -183,7 +182,7 @@ public class YarnRoPE: Module {
     }
 }
 
-func initializeRope(
+public func initializeRope(
     dims: Int,
     base: Float,
     traditional: Bool,
