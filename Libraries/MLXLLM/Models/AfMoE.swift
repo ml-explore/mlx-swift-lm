@@ -336,8 +336,7 @@ class AfMoEMoE: Module, UnaryLayer {
         // Group-based expert selection if nGroup > 1
         if nGroup > 1 {
             selectionScores = unflatten(selectionScores, axis: -1, shape: [nGroup, -1])
-            let groupScores = sorted(selectionScores, axis: -1)[.ellipsis, ..<2].sum(
-                axis: -1, keepDims: true)
+            let groupScores = top(selectionScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
             let k = nGroup - topkGroup
             let groupIdx = argPartition(groupScores, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
             selectionScores = putAlong(
