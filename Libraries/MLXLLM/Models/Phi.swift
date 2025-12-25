@@ -7,7 +7,7 @@ import MLXNN
 
 // https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/phi.py
 
-private class PhiAttention: Module {
+class PhiAttention: Module {
 
     let args: PhiConfiguration
     let heads: Int
@@ -83,7 +83,7 @@ private class PhiAttention: Module {
     }
 }
 
-private class PhiMLP: Module, UnaryLayer {
+class PhiMLP: Module, UnaryLayer {
 
     @ModuleInfo var fc1: Linear
     @ModuleInfo var fc2: Linear
@@ -100,7 +100,7 @@ private class PhiMLP: Module, UnaryLayer {
     }
 }
 
-private class PhiDecoderLayer: Module {
+class PhiDecoderLayer: Module {
 
     @ModuleInfo(key: "self_attn") var selfAttention: PhiAttention
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: LayerNorm
@@ -123,7 +123,7 @@ private class PhiDecoderLayer: Module {
     }
 }
 
-private class PhiModelInner: Module {
+public class PhiModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
@@ -160,7 +160,7 @@ public class PhiModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: PhiModelInner
+    public let model: PhiModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 

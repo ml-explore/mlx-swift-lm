@@ -12,7 +12,7 @@ import MLXNN
 
 // MARK: - Attention
 
-private final class Lille130mAttention: Module {
+final class Lille130mAttention: Module {
     let args: Lille130mConfiguration
     let headDim: Int
     let scale: Float
@@ -89,7 +89,7 @@ private final class Lille130mAttention: Module {
 
 // MARK: - MLP
 
-private final class Lille130mMLP: Module, UnaryLayer {
+final class Lille130mMLP: Module, UnaryLayer {
     @ModuleInfo(key: "norm") var norm: RMSNorm
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -114,7 +114,7 @@ private final class Lille130mMLP: Module, UnaryLayer {
 
 // MARK: - Block
 
-private final class Lille130mBlock: Module {
+final class Lille130mBlock: Module {
     @ModuleInfo(key: "attention") var attention: Lille130mAttention
     @ModuleInfo(key: "feed_forward") var feedForward: Lille130mMLP
 
@@ -135,7 +135,7 @@ private final class Lille130mBlock: Module {
 
 // MARK: - Model (inner)
 
-private final class Lille130mModelInner: Module {
+public final class Lille130mModelInner: Module {
     @ModuleInfo(key: "tok_embeddings") var embedTokens: Embedding
 
     let layers: [Lille130mBlock]
@@ -165,7 +165,7 @@ public final class Lille130mModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    @ModuleInfo(key: "transformer") fileprivate var transformer: Lille130mModelInner
+    @ModuleInfo(key: "transformer") public var transformer: Lille130mModelInner
     private let configuration: Lille130mConfiguration
 
     public init(_ args: Lille130mConfiguration) {

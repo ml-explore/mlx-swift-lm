@@ -13,7 +13,7 @@ import MLXNN
 
 // MARK: - RoPE helpers
 
-private class DynamicNTKScalingRoPE: Module {
+class Olmo2DynamicNTKScalingRoPE: Module {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -97,7 +97,7 @@ private class DynamicNTKScalingRoPE: Module {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class Olmo2Attention: Module {
     let args: Olmo2Configuration
     let nHeads: Int
     let nKVHeads: Int
@@ -113,7 +113,7 @@ private class Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     // rope can be either dynamic scaling or yarn depending on config
-    let ropeDynamic: DynamicNTKScalingRoPE?
+    let ropeDynamic: Olmo2DynamicNTKScalingRoPE?
     let ropeYarn: YarnRoPE?
 
     init(_ args: Olmo2Configuration) {
@@ -172,7 +172,7 @@ private class Attention: Module {
             } else {
                 ropeScale = 1
             }
-            self.ropeDynamic = DynamicNTKScalingRoPE(
+            self.ropeDynamic = Olmo2DynamicNTKScalingRoPE(
                 dims: headDim,
                 maxPositionEmbeddings: args.maxPositionEmbeddings,
                 traditional: args.ropeTraditional,
@@ -231,7 +231,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class Olmo2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -249,16 +249,16 @@ private class MLP: Module, UnaryLayer {
 
 // MARK: - Transformer Block
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    @ModuleInfo(key: "mlp") var mlp: MLP
+class Olmo2TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Olmo2Attention
+    @ModuleInfo(key: "mlp") var mlp: Olmo2MLP
 
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
 
     init(_ args: Olmo2Configuration) {
-        self._attention.wrappedValue = Attention(args)
-        self._mlp.wrappedValue = MLP(args)
+        self._attention.wrappedValue = Olmo2Attention(args)
+        self._mlp.wrappedValue = Olmo2MLP(args)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postFeedforwardLayerNorm.wrappedValue = RMSNorm(
@@ -278,10 +278,10 @@ private class TransformerBlock: Module {
 
 // MARK: - Model
 
-private class Olmo2ModelInner: Module {
+public class Olmo2ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [Olmo2TransformerBlock]
     let norm: RMSNorm
 
     init(_ args: Olmo2Configuration) {
@@ -290,7 +290,7 @@ private class Olmo2ModelInner: Module {
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { _ in Olmo2TransformerBlock(args) }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -309,7 +309,7 @@ public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: Olmo2ModelInner
+    public let model: Olmo2ModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

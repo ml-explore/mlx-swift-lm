@@ -75,7 +75,7 @@ public struct BailingMoeConfiguration: Codable, Sendable {
     }
 }
 
-private class Attention: Module {
+class BailingMoeAttention: Module {
     let args: BailingMoeConfiguration
     let heads: Int
     let kvHeads: Int
@@ -166,7 +166,7 @@ private class Attention: Module {
     }
 }
 
-private class BailingMoeMLP: Module, UnaryLayer {
+class BailingMoeMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -181,7 +181,7 @@ private class BailingMoeMLP: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray { down(silu(gate(x)) * up(x)) }
 }
 
-private class BailingMoeGate: Module, UnaryLayer {
+class BailingMoeGate: Module, UnaryLayer {
     let topK: Int
     let nGroup: Int
     let topkGroup: Int
@@ -237,7 +237,7 @@ private class BailingMoeGate: Module, UnaryLayer {
     }
 }
 
-private class BailingMoeSparseMoeBlock: Module, UnaryLayer {
+class BailingMoeSparseMoeBlock: Module, UnaryLayer {
     let args: BailingMoeConfiguration
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     @ModuleInfo(key: "gate") var gate: BailingMoeGate
@@ -273,11 +273,11 @@ private class BailingMoeSparseMoeBlock: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
+class BailingMoeTransformerBlock: Module {
     let args: BailingMoeConfiguration
     let layerIdx: Int
 
-    @ModuleInfo(key: "attention") var attention: Attention
+    @ModuleInfo(key: "attention") var attention: BailingMoeAttention
     @ModuleInfo(key: "mlp") var mlp: Module & UnaryLayer
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
@@ -286,7 +286,7 @@ private class TransformerBlock: Module {
         self.args = args
         self.layerIdx = layerIdx
 
-        _attention.wrappedValue = Attention(args)
+        _attention.wrappedValue = BailingMoeAttention(args)
         _inputLayerNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -308,16 +308,18 @@ private class TransformerBlock: Module {
     }
 }
 
-private class BailingMoeModelInner: Module {
+public class BailingMoeModelInner: Module {
     @ModuleInfo(key: "word_embeddings") var embedTokens: Embedding
-    let layers: [TransformerBlock]
+    let layers: [BailingMoeTransformerBlock]
     let norm: RMSNorm
 
     init(_ args: BailingMoeConfiguration) {
         precondition(args.vocabularySize > 0)
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
-        self.layers = (0 ..< args.hiddenLayers).map { TransformerBlock(args, layerIdx: $0) }
+        self.layers = (0 ..< args.hiddenLayers).map {
+            BailingMoeTransformerBlock(args, layerIdx: $0)
+        }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -334,7 +336,7 @@ private class BailingMoeModelInner: Module {
 public class BailingMoeModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
-    fileprivate let model: BailingMoeModelInner
+    public let model: BailingMoeModelInner
     let configuration: BailingMoeConfiguration
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

@@ -155,7 +155,7 @@ class SwiGLUSwitchGLU: Module {
     }
 }
 
-private class AttentionBlock: Module {
+class AttentionBlock: Module {
     let headDim: Int
     let numAttentionHeads: Int
     let numKeyValueHeads: Int
@@ -337,7 +337,7 @@ private class AttentionBlock: Module {
     }
 }
 
-private class MLPBlock: Module {
+class MLPBlock: Module {
     let hiddenSize: Int
     let numLocalExperts: Int
     let numExpertsPerTok: Int
@@ -371,7 +371,7 @@ private class MLPBlock: Module {
     }
 }
 
-private class TransformerBlock: Module {
+class GPTOSSTransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: AttentionBlock
     @ModuleInfo(key: "mlp") var mlp: MLPBlock
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
@@ -400,11 +400,11 @@ private class TransformerBlock: Module {
     }
 }
 
-private class ModelInner: Module {
+public class GPTOSSModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "norm") var norm: RMSNorm
     let layerTypes: [String]
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [GPTOSSTransformerBlock]
     let windowSize: Int
 
     public init(_ config: GPTOSSConfiguration) {
@@ -419,7 +419,7 @@ private class ModelInner: Module {
                     "full_attention",
                 ], count: config.hiddenLayers / 2
             ).flatMap { $0 }
-        self.layers = (0 ..< config.hiddenLayers).map { _ in TransformerBlock(config) }
+        self.layers = (0 ..< config.hiddenLayers).map { _ in GPTOSSTransformerBlock(config) }
         self.windowSize = config.slidingWindow
     }
 
@@ -494,14 +494,14 @@ public class GPTOSSModel: Module, LLMModel, KVCacheDimensionProvider {
     public let modelType: String
     public let vocabularySize: Int
     public let kvHeads: [Int]
-    private let model: ModelInner
+    public let model: GPTOSSModelInner
     private let configuration: GPTOSSConfiguration
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public init(_ config: GPTOSSConfiguration) {
         self.configuration = config
         self.modelType = config.modelType
-        self.model = ModelInner(config)
+        self.model = GPTOSSModelInner(config)
         self.vocabularySize = config.vocabularySize
         self.kvHeads = (0 ..< config.hiddenLayers).map { _ in config.kvHeads }
         _lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabularySize, bias: false)

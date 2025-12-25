@@ -5,7 +5,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/cohere.py
 
-private class Attention: Module {
+class CohereAttention: Module {
 
     let args: CohereConfiguration
     let scale: Float
@@ -73,7 +73,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class CohereMLP: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
@@ -91,16 +91,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
+class CohereTransformerBlock: Module {
 
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+    @ModuleInfo(key: "self_attn") var attention: CohereAttention
+    let mlp: CohereMLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: LayerNorm
 
     public init(_ args: CohereConfiguration) {
-        self._attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        self._attention.wrappedValue = CohereAttention(args)
+        self.mlp = CohereMLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         self._inputLayerNorm.wrappedValue = LayerNorm(
             dimensions: args.hiddenSize, eps: args.layerNormEps)
 
@@ -120,7 +120,7 @@ public class CohereModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [CohereTransformerBlock]
     let norm: LayerNorm
 
     public init(_ args: CohereConfiguration) {
@@ -131,7 +131,7 @@ public class CohereModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                CohereTransformerBlock(args)
             }
         self.norm = LayerNorm(dimensions: args.hiddenSize, eps: args.layerNormEps)
     }
@@ -154,7 +154,7 @@ public class CohereModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    let model: CohereModelInner
+    public let model: CohereModelInner
     let logitScale: Float
 
     public init(_ args: CohereConfiguration) {

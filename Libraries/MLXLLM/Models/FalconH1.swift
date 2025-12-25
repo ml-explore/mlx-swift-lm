@@ -200,7 +200,7 @@ public struct FalconH1Configuration: Codable, Sendable {
 
 // MARK: - RMSNormGated
 
-private class RMSNormGated: Module {
+class RMSNormGated: Module {
     let weight: MLXArray
     let varianceEpsilon: Float
     let nGroups: Int
@@ -252,7 +252,7 @@ private func computeMupVector(_ args: FalconH1Configuration) -> MLXArray {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class FalconH1Attention: Module {
     let hiddenSize: Int
     let numHeads: Int
     let numKVHeads: Int
@@ -328,7 +328,7 @@ private class Attention: Module {
 
 // MARK: - Mixer
 
-private class Mixer: Module {
+class FalconH1Mixer: Module {
     let numHeads: Int
     let hiddenSize: Int
     let ssmStateSize: Int
@@ -525,7 +525,7 @@ private class Mixer: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class FalconH1MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -553,10 +553,10 @@ private class MLP: Module, UnaryLayer {
 
 // MARK: - DecoderLayer
 
-private class DecoderLayer: Module {
-    @ModuleInfo(key: "feed_forward") var feedForward: MLP
-    @ModuleInfo(key: "mamba") var mamba: Mixer
-    @ModuleInfo(key: "self_attn") var attention: Attention
+class FalconH1DecoderLayer: Module {
+    @ModuleInfo(key: "feed_forward") var feedForward: FalconH1MLP
+    @ModuleInfo(key: "mamba") var mamba: FalconH1Mixer
+    @ModuleInfo(key: "self_attn") var attention: FalconH1Attention
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "pre_ff_layernorm") var preFfLayerNorm: RMSNorm
 
@@ -566,9 +566,9 @@ private class DecoderLayer: Module {
         let headDim = args.headDim
         self.channelsAttn = args.numAttentionHeads * headDim + 2 * args.numKeyValueHeads * headDim
 
-        _feedForward.wrappedValue = MLP(args)
-        _mamba.wrappedValue = Mixer(args)
-        _attention.wrappedValue = Attention(args)
+        _feedForward.wrappedValue = FalconH1MLP(args)
+        _mamba.wrappedValue = FalconH1Mixer(args)
+        _attention.wrappedValue = FalconH1Attention(args)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps
         )
@@ -625,13 +625,13 @@ private func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
 
 // MARK: - Model
 
-private class ModelInner: Module {
+public class FalconH1ModelInner: Module {
     let args: FalconH1Configuration
     let vocabSize: Int
     let hiddenSize: Int
 
     let _mupVector: MLXArray
-    let layers: [DecoderLayer]
+    let layers: [FalconH1DecoderLayer]
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "final_layernorm") var finalLayerNorm: RMSNorm
@@ -645,7 +645,7 @@ private class ModelInner: Module {
 
         self._mupVector = computeMupVector(args)
         self.layers = (0 ..< args.numHiddenLayers).map { _ in
-            DecoderLayer(args)
+            FalconH1DecoderLayer(args)
         }
 
         _finalLayerNorm.wrappedValue = RMSNorm(dimensions: hiddenSize, eps: args.rmsNormEps)
@@ -679,7 +679,7 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: ModelInner
+    public let model: FalconH1ModelInner
     let configuration: FalconH1Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear
@@ -688,7 +688,7 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
         self.configuration = args
         self.vocabularySize = args.vocabSize
         self.kvHeads = (0 ..< args.numKeyValueHeads).map { _ in args.numHiddenLayers }
-        self.model = ModelInner(args)
+        self.model = FalconH1ModelInner(args)
 
         _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
     }

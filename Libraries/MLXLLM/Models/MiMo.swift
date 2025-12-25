@@ -10,7 +10,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-private class Attention: Module {
+class MiMoAttention: Module {
     let args: MiMoConfiguration
     let scale: Float
 
@@ -91,7 +91,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class MiMoMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -107,16 +107,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class MiMoTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: MiMoAttention
+    let mlp: MiMoMLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     public init(_ args: MiMoConfiguration) {
-        _attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        _attention.wrappedValue = MiMoAttention(args)
+        self.mlp = MiMoMLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -134,10 +134,10 @@ private class TransformerBlock: Module {
     }
 }
 
-private class MiMoModelInner: Module {
+public class MiMoModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [MiMoTransformerBlock]
     let norm: RMSNorm
 
     let numNextnPredictLayers: Int
@@ -149,7 +149,7 @@ private class MiMoModelInner: Module {
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
         self.layers = (0 ..< args.hiddenLayers).map { _ in
-            TransformerBlock(args)
+            MiMoTransformerBlock(args)
         }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self.numNextnPredictLayers = args.numNextnPredictLayers
@@ -172,7 +172,7 @@ public class MiMoModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: MiMoModelInner
+    public let model: MiMoModelInner
     let configuration: MiMoConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

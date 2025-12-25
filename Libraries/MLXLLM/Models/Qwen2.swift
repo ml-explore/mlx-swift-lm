@@ -12,7 +12,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/qwen2.py
 
-private class Attention: Module {
+class Qwen2Attention: Module {
     let args: Qwen2Configuration
     let scale: Float
 
@@ -93,7 +93,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Qwen2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -109,16 +109,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class Qwen2TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Qwen2Attention
+    let mlp: Qwen2MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     public init(_ args: Qwen2Configuration) {
-        _attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        _attention.wrappedValue = Qwen2Attention(args)
+        self.mlp = Qwen2MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -136,10 +136,10 @@ private class TransformerBlock: Module {
     }
 }
 
-private class Qwen2ModelInner: Module {
+public class Qwen2ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [Qwen2TransformerBlock]
     let norm: RMSNorm
 
     public init(_ args: Qwen2Configuration) {
@@ -150,7 +150,7 @@ private class Qwen2ModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                Qwen2TransformerBlock(args)
             }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -172,7 +172,7 @@ public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: Qwen2ModelInner
+    public let model: Qwen2ModelInner
     let configuration: Qwen2Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

@@ -87,7 +87,7 @@ public struct Gemma3TextConfiguration: Codable {
     }
 }
 
-private class Attention: Module {
+class Gemma3Attention: Module {
     let nHeads: Int
     let nKVHeads: Int
     let repeats: Int
@@ -191,7 +191,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module {
+class Gemma3MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -208,9 +208,9 @@ private class MLP: Module {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var selfAttention: Attention
-    @ModuleInfo var mlp: MLP
+class Gemma3TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var selfAttention: Gemma3Attention
+    @ModuleInfo var mlp: Gemma3MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: Gemma.RMSNorm
@@ -225,8 +225,9 @@ private class TransformerBlock: Module {
         self.hiddenSize = config.hiddenSize
         self.layerIdx = layerIdx
 
-        self._selfAttention.wrappedValue = Attention(config, layerIdx: layerIdx)
-        self.mlp = MLP(dimensions: config.hiddenSize, hiddenDimensions: config.intermediateSize)
+        self._selfAttention.wrappedValue = Gemma3Attention(config, layerIdx: layerIdx)
+        self.mlp = Gemma3MLP(
+            dimensions: config.hiddenSize, hiddenDimensions: config.intermediateSize)
 
         self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -257,9 +258,9 @@ private class TransformerBlock: Module {
     }
 }
 
-private class Gemma3Model: Module {
+public class Gemma3Model: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo var layers: [TransformerBlock]
+    @ModuleInfo var layers: [Gemma3TransformerBlock]
     @ModuleInfo var norm: Gemma.RMSNorm
 
     let config: Gemma3TextConfiguration
@@ -273,7 +274,7 @@ private class Gemma3Model: Module {
         )
 
         self._layers.wrappedValue = (0 ..< config.hiddenLayers).map { layerIdx in
-            TransformerBlock(config, layerIdx: layerIdx)
+            Gemma3TransformerBlock(config, layerIdx: layerIdx)
         }
 
         self.norm = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -326,7 +327,7 @@ private class Gemma3Model: Module {
 
 public class Gemma3TextModel: Module, LLMModel {
 
-    @ModuleInfo private var model: Gemma3Model
+    @ModuleInfo public var model: Gemma3Model
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma3TextConfiguration

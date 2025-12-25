@@ -96,7 +96,7 @@ public struct LFM2MoEConfiguration: Codable, Sendable {
     }
 }
 
-private class Attention: Module {
+class LFM2MoEAttention: Module {
     let args: LFM2MoEConfiguration
     let scale: Float
     let headDim: Int
@@ -171,7 +171,7 @@ private class Attention: Module {
     }
 }
 
-private class ShortConv: Module {
+class LFM2MoEShortConv: Module {
     let args: LFM2MoEConfiguration
     let layerIdx: Int
     let lCache: Int
@@ -234,7 +234,7 @@ private class ShortConv: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class LFM2MoEMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -253,7 +253,7 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
+class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
     let args: LFM2MoEConfiguration
     let numExperts: Int
     let topK: Int
@@ -307,12 +307,12 @@ private class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
     }
 }
 
-private class DecoderLayer: Module {
+class LFM2MoEDecoderLayer: Module {
     let isAttentionLayer: Bool
     let usesDenseFeedForward: Bool
 
-    @ModuleInfo(key: "self_attn") var attention: Attention?
-    @ModuleInfo(key: "conv") var conv: ShortConv?
+    @ModuleInfo(key: "self_attn") var attention: LFM2MoEAttention?
+    @ModuleInfo(key: "conv") var conv: LFM2MoEShortConv?
     @ModuleInfo(key: "feed_forward") var feedForward: Module & UnaryLayer
     @ModuleInfo(key: "operator_norm") var operatorNorm: RMSNorm
     @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
@@ -322,13 +322,13 @@ private class DecoderLayer: Module {
         self.usesDenseFeedForward = layerIdx < args.numDenseLayers
 
         if isAttentionLayer {
-            _attention.wrappedValue = Attention(args)
+            _attention.wrappedValue = LFM2MoEAttention(args)
         } else {
-            _conv.wrappedValue = ShortConv(args, layerIdx: layerIdx)
+            _conv.wrappedValue = LFM2MoEShortConv(args, layerIdx: layerIdx)
         }
 
         if usesDenseFeedForward {
-            _feedForward.wrappedValue = MLP(args)
+            _feedForward.wrappedValue = LFM2MoEMLP(args)
         } else {
             _feedForward.wrappedValue = Lfm2MoeSparseMoeBlock(args)
         }
@@ -357,9 +357,9 @@ private class DecoderLayer: Module {
     }
 }
 
-private class LFM2MoEModelInner: Module {
+public class LFM2MoEModelInner: Module {
     let args: LFM2MoEConfiguration
-    let layers: [DecoderLayer]
+    let layers: [LFM2MoEDecoderLayer]
     let firstAttentionIndex: Int?
     let firstConvIndex: Int?
 
@@ -375,7 +375,7 @@ private class LFM2MoEModelInner: Module {
             dimensions: args.hiddenSize
         )
 
-        self.layers = (0 ..< args.hiddenLayers).map { DecoderLayer(args, layerIdx: $0) }
+        self.layers = (0 ..< args.hiddenLayers).map { LFM2MoEDecoderLayer(args, layerIdx: $0) }
         self.firstAttentionIndex = args.fullAttnIdxs.first
         self.firstConvIndex = layers.firstIndex(where: { !$0.isAttentionLayer })
 
@@ -418,7 +418,7 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
     let configuration: LFM2MoEConfiguration
 
-    private let model: LFM2MoEModelInner
+    public let model: LFM2MoEModelInner
 
     public init(_ args: LFM2MoEConfiguration) {
         self.configuration = args

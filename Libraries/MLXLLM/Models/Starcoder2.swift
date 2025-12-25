@@ -12,7 +12,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/starcoder2.py
 
-private class Attention: Module {
+class Starcoder2Attention: Module {
     let args: Starcoder2Configuration
     let scale: Float
 
@@ -78,7 +78,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Starcoder2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "c_fc") var cFc: Linear
     @ModuleInfo(key: "c_proj") var cProj: Linear
 
@@ -92,16 +92,17 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class Starcoder2TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Starcoder2Attention
+    let mlp: Starcoder2MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: LayerNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: LayerNorm
 
     public init(_ args: Starcoder2Configuration) {
-        _attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        _attention.wrappedValue = Starcoder2Attention(args)
+        self.mlp = Starcoder2MLP(
+            dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         _inputLayerNorm.wrappedValue = LayerNorm(
             dimensions: args.hiddenSize, eps: args.normEpsilon)
         _postAttentionLayerNorm.wrappedValue = LayerNorm(
@@ -119,10 +120,10 @@ private class TransformerBlock: Module {
     }
 }
 
-private class Starcoder2ModelInner: Module {
+public class Starcoder2ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [Starcoder2TransformerBlock]
     let norm: LayerNorm
 
     public init(_ args: Starcoder2Configuration) {
@@ -133,7 +134,7 @@ private class Starcoder2ModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                Starcoder2TransformerBlock(args)
             }
         self.norm = LayerNorm(dimensions: args.hiddenSize, eps: args.normEpsilon)
     }
@@ -156,7 +157,7 @@ public class Starcoder2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
 
     public let tieWordEmbeddings: Bool
-    private let model: Starcoder2ModelInner
+    public let model: Starcoder2ModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 

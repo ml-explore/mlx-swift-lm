@@ -13,7 +13,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/exaone4.py
 
-private class Attention: Module {
+class Exaone4Attention: Module {
     let args: Exaone4Configuration
     let scale: Float
     let isLocal: Bool
@@ -107,7 +107,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Exaone4MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -123,16 +123,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class Exaone4TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Exaone4Attention
+    let mlp: Exaone4MLP
 
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
 
     public init(_ args: Exaone4Configuration, isLocal: Bool?) {
-        _attention.wrappedValue = Attention(args, isLocal: isLocal)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        _attention.wrappedValue = Exaone4Attention(args, isLocal: isLocal)
+        self.mlp = Exaone4MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postFeedforwardLayerNorm.wrappedValue = RMSNorm(
@@ -150,10 +150,10 @@ private class TransformerBlock: Module {
     }
 }
 
-private class ModelInner: Module {
+public class Exaone4ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [Exaone4TransformerBlock]
     let norm: RMSNorm
 
     public init(_ args: Exaone4Configuration) {
@@ -173,7 +173,7 @@ private class ModelInner: Module {
                 } else {
                     isLocal = nil
                 }
-                return TransformerBlock(args, isLocal: isLocal)
+                return Exaone4TransformerBlock(args, isLocal: isLocal)
             }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -195,7 +195,7 @@ public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: ModelInner
+    public let model: Exaone4ModelInner
     let configuration: Exaone4Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
@@ -204,7 +204,7 @@ public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
         self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
-        self.model = ModelInner(args)
+        self.model = Exaone4ModelInner(args)
 
         if !args.tieWordEmbeddings {
             _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)

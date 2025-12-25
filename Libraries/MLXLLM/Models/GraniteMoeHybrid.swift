@@ -12,7 +12,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-private enum GraniteMoeHybridLayerType {
+enum GraniteMoeHybridLayerType {
     case mamba
     case attention
 }
@@ -21,7 +21,7 @@ private func createSSMMask(cache: KVCache?) -> MLXArray? {
     nil
 }
 
-private class GraniteMoeHybridRMSNormGated: Module {
+class GraniteMoeHybridRMSNormGated: Module {
     @ParameterInfo(key: "weight") var weight: MLXArray
     let eps: Float
 
@@ -40,7 +40,7 @@ private class GraniteMoeHybridRMSNormGated: Module {
     }
 }
 
-private class GraniteMoeHybridMamba2Mixer: Module {
+class GraniteMoeHybridMamba2Mixer: Module {
     let numHeads: Int
     let hiddenSize: Int
     let ssmStateSize: Int
@@ -188,7 +188,7 @@ private class GraniteMoeHybridMamba2Mixer: Module {
     }
 }
 
-private class GraniteMoeHybridAttention: Module {
+class GraniteMoeHybridAttention: Module {
     let args: GraniteMoeHybridConfiguration
     let scale: Float
 
@@ -271,7 +271,7 @@ private class GraniteMoeHybridAttention: Module {
     }
 }
 
-private class GraniteMoeHybridTopKGating: Module {
+class GraniteMoeHybridTopKGating: Module {
     let numExperts: Int
     let topK: Int
 
@@ -293,7 +293,7 @@ private class GraniteMoeHybridTopKGating: Module {
     }
 }
 
-private class GraniteMoeHybridMoE: Module, UnaryLayer {
+class GraniteMoeHybridMoE: Module, UnaryLayer {
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     let router: GraniteMoeHybridTopKGating
 
@@ -325,7 +325,7 @@ private class GraniteMoeHybridMoE: Module, UnaryLayer {
     }
 }
 
-private class GraniteMoeHybridSharedMLP: Module, UnaryLayer {
+class GraniteMoeHybridSharedMLP: Module, UnaryLayer {
     @ModuleInfo(key: "input_linear") var inputLinear: Linear
     @ModuleInfo(key: "output_linear") var outputLinear: Linear
 
@@ -348,7 +348,7 @@ private class GraniteMoeHybridSharedMLP: Module, UnaryLayer {
     }
 }
 
-private class GraniteMoeHybridMLP: Module, UnaryLayer {
+class GraniteMoeHybridMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -365,7 +365,7 @@ private class GraniteMoeHybridMLP: Module, UnaryLayer {
     }
 }
 
-private class GraniteMoeHybridLayer: Module {
+class GraniteMoeHybridLayer: Module {
     let layerType: GraniteMoeHybridLayerType
     let residualMultiplier: Float
     let useMoE: Bool
@@ -440,7 +440,7 @@ private class GraniteMoeHybridLayer: Module {
     }
 }
 
-private class GraniteMoeHybridModelInner: Module {
+public class GraniteMoeHybridModelInner: Module {
     let args: GraniteMoeHybridConfiguration
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     fileprivate let layers: [GraniteMoeHybridLayer]
@@ -494,7 +494,7 @@ public class GraniteMoeHybridModel: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
     let logitsScaling: Float
 
-    private let model: GraniteMoeHybridModelInner
+    public let model: GraniteMoeHybridModelInner
     let configuration: GraniteMoeHybridConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

@@ -50,7 +50,7 @@ func computeBaseFrequency(
     return newBaseFreqs.reduce(0, +) / Float(newBaseFreqs.count)
 }
 
-private class DynamicNTKScalingRoPE: Module {
+class LlamaDynamicNTKScalingRoPE: Module {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -132,7 +132,7 @@ private class DynamicNTKScalingRoPE: Module {
     }
 }
 
-private class Attention: Module {
+class LlamaAttention: Module {
 
     let args: LlamaConfiguration
     let scale: Float
@@ -142,7 +142,7 @@ private class Attention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: DynamicNTKScalingRoPE
+    let rope: LlamaDynamicNTKScalingRoPE
 
     init(_ args: LlamaConfiguration) {
         self.args = args
@@ -159,7 +159,7 @@ private class Attention: Module {
         self._wv.wrappedValue = Linear(dim, kvHeads * headDim, bias: args.attentionBias)
         self._wo.wrappedValue = Linear(heads * headDim, dim, bias: args.attentionBias)
 
-        self.rope = DynamicNTKScalingRoPE(
+        self.rope = LlamaDynamicNTKScalingRoPE(
             dims: headDim,
             maxPositionEmbeddings: args.maxPositionEmbeddings,
             traditional: args.ropeTraditional,
@@ -212,7 +212,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class LlamaMLP: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
@@ -230,16 +230,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    @ModuleInfo(key: "mlp") var mlp: MLP
+class LlamaTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: LlamaAttention
+    @ModuleInfo(key: "mlp") var mlp: LlamaMLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     init(_ args: LlamaConfiguration) {
-        self._attention.wrappedValue = Attention(args)
-        self._mlp.wrappedValue = MLP(args)
+        self._attention.wrappedValue = LlamaAttention(args)
+        self._mlp.wrappedValue = LlamaMLP(args)
         self._inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -257,11 +257,11 @@ private class TransformerBlock: Module {
     }
 }
 
-private class LlamaModelInner: Module {
+public class LlamaModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [LlamaTransformerBlock]
     let norm: RMSNorm
 
     init(_ args: LlamaConfiguration) {
@@ -270,7 +270,7 @@ private class LlamaModelInner: Module {
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { _ in LlamaTransformerBlock(args) }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -293,7 +293,7 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: LlamaModelInner
+    public let model: LlamaModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

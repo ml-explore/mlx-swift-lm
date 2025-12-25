@@ -12,7 +12,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm4.py
 
-private class Attention: Module {
+class GLM4Attention: Module {
     let args: GLM4Configuration
     let scale: Float
 
@@ -76,7 +76,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class GLM4MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_up_proj") var gateUp: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
 
@@ -92,9 +92,9 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class GLM4DecoderLayer: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class GLM4DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var attention: GLM4Attention
+    let mlp: GLM4MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
@@ -102,8 +102,8 @@ private class GLM4DecoderLayer: Module {
     @ModuleInfo(key: "post_mlp_layernorm") var postMlpLayerNorm: RMSNorm
 
     public init(_ args: GLM4Configuration) {
-        _attention.wrappedValue = Attention(args)
-        self.mlp = MLP(args)
+        _attention.wrappedValue = GLM4Attention(args)
+        self.mlp = GLM4MLP(args)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -128,7 +128,7 @@ private class GLM4DecoderLayer: Module {
     }
 }
 
-private class GLM4ModelInner: Module {
+public class GLM4ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [GLM4DecoderLayer]
@@ -164,7 +164,7 @@ public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: GLM4ModelInner
+    public let model: GLM4ModelInner
     let configuration: GLM4Configuration
     let modelType: String
 

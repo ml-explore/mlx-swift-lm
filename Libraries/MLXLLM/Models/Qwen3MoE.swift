@@ -12,7 +12,7 @@ import MLXNN
 
 // port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/qwen3_moe.py
 
-private class Attention: Module {
+class Qwen3MoEAttention: Module {
     let args: Qwen3MoEConfiguration
     let scale: Float
 
@@ -99,7 +99,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Qwen3MoEMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -115,7 +115,7 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
+class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
     let numExperts: Int
     let topK: Int
     let normTopkProb: Bool
@@ -151,11 +151,11 @@ private class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
     }
 }
 
-private class Qwen3MoeDecoderLayer: Module {
+class Qwen3MoeDecoderLayer: Module {
     let args: Qwen3MoEConfiguration
     let layerIdx: Int
 
-    @ModuleInfo(key: "self_attn") var selfAttn: Attention
+    @ModuleInfo(key: "self_attn") var selfAttn: Qwen3MoEAttention
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
@@ -165,7 +165,7 @@ private class Qwen3MoeDecoderLayer: Module {
         self.args = args
         self.layerIdx = layerIdx
 
-        _selfAttn.wrappedValue = Attention(args, layerIdx: layerIdx)
+        _selfAttn.wrappedValue = Qwen3MoEAttention(args, layerIdx: layerIdx)
         _inputLayerNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -175,7 +175,8 @@ private class Qwen3MoeDecoderLayer: Module {
         {
             self.mlp = Qwen3MoESparseMoeBlock(args)
         } else {
-            self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+            self.mlp = Qwen3MoEMLP(
+                dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         }
     }
 
@@ -190,7 +191,7 @@ private class Qwen3MoeDecoderLayer: Module {
     }
 }
 
-private class Qwen3MoEModelInner: Module {
+public class Qwen3MoEModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [Qwen3MoeDecoderLayer]
@@ -228,7 +229,7 @@ public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: Qwen3MoEModelInner
+    public let model: Qwen3MoEModelInner
     let configuration: Qwen3MoEConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

@@ -95,7 +95,7 @@ private func yarnLinearRampMask(minVal: Float, maxVal: Float, dim: Int) -> MLXAr
     return clip(linearFunc, min: 0, max: 1)
 }
 
-private class DeepseekV3YarnRotaryEmbedding: Module {
+class DeepseekV3YarnRotaryEmbedding: Module {
     var mscale: Float
     let dim: Int
     let maxPositionEmbeddings: Int
@@ -155,7 +155,7 @@ private func clippedSilu(_ x: MLXArray) -> MLXArray {
     clip(x * sigmoid(x), min: -100, max: 100)
 }
 
-private class DeepseekV3Attention: Module {
+class DeepseekV3Attention: Module {
     var config: DeepseekV3Configuration
     var hiddenSize: Int
     var numHeads: Int
@@ -306,7 +306,7 @@ private class DeepseekV3Attention: Module {
     }
 }
 
-private class DeepseekV3MLP: Module, UnaryLayer {
+class DeepseekV3MLP: Module, UnaryLayer {
     var config: DeepseekV3Configuration
     var hiddenSize: Int
     var intermediateSize: Int
@@ -328,7 +328,7 @@ private class DeepseekV3MLP: Module, UnaryLayer {
     }
 }
 
-private class MoEGate: Module {
+class MoEGate: Module {
     var config: DeepseekV3Configuration
     var topK: Int?
     var normTopkProb: Bool
@@ -379,7 +379,7 @@ private class MoEGate: Module {
     }
 }
 
-private class DeepseekV3MoE: Module, UnaryLayer {
+class DeepseekV3MoE: Module, UnaryLayer {
     var config: DeepseekV3Configuration
     var numExpertsPerTok: Int
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
@@ -418,7 +418,7 @@ private class DeepseekV3MoE: Module, UnaryLayer {
     }
 }
 
-private class DeepseekV3DecoderLayer: Module {
+class DeepseekV3DecoderLayer: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: DeepseekV3Attention
     var mlp: UnaryLayer
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
@@ -452,7 +452,7 @@ private class DeepseekV3DecoderLayer: Module {
     }
 }
 
-private class DeepseekV3ModelInner: Module {
+public class DeepseekV3ModelInner: Module {
     var config: DeepseekV3Configuration
     var vocabSize: Int
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
@@ -497,7 +497,7 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     public var kvHeads: [Int] = []
 
     var args: DeepseekV3Configuration
-    fileprivate var model: DeepseekV3ModelInner
+    public var model: DeepseekV3ModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     init(_ args: DeepseekV3Configuration) {

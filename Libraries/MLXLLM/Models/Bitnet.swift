@@ -63,7 +63,7 @@ private func makeBitLinearKernel() -> MLXFast.MLXFastKernel {
     )
 }
 
-private final class BitLinearKernelManager: @unchecked Sendable {
+final class BitLinearKernelManager: @unchecked Sendable {
     static let shared = BitLinearKernelManager()
 
     let bitlinearKernel: MLXFast.MLXFastKernel
@@ -73,7 +73,7 @@ private final class BitLinearKernelManager: @unchecked Sendable {
     }
 }
 
-private class BitLinear: Module {
+class BitLinear: Module {
     let inFeatures: Int
     let outFeatures: Int
     let invertWeightScales: Bool
@@ -266,7 +266,7 @@ public struct BitnetConfiguration: Codable, Sendable {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class BitnetAttention: Module {
     let args: BitnetConfiguration
     let scale: Float
 
@@ -356,7 +356,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module {
+class BitnetMLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: BitLinear
     @ModuleInfo(key: "down_proj") var downProj: BitLinear
     @ModuleInfo(key: "up_proj") var upProj: BitLinear
@@ -382,16 +382,16 @@ private class MLP: Module {
 
 // MARK: - Transformer Block
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    var mlp: MLP
+class BitnetTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: BitnetAttention
+    var mlp: BitnetMLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     init(_ args: BitnetConfiguration) {
-        _attention.wrappedValue = Attention(args)
-        mlp = MLP(args)
+        _attention.wrappedValue = BitnetAttention(args)
+        mlp = BitnetMLP(args)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps
         )
@@ -415,10 +415,10 @@ private class TransformerBlock: Module {
 
 // MARK: - Bitnet Model Inner
 
-private class BitnetModelInner: Module {
+public class BitnetModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [BitnetTransformerBlock]
     var norm: RMSNorm
 
     init(_ args: BitnetConfiguration) {
@@ -429,7 +429,7 @@ private class BitnetModelInner: Module {
         )
 
         layers = (0 ..< args.hiddenLayers).map { _ in
-            TransformerBlock(args)
+            BitnetTransformerBlock(args)
         }
         norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -453,7 +453,7 @@ public class BitnetModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: BitnetModelInner
+    public let model: BitnetModelInner
     let configuration: BitnetConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
