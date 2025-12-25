@@ -8,7 +8,7 @@ import Tokenizers
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma2.py
 
-private class Attention: Module {
+class Gemma2Attention: Module {
     let args: Gemma2Configuration
     let scale: Float
     let logitSoftCap: Float
@@ -88,7 +88,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Gemma2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -105,9 +105,9 @@ private class MLP: Module, UnaryLayer {
 }
 
 // Minimal changes from Gemma TransformerBlock
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class Gemma2TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Gemma2Attention
+    let mlp: Gemma2MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: Gemma.RMSNorm
@@ -115,8 +115,8 @@ private class TransformerBlock: Module {
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
 
     public init(_ args: Gemma2Configuration) {
-        self._attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        self._attention.wrappedValue = Gemma2Attention(args)
+        self.mlp = Gemma2MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._preFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
@@ -139,10 +139,10 @@ private class TransformerBlock: Module {
 }
 
 // Uses Gemma2TransformerBlock, otherwise same as GemmaModelInner
-private class ModelInner: Module {
+public class Gemma2ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [Gemma2TransformerBlock]
     fileprivate let norm: Gemma.RMSNorm
 
     let hiddenScale: Float
@@ -157,7 +157,7 @@ private class ModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                Gemma2TransformerBlock(args)
             }
         self.norm = Gemma.RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -182,13 +182,13 @@ public class Gemma2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: ModelInner
+    public let model: Gemma2ModelInner
     let logitSoftCap: Float
 
     public init(_ args: Gemma2Configuration) {
         self.vocabularySize = args.vocabularySize
         self.kvHeads = Array(repeating: args.kvHeads, count: args.hiddenLayers)
-        self.model = ModelInner(args)
+        self.model = Gemma2ModelInner(args)
         self.logitSoftCap = args.finalLogitSoftcapping
     }
 

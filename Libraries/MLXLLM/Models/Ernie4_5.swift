@@ -60,7 +60,7 @@ public struct Ernie45Configuration: Codable {
     }
 }
 
-private class Attention: Module {
+class Ernie45Attention: Module {
     let nHeads: Int
     let nKVHeads: Int
     let headDim: Int
@@ -128,7 +128,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Ernie45MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -144,16 +144,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class DecoderLayer: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class Ernie45DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var attention: Ernie45Attention
+    let mlp: Ernie45MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
 
     public init(_ args: Ernie45Configuration) {
-        self._attention.wrappedValue = Attention(args)
-        self.mlp = MLP(
+        self._attention.wrappedValue = Ernie45Attention(args)
+        self.mlp = Ernie45MLP(
             dim: args.hiddenSize, hiddenDim: args.intermediateSize, useBias: args.useBias)
         self._inputLayernorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -171,9 +171,9 @@ private class DecoderLayer: Module {
     }
 }
 
-private class Ernie45ModelInner: Module {
+public class Ernie45ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    let layers: [DecoderLayer]
+    let layers: [Ernie45DecoderLayer]
     let norm: RMSNorm
 
     public init(_ args: Ernie45Configuration) {
@@ -181,7 +181,7 @@ private class Ernie45ModelInner: Module {
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize
         )
         self.layers = (0 ..< args.numHiddenLayers).map { _ in
-            DecoderLayer(args)
+            Ernie45DecoderLayer(args)
         }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -203,7 +203,7 @@ public class Ernie45Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: Ernie45ModelInner
+    public let model: Ernie45ModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: Ernie45Configuration) {

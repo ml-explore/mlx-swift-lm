@@ -10,16 +10,16 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-private protocol PositionEmbedding {
+protocol SmolLM3PositionEmbedding {
     func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray
     func callAsFunction(_ x: MLXArray) -> MLXArray
 }
 
-extension RoPE: PositionEmbedding {}
+extension RoPE: SmolLM3PositionEmbedding {}
 
 // MARK: - NoPE
 
-private final class NoPE: Module, PositionEmbedding {
+final class NoPE: Module, SmolLM3PositionEmbedding {
     func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray {
         return x
     }
@@ -31,7 +31,7 @@ private final class NoPE: Module, PositionEmbedding {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class SmolLM3Attention: Module {
     let args: SmolLM3Configuration
     let scale: Float
 
@@ -40,7 +40,7 @@ private class Attention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    var rope: PositionEmbedding
+    var rope: SmolLM3PositionEmbedding
 
     init(_ args: SmolLM3Configuration) {
         self.args = args
@@ -103,7 +103,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class SmolLM3MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -120,16 +120,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    @ModuleInfo(key: "mlp") var mlp: MLP
+class SmolLM3TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: SmolLM3Attention
+    @ModuleInfo(key: "mlp") var mlp: SmolLM3MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     init(_ args: SmolLM3Configuration) {
-        _attention.wrappedValue = Attention(args)
-        _mlp.wrappedValue = MLP(args)
+        _attention.wrappedValue = SmolLM3Attention(args)
+        _mlp.wrappedValue = SmolLM3MLP(args)
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -149,10 +149,10 @@ private class TransformerBlock: Module {
 
 // MARK: - Model
 
-private class SmolLM3ModelInner: Module {
+public class SmolLM3ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [SmolLM3TransformerBlock]
     let norm: RMSNorm
 
     init(_ args: SmolLM3Configuration) {
@@ -161,7 +161,7 @@ private class SmolLM3ModelInner: Module {
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { _ in SmolLM3TransformerBlock(args) }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -182,7 +182,7 @@ public class SmolLM3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: SmolLM3ModelInner
+    public let model: SmolLM3ModelInner
     let configuration: SmolLM3Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

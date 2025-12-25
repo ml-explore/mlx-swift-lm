@@ -28,7 +28,7 @@ private func applySoftcap(_ logits: MLXArray, cap: Float) -> MLXArray {
 
 // MARK: - Attention
 
-private final class NanoChatAttention: Module {
+final class NanoChatAttention: Module {
     let config: NanoChatConfiguration
     let numHeads: Int
     let numKVHeads: Int
@@ -118,7 +118,7 @@ private final class NanoChatAttention: Module {
 
 // MARK: - MLP
 
-private final class NanoChatMLP: Module, UnaryLayer {
+final class NanoChatMLP: Module, UnaryLayer {
     let config: NanoChatConfiguration
 
     @ModuleInfo(key: "c_fc") var fc: Linear
@@ -138,7 +138,7 @@ private final class NanoChatMLP: Module, UnaryLayer {
 
 // MARK: - Transformer Block
 
-private final class NanoChatBlock: Module {
+final class NanoChatBlock: Module {
     let config: NanoChatConfiguration
 
     @ModuleInfo(key: "attn") var attention: NanoChatAttention
@@ -165,7 +165,7 @@ private final class NanoChatBlock: Module {
 
 // MARK: - Model (inner)
 
-private final class NanoChatModelInner: Module {
+public final class NanoChatModelInner: Module {
     let config: NanoChatConfiguration
 
     @ModuleInfo(key: "wte") var embedTokens: Embedding
@@ -205,7 +205,7 @@ public final class NanoChatModel: Module, LLMModel, KVCacheDimensionProvider {
 
     let config: NanoChatConfiguration
 
-    @ModuleInfo(key: "transformer") fileprivate var transformer: NanoChatModelInner
+    @ModuleInfo(key: "transformer") public var transformer: NanoChatModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public init(_ config: NanoChatConfiguration) {

@@ -25,7 +25,7 @@ func makeDivisible(_ v: Float, divisor: Int = 8, minValue: Float? = nil) -> Int 
     return Int(roundDown)
 }
 
-private class MultiHeadCausalAttention: Module {
+class MultiHeadCausalAttention: Module {
     let scale: Float
     let heads: Int
     let headDim: Int
@@ -99,7 +99,7 @@ private class MultiHeadCausalAttention: Module {
     }
 }
 
-private class FeedForwardNetwork: Module, UnaryLayer {
+class FeedForwardNetwork: Module, UnaryLayer {
     @ModuleInfo var proj_1: Linear
     @ModuleInfo var proj_2: Linear
 
@@ -122,7 +122,7 @@ private class FeedForwardNetwork: Module, UnaryLayer {
     }
 }
 
-private class TransformerDecoderLayer: Module {
+class OpenELMTransformerDecoderLayer: Module {
     @ModuleInfo(key: "attn") var attn: MultiHeadCausalAttention
     let ffn: FeedForwardNetwork
 
@@ -148,10 +148,10 @@ private class TransformerDecoderLayer: Module {
     }
 }
 
-class OpenELMModelInner: Module {
+public class OpenELMModelInner: Module {
     @ModuleInfo(key: "token_embeddings") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerDecoderLayer]
+    fileprivate let layers: [OpenELMTransformerDecoderLayer]
     fileprivate let norm: RMSNorm
 
     public init(_ args: OpenElmConfiguration) {
@@ -162,7 +162,7 @@ class OpenELMModelInner: Module {
 
         self.layers = (0 ..< args.numTransformerLayers)
             .map { layerId in
-                TransformerDecoderLayer(args, layerId: layerId)
+                OpenELMTransformerDecoderLayer(args, layerId: layerId)
             }
 
         self.norm = RMSNorm(dimensions: args.modelDim, eps: args.rmsNormEps)
@@ -184,7 +184,7 @@ public class OpenELMModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    let transformer: OpenELMModelInner
+    public let transformer: OpenELMModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

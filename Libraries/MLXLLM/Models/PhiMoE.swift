@@ -39,7 +39,7 @@ public struct PhiMoEConfiguration: Codable, Sendable {
     }
 }
 
-private class Attention: Module {
+class PhiMoEAttention: Module {
     let args: PhiMoEConfiguration
     let scale: Float
 
@@ -114,7 +114,7 @@ private class Attention: Module {
     }
 }
 
-private class PhiMoESparseMoeBlock: Module {
+class PhiMoESparseMoeBlock: Module {
     let hiddenDim: Int
     let ffnDim: Int
     let numExperts: Int
@@ -151,10 +151,10 @@ private class PhiMoESparseMoeBlock: Module {
     }
 }
 
-private class PhiMoEDecoderLayer: Module {
+class PhiMoEDecoderLayer: Module {
     let hiddenSize: Int
 
-    @ModuleInfo(key: "self_attn") var selfAttn: Attention
+    @ModuleInfo(key: "self_attn") var selfAttn: PhiMoEAttention
     @ModuleInfo(key: "block_sparse_moe") var blockSparseMoe: PhiMoESparseMoeBlock
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: LayerNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: LayerNorm
@@ -162,7 +162,7 @@ private class PhiMoEDecoderLayer: Module {
     init(_ args: PhiMoEConfiguration) {
         self.hiddenSize = args.hiddenSize
 
-        self._selfAttn.wrappedValue = Attention(args)
+        self._selfAttn.wrappedValue = PhiMoEAttention(args)
         self._blockSparseMoe.wrappedValue = PhiMoESparseMoeBlock(args)
         self._inputLayerNorm.wrappedValue = LayerNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -187,7 +187,7 @@ private class PhiMoEDecoderLayer: Module {
     }
 }
 
-private class PhiMoEModelInner: Module {
+public class PhiMoEModelInner: Module {
     let args: PhiMoEConfiguration
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
@@ -220,7 +220,7 @@ public class PhiMoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: PhiMoEModelInner
+    public let model: PhiMoEModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public init(_ args: PhiMoEConfiguration) {

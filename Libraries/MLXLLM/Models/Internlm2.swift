@@ -7,7 +7,7 @@ import MLXNN
 
 // Port of https://github.com/maiqingqiang/mlx-examples/blob/main/llms/mlx_lm/models/internlm2.py
 
-private class DynamicNTKScalingRoPE: Module {
+class Internlm2DynamicNTKScalingRoPE: Module {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -38,7 +38,7 @@ private class DynamicNTKScalingRoPE: Module {
     }
 }
 
-private class Attention: Module {
+class Internlm2Attention: Module {
     let args: InternLM2Configuration
     let scale: Float
 
@@ -50,7 +50,7 @@ private class Attention: Module {
     @ModuleInfo(key: "wqkv") var wqkv: Linear
     @ModuleInfo(key: "wo") var wo: Linear
 
-    let rope: DynamicNTKScalingRoPE
+    let rope: Internlm2DynamicNTKScalingRoPE
 
     init(_ args: InternLM2Configuration) {
         self.args = args
@@ -80,7 +80,7 @@ private class Attention: Module {
             ropeScale = 1
         }
 
-        self.rope = DynamicNTKScalingRoPE(
+        self.rope = Internlm2DynamicNTKScalingRoPE(
             dims: self.headDim,
             maxPositionEmbeddings: args.maxPositionEmbeddings,
             traditional: args.ropeTraditional,
@@ -129,7 +129,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Internlm2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "w1") var w1: Linear
     @ModuleInfo(key: "w2") var w2: Linear
     @ModuleInfo(key: "w3") var w3: Linear
@@ -145,16 +145,17 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "attention") var attention: Attention
-    @ModuleInfo(key: "feed_forward") var feedForward: MLP
+class Internlm2TransformerBlock: Module {
+    @ModuleInfo(key: "attention") var attention: Internlm2Attention
+    @ModuleInfo(key: "feed_forward") var feedForward: Internlm2MLP
 
     @ModuleInfo(key: "attention_norm") var attentionNorm: RMSNorm
     @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
 
     init(_ args: InternLM2Configuration) {
-        self._attention.wrappedValue = Attention(args)
-        self._feedForward.wrappedValue = MLP(dim: args.hiddenSize, hiddenDim: args.intermediateSize)
+        self._attention.wrappedValue = Internlm2Attention(args)
+        self._feedForward.wrappedValue = Internlm2MLP(
+            dim: args.hiddenSize, hiddenDim: args.intermediateSize)
         self._attentionNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._ffnNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -171,10 +172,10 @@ private class TransformerBlock: Module {
     }
 }
 
-private class InternLM2ModelInner: Module {
+public class InternLM2ModelInner: Module {
     @ModuleInfo(key: "tok_embeddings") var tokEmbeddings: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [Internlm2TransformerBlock]
     let norm: RMSNorm
 
     init(_ args: InternLM2Configuration) {
@@ -183,7 +184,7 @@ private class InternLM2ModelInner: Module {
         self._tokEmbeddings.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { _ in Internlm2TransformerBlock(args) }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -204,7 +205,7 @@ public class InternLM2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: InternLM2ModelInner
+    public let model: InternLM2ModelInner
 
     @ModuleInfo(key: "output") var output: Linear?
 

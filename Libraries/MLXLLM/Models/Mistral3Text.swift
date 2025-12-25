@@ -30,7 +30,7 @@ private func getLlama4AttentionScale(
 
 // MARK: - Attention
 
-private class Attention: Module {
+class Mistral3Attention: Module {
     let args: Mistral3TextConfiguration
     let nHeads: Int
     let nKVHeads: Int
@@ -129,7 +129,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class Mistral3MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -150,13 +150,13 @@ private class MLP: Module, UnaryLayer {
 
 // MARK: - Transformer Block
 
-private class TransformerBlock: Module {
+class Mistral3TextTransformerBlock: Module {
     let numAttentionHeads: Int
     let hiddenSize: Int
     let useSliding: Bool
 
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    @ModuleInfo(key: "mlp") var mlp: MLP
+    @ModuleInfo(key: "self_attn") var attention: Mistral3Attention
+    @ModuleInfo(key: "mlp") var mlp: Mistral3MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
@@ -165,8 +165,8 @@ private class TransformerBlock: Module {
         self.hiddenSize = args.hiddenSize
         self.useSliding = useSliding
 
-        self._attention.wrappedValue = Attention(args)
-        self._mlp.wrappedValue = MLP(args)
+        self._attention.wrappedValue = Mistral3Attention(args)
+        self._mlp.wrappedValue = Mistral3MLP(args)
         self._inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -187,7 +187,7 @@ private class TransformerBlock: Module {
 
 // MARK: - Language Model (Inner)
 
-private class Mistral3TextModelInner: Module {
+public class Mistral3TextModelInner: Module {
     let args: Mistral3TextConfiguration
     let vocabularySize: Int
     let numHiddenLayers: Int
@@ -196,7 +196,7 @@ private class Mistral3TextModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [Mistral3TextTransformerBlock]
     let norm: RMSNorm
 
     // Indices for first full attention and sliding window attention layers
@@ -217,7 +217,7 @@ private class Mistral3TextModelInner: Module {
 
         // Create transformer blocks with appropriate attention type
         self.layers = args.layerTypes.map { layerType in
-            TransformerBlock(args, useSliding: layerType == "sliding_attention")
+            Mistral3TextTransformerBlock(args, useSliding: layerType == "sliding_attention")
         }
 
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -294,7 +294,7 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: Mistral3TextModelInner
+    public let model: Mistral3TextModelInner
     fileprivate let args: Mistral3TextConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

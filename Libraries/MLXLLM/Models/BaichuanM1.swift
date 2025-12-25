@@ -46,7 +46,7 @@ public struct BaichuanM1Configuration: Codable, Sendable {
     }
 }
 
-private class Attention: Module {
+class BaichuanM1Attention: Module {
     let config: BaichuanM1Configuration
     let layerIdx: Int
     let isSWA: Bool
@@ -157,7 +157,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class BaichuanM1MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -173,15 +173,15 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class DecoderLayer: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class BaichuanM1DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var attention: BaichuanM1Attention
+    let mlp: BaichuanM1MLP
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
 
     init(_ config: BaichuanM1Configuration, layerIdx: Int) {
-        _attention.wrappedValue = Attention(config, layerIdx: layerIdx)
-        self.mlp = MLP(config)
+        _attention.wrappedValue = BaichuanM1Attention(config, layerIdx: layerIdx)
+        self.mlp = BaichuanM1MLP(config)
         _inputLayernorm.wrappedValue = RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
         _postAttentionLayernorm.wrappedValue = RMSNorm(
@@ -198,18 +198,20 @@ private class DecoderLayer: Module {
     }
 }
 
-private class BaichuanM1ModelInner: Module {
+public class BaichuanM1ModelInner: Module {
     let args: BaichuanM1Configuration
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [DecoderLayer]
+    fileprivate let layers: [BaichuanM1DecoderLayer]
     let norm: RMSNorm
 
     init(_ config: BaichuanM1Configuration) {
         self.args = config
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
-        self.layers = (0 ..< config.hiddenLayers).map { DecoderLayer(config, layerIdx: $0) }
+        self.layers = (0 ..< config.hiddenLayers).map {
+            BaichuanM1DecoderLayer(config, layerIdx: $0)
+        }
         norm = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
     }
 
@@ -234,7 +236,7 @@ public class BaichuanM1Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: BaichuanM1ModelInner
+    public let model: BaichuanM1ModelInner
     let configuration: BaichuanM1Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

@@ -13,7 +13,7 @@ import MLXNN
 
 // MARK: - Attention
 
-private class Attention: Module {
+class Olmo3Attention: Module {
     let args: Olmo3Configuration
     let layerIdx: Int
     let nHeads: Int
@@ -114,7 +114,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class Olmo3MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -132,16 +132,16 @@ private class MLP: Module, UnaryLayer {
 
 // MARK: - Transformer Block
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    @ModuleInfo(key: "mlp") var mlp: MLP
+class Olmo3TransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: Olmo3Attention
+    @ModuleInfo(key: "mlp") var mlp: Olmo3MLP
 
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
 
     init(_ args: Olmo3Configuration, layerIdx: Int) {
-        self._attention.wrappedValue = Attention(args, layerIdx: layerIdx)
-        self._mlp.wrappedValue = MLP(args)
+        self._attention.wrappedValue = Olmo3Attention(args, layerIdx: layerIdx)
+        self._mlp.wrappedValue = Olmo3MLP(args)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postFeedforwardLayerNorm.wrappedValue = RMSNorm(
@@ -161,10 +161,10 @@ private class TransformerBlock: Module {
 
 // MARK: - Model
 
-private class Olmo3ModelInner: Module {
+public class Olmo3ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [Olmo3TransformerBlock]
     let norm: RMSNorm
     let slidingWindow: Int
     let layerTypes: [String]
@@ -178,7 +178,7 @@ private class Olmo3ModelInner: Module {
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
         self.layers = (0 ..< args.hiddenLayers).map { i in
-            TransformerBlock(args, layerIdx: i)
+            Olmo3TransformerBlock(args, layerIdx: i)
         }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self.slidingWindow = args.slidingWindow
@@ -209,7 +209,7 @@ public class Olmo3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: Olmo3ModelInner
+    public let model: Olmo3ModelInner
     let args: Olmo3Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

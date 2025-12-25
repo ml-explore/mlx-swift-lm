@@ -9,7 +9,7 @@ import Tokenizers
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma.py
 
 // Specialized norm for Gemma
-private class RMSNorm: Module, UnaryLayer {
+class GemmaRMSNorm: Module, UnaryLayer {
     let weight: MLXArray
     let eps: Float
 
@@ -23,7 +23,7 @@ private class RMSNorm: Module, UnaryLayer {
     }
 }
 
-private class Attention: Module {
+class GemmaAttention: Module {
     let args: GemmaConfiguration
     let nHeads: Int
     let nKVHeads: Int
@@ -92,7 +92,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class GemmaMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
@@ -108,16 +108,16 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+class GemmaTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: GemmaAttention
+    let mlp: GemmaMLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
 
     public init(_ args: GemmaConfiguration) {
-        self._attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        self._attention.wrappedValue = GemmaAttention(args)
+        self.mlp = GemmaMLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(
@@ -134,13 +134,13 @@ private class TransformerBlock: Module {
     }
 }
 
-private class GemmaModelInner: Module {
+public class GemmaModelInner: Module {
     let args: GemmaConfiguration
     let vocabularySize: Int
     let numHiddenLayers: Int
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [GemmaTransformerBlock]
     fileprivate let norm: Gemma.RMSNorm
 
     public init(_ args: GemmaConfiguration) {
@@ -155,7 +155,7 @@ private class GemmaModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                GemmaTransformerBlock(args)
             }
         self.norm = Gemma.RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -179,7 +179,7 @@ public class GemmaModel: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
 
     let modelType: String
-    private let model: GemmaModelInner
+    public let model: GemmaModelInner
 
     public init(_ args: GemmaConfiguration) {
         self.modelType = args.modelType

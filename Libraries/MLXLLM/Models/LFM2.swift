@@ -96,7 +96,7 @@ public struct LFM2Configuration: Codable, Sendable {
     }
 }
 
-private class Attention: Module {
+class LFM2Attention: Module {
     let args: LFM2Configuration
     let scale: Float
     let headDim: Int
@@ -172,7 +172,7 @@ private class Attention: Module {
     }
 }
 
-private class ShortConv: Module {
+class LFM2ShortConv: Module {
     let args: LFM2Configuration
     let layerIdx: Int
     let lCache: Int
@@ -227,7 +227,7 @@ private class ShortConv: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class LFM2MLP: Module, UnaryLayer {
     @ModuleInfo(key: "w1") var w1: Linear
     @ModuleInfo(key: "w2") var w2: Linear
     @ModuleInfo(key: "w3") var w3: Linear
@@ -259,12 +259,12 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class DecoderLayer: Module {
+class LFM2DecoderLayer: Module {
     let isAttentionLayer: Bool
 
-    @ModuleInfo(key: "self_attn") var attention: Attention?
-    @ModuleInfo(key: "conv") var conv: ShortConv?
-    @ModuleInfo(key: "feed_forward") var feedForward: MLP
+    @ModuleInfo(key: "self_attn") var attention: LFM2Attention?
+    @ModuleInfo(key: "conv") var conv: LFM2ShortConv?
+    @ModuleInfo(key: "feed_forward") var feedForward: LFM2MLP
     @ModuleInfo(key: "operator_norm") var operatorNorm: RMSNorm
     @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
 
@@ -272,12 +272,12 @@ private class DecoderLayer: Module {
         self.isAttentionLayer = args.fullAttnIdxs.contains(layerIdx)
 
         if isAttentionLayer {
-            _attention.wrappedValue = Attention(args)
+            _attention.wrappedValue = LFM2Attention(args)
         } else {
-            _conv.wrappedValue = ShortConv(args, layerIdx: layerIdx)
+            _conv.wrappedValue = LFM2ShortConv(args, layerIdx: layerIdx)
         }
 
-        _feedForward.wrappedValue = MLP(
+        _feedForward.wrappedValue = LFM2MLP(
             dim: args.blockDim,
             ffDim: args.blockFFDim,
             multipleOf: args.blockMultipleOf,
@@ -303,12 +303,12 @@ private class DecoderLayer: Module {
     }
 }
 
-private class LFM2ModelInner: Module {
+public class LFM2ModelInner: Module {
     let args: LFM2Configuration
     let vocabularySize: Int
     let numHiddenLayers: Int
 
-    fileprivate let layers: [DecoderLayer]
+    fileprivate let layers: [LFM2DecoderLayer]
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
@@ -324,7 +324,7 @@ private class LFM2ModelInner: Module {
             embeddingCount: vocabularySize, dimensions: args.hiddenSize)
 
         self.layers = (0 ..< numHiddenLayers).map { i in
-            DecoderLayer(args, layerIdx: i)
+            LFM2DecoderLayer(args, layerIdx: i)
         }
 
         _embeddingNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.normEps)
@@ -356,7 +356,7 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: LFM2ModelInner
+    public let model: LFM2ModelInner
     let configuration: LFM2Configuration
 
     public init(_ args: LFM2Configuration) {

@@ -107,7 +107,7 @@ public struct JambaConfiguration: Codable, Sendable {
     }
 }
 
-private class JambaMLP: Module {
+class JambaMLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -123,7 +123,7 @@ private class JambaMLP: Module {
     }
 }
 
-private class JambaAttention: Module {
+class JambaAttention: Module {
     let numAttentionHeads: Int
     let numKeyValueHeads: Int
     let headDim: Int
@@ -182,7 +182,7 @@ private func fma(_ a: MLXArray, _ b: MLXArray, _ c: MLXArray) -> MLXArray {
     return a * b + c
 }
 
-private class JambaMambaMixer: Module {
+class JambaMambaMixer: Module {
     let hiddenSize: Int
     let ssmStateSize: Int
     let convKernelSize: Int
@@ -331,7 +331,7 @@ private class JambaMambaMixer: Module {
     }
 }
 
-private class JambaSparseMoeBlock: Module {
+class JambaSparseMoeBlock: Module {
     let numExpertsPerTok: Int
 
     @ModuleInfo(key: "router") var router: Linear
@@ -361,7 +361,7 @@ private class JambaSparseMoeBlock: Module {
     }
 }
 
-private class JambaDecoderLayer: Module {
+class JambaDecoderLayer: Module {
     let isAttn: Bool
     let isSparseMoe: Bool
 
@@ -418,7 +418,7 @@ private class JambaDecoderLayer: Module {
     }
 }
 
-private class JambaModelInner: Module {
+public class JambaModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [JambaDecoderLayer]
@@ -469,7 +469,7 @@ public class JambaModel: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
     let modelType: String
     let config: JambaConfiguration
-    fileprivate let model: JambaModelInner
+    public let model: JambaModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

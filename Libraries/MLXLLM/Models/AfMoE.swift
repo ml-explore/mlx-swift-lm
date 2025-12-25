@@ -123,7 +123,7 @@ public struct AfMoEConfiguration: Codable, Sendable {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class AfMoEAttention: Module {
     let hiddenSize: Int
     let nHeads: Int
     let nKVHeads: Int
@@ -239,7 +239,7 @@ private class Attention: Module {
 
 // MARK: - MLP
 
-private class MLP: Module, UnaryLayer {
+class AfMoEMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -262,7 +262,7 @@ private class MLP: Module, UnaryLayer {
 
 // MARK: - MoE Router
 
-private class MoERouter: Module {
+class MoERouter: Module {
     @ModuleInfo(key: "gate") var gate: Linear
 
     init(_ args: AfMoEConfiguration) {
@@ -277,7 +277,7 @@ private class MoERouter: Module {
 
 // MARK: - AfMoE MoE
 
-private class AfMoEMoE: Module, UnaryLayer {
+class AfMoEMoE: Module, UnaryLayer {
     let numExperts: Int
     let numExpertsPerTok: Int
     let routeNorm: Bool
@@ -290,7 +290,7 @@ private class AfMoEMoE: Module, UnaryLayer {
     @ModuleInfo var router: MoERouter
     @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
     @ModuleInfo(key: "experts") var experts: SwitchGLU
-    @ModuleInfo(key: "shared_experts") var sharedExperts: MLP?
+    @ModuleInfo(key: "shared_experts") var sharedExperts: AfMoEMLP?
 
     init(_ args: AfMoEConfiguration) {
         self.numExperts = args.numExperts
@@ -312,7 +312,8 @@ private class AfMoEMoE: Module, UnaryLayer {
 
         if args.numSharedExperts > 0 {
             let sharedIntermediateSize = args.moeIntermediateSize * args.numSharedExperts
-            self._sharedExperts.wrappedValue = MLP(args, intermediateSize: sharedIntermediateSize)
+            self._sharedExperts.wrappedValue = AfMoEMLP(
+                args, intermediateSize: sharedIntermediateSize)
         }
 
         super.init()
@@ -375,12 +376,12 @@ private class AfMoEMoE: Module, UnaryLayer {
 
 // MARK: - Decoder Layer
 
-private class DecoderLayer: Module {
+class AfMoEDecoderLayer: Module {
     let hiddenSize: Int
     let useSliding: Bool
     let layerIdx: Int
 
-    @ModuleInfo(key: "self_attn") var selfAttn: Attention
+    @ModuleInfo(key: "self_attn") var selfAttn: AfMoEAttention
     var mlp: UnaryLayer
 
     // Dual normalization: 4 layer norms total
@@ -394,11 +395,11 @@ private class DecoderLayer: Module {
         self.useSliding = useSliding
         self.layerIdx = layerIdx
 
-        self._selfAttn.wrappedValue = Attention(args, isLocalAttention: useSliding)
+        self._selfAttn.wrappedValue = AfMoEAttention(args, isLocalAttention: useSliding)
 
         // First numDenseLayers use regular MLP, rest use MoE
         if layerIdx < args.numDenseLayers {
-            self.mlp = MLP(args)
+            self.mlp = AfMoEMLP(args)
         } else {
             self.mlp = AfMoEMoE(args)
         }
@@ -434,7 +435,7 @@ private class DecoderLayer: Module {
 
 // MARK: - AfMoE Model Inner
 
-private class AfMoEModelInner: Module {
+public class AfMoEModelInner: Module {
     let config: AfMoEConfiguration
     let vocabSize: Int
     let numHiddenLayers: Int
@@ -444,7 +445,7 @@ private class AfMoEModelInner: Module {
     let hiddenSize: Int
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo var layers: [DecoderLayer]
+    @ModuleInfo var layers: [AfMoEDecoderLayer]
     @ModuleInfo var norm: RMSNorm
 
     // Indices for full and sliding attention layers
@@ -464,7 +465,7 @@ private class AfMoEModelInner: Module {
             embeddingCount: args.vocabSize, dimensions: args.hiddenSize)
 
         self._layers.wrappedValue = layerTypes.enumerated().map { idx, layerType in
-            DecoderLayer(args, layerIdx: idx, useSliding: layerType == "sliding_attention")
+            AfMoEDecoderLayer(args, layerIdx: idx, useSliding: layerType == "sliding_attention")
         }
 
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -523,7 +524,7 @@ public class AfMoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public var kvHeads: [Int]
 
     let config: AfMoEConfiguration
-    fileprivate var model: AfMoEModelInner
+    public var model: AfMoEModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 

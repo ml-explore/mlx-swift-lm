@@ -121,7 +121,7 @@ public struct Gemma3nTextConfiguration: Codable {
     }
 }
 
-private class RMSNoScale: Module {
+class RMSNoScale: Module {
     let eps: Float
 
     init(eps: Float = 1e-6) {
@@ -134,7 +134,7 @@ private class RMSNoScale: Module {
     }
 }
 
-private class Gemma3nTextLaurelBlock: Module {
+class Gemma3nTextLaurelBlock: Module {
     @ModuleInfo(key: "linear_left") var linearLeft: Linear
     @ModuleInfo(key: "linear_right") var linearRight: Linear
     @ModuleInfo(key: "post_laurel_norm") var postLaurelNorm: RMSNorm
@@ -155,7 +155,7 @@ private class Gemma3nTextLaurelBlock: Module {
     }
 }
 
-private class Gemma3nAttention: Module {
+class Gemma3nAttention: Module {
     let isSliding: Bool
     let numHeads: Int
     let numKVHeads: Int
@@ -295,7 +295,7 @@ private class Gemma3nAttention: Module {
     }
 }
 
-private class MLP: Module {
+class Gemma3nMLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -352,7 +352,7 @@ private class MLP: Module {
     }
 }
 
-private class Gemma3nAltUp: Module {
+class Gemma3nAltUp: Module {
     @ModuleInfo(key: "correct_output_scale") var correctOutputScale: MLXArray
     @ModuleInfo(key: "correction_coefs") var correctionCoefs: Linear
     @ModuleInfo(key: "prediction_coefs") var predictionCoefs: Linear
@@ -468,7 +468,7 @@ private class Gemma3nAltUp: Module {
     }
 }
 
-private class Gemma3nDecoderLayer: Module {
+class Gemma3nDecoderLayer: Module {
     let config: Gemma3nTextConfiguration
     let hiddenSize: Int
     let layerIdx: Int
@@ -477,7 +477,7 @@ private class Gemma3nDecoderLayer: Module {
     let hiddenSizePerLayerInput: Int
 
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma3nAttention
-    @ModuleInfo var mlp: MLP
+    @ModuleInfo var mlp: Gemma3nMLP
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayernorm: RMSNorm
@@ -501,7 +501,7 @@ private class Gemma3nDecoderLayer: Module {
             ?? Array(repeating: "global_attention", count: config.numHiddenLayers))[layerIdx]
             == "sliding_attention"
 
-        self._mlp.wrappedValue = MLP(config, layerIdx: layerIdx)
+        self._mlp.wrappedValue = Gemma3nMLP(config, layerIdx: layerIdx)
         self._inputLayernorm.wrappedValue = RMSNorm(
             dimensions: hiddenSize,
             eps: config.rmsNormEps
@@ -621,7 +621,7 @@ private class Gemma3nDecoderLayer: Module {
     }
 }
 
-private class LanguageModel: Module {
+public class Gemma3nLanguageModel: Module {
     let config: Gemma3nTextConfiguration
     let hiddenSize: Int
     let vocabSize: Int
@@ -919,7 +919,7 @@ private class LanguageModel: Module {
 }
 
 public class Gemma3nTextModel: Module, LLMModel {
-    @ModuleInfo(key: "language_model") private var languageModel: LanguageModel
+    @ModuleInfo(key: "language_model") public var languageModel: Gemma3nLanguageModel
 
     let config: Gemma3nTextConfiguration
     let modelType: String
@@ -932,7 +932,7 @@ public class Gemma3nTextModel: Module, LLMModel {
         self.modelType = config.modelType
         self.textVocabSize = config.vocabSizePerLayerInput
 
-        self._languageModel.wrappedValue = LanguageModel(config)
+        self._languageModel.wrappedValue = Gemma3nLanguageModel(config)
 
         self.kvHeads = Array(repeating: config.numKeyValueHeads, count: config.numHiddenLayers)
 

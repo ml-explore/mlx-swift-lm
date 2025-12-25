@@ -13,7 +13,7 @@ import MLXNN
 
 // MARK: - RoPE helpers
 
-private class DynamicNTKScalingRoPE: Module {
+class OlmoEDynamicNTKScalingRoPE: Module {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -97,7 +97,7 @@ private class DynamicNTKScalingRoPE: Module {
 
 // MARK: - Attention
 
-private class Attention: Module {
+class OlmoEAttention: Module {
     let args: OlmoEConfiguration
     let nHeads: Int
     let nKVHeads: Int
@@ -112,7 +112,7 @@ private class Attention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let ropeDynamic: DynamicNTKScalingRoPE?
+    let ropeDynamic: OlmoEDynamicNTKScalingRoPE?
     let ropeYarn: YarnRoPE?
 
     init(_ args: OlmoEConfiguration) {
@@ -169,7 +169,7 @@ private class Attention: Module {
             } else {
                 ropeScale = 1
             }
-            self.ropeDynamic = DynamicNTKScalingRoPE(
+            self.ropeDynamic = OlmoEDynamicNTKScalingRoPE(
                 dims: headDim,
                 maxPositionEmbeddings: args.maxPositionEmbeddings,
                 traditional: args.ropeTraditional,
@@ -226,7 +226,7 @@ private class Attention: Module {
 
 // MARK: - Sparse MoE Block
 
-private class OlmoeSparseMoeBlock: Module, UnaryLayer {
+class OlmoeSparseMoeBlock: Module, UnaryLayer {
     let numExperts: Int
     let topK: Int
     let normTopkProb: Bool
@@ -265,15 +265,15 @@ private class OlmoeSparseMoeBlock: Module, UnaryLayer {
 
 // MARK: - Transformer Block
 
-private class TransformerBlock: Module {
-    @ModuleInfo(key: "self_attn") var attention: Attention
+class OlmoETransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: OlmoEAttention
     @ModuleInfo(key: "mlp") var mlp: OlmoeSparseMoeBlock
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     init(_ args: OlmoEConfiguration) {
-        self._attention.wrappedValue = Attention(args)
+        self._attention.wrappedValue = OlmoEAttention(args)
         self._mlp.wrappedValue = OlmoeSparseMoeBlock(args)
         self._inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -292,10 +292,10 @@ private class TransformerBlock: Module {
 
 // MARK: - Model
 
-private class OlmoEModelInner: Module {
+public class OlmoEModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    let layers: [TransformerBlock]
+    let layers: [OlmoETransformerBlock]
     let norm: RMSNorm
 
     init(_ args: OlmoEConfiguration) {
@@ -304,7 +304,7 @@ private class OlmoEModelInner: Module {
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { _ in OlmoETransformerBlock(args) }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
@@ -325,7 +325,7 @@ public class OlmoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: OlmoEModelInner
+    public let model: OlmoEModelInner
     let configuration: OlmoEConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?

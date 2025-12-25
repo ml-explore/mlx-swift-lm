@@ -5,7 +5,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-private class Attention: Module {
+class Phi3Attention: Module {
 
     let args: Phi3Configuration
     let scale: Float
@@ -117,7 +117,7 @@ private class Attention: Module {
     }
 }
 
-private class MLP: Module, UnaryLayer {
+class Phi3MLP: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate_up_proj") var gate_up: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
@@ -133,17 +133,17 @@ private class MLP: Module, UnaryLayer {
     }
 }
 
-private class TransformerBlock: Module {
+class Phi3TransformerBlock: Module {
 
-    @ModuleInfo(key: "self_attn") var attention: Attention
-    let mlp: MLP
+    @ModuleInfo(key: "self_attn") var attention: Phi3Attention
+    let mlp: Phi3MLP
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
     public init(_ args: Phi3Configuration) {
-        self._attention.wrappedValue = Attention(args)
-        self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
+        self._attention.wrappedValue = Phi3Attention(args)
+        self.mlp = Phi3MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         self._inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
@@ -161,11 +161,11 @@ private class TransformerBlock: Module {
     }
 }
 
-private class Phi3ModelInner: Module {
+public class Phi3ModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [TransformerBlock]
+    fileprivate let layers: [Phi3TransformerBlock]
     let norm: RMSNorm
     let args: Phi3Configuration
 
@@ -178,7 +178,7 @@ private class Phi3ModelInner: Module {
 
         self.layers = (0 ..< args.hiddenLayers)
             .map { _ in
-                TransformerBlock(args)
+                Phi3TransformerBlock(args)
             }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -201,7 +201,7 @@ public class Phi3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    private let model: Phi3ModelInner
+    public let model: Phi3ModelInner
     private let args: Phi3Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
