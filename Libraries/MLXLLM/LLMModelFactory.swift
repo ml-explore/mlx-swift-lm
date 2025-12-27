@@ -6,13 +6,12 @@ import MLX
 import MLXLMCommon
 import Tokenizers
 
-/// Creates a function that loads a configuration file and instantiates a model with the proper configuration
+/// Creates a function that decodes configuration data and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
     _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
-) -> (URL) throws -> M {
-    { url in
-        let configuration = try JSONDecoder().decode(
-            C.self, from: Data(contentsOf: url))
+) -> (Data) throws -> M {
+    { data in
+        let configuration = try JSONDecoder().decode(C.self, from: data)
         return modelInit(configuration)
     }
 }
@@ -478,13 +477,13 @@ public final class LLMModelFactory: ModelFactory {
         let modelDirectory = try await downloadModel(
             hub: hub, configuration: configuration, progressHandler: progressHandler)
 
-        // Load the generic config to understand which model and how to load the weights
+        // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
-
+        let configData: Data
         let baseConfig: BaseConfiguration
         do {
-            baseConfig = try JSONDecoder().decode(
-                BaseConfiguration.self, from: Data(contentsOf: configurationURL))
+            configData = try Data(contentsOf: configurationURL)
+            baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -493,18 +492,21 @@ public final class LLMModelFactory: ModelFactory {
         let model: LanguageModel
         do {
             model = try await typeRegistry.createModel(
-                configuration: configurationURL, modelType: baseConfig.modelType)
+                configuration: configData, modelType: baseConfig.modelType)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // apply the weights to the bare model
+        // Start tokenizer loading asynchronously, then load weights synchronously.
+        // Both operations run in parallel because async let begins execution immediately.
+        async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
+
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
-        let tokenizer = try await loadTokenizer(configuration: configuration, hub: hub)
+        let tokenizer = try await tokenizerTask
 
         let messageGenerator =
             if let model = model as? LLMModel {

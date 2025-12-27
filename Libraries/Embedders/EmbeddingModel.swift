@@ -46,13 +46,17 @@ public actor ModelContainer {
     public init(
         hub: HubApi, modelDirectory: URL, configuration: ModelConfiguration
     ) async throws {
-        self.model = try loadSynchronous(modelDirectory: modelDirectory)
-
-        let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
+        // Start tokenizer config loading asynchronously, then load model synchronously.
+        // Both operations run in parallel because async let begins execution immediately.
+        async let tokenizerConfigTask = loadTokenizerConfig(
             configuration: configuration, hub: hub)
+
+        self.model = try loadSynchronous(modelDirectory: modelDirectory)
+        self.pooler = loadPooling(modelDirectory: modelDirectory)
+
+        let (tokenizerConfig, tokenizerData) = try await tokenizerConfigTask
         self.tokenizer = try PreTrainedTokenizer(
             tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
-        self.pooler = loadPooling(modelDirectory: modelDirectory)  //?? Pooling(strategy: .none)
     }
 
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as

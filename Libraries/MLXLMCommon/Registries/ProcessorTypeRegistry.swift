@@ -11,26 +11,26 @@ public actor ProcessorTypeRegistry {
     }
 
     /// Creates a registry with given creators.
-    public init(creators: [String: (URL, any Tokenizer) throws -> any UserInputProcessor]) {
+    public init(creators: [String: (Data, any Tokenizer) throws -> any UserInputProcessor]) {
         self.creators = creators
     }
 
-    private var creators: [String: (URL, any Tokenizer) throws -> any UserInputProcessor]
+    private var creators: [String: (Data, any Tokenizer) throws -> any UserInputProcessor]
 
     /// Add a new model to the type registry.
     public func registerProcessorType(
         _ type: String,
         creator:
             @escaping (
-                URL,
+                Data,
                 any Tokenizer
             ) throws -> any UserInputProcessor
     ) {
         creators[type] = creator
     }
 
-    /// Given a `processorType` and configuration file instantiate a new `UserInputProcessor`.
-    public func createModel(configuration: URL, processorType: String, tokenizer: any Tokenizer)
+    /// Given a `processorType` and configuration data instantiate a new `UserInputProcessor`.
+    public func createModel(configuration: Data, processorType: String, tokenizer: any Tokenizer)
         throws -> sending any UserInputProcessor
     {
         guard let creator = creators[processorType] else {

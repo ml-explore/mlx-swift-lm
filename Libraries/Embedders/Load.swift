@@ -49,20 +49,24 @@ public func load(
 ) async throws -> (EmbeddingModel, Tokenizer) {
     let modelDirectory = try await prepareModelDirectory(
         hub: hub, configuration: configuration, progressHandler: progressHandler)
+
+    // Start tokenizer loading asynchronously, then load model synchronously.
+    // Both operations run in parallel because async let begins execution immediately.
+    async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
     let model = try loadSynchronous(modelDirectory: modelDirectory)
-    let tokenizer = try await loadTokenizer(configuration: configuration, hub: hub)
+    let tokenizer = try await tokenizerTask
 
     return (model, tokenizer)
 }
 
 func loadSynchronous(modelDirectory: URL) throws -> EmbeddingModel {
-    // create the model (no weights loaded)
+    // Load config.json once and decode for both base config and model-specific config
     let configurationURL = modelDirectory.appending(component: "config.json")
-    let baseConfig = try JSONDecoder().decode(
-        BaseConfiguration.self, from: Data(contentsOf: configurationURL))
+    let configData = try Data(contentsOf: configurationURL)
+    let baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
 
     let modelType = ModelType(rawValue: baseConfig.modelType)
-    let model = try modelType.createModel(configuration: configurationURL)
+    let model = try modelType.createModel(configuration: configData)
 
     // load the weights
     var weights = [String: MLXArray]()
