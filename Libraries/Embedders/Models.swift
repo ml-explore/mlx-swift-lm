@@ -12,7 +12,7 @@ import Hub
 public struct ModelConfiguration: Sendable {
 
     public enum Identifier: Sendable {
-        case id(String)
+        case id(String, revision: String = "main")
         case directory(URL)
     }
 
@@ -20,7 +20,7 @@ public struct ModelConfiguration: Sendable {
 
     public var name: String {
         switch id {
-        case .id(let string):
+        case .id(let string, _):
             string
         case .directory(let url):
             url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
@@ -34,9 +34,10 @@ public struct ModelConfiguration: Sendable {
     public let overrideTokenizer: String?
 
     public init(
-        id: String, tokenizerId: String? = nil, overrideTokenizer: String? = nil
+        id: String, revision: String = "main",
+        tokenizerId: String? = nil, overrideTokenizer: String? = nil
     ) {
-        self.id = .id(id)
+        self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
     }
@@ -51,7 +52,7 @@ public struct ModelConfiguration: Sendable {
 
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
         switch id {
-        case .id(let id):
+        case .id(let id, _):
             // download the model weights and config
             let repo = Hub.Repo(id: id)
             return hub.localRepoLocation(repo)

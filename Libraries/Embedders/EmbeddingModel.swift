@@ -48,10 +48,7 @@ public actor ModelContainer {
     ) async throws {
         self.model = try loadSynchronous(modelDirectory: modelDirectory)
 
-        let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
-            configuration: configuration, hub: hub)
-        self.tokenizer = try PreTrainedTokenizer(
-            tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+        self.tokenizer = try await loadTokenizer(configuration: configuration, hub: hub)
         self.pooler = loadPooling(modelDirectory: modelDirectory)  //?? Pooling(strategy: .none)
     }
 
