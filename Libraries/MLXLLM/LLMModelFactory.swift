@@ -480,9 +480,14 @@ public final class LLMModelFactory: ModelFactory {
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
         let configData: Data
-        let baseConfig: BaseConfiguration
         do {
             configData = try Data(contentsOf: configurationURL)
+        } catch {
+            throw ModelFactoryError.configurationFileError(
+                configurationURL.lastPathComponent, configuration.name, error)
+        }
+        let baseConfig: BaseConfiguration
+        do {
             baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(

@@ -51,7 +51,8 @@ public actor ModelContainer {
         async let tokenizerConfigTask = loadTokenizerConfig(
             configuration: configuration, hub: hub)
 
-        self.model = try loadSynchronous(modelDirectory: modelDirectory)
+        self.model = try loadSynchronous(
+            modelDirectory: modelDirectory, modelName: configuration.name)
         self.pooler = loadPooling(modelDirectory: modelDirectory)
 
         let (tokenizerConfig, tokenizerData) = try await tokenizerConfigTask

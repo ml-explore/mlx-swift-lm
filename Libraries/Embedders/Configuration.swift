@@ -73,7 +73,7 @@ private class ModelTypeRegistry: @unchecked Sendable {
             creators[rawValue]
         }
         guard let creator else {
-            throw EmbedderError(message: "Unsupported model type.")
+            throw EmbedderError.unsupportedModelType(rawValue)
         }
         return try creator(configuration)
     }

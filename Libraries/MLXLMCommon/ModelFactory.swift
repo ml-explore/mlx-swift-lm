@@ -7,6 +7,7 @@ import Tokenizers
 public enum ModelFactoryError: LocalizedError {
     case unsupportedModelType(String)
     case unsupportedProcessorType(String)
+    case configurationFileError(String, String, Error)
     case configurationDecodingError(String, String, DecodingError)
     case noModelFactoryAvailable
 
@@ -16,6 +17,8 @@ public enum ModelFactoryError: LocalizedError {
             return "Unsupported model type: \(type)"
         case .unsupportedProcessorType(let type):
             return "Unsupported processor type: \(type)"
+        case .configurationFileError(let file, let modelName, let error):
+            return "Error reading '\(file)' for model '\(modelName)': \(error.localizedDescription)"
         case .noModelFactoryAvailable:
             return "No model factory available via ModelFactoryRegistry"
         case .configurationDecodingError(let file, let modelName, let decodingError):

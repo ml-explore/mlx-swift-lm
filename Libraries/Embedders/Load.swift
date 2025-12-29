@@ -6,8 +6,48 @@ import MLX
 import MLXNN
 import Tokenizers
 
-struct EmbedderError: Error {
-    let message: String
+public enum EmbedderError: LocalizedError {
+    case unsupportedModelType(String)
+    case configurationFileError(String, String, Error)
+    case configurationDecodingError(String, String, DecodingError)
+    case missingTokenizerConfig
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedModelType(let type):
+            return "Unsupported model type: \(type)"
+        case .configurationFileError(let file, let modelName, let error):
+            return "Error reading '\(file)' for model '\(modelName)': \(error.localizedDescription)"
+        case .configurationDecodingError(let file, let modelName, let decodingError):
+            let errorDetail = extractDecodingErrorDetail(decodingError)
+            return "Failed to parse \(file) for model '\(modelName)': \(errorDetail)"
+        case .missingTokenizerConfig:
+            return "Missing tokenizer configuration"
+        }
+    }
+
+    private func extractDecodingErrorDetail(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            let path = (context.codingPath + [key]).map { $0.stringValue }.joined(separator: ".")
+            return "Missing field '\(path)'"
+        case .typeMismatch(_, let context):
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "Type mismatch at '\(path)'"
+        case .valueNotFound(_, let context):
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "Missing value at '\(path)'"
+        case .dataCorrupted(let context):
+            if context.codingPath.isEmpty {
+                return "Invalid JSON"
+            } else {
+                let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+                return "Invalid data at '\(path)'"
+            }
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
 }
 
 func prepareModelDirectory(
@@ -53,20 +93,38 @@ public func load(
     // Start tokenizer loading asynchronously, then load model synchronously.
     // Both operations run in parallel because async let begins execution immediately.
     async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
-    let model = try loadSynchronous(modelDirectory: modelDirectory)
+    let model = try loadSynchronous(modelDirectory: modelDirectory, modelName: configuration.name)
     let tokenizer = try await tokenizerTask
 
     return (model, tokenizer)
 }
 
-func loadSynchronous(modelDirectory: URL) throws -> EmbeddingModel {
+func loadSynchronous(modelDirectory: URL, modelName: String) throws -> EmbeddingModel {
     // Load config.json once and decode for both base config and model-specific config
     let configurationURL = modelDirectory.appending(component: "config.json")
-    let configData = try Data(contentsOf: configurationURL)
-    let baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+    let configData: Data
+    do {
+        configData = try Data(contentsOf: configurationURL)
+    } catch {
+        throw EmbedderError.configurationFileError(
+            configurationURL.lastPathComponent, modelName, error)
+    }
+    let baseConfig: BaseConfiguration
+    do {
+        baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+    } catch let error as DecodingError {
+        throw EmbedderError.configurationDecodingError(
+            configurationURL.lastPathComponent, modelName, error)
+    }
 
     let modelType = ModelType(rawValue: baseConfig.modelType)
-    let model = try modelType.createModel(configuration: configData)
+    let model: EmbeddingModel
+    do {
+        model = try modelType.createModel(configuration: configData)
+    } catch let error as DecodingError {
+        throw EmbedderError.configurationDecodingError(
+            configurationURL.lastPathComponent, modelName, error)
+    }
 
     // load the weights
     var weights = [String: MLXArray]()

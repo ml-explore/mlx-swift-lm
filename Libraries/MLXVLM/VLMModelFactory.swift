@@ -259,9 +259,14 @@ public final class VLMModelFactory: ModelFactory {
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
         let configData: Data
-        let baseConfig: BaseConfiguration
         do {
             configData = try Data(contentsOf: configurationURL)
+        } catch {
+            throw ModelFactoryError.configurationFileError(
+                configurationURL.lastPathComponent, configuration.name, error)
+        }
+        let baseConfig: BaseConfiguration
+        do {
             baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
@@ -287,7 +292,18 @@ public final class VLMModelFactory: ModelFactory {
             perLayerQuantization: baseConfig.perLayerQuantization)
 
         let tokenizer = try await tokenizerTask
-        let (processorConfigData, baseProcessorConfig) = try await processorConfigTask
+        let processorConfigData: Data
+        let baseProcessorConfig: BaseProcessorConfiguration
+        do {
+            (processorConfigData, baseProcessorConfig) = try await processorConfigTask
+        } catch let error as ProcessorConfigError {
+            if let decodingError = error.underlying as? DecodingError {
+                throw ModelFactoryError.configurationDecodingError(
+                    error.filename, configuration.name, decodingError)
+            }
+            throw ModelFactoryError.configurationFileError(
+                error.filename, configuration.name, error.underlying)
+        }
 
         // Override processor type based on model type for models that need special handling
         // Mistral3 models ship with "PixtralProcessor" in their config but need Mistral3Processor
@@ -308,7 +324,14 @@ public final class VLMModelFactory: ModelFactory {
 
 }
 
+/// Error wrapper that includes the filename for better error messages.
+private struct ProcessorConfigError: Error {
+    let filename: String
+    let underlying: Error
+}
+
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
+/// Throws ProcessorConfigError wrapping any underlying error with the filename.
 private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
     Data, BaseProcessorConfiguration
 ) {
@@ -318,9 +341,13 @@ private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
         FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
         ? preprocessorConfigURL
         : processorConfigURL
-    let data = try Data(contentsOf: url)
-    let config = try JSONDecoder().decode(BaseProcessorConfiguration.self, from: data)
-    return (data, config)
+    do {
+        let data = try Data(contentsOf: url)
+        let config = try JSONDecoder().decode(BaseProcessorConfiguration.self, from: data)
+        return (data, config)
+    } catch {
+        throw ProcessorConfigError(filename: url.lastPathComponent, underlying: error)
+    }
 }
 
 public class TrampolineModelFactory: NSObject, ModelFactoryTrampoline {

@@ -45,7 +45,7 @@ func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async t
     }
 
     guard let tokenizerConfig = try await config.tokenizerConfig else {
-        throw EmbedderError(message: "missing config")
+        throw EmbedderError.missingTokenizerConfig
     }
     let tokenizerData = try await config.tokenizerData
     return (tokenizerConfig, tokenizerData)
