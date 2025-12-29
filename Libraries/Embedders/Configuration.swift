@@ -33,65 +33,47 @@ private class ModelTypeRegistry: @unchecked Sendable {
     // to remain synchronous.
     private let lock = NSLock()
 
-    private var creators: [String: @Sendable (URL) throws -> EmbeddingModel] = [
-        "bert": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                BertConfiguration.self, from: Data(contentsOf: url))
-            let model = BertModel(configuration)
-            return model
+    private var creators: [String: @Sendable (Data) throws -> EmbeddingModel] = [
+        "bert": { data in
+            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            return BertModel(configuration)
         },
-        "roberta": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                BertConfiguration.self, from: Data(contentsOf: url))
-            let model = BertModel(configuration)
-            return model
+        "roberta": { data in
+            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            return BertModel(configuration)
         },
-        "xlm-roberta": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                BertConfiguration.self, from: Data(contentsOf: url))
-            let model = BertModel(configuration)
-            return model
+        "xlm-roberta": { data in
+            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            return BertModel(configuration)
         },
-        "distilbert": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                BertConfiguration.self, from: Data(contentsOf: url))
-            let model = BertModel(configuration)
-            return model
+        "distilbert": { data in
+            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            return BertModel(configuration)
         },
-        "nomic_bert": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                NomicBertConfiguration.self, from: Data(contentsOf: url))
-            let model = NomicBertModel(configuration, pooler: false)
-            return model
+        "nomic_bert": { data in
+            let configuration = try JSONDecoder().decode(NomicBertConfiguration.self, from: data)
+            return NomicBertModel(configuration, pooler: false)
         },
-        "qwen3": {
-            url in
-            let configuration = try JSONDecoder().decode(
-                Qwen3Configuration.self, from: Data(contentsOf: url))
-            let model = Qwen3Model(configuration)
-            return model
+        "qwen3": { data in
+            let configuration = try JSONDecoder().decode(Qwen3Configuration.self, from: data)
+            return Qwen3Model(configuration)
         },
     ]
 
     public func registerModelType(
-        _ type: String, creator: @Sendable @escaping (URL) throws -> EmbeddingModel
+        _ type: String, creator: @Sendable @escaping (Data) throws -> EmbeddingModel
     ) {
         lock.withLock {
             creators[type] = creator
         }
     }
 
-    public func createModel(configuration: URL, rawValue: String) throws -> EmbeddingModel {
+    public func createModel(configuration: Data, rawValue: String) throws -> EmbeddingModel {
         let creator = lock.withLock {
             creators[rawValue]
         }
         guard let creator else {
-            throw EmbedderError(message: "Unsupported model type.")
+            throw EmbedderError.unsupportedModelType(rawValue)
         }
         return try creator(configuration)
     }
@@ -108,12 +90,12 @@ public struct ModelType: RawRepresentable, Codable, Sendable {
     }
 
     public static func registerModelType(
-        _ type: String, creator: @Sendable @escaping (URL) throws -> EmbeddingModel
+        _ type: String, creator: @Sendable @escaping (Data) throws -> EmbeddingModel
     ) {
         modelTypeRegistry.registerModelType(type, creator: creator)
     }
 
-    public func createModel(configuration: URL) throws -> EmbeddingModel {
+    public func createModel(configuration: Data) throws -> EmbeddingModel {
         try modelTypeRegistry.createModel(configuration: configuration, rawValue: rawValue)
     }
 }

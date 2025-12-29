@@ -104,6 +104,18 @@ let package = Package(
                 .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
+        .testTarget(
+            name: "Benchmarks",
+            dependencies: [
+                "MLXLLM",
+                "MLXVLM",
+                "MLXLMCommon",
+            ],
+            path: "Tests/Benchmarks",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
         .target(
             name: "MLXEmbedders",
             dependencies: [

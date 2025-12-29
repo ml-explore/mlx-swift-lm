@@ -10,21 +10,22 @@ public actor ModelTypeRegistry {
     }
 
     /// Creates a registry with given creators.
-    public init(creators: [String: (URL) throws -> any LanguageModel]) {
+    public init(creators: [String: (Data) throws -> any LanguageModel]) {
         self.creators = creators
     }
 
-    private var creators: [String: (URL) throws -> any LanguageModel]
+    private var creators: [String: (Data) throws -> any LanguageModel]
 
     /// Add a new model to the type registry.
     public func registerModelType(
-        _ type: String, creator: @escaping (URL) throws -> any LanguageModel
+        _ type: String, creator: @escaping (Data) throws -> any LanguageModel
     ) {
         creators[type] = creator
     }
 
-    /// Given a `modelType` and configuration file instantiate a new `LanguageModel`.
-    public func createModel(configuration: URL, modelType: String) throws -> sending LanguageModel {
+    /// Given a `modelType` and configuration data instantiate a new `LanguageModel`.
+    public func createModel(configuration: Data, modelType: String) throws -> sending LanguageModel
+    {
         guard let creator = creators[modelType] else {
             throw ModelFactoryError.unsupportedModelType(modelType)
         }
