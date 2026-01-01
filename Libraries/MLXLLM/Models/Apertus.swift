@@ -1,8 +1,8 @@
 import Foundation
 import MLX
-import MLXNN
-import MLXLMCommon
 import MLXFast
+import MLXLMCommon
+import MLXNN
 
 // MARK: - Configuration
 
@@ -57,7 +57,7 @@ public struct ApertusConfiguration: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        
+
         // Required fields
         let hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
         let intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
@@ -65,19 +65,23 @@ public struct ApertusConfiguration: Codable, Sendable {
         let numAttentionHeads = try container.decode(Int.self, forKey: .numAttentionHeads)
         let rmsNormEps = try container.decode(Float.self, forKey: .rmsNormEps)
         let vocabSize = try container.decode(Int.self, forKey: .vocabSize)
-        
+
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.numHiddenLayers = numHiddenLayers
         self.numAttentionHeads = numAttentionHeads
         self.rmsNormEps = rmsNormEps
         self.vocabSize = vocabSize
-        
+
         // Optional fields with defaults
-        self.numKeyValueHeads = try container.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
-        self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000.0
-        self.ropeTraditional = try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
-        self.ropeScaling = try container.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeScaling)
+        self.numKeyValueHeads =
+            try container.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
+        self.ropeTheta =
+            try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000.0
+        self.ropeTraditional =
+            try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
+        self.ropeScaling = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeScaling)
     }
 }
 
@@ -89,21 +93,21 @@ public class XIELU: Module, UnaryLayer {
     @ModuleInfo(key: "alpha_n") var alphaNParam: MLXArray
     @ModuleInfo(key: "beta") var betaParam: MLXArray
     @ModuleInfo(key: "eps") var epsParam: MLXArray
-    
+
     override public init() {
         self._alphaPParam.wrappedValue = MLXArray(0.55)
         self._alphaNParam.wrappedValue = MLXArray(0.55)
         self._betaParam.wrappedValue = MLXArray(0.5)
         self._epsParam.wrappedValue = MLXArray(-1e-6)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         let alphaP = softplus(alphaPParam)
         let alphaN = betaParam + softplus(alphaNParam)
-        
+
         let posTerm = alphaP * square(x) + betaParam * x
         let negTerm = alphaN * (exp(minimum(x, epsParam)) - 1) - alphaN * x + betaParam * x
-        
+
         return MLX.where(x .> 0, posTerm, negTerm)
     }
 }
@@ -111,36 +115,36 @@ public class XIELU: Module, UnaryLayer {
 public class ApertusAttention: Module {
     let args: ApertusConfiguration
     let scale: Float
-    
+
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
-    
+
     // Apertus Specific: RMSNorm on Q and K
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
-    
+
     let rope: RoPE
 
     init(args: ApertusConfiguration) {
         self.args = args
-        
+
         let dim = args.hiddenSize
         let heads = args.numAttentionHeads
         let kvHeads = args.numKeyValueHeads
         let headDim = args.hiddenSize / heads
         self.scale = pow(Float(headDim), -0.5)
-        
+
         self._qProj.wrappedValue = Linear(dim, heads * headDim, bias: false)
         self._kProj.wrappedValue = Linear(dim, kvHeads * headDim, bias: false)
         self._vProj.wrappedValue = Linear(dim, kvHeads * headDim, bias: false)
         self._oProj.wrappedValue = Linear(heads * headDim, dim, bias: false)
-        
+
         // Norm applies to the head dimension
         self._qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         self._kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
-        
+
         self.rope = RoPE(
             dimensions: headDim,
             traditional: args.ropeTraditional,
@@ -158,30 +162,30 @@ public class ApertusAttention: Module {
         let heads = args.numAttentionHeads
         let kvHeads = args.numKeyValueHeads
         let headDim = args.hiddenSize / heads
-        
+
         var queries = qProj(x)
         var keys = kProj(x)
         var values = vProj(x)
-        
+
         // 1. Reshape to [B, L, Heads, HeadDim] to apply Norms
         queries = queries.reshaped([B, L, heads, headDim])
         keys = keys.reshaped([B, L, kvHeads, headDim])
         values = values.reshaped([B, L, kvHeads, headDim])
-        
+
         // 2. Apply QK-Norms (Apertus Specific)
         queries = qNorm(queries)
         keys = kNorm(keys)
-        
+
         // 3. Transpose to [B, Heads, L, HeadDim] for RoPE and SDPA
         queries = queries.transposed(0, 2, 1, 3)
         keys = keys.transposed(0, 2, 1, 3)
         values = values.transposed(0, 2, 1, 3)
-        
+
         // 4. RoPE
         if let cache = cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
-            
+
             // Update cache (expects [B, H, L, D])
             let (k, v) = cache.update(keys: keys, values: values)
             keys = k
@@ -190,7 +194,7 @@ public class ApertusAttention: Module {
             queries = rope(queries)
             keys = rope(keys)
         }
-        
+
         // 5. Attention (SDPA expects [B, H, L, D])
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
@@ -199,12 +203,13 @@ public class ApertusAttention: Module {
             scale: scale,
             mask: mask
         )
-        
+
         // 6. Transpose back to [B, L, Heads, HeadDim] and fuse
-        let outputFused = output
+        let outputFused =
+            output
             .transposed(0, 2, 1, 3)
             .reshaped([B, L, heads * headDim])
-        
+
         return oProj(outputFused)
     }
 }
@@ -234,8 +239,10 @@ public class ApertusBlock: Module {
     public init(args: ApertusConfiguration) {
         self._selfAttn.wrappedValue = ApertusAttention(args: args)
         self._mlp.wrappedValue = ApertusMLP(dim: args.hiddenSize, hiddenDim: args.intermediateSize)
-        self._inputLayerNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
-        self._postAttentionLayerNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        self._inputLayerNorm.wrappedValue = RMSNorm(
+            dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        self._postAttentionLayerNorm.wrappedValue = RMSNorm(
+            dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
     public func callAsFunction(
@@ -259,7 +266,7 @@ public class ApertusModel: Module {
             embeddingCount: args.vocabSize,
             dimensions: args.hiddenSize
         )
-        self._layers.wrappedValue = (0..<args.numHiddenLayers).map { _ in
+        self._layers.wrappedValue = (0 ..< args.numHiddenLayers).map { _ in
             ApertusBlock(args: args)
         }
         self._norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -271,11 +278,11 @@ public class ApertusModel: Module {
         cache: [KVCache]? = nil
     ) -> MLXArray {
         var h = embedTokens(inputs)
-        
+
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])
         }
-        
+
         return norm(h)
     }
 }
@@ -305,13 +312,13 @@ public class ApertusForCausalLM: Module, LLMModel, LoRAModel, KVCacheDimensionPr
     // MARK: - LLMModel Protocol Conformance
 
     public var vocabularySize: Int { config.vocabSize }
-    
-    public func sanitize(weights: [String : MLXArray]) -> [String : MLXArray] {
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         return weights
     }
-    
+
     // MARK: - LoRAModel Protocol Conformance
-    
+
     public var loraLayers: [Module] {
         return model.layers
     }
