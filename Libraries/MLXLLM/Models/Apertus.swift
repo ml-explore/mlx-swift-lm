@@ -95,8 +95,8 @@ public class XIELU: Module, UnaryLayer {
     @ModuleInfo(key: "eps") var epsParam: MLXArray
 
     override public init() {
-        self._alphaPParam.wrappedValue = MLXArray(0.55)
-        self._alphaNParam.wrappedValue = MLXArray(0.55)
+        self._alphaPParam.wrappedValue = MLXArray(converting: [0.55])
+        self._alphaNParam.wrappedValue = MLXArray(converting: [0.55])
         self._betaParam.wrappedValue = MLXArray(0.5)
         self._epsParam.wrappedValue = MLXArray(-1e-6)
     }
