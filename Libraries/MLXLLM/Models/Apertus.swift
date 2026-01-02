@@ -3,6 +3,7 @@ import MLX
 import MLXFast
 import MLXLMCommon
 import MLXNN
+import Tokenizers
 
 // MARK: - Configuration
 
@@ -14,6 +15,8 @@ public struct ApertusConfiguration: Codable, Sendable {
     public var numKeyValueHeads: Int
     public var rmsNormEps: Float
     public var vocabSize: Int
+    public var tieWordEmbeddings: Bool
+    public var maxPositionEmbeddings: Int?
     public var ropeTheta: Float
     public var ropeTraditional: Bool
     public var ropeScaling: [String: StringOrNumber]?
@@ -26,6 +29,8 @@ public struct ApertusConfiguration: Codable, Sendable {
         numKeyValueHeads: Int? = 8,
         rmsNormEps: Float = 1e-5,
         vocabSize: Int = 131072,
+        tieWordEmbeddings: Bool = false,
+        maxPositionEmbeddings: Int? = nil,
         ropeTheta: Float = 1_000_000.0,
         ropeTraditional: Bool = false,
         ropeScaling: [String: StringOrNumber]? = nil
@@ -37,6 +42,8 @@ public struct ApertusConfiguration: Codable, Sendable {
         self.numKeyValueHeads = numKeyValueHeads ?? numAttentionHeads
         self.rmsNormEps = rmsNormEps
         self.vocabSize = vocabSize
+        self.tieWordEmbeddings = tieWordEmbeddings
+        self.maxPositionEmbeddings = maxPositionEmbeddings
         self.ropeTheta = ropeTheta
         self.ropeTraditional = ropeTraditional
         self.ropeScaling = ropeScaling
@@ -50,12 +57,14 @@ public struct ApertusConfiguration: Codable, Sendable {
         case numKeyValueHeads = "num_key_value_heads"
         case rmsNormEps = "rms_norm_eps"
         case vocabSize = "vocab_size"
+        case tieWordEmbeddings = "tie_word_embeddings"
+        case maxPositionEmbeddings = "max_position_embeddings"
         case ropeTheta = "rope_theta"
         case ropeTraditional = "rope_traditional"
         case ropeScaling = "rope_scaling"
     }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: Swift.Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         // Required fields
@@ -76,19 +85,50 @@ public struct ApertusConfiguration: Codable, Sendable {
         // Optional fields with defaults
         self.numKeyValueHeads =
             try container.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
+        self.tieWordEmbeddings = try container.decodeIfPresent(
+            Bool.self, forKey: .tieWordEmbeddings) ?? true
+        self.maxPositionEmbeddings = try container.decodeIfPresent(
+            Int.self, forKey: .maxPositionEmbeddings)
         self.ropeTheta =
             try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000.0
         self.ropeTraditional =
             try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
+        
+        if let ropeScaling {
+            if ropeScaling["factor"] == nil {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ropeScaling, in: container,
+                    debugDescription: "rope_scaling must contain 'factor'")
+            }
+            if let ropeType = ropeScaling["type"] ?? ropeScaling["rope_type"] {
+                if case .string = ropeType {
+                    let options = [
+                        StringOrNumber.string("linear"), StringOrNumber.string("dynamic"),
+                        StringOrNumber.string("llama3"),
+                    ]
+                    if !options.contains(ropeType) {
+                        throw DecodingError.dataCorruptedError(
+                            forKey: .ropeScaling, in: container,
+                            debugDescription:
+                                "rope_scaling 'type' currently only supports 'linear', 'dynamic', or 'llama3'"
+                        )
+                    }
+                }
+            } else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ropeScaling, in: container,
+                    debugDescription: "rope_scaling must contain either 'type' or 'rope_type'")
+            }
+        }
     }
 }
 
 // MARK: - Layers
 
 // Expanded Integral of the Exponential Linear Unit
-public class XIELU: Module, UnaryLayer {
+private class XIELU: Module, UnaryLayer {
     @ModuleInfo(key: "alpha_p") var alphaPParam: MLXArray
     @ModuleInfo(key: "alpha_n") var alphaNParam: MLXArray
     @ModuleInfo(key: "beta") var betaParam: MLXArray
@@ -112,7 +152,89 @@ public class XIELU: Module, UnaryLayer {
     }
 }
 
-public class ApertusAttention: Module {
+private class DynamicNTKScalingRoPE: Module {
+    let dims: Int
+    let maxPositionEmbeddings: Int
+    let traditional: Bool
+    var base: Float?
+    let scale: Float
+    let ropeType: String
+    let ropeScaling: [String: StringOrNumber]?
+    var freqs: MLXArray?
+
+    init(
+        dims: Int,
+        maxPositionEmbeddings: Int?,
+        traditional: Bool = false,
+        base: Float = 10000,
+        scale: Float = 1.0,
+        ropeType: String = "default",
+        ropeScaling: [String: StringOrNumber]? = nil
+    ) {
+        self.dims = dims
+        self.maxPositionEmbeddings = maxPositionEmbeddings ?? 2048
+        self.traditional = traditional
+        self.base = base
+        self.scale = scale
+        self.ropeType = ropeType
+        self.ropeScaling = ropeScaling
+        super.init()
+        computeFreqs()
+    }
+
+    private func computeFreqs() {
+        if ropeType != "llama3" {
+            freqs = nil
+            return
+        }
+
+        guard let ropeScaling = ropeScaling,
+            case .float(let factor) = ropeScaling["factor"],
+            case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"] ?? .float(1.0),
+            case .float(let highFreqFactor) = ropeScaling["high_freq_factor"] ?? .float(4.0),
+            case .float(let oldContextLen) = ropeScaling["original_max_position_embeddings"]
+                ?? .float(8192),
+            let base
+        else {
+            freqs = nil
+            return
+        }
+
+        let lowFreqWavelen = oldContextLen / lowFreqFactor
+        let highFreqWavelen = oldContextLen / highFreqFactor
+
+        let indices = MLXArray(stride(from: 0, to: dims, by: 2))
+        var frequencies = MLX.pow(base, indices / Float(dims))
+        let wavelens = 2 * Float.pi * frequencies
+
+        frequencies = MLX.where(
+            wavelens .> MLXArray(lowFreqWavelen), frequencies * factor, frequencies)
+        let isMediumFreq = MLX.logicalAnd(
+            wavelens .> MLXArray(highFreqWavelen),
+            wavelens .< MLXArray(lowFreqWavelen)
+        )
+        let smoothFactors =
+            (oldContextLen / wavelens - lowFreqFactor) / (highFreqFactor - lowFreqFactor)
+        let smoothFreqs = frequencies / ((1 - smoothFactors) / factor + smoothFactors)
+
+        freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
+        self.base = nil
+    }
+
+    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+        MLXFast.RoPE(
+            x,
+            dimensions: dims,
+            traditional: traditional,
+            base: base,
+            scale: scale,
+            offset: offset,
+            freqs: freqs
+        )
+    }
+}
+
+private class ApertusAttention: Module {
     let args: ApertusConfiguration
     let scale: Float
 
@@ -125,7 +247,7 @@ public class ApertusAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let rope: RoPE
+    let rope: DynamicNTKScalingRoPE
 
     init(args: ApertusConfiguration) {
         self.args = args
@@ -145,11 +267,20 @@ public class ApertusAttention: Module {
         self._qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         self._kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
-        self.rope = RoPE(
-            dimensions: headDim,
+        self.rope = DynamicNTKScalingRoPE(
+            dims: headDim,
+            maxPositionEmbeddings: args.maxPositionEmbeddings,
             traditional: args.ropeTraditional,
-            base: args.ropeTheta
-        )
+            base: args.ropeTheta,
+            scale: 1.0,
+            ropeType: {
+                if case .string(let value) = args.ropeScaling?["type"] {
+                    return value
+                } else {
+                    return "default"
+                }
+            }(),
+            ropeScaling: args.ropeScaling)
     }
 
     func callAsFunction(
@@ -214,7 +345,7 @@ public class ApertusAttention: Module {
     }
 }
 
-public class ApertusMLP: Module {
+private class ApertusMLP: Module {
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "act_fn") var act: XIELU
@@ -230,13 +361,13 @@ public class ApertusMLP: Module {
     }
 }
 
-public class ApertusBlock: Module {
-    @ModuleInfo(key: "self_attn") public var selfAttn: ApertusAttention
-    @ModuleInfo(key: "mlp") public var mlp: ApertusMLP
-    @ModuleInfo(key: "attention_layernorm") public var inputLayerNorm: RMSNorm
-    @ModuleInfo(key: "feedforward_layernorm") public var postAttentionLayerNorm: RMSNorm
+private class ApertusBlock: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: ApertusAttention
+    @ModuleInfo(key: "mlp") var mlp: ApertusMLP
+    @ModuleInfo(key: "attention_layernorm") var inputLayerNorm: RMSNorm
+    @ModuleInfo(key: "feedforward_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    public init(args: ApertusConfiguration) {
+    public init(_ args: ApertusConfiguration) {
         self._selfAttn.wrappedValue = ApertusAttention(args: args)
         self._mlp.wrappedValue = ApertusMLP(dim: args.hiddenSize, hiddenDim: args.intermediateSize)
         self._inputLayerNorm.wrappedValue = RMSNorm(
@@ -256,28 +387,31 @@ public class ApertusBlock: Module {
     }
 }
 
-public class ApertusModel: Module {
-    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
-    @ModuleInfo(key: "layers") public var layers: [ApertusBlock]
-    @ModuleInfo(key: "norm") public var norm: RMSNorm
+private class ApertusModelInner: Module {
 
-    public init(args: ApertusConfiguration) {
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+
+    let layers: [ApertusBlock]
+    let norm: RMSNorm
+
+    public init(_ args: ApertusConfiguration) {
+        precondition(args.vocabSize > 0)
+        
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabSize,
             dimensions: args.hiddenSize
         )
-        self._layers.wrappedValue = (0 ..< args.numHiddenLayers).map { _ in
-            ApertusBlock(args: args)
-        }
-        self._norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        self.layers = (0 ..< args.numHiddenLayers).map { _ in ApertusBlock(args) }
+        self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
     public func callAsFunction(
         _ inputs: MLXArray,
-        mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: [KVCache]? = nil
     ) -> MLXArray {
         var h = embedTokens(inputs)
+
+        let mask = createAttentionMask(h: inputs, cache: cache)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])
@@ -287,38 +421,62 @@ public class ApertusModel: Module {
     }
 }
 
-public class ApertusForCausalLM: Module, LLMModel, LoRAModel, KVCacheDimensionProvider {
-    public let config: ApertusConfiguration
-    public let kvHeads: [Int]
-    @ModuleInfo(key: "model") public var model: ApertusModel
-    @ModuleInfo(key: "lm_head") public var lmHead: Linear
+public class ApertusModel: Module, LLMModel, KVCacheDimensionProvider {
 
-    public init(config: ApertusConfiguration) {
-        self.config = config
-        self.kvHeads = (0 ..< config.numHiddenLayers).map { _ in config.numKeyValueHeads }
-        self._model.wrappedValue = ApertusModel(args: config)
-        self._lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabSize, bias: false)
+    public let vocabularySize: Int
+    public let kvHeads: [Int]
+
+    fileprivate let model: ApertusModelInner
+
+    @ModuleInfo(key: "lm_head") public var lmHead: Linear?
+
+    public init(_ args: ApertusConfiguration) {
+        self.vocabularySize = args.vocabSize
+        self.kvHeads = (0 ..< args.numHiddenLayers).map { _ in args.numKeyValueHeads }
+        self.model = ApertusModelInner(args)
+        if !args.tieWordEmbeddings {
+            self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
+        }
     }
 
     public func callAsFunction(
         _ inputs: MLXArray,
         cache: [KVCache]? = nil
     ) -> MLXArray {
-        let mask = createAttentionMask(h: inputs, cache: cache)
-        let out = model(inputs, mask: mask, cache: cache)
-        return lmHead(out)
+        let out = model(inputs, cache: cache)
+        if let lmHead {
+            return lmHead(out)
+        } else {
+            return model.embedTokens.asLinear(out)
+        }
     }
-
-    // MARK: - LLMModel Protocol Conformance
-
-    public var vocabularySize: Int { config.vocabSize }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        return weights
+        // Remove unused precomputed rotary frequencies
+        weights.filter {
+            !$0.key.contains("self_attn.rotary_emb.inv_freq")
+        }
     }
+    
+    public func messageGenerator(tokenizer: any Tokenizer) -> any MessageGenerator {
+        // some models allow the system role and some do not -- this is enforced
+        // by the chat template (code).
+        do {
+            let probe = [
+                [
+                    "role": "system",
+                    "content": "test",
+                ]
+            ]
+            _ = try tokenizer.applyChatTemplate(messages: probe)
+            return DefaultMessageGenerator()
+        } catch {
+            return NoSystemMessageGenerator()
+        }
+    }
+}
 
-    // MARK: - LoRAModel Protocol Conformance
-
+extension ApertusModel: LoRAModel {
     public var loraLayers: [Module] {
         return model.layers
     }
