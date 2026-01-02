@@ -1180,7 +1180,7 @@ public struct FastVLMMessageGenerator: MessageGenerator {
         ]
     }
 
-    public func generate(messages: [Chat.Message]) -> [Message] {
+    public func generate(messages: [Chat.Message]) -> [MLXLMCommon.Message] {
         // Remove system role if empty, because the template adds a default one
         messages
             .filter { $0.role != .system || ($0.role == .system && !$0.content.isEmpty) }
