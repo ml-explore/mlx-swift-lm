@@ -9,7 +9,7 @@ public indirect enum ToolParameterType {
     case object(properties: [ToolParameter])
     case data
 
-    var schemaType: [String: Any] {
+    var schemaType: [String: any Sendable] {
         switch self {
         case .string: return ["type": "string"]
         case .bool: return ["type": "boolean"]
@@ -19,7 +19,7 @@ public indirect enum ToolParameterType {
         case .array(let elementType):
             return ["type": "array", "items": elementType.schemaType]
         case .object(let properties):
-            var props = [String: Any]()
+            var props = [String: any Sendable]()
             var required = [String]()
 
             for param in properties {
@@ -39,9 +39,9 @@ public struct ToolParameter {
     public let type: ToolParameterType
     public let description: String
     public let isRequired: Bool
-    public let extraProperties: [String: Any]
+    public let extraProperties: [String: any Sendable]
 
-    public var schema: [String: Any] {
+    public var schema: [String: any Sendable] {
         var schema = type.schemaType
         schema["description"] = description
 
@@ -57,7 +57,7 @@ public struct ToolParameter {
         _ name: String,
         type: ToolParameterType,
         description: String,
-        extraProperties: [String: Any] = [:]
+        extraProperties: [String: any Sendable] = [:]
     ) -> ToolParameter {
         ToolParameter(
             name: name,
@@ -72,7 +72,7 @@ public struct ToolParameter {
         _ name: String,
         type: ToolParameterType,
         description: String,
-        extraProperties: [String: Any] = [:]
+        extraProperties: [String: any Sendable] = [:]
     ) -> ToolParameter {
         ToolParameter(
             name: name,

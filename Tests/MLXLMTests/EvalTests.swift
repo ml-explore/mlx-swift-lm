@@ -266,7 +266,7 @@ struct TestTokenizer: Tokenizer {
 
     func applyChatTemplate(
         messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?,
-        additionalContext: [String: Any]?
+        additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
         encode(text: "")
     }
@@ -291,7 +291,7 @@ struct TestTokenizer: Tokenizer {
     func applyChatTemplate(
         messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
         addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?,
-        additionalContext: [String: Any]?
+        additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
         encode(text: "")
     }

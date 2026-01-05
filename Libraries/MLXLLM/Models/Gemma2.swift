@@ -166,6 +166,7 @@ private class ModelInner: Module {
         var h = embedTokens(inputs)
         h = h * hiddenScale
 
+        // Gemma2 uses the older array-based mask pattern with manual application in attention
         let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
 
         for (i, layer) in layers.enumerated() {

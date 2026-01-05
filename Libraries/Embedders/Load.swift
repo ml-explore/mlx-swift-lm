@@ -91,13 +91,6 @@ func loadSynchronous(modelDirectory: URL) throws -> EmbeddingModel {
         }
     }
 
-    if let quantization = baseConfig.quantization {
-        quantize(model: model, groupSize: quantization.groupSize, bits: quantization.bits) {
-            path, module in
-            weights["\(path).scales"] != nil
-        }
-    }
-
     // apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
     try model.update(parameters: parameters, verify: [.all])

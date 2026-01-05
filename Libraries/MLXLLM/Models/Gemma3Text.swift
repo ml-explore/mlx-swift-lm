@@ -10,7 +10,6 @@
 import Foundation
 import MLX
 import MLXFast
-import MLXLLM
 import MLXLMCommon
 import MLXNN
 
@@ -301,15 +300,12 @@ private class Gemma3Model: Module {
         var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
         if mask == nil {
             let j = config.slidingWindowPattern
-            let globalLayerCache: [KVCache]
-            if j > 0 && j <= (layerCache?.count ?? 0), let globalCache = layerCache?[j - 1] {
-                globalLayerCache = [globalCache]
-            } else {
-                globalLayerCache = []
-            }
-            fullMask = createAttentionMask(h: h, cache: globalLayerCache)
-            let allCaches = layerCache?.compactMap { $0 } ?? []
-            slidingWindowMask = createAttentionMask(h: h, cache: allCaches)
+            let globalCache: KVCache? =
+                (j > 0 && j <= (layerCache?.count ?? 0)) ? layerCache?[j - 1] : nil
+            fullMask = createAttentionMask(h: h, cache: globalCache)
+            let slidingCache: KVCache? = layerCache?.first ?? nil
+            slidingWindowMask = createAttentionMask(
+                h: h, cache: slidingCache, windowSize: config.slidingWindow)
         }
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)

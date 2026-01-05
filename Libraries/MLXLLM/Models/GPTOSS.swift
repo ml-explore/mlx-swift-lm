@@ -256,11 +256,11 @@ private class AttentionBlock: Module {
 
         if L > 1 {
             _previousMask = nil
-            return makeMask(L, min(windowSize + 1, offset))
+            return makeMask(L, min(windowSize, offset))
         }
 
         if _previousMask == nil {
-            _previousMask = makeMask(L, windowSize + 1)
+            _previousMask = makeMask(L, windowSize)
         }
 
         return _previousMask![.ellipsis, 0 ..< min(L + offset, windowSize + 1)]

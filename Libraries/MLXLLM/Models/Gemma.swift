@@ -164,7 +164,7 @@ private class GemmaModelInner: Module {
         var h = embedTokens(inputs)
         h = h * pow(Float(args.hiddenSize), 0.5)
 
-        let mask = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

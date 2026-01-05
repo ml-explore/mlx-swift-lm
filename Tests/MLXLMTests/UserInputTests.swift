@@ -19,7 +19,7 @@ func assertEqual(
             assertEqual(v1v, v2v, path: path + [index.description], file: file, line: line)
         }
 
-    case let (v1, v2) as ([String: Any], [String: Any]):
+    case let (v1, v2) as ([String: any Sendable], [String: any Sendable]):
         XCTAssertEqual(
             v1.keys.sorted(), v2.keys.sorted(),
             "\(String(describing: v1.keys.sorted())) and \(String(describing: v2.keys.sorted())) not equal at \(path)",
