@@ -282,8 +282,10 @@ public final class VLMModelFactory: ModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // Start tokenizer and processor config loading asynchronously, then load weights synchronously.
-        // All three operations run in parallel because async let begins execution immediately.
+        // Load tokenizer, processor config, and weights in parallel using async let.
+        // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
+        // parallel scheduling. This may briefly block a cooperative thread pool thread,
+        // but the config file is small and model loading is not a high-concurrency path.
         async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
@@ -331,6 +333,7 @@ private struct ProcessorConfigError: Error {
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
+/// Marked async to enable parallel scheduling via async let, though the underlying I/O is synchronous.
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
 private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
     Data, BaseProcessorConfiguration

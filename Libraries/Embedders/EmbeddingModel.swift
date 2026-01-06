@@ -46,8 +46,7 @@ public actor ModelContainer {
     public init(
         hub: HubApi, modelDirectory: URL, configuration: ModelConfiguration
     ) async throws {
-        // Start tokenizer config loading asynchronously, then load model synchronously.
-        // Both operations run in parallel because async let begins execution immediately.
+        // Load tokenizer config and model in parallel using async let.
         async let tokenizerConfigTask = loadTokenizerConfig(
             configuration: configuration, hub: hub)
 

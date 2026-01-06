@@ -503,8 +503,7 @@ public final class LLMModelFactory: ModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // Start tokenizer loading asynchronously, then load weights synchronously.
-        // Both operations run in parallel because async let begins execution immediately.
+        // Load tokenizer and weights in parallel using async let.
         async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
 
         try loadWeights(

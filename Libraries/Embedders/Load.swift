@@ -90,8 +90,7 @@ public func load(
     let modelDirectory = try await prepareModelDirectory(
         hub: hub, configuration: configuration, progressHandler: progressHandler)
 
-    // Start tokenizer loading asynchronously, then load model synchronously.
-    // Both operations run in parallel because async let begins execution immediately.
+    // Load tokenizer and model in parallel using async let.
     async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
     let model = try loadSynchronous(modelDirectory: modelDirectory, modelName: configuration.name)
     let tokenizer = try await tokenizerTask
