@@ -28,6 +28,10 @@ public struct ModelConfiguration: Sendable {
     public let tokenizerId: String?
 
     /// overrides for TokenizerModel/knownTokenizers -- useful before swift-transformers is updated
+    @available(
+        *, deprecated,
+        message: "No longer used. swift-transformers now handles tokenizer remapping internally."
+    )
     public let overrideTokenizer: String?
 
     /// A reasonable default prompt for the model
