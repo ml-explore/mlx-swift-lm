@@ -16,12 +16,13 @@ func prepareModelDirectory(
 ) async throws -> URL {
     do {
         switch configuration.id {
-        case .id(let id):
+        case .id(let id, let revision):
             // download the model weights
             let repo = Hub.Repo(id: id)
             let modelFiles = ["*.safetensors", "config.json", "*/config.json"]
             return try await hub.snapshot(
-                from: repo, matching: modelFiles, progressHandler: progressHandler)
+                from: repo, revision: revision, matching: modelFiles,
+                progressHandler: progressHandler)
 
         case .directory(let directory):
             return directory
