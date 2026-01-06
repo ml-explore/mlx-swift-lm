@@ -393,7 +393,7 @@ public struct Mistral3TextConfiguration: Codable, Sendable {
     var maxPositionEmbeddings: Int?
     var kvHeads: Int
     var ropeParameters: [String: StringOrNumber]?
-    var tieWordEmbeddings: Bool = true
+    var tieWordEmbeddings: Bool = false
     var layerTypes: [String]
     var slidingWindow: Int?
 
@@ -423,6 +423,7 @@ public struct Mistral3TextConfiguration: Codable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        let topLevelContainer = try decoder.container(keyedBy: CodingKeys.self)
         let nestedContainer = try decoder.container(keyedBy: VLMCodingKeys.self)
 
         // In the case of VLM models converted using mlx_lm.convert,
@@ -433,6 +434,7 @@ public struct Mistral3TextConfiguration: Codable, Sendable {
             } else {
                 try decoder.container(keyedBy: CodingKeys.self)
             }
+
 
         modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "ministral3"
         hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
@@ -447,8 +449,11 @@ public struct Mistral3TextConfiguration: Codable, Sendable {
         kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? attentionHeads
         ropeParameters = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeParameters)
+
         tieWordEmbeddings =
-            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
+            ?? (try topLevelContainer.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings))
+            ?? false
 
         // Handle layer_types with default to all full_attention
         if let types = try container.decodeIfPresent([String].self, forKey: .layerTypes) {
