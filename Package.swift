@@ -24,7 +24,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.29.1")),
         .package(
             url: "https://github.com/huggingface/swift-transformers",
-            revision: "573e5c9"
+            revision: "40808744d0c68bd5e988ba4ec1b7d4e6cb482f50"
         ),
     ],
     targets: [
