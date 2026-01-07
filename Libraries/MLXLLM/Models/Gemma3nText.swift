@@ -1004,9 +1004,13 @@ public class Gemma3nTextModel: Module, LLMModel {
 
         for (key, value) in weights {
             if key.hasPrefix("model.language_model.") {
+                // Remove "model." prefix for VLM-style weights
                 let newKey = key.replacingOccurrences(
                     of: "model.language_model.", with: "language_model.")
                 processedWeights[newKey] = value
+            } else {
+                // Keep other weights as-is
+                processedWeights[key] = value
             }
         }
 
