@@ -90,4 +90,25 @@ public class ChatSessionTests: XCTestCase {
         print("Vision result:", result)
         XCTAssertTrue(result.lowercased().contains("red"))
     }
+    
+    func testPromptRehydration() async throws {
+        // Simulate a persisted history (e.g. loaded from SwiftData)
+        let history: [Chat.Message] = [
+            .system("You are a helpful assistant."),
+            .user("My name is Bob."),
+            .assistant("Hello Bob! How can I help you today?")
+        ]
+
+        let session = ChatSession(Self.llmContainer, history: history)
+
+        // Ask a question that requires the context
+        let response = try await session.respond(to: "What is my name?")
+        
+        print("Rehydration result:", response)
+
+        XCTAssertTrue(
+            response.lowercased().contains("bob"),
+            "Model should recognize the name 'Bob' from the injected history, proving successful prompt re-hydration."
+        )
+    }
 }

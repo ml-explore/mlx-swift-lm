@@ -78,6 +78,60 @@ public final class ChatSession {
         self.additionalContext = additionalContext
     }
 
+    /// Initialize the `ChatSession` with an existing message history.
+    ///
+    /// This enables "Prompt Re-hydration" for persistent chat applications.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContainer``
+    ///   - history: The full array of messages to restore (including system prompt)
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - additionalContext: optional model-specific context
+    public convenience init(
+        _ model: ModelContainer,
+        history: [Chat.Message],
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil
+    ) {
+        self.init(
+            model,
+            instructions: nil,
+            generateParameters: generateParameters,
+            processing: processing,
+            additionalContext: additionalContext
+        )
+        self.messages = history
+    }
+
+    /// Initialize the `ChatSession` with an existing message history.
+    ///
+    /// This enables "Prompt Re-hydration" for persistent chat applications.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContext``
+    ///   - history: The full array of messages to restore (including system prompt)
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - additionalContext: optional model-specific context
+    public convenience init(
+        _ model: ModelContext,
+        history: [Chat.Message],
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil
+    ) {
+        self.init(
+            model,
+            instructions: nil,
+            generateParameters: generateParameters,
+            processing: processing,
+            additionalContext: additionalContext
+        )
+        self.messages = history
+    }
+
     /// Produces a response to a prompt.
     ///
     /// - Parameters:
