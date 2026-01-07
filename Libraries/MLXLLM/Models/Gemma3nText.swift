@@ -67,7 +67,7 @@ public struct Gemma3nTextConfiguration: Codable {
     let vocabSize: Int
     let numKeyValueHeads: Int
     let numKvSharedLayers: Int
-    let queryPreAttnScalar: Float
+    let queryPreAttnScalar: Float?  // Optional - not present in all HF configs
     let vocabSizePerLayerInput: Int
     let slidingWindow: Int
     let maxPositionEmbeddings: Int
@@ -140,7 +140,7 @@ public struct Gemma3nTextConfiguration: Codable {
         vocabSize = try container.decode(Int.self, forKey: .vocabSize)
         numKeyValueHeads = try container.decode(Int.self, forKey: .numKeyValueHeads)
         numKvSharedLayers = try container.decode(Int.self, forKey: .numKvSharedLayers)
-        queryPreAttnScalar = try container.decode(Float.self, forKey: .queryPreAttnScalar)
+        queryPreAttnScalar = try container.decodeIfPresent(Float.self, forKey: .queryPreAttnScalar)
         vocabSizePerLayerInput = try container.decode(Int.self, forKey: .vocabSizePerLayerInput)
         slidingWindow = try container.decode(Int.self, forKey: .slidingWindow)
         maxPositionEmbeddings = try container.decode(Int.self, forKey: .maxPositionEmbeddings)
