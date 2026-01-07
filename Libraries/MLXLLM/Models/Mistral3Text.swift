@@ -435,7 +435,6 @@ public struct Mistral3TextConfiguration: Codable, Sendable {
                 try decoder.container(keyedBy: CodingKeys.self)
             }
 
-
         modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "ministral3"
         hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
         hiddenLayers = try container.decode(Int.self, forKey: .hiddenLayers)
