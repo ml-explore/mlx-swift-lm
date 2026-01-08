@@ -90,7 +90,7 @@ public class ChatSessionTests: XCTestCase {
         print("Vision result:", result)
         XCTAssertTrue(result.lowercased().contains("red"))
     }
-    
+
     func testPromptRehydration() async throws {
         // Simulate a persisted history (e.g. loaded from SwiftData)
         let history: [Chat.Message] = [
