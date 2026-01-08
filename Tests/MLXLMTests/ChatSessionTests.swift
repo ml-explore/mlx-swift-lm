@@ -96,14 +96,14 @@ public class ChatSessionTests: XCTestCase {
         let history: [Chat.Message] = [
             .system("You are a helpful assistant."),
             .user("My name is Bob."),
-            .assistant("Hello Bob! How can I help you today?")
+            .assistant("Hello Bob! How can I help you today?"),
         ]
 
         let session = ChatSession(Self.llmContainer, history: history)
 
         // Ask a question that requires the context
         let response = try await session.respond(to: "What is my name?")
-        
+
         print("Rehydration result:", response)
 
         XCTAssertTrue(
