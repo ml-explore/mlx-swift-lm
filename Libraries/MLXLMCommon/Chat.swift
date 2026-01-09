@@ -66,7 +66,7 @@ public enum Chat {
 ///     let messages = Qwen2VLMessageGenerator().generate(from: input)
 ///     ...
 /// ```
-public protocol MessageGenerator {
+public protocol MessageGenerator: Sendable {
 
     /// Generates messages from the input.
     func generate(from input: UserInput) -> [Message]

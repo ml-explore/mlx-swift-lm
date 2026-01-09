@@ -7,7 +7,6 @@
 
 import Foundation
 import MLX
-import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
@@ -55,7 +54,7 @@ private func makeBitLinearKernel() -> MLXFast.MLXFastKernel {
         }
         """
 
-    return metalKernel(
+    return MLXFast.metalKernel(
         name: "bitlinear_matmul",
         inputNames: ["x", "packed_weights", "weight_scale"],
         outputNames: ["out"],
@@ -63,7 +62,7 @@ private func makeBitLinearKernel() -> MLXFast.MLXFastKernel {
     )
 }
 
-final class BitLinearKernelManager: @unchecked Sendable {
+private final class BitLinearKernelManager: Sendable {
     static let shared = BitLinearKernelManager()
 
     let bitlinearKernel: MLXFast.MLXFastKernel

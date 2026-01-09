@@ -806,7 +806,7 @@ public struct Idefics3ProcessorConfiguration: Codable, Sendable {
 
 // MARK: - Processor
 
-public class Idefics3Processor: UserInputProcessor {
+public struct Idefics3Processor: UserInputProcessor {
     private let config: Idefics3ProcessorConfiguration
     private let tokenizer: any Tokenizer
     private let fixedImageSize = 384

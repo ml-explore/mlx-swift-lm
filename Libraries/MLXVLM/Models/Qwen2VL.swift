@@ -519,7 +519,7 @@ private enum Vision {
 /// Qwen2VL VLM `UserInputProcessor`.
 ///
 /// This is meant to be used with ``Qwen2VL`` and is typically created by ``VLMModelFactory``.
-public class Qwen2VLProcessor: UserInputProcessor {
+public struct Qwen2VLProcessor: UserInputProcessor {
     private let config: Qwen2VLProcessorConfiguration
     private let tokenizer: any Tokenizer
 

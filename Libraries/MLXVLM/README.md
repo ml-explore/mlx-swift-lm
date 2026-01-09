@@ -158,7 +158,7 @@ public struct YourModelProcessorConfiguration: Codable, Sendable {
 this will be consumed by:
 
 ```swift
-public class YourModelProcessor: UserInputProcessor {
+public struct YourModelProcessor: UserInputProcessor {
 ...
 ```
 
@@ -312,7 +312,7 @@ public func prepare(input: UserInput) throws -> LMInput
 This is a slight paraphrase of the `PaligemmaUserInputProcessor` as an example:
 
 ```swift
-public class YourModelProcessor: UserInputProcessor {
+public struct YourModelProcessor: UserInputProcessor {
 
     private let config: YourModelProcessorConfiguration
     private let tokenizer: any Tokenizer

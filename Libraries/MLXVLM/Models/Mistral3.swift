@@ -1,7 +1,6 @@
 import CoreImage
 import Foundation
 import MLX
-import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
@@ -916,7 +915,7 @@ public struct Mistral3MessageGenerator: MessageGenerator {
 
 // MARK: - Processor
 
-public class Mistral3VLMProcessor: UserInputProcessor {
+public struct Mistral3VLMProcessor: UserInputProcessor {
     private let config: Mistral3VLMProcessorConfiguration
     private let tokenizer: any Tokenizer
     private let imageToken: String

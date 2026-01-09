@@ -7,9 +7,7 @@
 
 import Foundation
 import MLX
-import MLXLinalg
 import MLXNN
-import MLXRandom
 
 /// Performs the forward pass for a DoRA linear layer.
 private func forward(
@@ -171,7 +169,7 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
     }
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let y = quantizedMatmul(
+        let y = quantizedMM(
             x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
             mode: mode)
         return forward(

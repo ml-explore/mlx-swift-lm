@@ -77,7 +77,7 @@ public struct SmolVLMProcessorConfiguration: Codable, Sendable {
     }
 }
 
-public class SmolVLMProcessor: UserInputProcessor {
+public struct SmolVLMProcessor: UserInputProcessor {
     private let config: SmolVLMProcessorConfiguration
     private let tokenizer: any Tokenizer
 

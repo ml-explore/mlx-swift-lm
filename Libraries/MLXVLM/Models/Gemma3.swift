@@ -1,6 +1,5 @@
 import CoreImage
 import MLX
-import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
@@ -1054,7 +1053,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     }
 }
 
-public class Gemma3Processor: UserInputProcessor {
+public struct Gemma3Processor: UserInputProcessor {
     private let config: Gemma3ProcessorConfiguration
     private let tokenizer: any Tokenizer
 
