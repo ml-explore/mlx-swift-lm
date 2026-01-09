@@ -969,7 +969,7 @@ public struct FastVLMProcessorConfiguration: Codable, Sendable {
     }
 }
 
-public class FastVLMProcessor: UserInputProcessor {
+public struct FastVLMProcessor: UserInputProcessor {
     private let config: FastVLMProcessorConfiguration
     private let tokenizer: any Tokenizer
 
