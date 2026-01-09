@@ -193,7 +193,7 @@ public final class ChatSession {
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of `Generation` from the model
-    public func stream(
+    public func streamDetails(
         to prompt: String,
         images: consuming [UserInput.Image],
         videos: consuming [UserInput.Video]
@@ -211,7 +211,7 @@ public final class ChatSession {
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of transformed values from the model
-    public func streamMap<R: Sendable>(
+    private func streamMap<R: Sendable>(
         to prompt: String,
         images: consuming [UserInput.Image],
         videos: consuming [UserInput.Video],
