@@ -810,6 +810,22 @@ public func generate(
     return stream
 }
 
+@available(
+    *, deprecated,
+    message: "use a higher level generate() call or use generateTask() for fine grained control"
+)
+public func generate(
+    input: LMInput, context: ModelContext,
+    iterator: TokenIterator
+) -> AsyncStream<Generation> {
+    let (stream, _) = generateTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator)
+    return stream
+}
+
 /// Low-level token generation using a ``TokenIterator``, returning an
 /// `AsyncStream<Generation>` and a `Task`.
 ///
