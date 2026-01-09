@@ -169,7 +169,7 @@ public final class ChatSession {
         )
     }
 
-    /// Produces a streaming response to a prompt.
+    /// Produces a streaming response to a prompt as Strings.
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
@@ -186,13 +186,31 @@ public final class ChatSession {
         }
     }
 
-    /// Produces a streaming response to a prompt.
+    /// Produces a streaming response to a prompt as `Generation`.
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
-    /// - Returns: a stream of string chunks from the model
+    /// - Returns: a stream of `Generation` from the model
+    public func stream(
+        to prompt: String,
+        images: consuming [UserInput.Image],
+        videos: consuming [UserInput.Video]
+    ) -> AsyncThrowingStream<Generation, Error> {
+        streamMap(to: prompt, images: images, videos: videos) {
+            $0
+        }
+    }
+
+    /// Produces a streaming response to a prompt by transforming the
+    /// raw `Generation` values.
+    ///
+    /// - Parameters:
+    ///   - prompt: the user prompt
+    ///   - images: list of images (for use with VLMs)
+    ///   - videos: list of videos (for use with VLMs)
+    /// - Returns: a stream of transformed values from the model
     public func streamMap<R: Sendable>(
         to prompt: String,
         images: consuming [UserInput.Image],
