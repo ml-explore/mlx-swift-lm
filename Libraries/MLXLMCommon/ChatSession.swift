@@ -181,7 +181,25 @@ public final class ChatSession {
         images: consuming [UserInput.Image],
         videos: consuming [UserInput.Video]
     ) -> AsyncThrowingStream<String, Error> {
-        let (stream, continuation) = AsyncThrowingStream<String, Error>.makeStream()
+        streamMap(to: prompt, images: images, videos: videos) {
+            $0.chunk
+        }
+    }
+
+    /// Produces a streaming response to a prompt.
+    ///
+    /// - Parameters:
+    ///   - prompt: the user prompt
+    ///   - images: list of images (for use with VLMs)
+    ///   - videos: list of videos (for use with VLMs)
+    /// - Returns: a stream of string chunks from the model
+    public func streamMap<R: Sendable>(
+        to prompt: String,
+        images: consuming [UserInput.Image],
+        videos: consuming [UserInput.Video],
+        transform: @Sendable @escaping (Generation) -> R?
+    ) -> AsyncThrowingStream<R, Error> {
+        let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
@@ -260,11 +278,9 @@ public final class ChatSession {
                         iterator: iterator
                     )
 
-                    var fullResponse = ""
                     for await item in stream {
-                        if let chunk = item.chunk {
-                            fullResponse += chunk
-                            if case .terminated = continuation.yield(chunk) {
+                        if let value = transform(item) {
+                            if case .terminated = continuation.yield(value) {
                                 break
                             }
                         }
