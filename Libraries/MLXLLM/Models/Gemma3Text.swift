@@ -22,12 +22,40 @@ public struct Gemma3TextConfiguration: Codable {
     let rmsNormEps: Float
     let vocabularySize: Int
     let kvHeads: Int
-    let ropeGlobalBaseFreq: Float
+    let ropeTheta: Float
     let ropeLocalBaseFreq: Float
     let ropeTraditional: Bool
     let queryPreAttnScalar: Float
     let slidingWindow: Int
     let slidingWindowPattern: Int
+    let maxPositionEmbeddings: Int
+    let ropeScaling: [String: StringOrNumber]?
+
+    public init(
+        modelType: String, hiddenSize: Int, hiddenLayers: Int, intermediateSize: Int,
+        attentionHeads: Int, headDim: Int, rmsNormEps: Float, vocabularySize: Int, kvHeads: Int,
+        ropeTheta: Float, ropeLocalBaseFreq: Float, ropeTraditional: Bool,
+        queryPreAttnScalar: Float, slidingWindow: Int, slidingWindowPattern: Int,
+        maxPositionEmbeddings: Int, ropeScaling: [String: StringOrNumber]? = nil
+    ) {
+        self.modelType = modelType
+        self.hiddenSize = hiddenSize
+        self.hiddenLayers = hiddenLayers
+        self.intermediateSize = intermediateSize
+        self.attentionHeads = attentionHeads
+        self.headDim = headDim
+        self.rmsNormEps = rmsNormEps
+        self.vocabularySize = vocabularySize
+        self.kvHeads = kvHeads
+        self.ropeTheta = ropeTheta
+        self.ropeLocalBaseFreq = ropeLocalBaseFreq
+        self.ropeTraditional = ropeTraditional
+        self.queryPreAttnScalar = queryPreAttnScalar
+        self.slidingWindow = slidingWindow
+        self.slidingWindowPattern = slidingWindowPattern
+        self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.ropeScaling = ropeScaling
+    }
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -39,12 +67,14 @@ public struct Gemma3TextConfiguration: Codable {
         case rmsNormEps = "rms_norm_eps"
         case vocabularySize = "vocab_size"
         case kvHeads = "num_key_value_heads"
-        case ropeGlobalBaseFreq = "rope_global_base_freq"
+        case ropeTheta = "rope_theta"
         case ropeLocalBaseFreq = "rope_local_base_freq"
         case ropeTraditional = "rope_traditional"
         case queryPreAttnScalar = "query_pre_attn_scalar"
         case slidingWindow = "sliding_window"
         case slidingWindowPattern = "sliding_window_pattern"
+        case maxPositionEmbeddings = "max_position_embeddings"
+        case ropeScaling = "rope_scaling"
     }
 
     enum VLMCodingKeys: String, CodingKey {
@@ -64,16 +94,17 @@ public struct Gemma3TextConfiguration: Codable {
             }
 
         modelType = try container.decode(String.self, forKey: .modelType)
-        hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
-        hiddenLayers = try container.decode(Int.self, forKey: .hiddenLayers)
-        intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
+        hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 1152
+        hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 26
+        intermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 6912
         attentionHeads = try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 4
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 256
         rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1.0e-6
         vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 262144
         kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 1
-        ropeGlobalBaseFreq =
-            try container.decodeIfPresent(Float.self, forKey: .ropeGlobalBaseFreq) ?? 1_000_000.0
+        ropeTheta =
+            try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000.0
         ropeLocalBaseFreq =
             try container.decodeIfPresent(Float.self, forKey: .ropeLocalBaseFreq) ?? 10_000.0
         ropeTraditional =
@@ -83,6 +114,10 @@ public struct Gemma3TextConfiguration: Codable {
         slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
         slidingWindowPattern =
             try container.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 6
+        maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
+        ropeScaling =
+            try container.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeScaling)
     }
 }
 
@@ -105,7 +140,7 @@ class Gemma3Attention: Module {
     @ModuleInfo(key: "q_norm") var queryNorm: Gemma.RMSNorm
     @ModuleInfo(key: "k_norm") var keyNorm: Gemma.RMSNorm
 
-    @ModuleInfo var rope: RoPE
+    @ModuleInfo var rope: OffsetLayer
 
     init(_ config: Gemma3TextConfiguration, layerIdx: Int) {
         let dim = config.hiddenSize
@@ -130,12 +165,16 @@ class Gemma3Attention: Module {
 
         self.isSliding = (layerIdx + 1) % config.slidingWindowPattern != 0
 
-        let baseFreq = isSliding ? config.ropeLocalBaseFreq : config.ropeGlobalBaseFreq
-        self._rope.wrappedValue = RoPE(
-            dimensions: headDim,
-            traditional: config.ropeTraditional,
-            base: baseFreq
-        )
+        if isSliding {
+            self.rope = initializeRope(
+                dims: headDim, base: config.ropeLocalBaseFreq, traditional: false,
+                scalingConfig: nil, maxPositionEmbeddings: nil)
+        } else {
+            self.rope = initializeRope(
+                dims: headDim, base: config.ropeTheta, traditional: false,
+                scalingConfig: config.ropeScaling,
+                maxPositionEmbeddings: config.maxPositionEmbeddings)
+        }
 
         super.init()
     }
@@ -162,18 +201,8 @@ class Gemma3Attention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
-        }
-
-        // Sliding window masking
-        var finalMask = mask
-        if case .array(let maskArray) = mask {
-            let keySeqLen = keys.shape[2]
-            if maskArray.shape.last! != keySeqLen {
-                let slicedMask = maskArray[.ellipsis, (-keySeqLen)...]
-                finalMask = .array(slicedMask)
-            }
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(
@@ -182,7 +211,7 @@ class Gemma3Attention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: finalMask
+            mask: mask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -295,30 +324,19 @@ public class Gemma3Model: Module {
         if layerCache == nil {
             layerCache = Array(repeating: nil as KVCache?, count: layers.count)
         }
-        // Create attention masks
-        var fullMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
-        var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
-        if mask == nil {
-            let j = config.slidingWindowPattern
-            let globalCache: KVCache? =
-                (j > 0 && j <= (layerCache?.count ?? 0)) ? layerCache?[j - 1] : nil
-            fullMask = createAttentionMask(h: h, cache: globalCache)
-            let slidingCache: KVCache? = layerCache?.first ?? nil
-            slidingWindowMask = createAttentionMask(
-                h: h, cache: slidingCache, windowSize: config.slidingWindow)
-        }
+
+        let globalMask = createAttentionMask(h: h, cache: cache?[config.slidingWindowPattern - 1])
+        let slidingWindowMask =
+            if config.slidingWindowPattern > 1 {
+                createAttentionMask(h: h, cache: cache?[0], windowSize: config.slidingWindow)
+            } else {
+                MLXFast.ScaledDotProductAttentionMaskMode.none
+            }
+
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
-
-            let localMask: MLXFast.ScaledDotProductAttentionMaskMode
-            if let mask {
-                localMask = mask
-            } else if isGlobal {
-                localMask = fullMask
-            } else {
-                localMask = slidingWindowMask
-            }
-            h = layer(h, mask: localMask, cache: layerCache?[i])
+            let mask = isGlobal ? globalMask : slidingWindowMask
+            h = layer(h, mask: mask, cache: layerCache?[i])
         }
         return norm(h)
     }
