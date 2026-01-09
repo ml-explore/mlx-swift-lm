@@ -195,6 +195,31 @@ public func createCausalMask(
     return mask
 }
 
+/// Create an attention mask matching mlx-lm's create_attention_mask helper.
+///
+/// This returns `.causal` when a symbolic mask is sufficient, avoiding
+/// materializing a full mask array.
+public func makeAttentionMask(
+    n: Int,
+    cache: KVCache?,
+    windowSize: Int? = nil,
+    returnArray: Bool = false
+) -> MLXFast.ScaledDotProductAttentionMaskMode {
+    if let cache {
+        return cache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    if n == 1 {
+        return .none
+    }
+
+    if returnArray || (windowSize != nil && n > windowSize!) {
+        return .array(createCausalMask(n: n, offset: 0, windowSize: windowSize))
+    }
+
+    return .causal
+}
+
 /// Create an attention mask using the parameters from the KVCache.
 ///
 /// See also ``MultiHeadAttention/createAdditiveCausalMask(_:dtype:)`` -- same idea
