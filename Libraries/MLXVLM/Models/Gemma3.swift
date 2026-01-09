@@ -47,7 +47,7 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
         _queryPreAttnScalar ?? 256
     }
 
-    public let ropeGlobalBaseFreq: Float = 1_000_000.0
+    public let ropeTheta: Float = 1_000_000.0
     public let ropeLocalBaseFreq: Float = 10_000.0
     public let ropeTraditional: Bool = false
     public let mmTokensPerImage: Int = 256
@@ -151,7 +151,7 @@ private class Attention: Module {
     @ModuleInfo(key: "q_norm") var queryNorm: Gemma.RMSNorm
     @ModuleInfo(key: "k_norm") var keyNorm: Gemma.RMSNorm
 
-    @ModuleInfo var rope: RoPE
+    @ModuleInfo var rope: OffsetLayer
 
     init(config: Gemma3TextConfiguration, layerIdx: Int) {
         let dim = config.hiddenSize
@@ -175,12 +175,16 @@ private class Attention: Module {
         // Gemma3 uses sliding window attention pattern
         self.isSliding = (layerIdx + 1) % config.slidingWindowPattern != 0
 
-        let baseFreq = isSliding ? config.ropeLocalBaseFreq : config.ropeGlobalBaseFreq
-        self._rope.wrappedValue = RoPE(
-            dimensions: headDim,
-            traditional: config.ropeTraditional,
-            base: baseFreq
-        )
+        if isSliding {
+            self.rope = initializeRope(
+                dims: headDim, base: config.ropeLocalBaseFreq, traditional: false,
+                scalingConfig: nil, maxPositionEmbeddings: nil)
+        } else {
+            self.rope = initializeRope(
+                dims: headDim, base: config.ropeTheta, traditional: false,
+                scalingConfig: config.ropeScaling,
+                maxPositionEmbeddings: config.maxPositionEmbeddings)
+        }
     }
 
     func callAsFunction(
@@ -208,30 +212,20 @@ private class Attention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
-        // Handle sliding window masking
-        var finalMask = mask
-        if case .array(let maskArray) = mask, maskArray.shape.last! != keys.shape[2] {
-            let keyLen = keys.shape[2]
-            let slicedMask = maskArray[.ellipsis, (-keyLen)...]
-            finalMask = .array(slicedMask)
-        }
-
-        // Scaled dot-product attention with native GQA support
         let output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
             cache: cache,
             scale: scale,
-            mask: finalMask
+            mask: mask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
-
         return outputProj(output)
     }
 }
@@ -346,36 +340,19 @@ private class GemmaModel: Module {
             layerCache = Array(repeating: nil as KVCache?, count: layers.count)
         }
 
-        // Create attention masks for global and sliding window layers
-        var fullMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
-        var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
-
-        if mask == nil {
-            let j = config.slidingWindowPattern
-            if j > 0 && j <= layerCache!.count {
-                let globalCache = layerCache?[j - 1]
-                fullMask = createAttentionMask(h: h, cache: globalCache)
+        let globalMask = createAttentionMask(h: h, cache: cache?[config.slidingWindowPattern - 1])
+        let slidingWindowMask =
+            if config.slidingWindowPattern > 1 {
+                createAttentionMask(h: h, cache: cache?[0], windowSize: config.slidingWindow)
+            } else {
+                MLXFast.ScaledDotProductAttentionMaskMode.none
             }
-            let slidingCache = layerCache?.first ?? nil
-            slidingWindowMask = createAttentionMask(
-                h: h, cache: slidingCache, windowSize: config.slidingWindow)
-        }
 
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
-
-            let localMask: MLXFast.ScaledDotProductAttentionMaskMode
-            if let mask {
-                localMask = mask
-            } else if isGlobal {
-                localMask = fullMask
-            } else {
-                localMask = slidingWindowMask
-            }
-
-            h = layer(h, mask: localMask, cache: layerCache?[i])
+            let mask = isGlobal ? globalMask : slidingWindowMask
+            h = layer(h, mask: mask, cache: layerCache?[i])
         }
-
         return norm(h)
     }
 }
