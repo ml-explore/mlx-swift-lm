@@ -66,6 +66,7 @@ public enum LLMTypeRegistry {
         "afmoe": create(AfMoEConfiguration.self, AfMoEModel.init),
         "jamba_3b": create(JambaConfiguration.self, JambaModel.init),
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
+        "apertus": create(ApertusConfiguration.self, ApertusModel.init),
     ])
 }
 
