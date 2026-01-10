@@ -7,9 +7,7 @@ Example implementations of various Large Language Models (LLMs).
 - [MLXEmbedders](MLXEmbedders)
 - [MLXLLM](MLXLLM)
 - [MLXLMCommon](MLXLMCommon)
-- [MLXMNIST](MLXMNIST)
 - [MLXVLM](MLXVLM)
-- [StableDiffusion](StableDiffusion)
 
 ## Quick Start
 
