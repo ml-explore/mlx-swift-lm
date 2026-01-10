@@ -27,11 +27,11 @@ public final class ChatSession {
     }
 
     private let model: ModelContainer
-    private let instructions: String?
+    public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
-    private let processing: UserInput.Processing
-    private let generateParameters: GenerateParameters
-    private let additionalContext: [String: any Sendable]?
+    public var processing: UserInput.Processing
+    public var generateParameters: GenerateParameters
+    public var additionalContext: [String: any Sendable]?
 
     /// Initialize the `ChatSession`.
     ///
