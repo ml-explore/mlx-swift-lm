@@ -3,6 +3,7 @@
 import CoreGraphics
 import Foundation
 import MLX
+import os
 
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///
@@ -18,7 +19,7 @@ import MLX
 /// - Note: `ChatSession` is not thread-safe. Each session should be used from a single
 ///   task/thread at a time. The underlying `ModelContainer` handles thread safety for
 ///   model operations.
-public final class ChatSession {
+public final class ChatSession : @unchecked Sendable {
 
     private enum Model {
         case container(ModelContainer)
@@ -31,6 +32,7 @@ public final class ChatSession {
     private let processing: UserInput.Processing
     private let generateParameters: GenerateParameters
     private let additionalContext: [String: any Sendable]?
+    private let cancelled = OSAllocatedUnfairLock(initialState: false)
 
     /// Initialize the `ChatSession`.
     ///
@@ -132,6 +134,16 @@ public final class ChatSession {
         self.messages = history
     }
 
+    /// Immediately request cancellation of any ongoing generation.
+    public func cancel() {
+        cancelled.withLock { $0 = true }
+    }
+
+    /// Returns whether cancellation has been requested.
+    public var isCancelled: Bool {
+        Task.isCancelled || cancelled.withLock { $0 }
+    }
+
     /// Produces a response to a prompt.
     ///
     /// - Parameters:
@@ -144,7 +156,10 @@ public final class ChatSession {
         images: [UserInput.Image],
         videos: [UserInput.Video]
     ) async throws -> String {
-        messages.append(.user(prompt, images: images, videos: videos))
+        cancelled.withLock { $0 = false }
+
+        let message = Chat.Message.user(prompt, images: images, videos: videos)
+        self.messages.append(message)
 
         func generate(context: ModelContext) async throws -> String {
             let userInput = UserInput(
@@ -159,12 +174,14 @@ public final class ChatSession {
             for await generation in try MLXLMCommon.generate(
                 input: input, cache: cache, parameters: generateParameters, context: context
             ) {
+                if isCancelled {
+                    break
+                }
+
                 if let chunk = generation.chunk {
                     output += chunk
                 }
             }
-
-            Stream().synchronize()
 
             return output
         }
@@ -173,13 +190,17 @@ public final class ChatSession {
         switch model {
         case .container(let container):
             output = try await container.perform { context in
-                try await generate(context: context)
+                return try await generate(context: context)
             }
         case .context(let context):
             output = try await generate(context: context)
         }
 
-        messages.append(.assistant(output))
+        // Only append assistant message if we completed without cancellation
+        if !isCancelled {
+            messages.append(.assistant(output))
+        }
+
         return output
     }
 
@@ -214,19 +235,24 @@ public final class ChatSession {
         images: [UserInput.Image],
         videos: [UserInput.Video]
     ) -> AsyncThrowingStream<String, Error> {
-        messages.append(.user(prompt, images: images, videos: videos))
+        cancelled.withLock { $0 = false }
 
+        let message = Chat.Message.user(prompt, images: images, videos: videos)
         let (stream, continuation) = AsyncThrowingStream<String, Error>.makeStream()
 
         let task = Task {
             do {
-                try await self.performStreaming(continuation: continuation)
+                try await self.performStreaming(continuation: continuation, message: message)
             } catch {
                 continuation.finish(throwing: error)
             }
         }
 
-        continuation.onTermination = { _ in
+        let cancelledLock = self.cancelled
+        continuation.onTermination = { @Sendable [cancelledLock, task] termination in
+            if case .cancelled = termination {
+                cancelledLock.withLock { $0 = true }
+            }
             task.cancel()
         }
 
@@ -261,8 +287,12 @@ public final class ChatSession {
     // MARK: - Private
 
     private func performStreaming(
-        continuation: AsyncThrowingStream<String, Error>.Continuation
+        continuation: AsyncThrowingStream<String, Error>.Continuation,
+        message: Chat.Message
     ) async throws {
+        // Append message before entering the actor to avoid data race risks
+        self.messages.append(message)
+        
         func stream(context: ModelContext) async throws {
             let userInput = UserInput(
                 chat: messages, processing: processing, additionalContext: additionalContext)
@@ -276,15 +306,19 @@ public final class ChatSession {
             for await item in try MLXLMCommon.generate(
                 input: input, cache: cache, parameters: generateParameters, context: context
             ) {
+                if isCancelled {
+                    break
+                }
+
                 if let chunk = item.chunk {
                     fullResponse += chunk
                     continuation.yield(chunk)
                 }
             }
 
-            Stream().synchronize()
-
-            messages.append(.assistant(fullResponse))
+            if !isCancelled {
+                messages.append(.assistant(fullResponse))
+            }
             continuation.finish()
         }
 

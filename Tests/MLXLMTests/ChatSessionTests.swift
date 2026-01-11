@@ -111,4 +111,99 @@ public class ChatSessionTests: XCTestCase {
             "Model should recognize the name 'Bob' from the injected history, proving successful prompt re-hydration."
         )
     }
+
+    func testStopGeneration() async throws {
+        let session = ChatSession(Self.llmContainer)
+
+        var collectedOutput = ""
+        let prompt =
+            "Write a detailed 1000 word essay about the history of the Roman Empire. Please include dates and specific names."
+
+        let generationTask = Task {
+            do {
+                for try await chunk in session.streamResponse(to: prompt) {
+                    collectedOutput += chunk
+                    print(chunk, terminator: "")
+                }
+            } catch {
+                // Cancellation is expected
+                if !(error is CancellationError) {
+                    XCTFail("Unexpected error: \(error)")
+                }
+            }
+            return collectedOutput
+        }
+
+        try await Task.sleep(for: .seconds(1))
+
+        session.cancel()
+
+        let result = await generationTask.value
+
+        XCTAssertFalse(
+            result.isEmpty,
+            "The model should have generated some text before stopping."
+        )
+
+        XCTAssertTrue(
+            result.count < 2000,
+            "The generation should have stopped early. Got \(result.count) characters."
+        )
+
+        let recoveryResponse = try await session.respond(to: "Say 'ready' if you can hear me.")
+        print("Recovery response:", recoveryResponse)
+        XCTAssertFalse(
+            recoveryResponse.isEmpty,
+            "The session should function correctly after stopping."
+        )
+    }
+
+    func testStopRespondNonStreaming() async throws {
+        let session = ChatSession(Self.llmContainer)
+
+        let generationTask = Task {
+            try await session.respond(
+                to: "Write a 500 word essay about quantum physics. Include mathematical formulas."
+            )
+        }
+
+        // Allow some generation
+        try await Task.sleep(for: .seconds(1))
+
+        // Stop it
+        session.cancel()
+
+        // Should complete quickly
+        let result = try await generationTask.value
+        XCTAssertTrue(
+            result.count < 2000,
+            "Generation should have stopped early"
+        )
+    }
+
+    /// Test rapid stop/start cycles don't cause issues.
+    func testRapidStopStart() async throws {
+        let session = ChatSession(Self.llmContainer)
+
+        for i in 1 ... 3 {
+            print("Cycle \(i)...")
+
+            let task = Task {
+                var output = ""
+                for try await chunk in session.streamResponse(to: "Count from 1 to 100.") {
+                    output += chunk
+                }
+                return output
+            }
+
+            try await Task.sleep(for: .milliseconds(500))
+            session.cancel()
+
+            _ = try await task.value
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        let finalResponse = try await session.respond(to: "Say 'ok'")
+        XCTAssertFalse(finalResponse.isEmpty)
+    }
 }

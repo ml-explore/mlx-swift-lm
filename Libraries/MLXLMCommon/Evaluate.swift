@@ -452,6 +452,35 @@ public struct TokenIterator: Sequence, IteratorProtocol {
     }
 }
 
+/// A dedicated asynchronous iterator for `TokenIterator`.
+public struct AsyncTokenIterator: AsyncIteratorProtocol {
+    public typealias Element = Int
+    var iterator: TokenIterator
+
+    public init(iterator: TokenIterator) {
+        self.iterator = iterator
+    }
+
+    mutating public func next() async -> Int? {
+        if Task.isCancelled { return nil }
+
+        await Task.yield()
+
+        if Task.isCancelled { return nil }
+        
+        return iterator.next()
+    }
+}
+
+extension TokenIterator: AsyncSequence {
+    public typealias Element = Int
+    public typealias AsyncIterator = AsyncTokenIterator
+
+    public func makeAsyncIterator() -> AsyncTokenIterator {
+        return AsyncTokenIterator(iterator: self)
+    }
+}
+
 /// Result of a call to a deprecated callback-based generate function.
 public struct GenerateResult {
 
@@ -829,7 +858,7 @@ public func generate(
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
         let toolCallProcessor = ToolCallProcessor()
 
-        for token in iterator {
+        for await token in iterator {
 
             // Check for cancellation on every loop iteration.
             if Task.isCancelled { break }
