@@ -21,7 +21,8 @@ public class ToolCallProcessor {
     private static let toolUseStartTag = "<tool_call>"
     private static let toolUseEndTag = "</tool_call>"
 
-    private static let toolCallRegex = #/<tool_call>\s*(\{.*?\})\s*<\/tool_call>/#
+    nonisolated(unsafe) private static let toolCallRegex =
+        #/<tool_call>\s*(\{.*?\})\s*<\/tool_call>/#
 
     /// The current parsed tool call, if any
     public var toolCalls: [ToolCall] = []

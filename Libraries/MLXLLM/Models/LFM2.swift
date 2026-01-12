@@ -340,7 +340,7 @@ private class LFM2ModelInner: Module {
             mask
             ?? {
                 let firstAttnIdx = args.fullAttnIdxs.first ?? 0
-                let c = cache != nil && firstAttnIdx < cache!.count ? [cache![firstAttnIdx]] : nil
+                let c = cache != nil && firstAttnIdx < cache!.count ? cache![firstAttnIdx] : nil
                 return createAttentionMask(h: h, cache: c)
             }()
 

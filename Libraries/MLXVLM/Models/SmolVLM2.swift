@@ -154,7 +154,7 @@ public class SmolVLMProcessor: UserInputProcessor {
     /// If `multiple` is not nil, ensures each side is a multiple of that value
     func aspectRatioSize(for size: CGSize, longestEdge: CGFloat, multiple: CGFloat? = nil) -> CGSize
     {
-        var targetSize = MediaProcessing.bestFit(
+        let targetSize = MediaProcessing.bestFit(
             size, in: CGSize(width: longestEdge, height: longestEdge))
         guard let multiple = multiple else { return targetSize }
         let aspectRatio = targetSize.width / targetSize.height
@@ -237,7 +237,7 @@ public class SmolVLMProcessor: UserInputProcessor {
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
             let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
-            let decoded = try tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
             let image = try input.images[0].asCIImage().toSRGB()
             let (tiles, imageRows, imageCols) = tiles(from: image)
@@ -268,7 +268,7 @@ public class SmolVLMProcessor: UserInputProcessor {
             )
 
             let prompt = decoded.replacingOccurrences(of: imageToken, with: imagePromptString)
-            let finalPromptTokens = try tokenizer.encode(text: prompt)
+            let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray)
@@ -287,8 +287,8 @@ public class SmolVLMProcessor: UserInputProcessor {
             }
 
             // Insert a default system message if the input doesn't have one
-            func messagesWithSystem(_ messages: [Message]) -> [Message] {
-                guard messages.filter { $0["role"] as? String == "system" }.isEmpty else {
+            func messagesWithSystem(_ messages: [MLXLMCommon.Message]) -> [MLXLMCommon.Message] {
+                guard messages.filter({ $0["role"] as? String == "system" }).isEmpty else {
                     return messages
                 }
 
@@ -302,14 +302,13 @@ public class SmolVLMProcessor: UserInputProcessor {
             }
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
-            let finalMessages = messagesWithSystem(messages)
             let promptTokens = try tokenizer.applyChatTemplate(
                 messages: messagesWithSystem(messages))
-            let decoded = try tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
-            var video = try input.videos[0].asAVAsset()
+            let video = input.videos[0].asAVAsset()
 
-            let processedFrames = await try MediaProcessing.asProcessedSequence(
+            let processedFrames = try await MediaProcessing.asProcessedSequence(
                 video,
                 maxFrames: maxVideoFrames,
                 targetFPS: { duration in
@@ -350,7 +349,7 @@ public class SmolVLMProcessor: UserInputProcessor {
                 // Fallback if the expected marker is not present
                 prompt = decoded + "\n" + videoPromptString
             }
-            let finalPromptTokens = try tokenizer.encode(text: prompt)
+            let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray)

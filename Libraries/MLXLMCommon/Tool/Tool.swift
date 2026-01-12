@@ -14,11 +14,11 @@ public struct Tool<Input: Codable, Output: Codable>: ToolProtocol {
     public let schema: ToolSpec
 
     /// The handler for the tool.
-    public let handler: (Input) async throws -> Output
+    public let handler: @Sendable (Input) async throws -> Output
 
     /// The name of the tool extracted from the schema
     public var name: String {
-        let function = schema["function"] as? [String: Any]
+        let function = schema["function"] as? [String: any Sendable]
         let name = function?["name"] as? String
         return name ?? ""
     }
@@ -27,9 +27,9 @@ public struct Tool<Input: Codable, Output: Codable>: ToolProtocol {
         name: String,
         description: String,
         parameters: [ToolParameter],
-        handler: @escaping (Input) async throws -> Output
+        handler: @Sendable @escaping (Input) async throws -> Output
     ) {
-        var properties = [String: Any]()
+        var properties = [String: any Sendable]()
         var requiredParams = [String]()
 
         for param in parameters {
@@ -39,23 +39,24 @@ public struct Tool<Input: Codable, Output: Codable>: ToolProtocol {
             }
         }
 
-        self.schema = [
-            "type": "function",
-            "function": [
-                "name": name,
-                "description": description,
-                "parameters": [
-                    "type": "object",
-                    "properties": properties,
-                    "required": requiredParams,
-                ],
-            ],
-        ]
+        self.schema =
+            [
+                "type": "function",
+                "function": [
+                    "name": name,
+                    "description": description,
+                    "parameters": [
+                        "type": "object",
+                        "properties": properties,
+                        "required": requiredParams,
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
 
         self.handler = handler
     }
 
-    public init(schema: ToolSpec, handler: @escaping (Input) async throws -> Output) {
+    public init(schema: ToolSpec, handler: @Sendable @escaping (Input) async throws -> Output) {
         self.schema = schema
         self.handler = handler
     }

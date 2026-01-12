@@ -70,7 +70,7 @@ public enum JSONValue: Hashable, Codable, Sendable {
             return .string(string)
         case let array as [Any]:
             return .array(array.map { from($0) })
-        case let dict as [String: Any]:
+        case let dict as [String: any Sendable]:
             var result = [String: JSONValue]()
             for (key, value) in dict {
                 result[key] = from(value)
@@ -101,7 +101,7 @@ public enum JSONValue: Hashable, Codable, Sendable {
     }
 
     /// Convert to JSON Schema representation
-    public var asSchema: [String: Any] {
+    public var asSchema: [String: any Sendable] {
         switch self {
         case .null:
             return ["type": "null"]
@@ -119,7 +119,7 @@ public enum JSONValue: Hashable, Codable, Sendable {
             }
             return ["type": "array"]
         case .object(let properties):
-            var props: [String: Any] = [:]
+            var props: [String: any Sendable] = [:]
 
             for (key, value) in properties {
                 props[key] = value.asSchema

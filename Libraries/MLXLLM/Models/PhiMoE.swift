@@ -48,7 +48,7 @@ private class Attention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: SuScaledRotaryEmbedding
+    let rope: SuScaledRoPE
 
     init(_ args: PhiMoEConfiguration) {
         self.args = args
@@ -65,13 +65,15 @@ private class Attention: Module {
         self._wv.wrappedValue = Linear(dim, kvHeads * headDim, bias: true)
         self._wo.wrappedValue = Linear(heads * headDim, dim, bias: true)
 
-        self.rope = SuScaledRotaryEmbedding(
+        self.rope = SuScaledRoPE(
             dimensions: headDim,
             base: args.ropeTheta,
             maxPositionEmbeddings: args.maxPositionEmbeddings,
             originalMaxPositionEmbeddings: args.originalMaxPositionEmbeddings,
-            longFactor: args.ropeScaling?.longFactor as? [Float] ?? [1.0],
-            longMScale: args.ropeScaling?.longMScale as? Float
+            shortFactor: args.ropeScaling?.shortFactor ?? [1.0],
+            longFactor: args.ropeScaling?.longFactor ?? [1.0],
+            shortMScale: args.ropeScaling?.shortMScale,
+            longMScale: args.ropeScaling?.longMScale
         )
     }
 
@@ -87,7 +89,7 @@ private class Attention: Module {
         // Prepare the queries, keys and values for the attention computation
         var q = queries.reshaped(B, L, args.attentionHeads, -1).transposed(0, 2, 1, 3)
         var k = keys.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
-        var v = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
+        let v = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
         if let cache {
             q = rope(q, offset: cache.offset)
@@ -204,7 +206,7 @@ private class PhiMoEModelInner: Module {
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let mask = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

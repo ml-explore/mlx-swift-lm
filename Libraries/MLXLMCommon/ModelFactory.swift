@@ -54,7 +54,7 @@ public enum ModelFactoryError: LocalizedError {
 /// This contains the following:
 ///
 /// - ``ModelConfiguration`` -- identifier for the model
-/// - ``LanguageModel`` -- the model itself, see ``generate(input:parameters:context:didGenerate:)``
+/// - ``LanguageModel`` -- the model itself, see ``generate(input:cache:parameters:context:)``
 /// - ``UserInputProcessor`` -- can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///
@@ -122,7 +122,7 @@ extension ModelFactory {
 }
 
 /// Default instance of HubApi to use.  This is configured to save downloads into the caches directory.
-public var defaultHubApi: HubApi = {
+public let defaultHubApi: HubApi = {
     HubApi(downloadBase: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
 }()
 

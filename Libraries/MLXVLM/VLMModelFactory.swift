@@ -74,57 +74,50 @@ private func create<C: Codable, P>(
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
 /// Typically called via ``LLMModelFactory/load(hub:configuration:progressHandler:)``.
-public class VLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
+public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
-    public static let shared: VLMTypeRegistry = .init(creators: all())
-
-    /// All predefined model types
-    private static func all() -> [String: @Sendable (URL) throws -> any LanguageModel] {
-        [
-            "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
-            "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
-            "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
-            "qwen3_vl": create(Qwen3VLConfiguration.self, Qwen3VL.init),
-            "idefics3": create(Idefics3Configuration.self, Idefics3.init),
-            "gemma3": create(Gemma3Configuration.self, Gemma3.init),
-            "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
-            // TODO: see if we can make it work with fastvlm rather than llava_qwen2
-            "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
-            "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
-        ]
-    }
+    public static let shared: ModelTypeRegistry = .init(creators: [
+        "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
+        "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
+        "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
+        "qwen3_vl": create(Qwen3VLConfiguration.self, Qwen3VL.init),
+        "idefics3": create(Idefics3Configuration.self, Idefics3.init),
+        "gemma3": create(Gemma3Configuration.self, Gemma3.init),
+        "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
+        // TODO: see if we can make it work with fastvlm rather than llava_qwen2
+        "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
+        "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
+        "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
+        "mistral3": create(Mistral3VLMConfiguration.self, Mistral3VLM.init),
+    ])
 }
 
-public class VLMProcessorTypeRegistry: ProcessorTypeRegistry, @unchecked Sendable {
+public enum VLMProcessorTypeRegistry {
 
     /// Shared instance with default processor types.
-    public static let shared: VLMProcessorTypeRegistry = .init(creators: all())
-
-    /// All predefined processor types.
-    private static func all() -> [String:
-        @Sendable (URL, any Tokenizer) throws ->
-        any UserInputProcessor]
-    {
-        [
-            "PaliGemmaProcessor": create(
-                PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
-            "Qwen2VLProcessor": create(
-                Qwen2VLProcessorConfiguration.self, Qwen2VLProcessor.init),
-            "Qwen2_5_VLProcessor": create(
-                Qwen25VLProcessorConfiguration.self, Qwen25VLProcessor.init),
-            "Qwen3VLProcessor": create(
-                Qwen3VLProcessorConfiguration.self, Qwen3VLProcessor.init),
-            "Idefics3Processor": create(
-                Idefics3ProcessorConfiguration.self, Idefics3Processor.init),
-            "Gemma3Processor": create(
-                Gemma3ProcessorConfiguration.self, Gemma3Processor.init),
-            "SmolVLMProcessor": create(
-                SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
-            "FastVLMProcessor": create(
-                FastVLMProcessorConfiguration.self, FastVLMProcessor.init),
-        ]
-    }
+    public static let shared: ProcessorTypeRegistry = .init(creators: [
+        "PaliGemmaProcessor": create(
+            PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
+        "Qwen2VLProcessor": create(
+            Qwen2VLProcessorConfiguration.self, Qwen2VLProcessor.init),
+        "Qwen2_5_VLProcessor": create(
+            Qwen25VLProcessorConfiguration.self, Qwen25VLProcessor.init),
+        "Qwen3VLProcessor": create(
+            Qwen3VLProcessorConfiguration.self, Qwen3VLProcessor.init),
+        "Idefics3Processor": create(
+            Idefics3ProcessorConfiguration.self, Idefics3Processor.init),
+        "Gemma3Processor": create(
+            Gemma3ProcessorConfiguration.self, Gemma3Processor.init),
+        "SmolVLMProcessor": create(
+            SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
+        "FastVLMProcessor": create(
+            FastVLMProcessorConfiguration.self, FastVLMProcessor.init),
+        "PixtralProcessor": create(
+            PixtralProcessorConfiguration.self, PixtralProcessor.init),
+        "Mistral3Processor": create(
+            Mistral3VLMProcessorConfiguration.self, Mistral3VLMProcessor.init),
+    ])
 }
 
 /// Registry of models and any overrides that go with them, e.g. prompt augmentation.
@@ -166,6 +159,11 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let smolvlminstruct4bit = ModelConfiguration(
         id: "mlx-community/SmolVLM-Instruct-4bit",
         defaultPrompt: "Describe the image in English"
+    )
+
+    static public let mistral3_3B_Instruct_4bit = ModelConfiguration(
+        id: "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+        defaultPrompt: ""
     )
 
     static public let gemma3_4B_qat_4bit = ModelConfiguration(
@@ -227,7 +225,7 @@ public typealias ModelRegistry = VLMRegistry
 /// let modelContainer = try await VLMModelFactory.shared.loadContainer(
 ///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
-public class VLMModelFactory: ModelFactory {
+public final class VLMModelFactory: ModelFactory {
 
     public init(
         typeRegistry: ModelTypeRegistry, processorRegistry: ProcessorTypeRegistry,
@@ -276,7 +274,7 @@ public class VLMModelFactory: ModelFactory {
 
         let model: LanguageModel
         do {
-            model = try typeRegistry.createModel(
+            model = try await typeRegistry.createModel(
                 configuration: configurationURL, modelType: baseConfig.modelType)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
@@ -293,9 +291,13 @@ public class VLMModelFactory: ModelFactory {
             hub: hub
         )
 
-        let processorConfigurationURL = modelDirectory.appending(
-            component: "preprocessor_config.json"
-        )
+        // Support both processor_config.json and preprocessor_config.json (prefer preprocessor_config.json)
+        let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
+        let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
+        let processorConfigurationURL =
+            FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
+            ? preprocessorConfigURL
+            : processorConfigURL
 
         let baseProcessorConfig: BaseProcessorConfiguration
         do {
@@ -308,9 +310,18 @@ public class VLMModelFactory: ModelFactory {
                 processorConfigurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let processor = try processorRegistry.createModel(
+        // Override processor type based on model type for models that need special handling
+        // Mistral3 model ship with "PixtralProcessor" in their config but need Mistral3Processor
+        // to handle spatial merging correctly
+        let processorTypeOverrides: [String: String] = [
+            "mistral3": "Mistral3Processor"
+        ]
+        let processorType =
+            processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
+
+        let processor = try await processorRegistry.createModel(
             configuration: processorConfigurationURL,
-            processorType: baseProcessorConfig.processorClass, tokenizer: tokenizer)
+            processorType: processorType, tokenizer: tokenizer)
 
         return .init(
             configuration: configuration, model: model, processor: processor, tokenizer: tokenizer)

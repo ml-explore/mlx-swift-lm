@@ -3,7 +3,7 @@
 import Foundation
 import Tokenizers
 
-open class ProcessorTypeRegistry: @unchecked Sendable {
+public actor ProcessorTypeRegistry {
 
     /// Creates an empty registry.
     public init() {
@@ -11,40 +11,29 @@ open class ProcessorTypeRegistry: @unchecked Sendable {
     }
 
     /// Creates a registry with given creators.
-    public init(creators: [String: @Sendable (URL, any Tokenizer) throws -> any UserInputProcessor])
-    {
+    public init(creators: [String: (URL, any Tokenizer) throws -> any UserInputProcessor]) {
         self.creators = creators
     }
 
-    // Note: using NSLock as we have very small (just dictionary get/set)
-    // critical sections and expect no contention. this allows the methods
-    // to remain synchronous.
-    private let lock = NSLock()
-
-    private var creators: [String: @Sendable (URL, any Tokenizer) throws -> any UserInputProcessor]
+    private var creators: [String: (URL, any Tokenizer) throws -> any UserInputProcessor]
 
     /// Add a new model to the type registry.
     public func registerProcessorType(
         _ type: String,
         creator:
-            @Sendable @escaping (
+            @escaping (
                 URL,
                 any Tokenizer
             ) throws -> any UserInputProcessor
     ) {
-        lock.withLock {
-            creators[type] = creator
-        }
+        creators[type] = creator
     }
 
     /// Given a `processorType` and configuration file instantiate a new `UserInputProcessor`.
     public func createModel(configuration: URL, processorType: String, tokenizer: any Tokenizer)
-        throws -> any UserInputProcessor
+        throws -> sending any UserInputProcessor
     {
-        let creator = lock.withLock {
-            creators[processorType]
-        }
-        guard let creator else {
+        guard let creator = creators[processorType] else {
             throw ModelFactoryError.unsupportedProcessorType(processorType)
         }
         return try creator(configuration, tokenizer)

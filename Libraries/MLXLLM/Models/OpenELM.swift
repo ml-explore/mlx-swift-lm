@@ -69,7 +69,7 @@ private class MultiHeadCausalAttention: Module {
         let qkvSplit = split(qkv, indices: [heads, heads + kvHeads], axis: 1)
         var queries = qkvSplit[0]
         var keys = qkvSplit[1]
-        var values = qkvSplit[2]
+        let values = qkvSplit[2]
 
         if let qNorm, let kNorm {
             queries = qNorm(queries)
@@ -170,7 +170,7 @@ class OpenELMModelInner: Module {
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs)
-        let mask = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

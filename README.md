@@ -1,7 +1,7 @@
 # MLX Swift LM
 
 MLX Swift LM is a Swift package to build tools and applications with large
-language models (LLMs) and vision language models (VLMs) in [MLX Swift]((https://github.com/ml-explore/mlx-swift).
+language models (LLMs) and vision language models (VLMs) in [MLX Swift](https://github.com/ml-explore/mlx-swift).
 
 Some key features include:
 

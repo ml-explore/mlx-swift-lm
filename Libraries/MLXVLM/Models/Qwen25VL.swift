@@ -86,7 +86,7 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
         ) -> MLXArray {
             let (B, L) = (x.dim(0), x.dim(1))
 
@@ -104,20 +104,13 @@ private enum Language {
             queries = rotaryEmbedding(queries, offset: offset)
             keys = rotaryEmbedding(keys, offset: offset)
 
-            let maskConverted: MLXFast.ScaledDotProductAttentionMaskMode =
-                if let mask {
-                    .array(mask[0..., 0 ..< keys.dim(-2)])
-                } else {
-                    .none
-                }
-
             let output = attentionWithCacheUpdate(
                 queries: queries,
                 keys: keys,
                 values: values,
                 cache: cache,
                 scale: scale,
-                mask: maskConverted
+                mask: mask
             )
             .transposed(0, 2, 1, 3)
             .reshaped(B, L, -1)
@@ -160,7 +153,7 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
         ) -> MLXArray {
             var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
             let h = x + r
@@ -202,7 +195,7 @@ private enum Language {
                 fatalError("one of inputs or inputEmbedding must be non-nil")
             }
 
-            let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
+            let mask = createAttentionMask(h: h, cache: cache?.first)
 
             for (i, layer) in layers.enumerated() {
                 h = layer(h, mask: mask, cache: cache?[i])
@@ -707,12 +700,12 @@ public class Qwen25VLProcessor: UserInputProcessor {
 
         // Process images
         let processedImages =
-            try images
+            images
             .map {
                 MediaProcessing.inSRGBToneCurveSpace($0)
             }
             .map {
-                return try MediaProcessing.resampleBicubic($0, to: resizedSize)
+                return MediaProcessing.resampleBicubic($0, to: resizedSize)
             }
             .map {
                 MediaProcessing.normalize(

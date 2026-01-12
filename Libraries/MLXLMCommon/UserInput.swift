@@ -1,31 +1,31 @@
 // Copyright © 2024 Apple Inc.
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreImage
 import Foundation
 import MLX
 import Tokenizers
 
-public typealias Message = [String: Any]
+public typealias Message = [String: any Sendable]
 
 /// Container for raw user input.
 ///
 /// A ``UserInputProcessor`` can convert this to ``LMInput``.
 /// See also ``ModelContext``.
-public struct UserInput: Sendable {
+public struct UserInput {
 
     /// Representation of a prompt or series of messages (conversation).
     ///
     /// This may be a single string with a user prompt or a series of back
     /// and forth responses representing a conversation.
-    public enum Prompt: Sendable, CustomStringConvertible {
-        /// a single string
+    public enum Prompt: CustomStringConvertible {
+        /// A single string
         case text(String)
 
-        /// model specific array of dictionaries
+        /// Model-specific array of dictionaries
         case messages([Message])
 
-        /// model agnostic structured chat (series of messages)
+        /// Model-agnostic structured chat (series of messages)
         case chat([Chat.Message])
 
         public var description: String {
@@ -41,7 +41,7 @@ public struct UserInput: Sendable {
     }
 
     /// Representation of a video resource.
-    public enum Video: Sendable {
+    public enum Video {
         case avAsset(AVAsset)
         case url(URL)
 
@@ -56,7 +56,7 @@ public struct UserInput: Sendable {
     }
 
     /// Representation of an image resource.
-    public enum Image: Sendable {
+    public enum Image {
         case ciImage(CIImage)
         case url(URL)
         case array(MLXArray)
@@ -104,11 +104,10 @@ public struct UserInput: Sendable {
                 default:
                     throw UserInputError.arrayError(
                         "channel dimension must be last and 3/4: \(array.shape)")
-                    break
                 }
 
                 let arrayData = array.asData()
-                let (H, W, C) = array.shape3
+                let (H, W, _) = array.shape3
                 let cs = CGColorSpace(name: CGColorSpace.sRGB)!
 
                 return CIImage(
@@ -162,7 +161,7 @@ public struct UserInput: Sendable {
     public var tools: [ToolSpec]?
 
     /// Additional values provided for the chat template rendering context
-    public var additionalContext: [String: Any]?
+    public var additionalContext: [String: any Sendable]?
     public var processing: Processing = .init()
 
     /// Initialize the `UserInput` with a single text prompt.
@@ -179,7 +178,7 @@ public struct UserInput: Sendable {
     public init(
         prompt: String, images: [Image] = [Image](), videos: [Video] = [Video](),
         tools: [ToolSpec]? = nil,
-        additionalContext: [String: Any]? = nil
+        additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .chat([
             .user(prompt, images: images, videos: videos)
@@ -224,7 +223,7 @@ public struct UserInput: Sendable {
     public init(
         messages: [Message], images: [Image] = [Image](), videos: [Video] = [Video](),
         tools: [ToolSpec]? = nil,
-        additionalContext: [String: Any]? = nil
+        additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .messages(messages)
         self.images = images
@@ -260,7 +259,7 @@ public struct UserInput: Sendable {
         chat: [Chat.Message],
         processing: Processing = .init(),
         tools: [ToolSpec]? = nil,
-        additionalContext: [String: Any]? = nil
+        additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .chat(chat)
 
@@ -296,7 +295,7 @@ public struct UserInput: Sendable {
         images: [Image] = [Image](),
         videos: [Video] = [Video](),
         processing: Processing = .init(),
-        tools: [ToolSpec]? = nil, additionalContext: [String: Any]? = nil
+        tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = prompt
         switch prompt {

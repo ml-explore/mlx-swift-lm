@@ -1,104 +1,21 @@
-//  Olmo2.swift
+//  Olmo3.swift
 //  LLM
 //
-//  Created by Sachin Desai on 9/11/25.
+//  Created by Anthony DePasquale on 23 November 2025.
 //
 
-// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/olmo2.py
+// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/olmo3.py
 
 import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
 
-// MARK: - RoPE helpers
-
-private class DynamicNTKScalingRoPE: Module {
-    let dims: Int
-    let maxPositionEmbeddings: Int
-    let traditional: Bool
-    var base: Float?
-    let scale: Float
-    let ropeType: String
-    let ropeScaling: [String: StringOrNumber]?
-    var freqs: MLXArray?
-
-    init(
-        dims: Int,
-        maxPositionEmbeddings: Int?,
-        traditional: Bool = false,
-        base: Float = 10000,
-        scale: Float = 1.0,
-        ropeType: String = "default",
-        ropeScaling: [String: StringOrNumber]? = nil
-    ) {
-        self.dims = dims
-        self.maxPositionEmbeddings = maxPositionEmbeddings ?? 2048
-        self.traditional = traditional
-        self.base = base
-        self.scale = scale
-        self.ropeType = ropeType
-        self.ropeScaling = ropeScaling
-        super.init()
-        computeFreqs()
-    }
-
-    private func computeFreqs() {
-        if ropeType != "llama3" {
-            freqs = nil
-            return
-        }
-
-        guard let ropeScaling = ropeScaling,
-            case .float(let factor) = ropeScaling["factor"],
-            case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"] ?? .float(1.0),
-            case .float(let highFreqFactor) = ropeScaling["high_freq_factor"] ?? .float(4.0),
-            case .float(let oldContextLen) = ropeScaling["original_max_position_embeddings"]
-                ?? .float(8192),
-            let base
-        else {
-            freqs = nil
-            return
-        }
-
-        let lowFreqWavelen = oldContextLen / lowFreqFactor
-        let highFreqWavelen = oldContextLen / highFreqFactor
-
-        let indices = MLXArray(stride(from: 0, to: dims, by: 2))
-        var frequencies = MLX.pow(base, indices / Float(dims))
-        let wavelens = 2 * Float.pi * frequencies
-
-        frequencies = MLX.where(
-            wavelens .> MLXArray(lowFreqWavelen), frequencies * factor, frequencies)
-        let isMediumFreq = MLX.logicalAnd(
-            wavelens .> MLXArray(highFreqWavelen),
-            wavelens .< MLXArray(lowFreqWavelen)
-        )
-        let smoothFactors =
-            (oldContextLen / wavelens - lowFreqFactor) / (highFreqFactor - lowFreqFactor)
-        let smoothFreqs = frequencies / ((1 - smoothFactors) / factor + smoothFactors)
-
-        freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
-        self.base = nil
-    }
-
-    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        MLXFast.RoPE(
-            x,
-            dimensions: dims,
-            traditional: traditional,
-            base: base,
-            scale: scale,
-            offset: offset,
-            freqs: freqs
-        )
-    }
-}
-
 // MARK: - Attention
 
 private class Attention: Module {
-    let args: Olmo2Configuration
+    let args: Olmo3Configuration
+    let layerIdx: Int
     let nHeads: Int
     let nKVHeads: Int
     let headDim: Int
@@ -112,19 +29,18 @@ private class Attention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    // rope can be either dynamic scaling or yarn depending on config
-    let ropeDynamic: DynamicNTKScalingRoPE?
-    let ropeYarn: YarnRoPE?
+    let rope: Module
 
-    init(_ args: Olmo2Configuration) {
+    init(_ args: Olmo3Configuration, layerIdx: Int) {
         self.args = args
+        self.layerIdx = layerIdx
 
-        let dim = args.hiddenSize
         self.nHeads = args.attentionHeads
         self.nKVHeads = args.kvHeads
-        self.headDim = args.resolvedHeadDimensions
+        self.headDim = args._headDimensions
         self.scale = pow(Float(headDim), -0.5)
 
+        let dim = args.hiddenSize
         self._wq.wrappedValue = Linear(dim, nHeads * headDim, bias: args.attentionBias)
         self._wk.wrappedValue = Linear(dim, nKVHeads * headDim, bias: args.attentionBias)
         self._wv.wrappedValue = Linear(dim, nKVHeads * headDim, bias: args.attentionBias)
@@ -133,62 +49,29 @@ private class Attention: Module {
         self._qNorm.wrappedValue = RMSNorm(dimensions: nHeads * headDim, eps: args.rmsNormEps)
         self._kNorm.wrappedValue = RMSNorm(dimensions: nKVHeads * headDim, eps: args.rmsNormEps)
 
-        let ropeType: String = {
-            if let v = args.ropeScaling?["type"] ?? args.ropeScaling?["rope_type"],
-                case .string(let s) = v
-            {
-                return s
-            } else {
-                return "default"
-            }
-        }()
-
-        if ropeType == "yarn" {
-            // Map the Yarn parameters with sensible defaults
-            let factor = args.ropeScaling?["factor"]?.asFloat() ?? 32.0
-            let origMax = args.ropeScaling?["original_max_position_embeddings"]?.asInt() ?? 4096
-            let betaFast = args.ropeScaling?["beta_fast"]?.asFloat() ?? 32.0
-            let betaSlow = args.ropeScaling?["beta_slow"]?.asFloat() ?? 1.0
-            let mscale = args.ropeScaling?["mscale"]?.asFloat() ?? 1.0
-            let mscaleAllDim = args.ropeScaling?["mscale_all_dim"]?.asFloat() ?? 0.0
-            self.ropeYarn = YarnRoPE(
-                dimensions: headDim,
-                traditional: args.ropeTraditional,
-                maxPositionEmbeddings: args.maxPositionEmbeddings ?? 2048,
-                base: args.ropeTheta,
-                scalingFactor: factor,
-                originalMaxPositionEmbeddings: origMax,
-                betaFast: betaFast,
-                betaSlow: betaSlow,
-                mscale: mscale,
-                mscaleAllDim: mscaleAllDim
-            )
-            self.ropeDynamic = nil
+        // Different RoPE initialization based on layer type
+        if args.layerTypes[layerIdx] != "full_attention" {
+            self.rope = RoPE(dimensions: headDim, traditional: false, base: args.ropeTheta)
         } else {
-            // Support default/linear/llama3
-            let ropeScale: Float
-            if ropeType == "linear", let factor = args.ropeScaling?["factor"]?.asFloat() {
-                ropeScale = 1 / factor
-            } else {
-                ropeScale = 1
-            }
-            self.ropeDynamic = DynamicNTKScalingRoPE(
+            self.rope = initializeRope(
                 dims: headDim,
-                maxPositionEmbeddings: args.maxPositionEmbeddings,
-                traditional: args.ropeTraditional,
                 base: args.ropeTheta,
-                scale: ropeScale,
-                ropeType: ropeType,
-                ropeScaling: args.ropeScaling
+                traditional: false,
+                scalingConfig: args.ropeScaling,
+                maxPositionEmbeddings: args.maxPositionEmbeddings
             )
-            self.ropeYarn = nil
         }
+
+        super.init()
     }
 
-    func applyRoPE(_ x: MLXArray, offset: Int?) -> MLXArray {
-        if let ropeYarn { return ropeYarn(x, offset: offset ?? 0) }
-        if let ropeDynamic {
-            return ropeDynamic(x, offset: offset ?? 0)
+    private func applyRoPE(_ x: MLXArray, offset: Int?) -> MLXArray {
+        if let llama3Rope = rope as? Llama3RoPE {
+            return llama3Rope(x, offset: offset ?? 0)
+        } else if let yarnRope = rope as? YarnRoPE {
+            return yarnRope(x, offset: offset ?? 0)
+        } else if let basicRope = rope as? RoPE {
+            return basicRope(x, offset: offset ?? 0)
         }
         return x
     }
@@ -236,10 +119,10 @@ private class MLP: Module, UnaryLayer {
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
 
-    init(_ args: Olmo2Configuration) {
-        self._gate.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: args.mlpBias)
-        self._down.wrappedValue = Linear(args.intermediateSize, args.hiddenSize, bias: args.mlpBias)
-        self._up.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: args.mlpBias)
+    init(_ args: Olmo3Configuration) {
+        self._gate.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: false)
+        self._down.wrappedValue = Linear(args.intermediateSize, args.hiddenSize, bias: false)
+        self._up.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: false)
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -256,8 +139,8 @@ private class TransformerBlock: Module {
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
 
-    init(_ args: Olmo2Configuration) {
-        self._attention.wrappedValue = Attention(args)
+    init(_ args: Olmo3Configuration, layerIdx: Int) {
+        self._attention.wrappedValue = Attention(args, layerIdx: layerIdx)
         self._mlp.wrappedValue = MLP(args)
         self._postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -278,45 +161,64 @@ private class TransformerBlock: Module {
 
 // MARK: - Model
 
-private class Olmo2ModelInner: Module {
+private class Olmo3ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     let layers: [TransformerBlock]
     let norm: RMSNorm
+    let slidingWindow: Int
+    let layerTypes: [String]
+    let swaIdx: Int
+    let gaIdx: Int
 
-    init(_ args: Olmo2Configuration) {
+    init(_ args: Olmo3Configuration) {
         precondition(args.vocabularySize > 0)
 
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers).map { _ in TransformerBlock(args) }
+        self.layers = (0 ..< args.hiddenLayers).map { i in
+            TransformerBlock(args, layerIdx: i)
+        }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        self.slidingWindow = args.slidingWindow
+        self.layerTypes = args.layerTypes
+
+        // Find first occurrence of each type
+        self.swaIdx = args.layerTypes.firstIndex(of: "sliding_attention") ?? 0
+        self.gaIdx = args.layerTypes.firstIndex(of: "full_attention") ?? 0
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs)
-        let mask = createAttentionMask(h: h, cache: cache?.first)
+
+        let fullMask = createAttentionMask(h: h, cache: cache?[gaIdx])
+        let slidingWindowMask = createAttentionMask(
+            h: h, cache: cache?[swaIdx], windowSize: slidingWindow)
 
         for (i, layer) in layers.enumerated() {
+            let mask = layerTypes[i] == "full_attention" ? fullMask : slidingWindowMask
             h = layer(h, mask: mask, cache: cache?[i])
         }
+
         return norm(h)
     }
 }
 
-public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Olmo3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    fileprivate let model: Olmo2ModelInner
+    fileprivate let model: Olmo3ModelInner
+    let args: Olmo3Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
-    public init(_ args: Olmo2Configuration) {
+    public init(_ args: Olmo3Configuration) {
         self.vocabularySize = args.vocabularySize
         self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
-        self.model = Olmo2ModelInner(args)
+        self.args = args
+        self.model = Olmo3ModelInner(args)
         if !args.tieWordEmbeddings {
             self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
         }
@@ -335,11 +237,23 @@ public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
         // Remove unused precomputed rotary frequencies
         weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
     }
+
+    public func newCache(parameters: GenerateParameters) -> [KVCache] {
+        var caches: [KVCache] = []
+        for layerType in args.layerTypes {
+            if layerType == "full_attention" {
+                caches.append(KVCacheSimple())
+            } else {
+                caches.append(RotatingKVCache(maxSize: args.slidingWindow))
+            }
+        }
+        return caches
+    }
 }
 
 // MARK: - Configuration
 
-public struct Olmo2Configuration: Codable, Sendable {
+public struct Olmo3Configuration: Codable, Sendable {
     var hiddenSize: Int
     var hiddenLayers: Int
     var intermediateSize: Int
@@ -348,15 +262,15 @@ public struct Olmo2Configuration: Codable, Sendable {
     var rmsNormEps: Float
     var vocabularySize: Int
     var kvHeads: Int
-    var maxPositionEmbeddings: Int?
+    var maxPositionEmbeddings: Int
+    var slidingWindow: Int
     var ropeTheta: Float = 10_000
-    var ropeTraditional: Bool = false
-    var ropeScaling: [String: StringOrNumber]?
-    var tieWordEmbeddings: Bool = true
     var attentionBias: Bool = false
-    var mlpBias: Bool = false
+    var layerTypes: [String]
+    var ropeScaling: [String: StringOrNumber]?
+    var tieWordEmbeddings: Bool = false
 
-    var resolvedHeadDimensions: Int { headDimensions ?? (hiddenSize / attentionHeads) }
+    var _headDimensions: Int { headDimensions ?? (hiddenSize / attentionHeads) }
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -368,12 +282,12 @@ public struct Olmo2Configuration: Codable, Sendable {
         case vocabularySize = "vocab_size"
         case kvHeads = "num_key_value_heads"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case slidingWindow = "sliding_window"
         case ropeTheta = "rope_theta"
-        case ropeTraditional = "rope_traditional"
+        case attentionBias = "attention_bias"
+        case layerTypes = "layer_types"
         case ropeScaling = "rope_scaling"
         case tieWordEmbeddings = "tie_word_embeddings"
-        case attentionBias = "attention_bias"
-        case mlpBias = "mlp_bias"
     }
 
     public init(from decoder: Decoder) throws {
@@ -386,36 +300,43 @@ public struct Olmo2Configuration: Codable, Sendable {
         headDimensions = try container.decodeIfPresent(Int.self, forKey: .headDimensions)
         rmsNormEps = try container.decode(Float.self, forKey: .rmsNormEps)
         vocabularySize = try container.decode(Int.self, forKey: .vocabularySize)
+        maxPositionEmbeddings = try container.decode(Int.self, forKey: .maxPositionEmbeddings)
+        slidingWindow = try container.decode(Int.self, forKey: .slidingWindow)
+
         let maybeKV = try container.decodeIfPresent(Int.self, forKey: .kvHeads)
         kvHeads = maybeKV ?? attentionHeads
-        maxPositionEmbeddings = try container.decodeIfPresent(
-            Int.self, forKey: .maxPositionEmbeddings)
+
         if let ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) {
             self.ropeTheta = ropeTheta
-        }
-        if let ropeTraditional = try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional)
-        {
-            self.ropeTraditional = ropeTraditional
-        }
-        ropeScaling = try container.decodeIfPresent(
-            [String: StringOrNumber].self, forKey: .ropeScaling)
-        if let tieWordEmbeddings = try container.decodeIfPresent(
-            Bool.self, forKey: .tieWordEmbeddings)
-        {
-            self.tieWordEmbeddings = tieWordEmbeddings
         }
         if let attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) {
             self.attentionBias = attentionBias
         }
-        if let mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) {
-            self.mlpBias = mlpBias
+
+        // Decode layer_types or generate default
+        if let layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes) {
+            self.layerTypes = layerTypes
+        } else {
+            // Generate default layer types: full attention every 4th layer
+            self.layerTypes = (0 ..< hiddenLayers).map { i in
+                (i + 1) % 4 == 0 ? "full_attention" : "sliding_attention"
+            }
+        }
+
+        ropeScaling = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeScaling)
+
+        if let tieWordEmbeddings = try container.decodeIfPresent(
+            Bool.self, forKey: .tieWordEmbeddings)
+        {
+            self.tieWordEmbeddings = tieWordEmbeddings
         }
     }
 }
 
 // MARK: - LoRA
 
-extension Olmo2Model: LoRAModel {
+extension Olmo3Model: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
     }

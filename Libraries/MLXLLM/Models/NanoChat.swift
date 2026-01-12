@@ -186,7 +186,7 @@ private final class NanoChatModelInner: Module {
         var hidden = embedTokens(inputs)
         hidden = functionalRMSNorm(hidden, eps: config.rmsNormEps)
 
-        let mask = createAttentionMask(h: hidden, cache: cache)
+        let mask = createAttentionMask(h: hidden, cache: cache?.first)
 
         for (index, layer) in layers.enumerated() {
             hidden = layer(hidden, mask: mask, cache: cache?[index])

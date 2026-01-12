@@ -354,10 +354,12 @@ private class GemmaModel: Module {
         if mask == nil {
             let j = config.slidingWindowPattern
             if j > 0 && j <= layerCache!.count {
-                let globalCacheSlice = layerCache![(j - 1) ..< j].compactMap { $0 }
-                fullMask = createAttentionMask(h: h, cache: globalCacheSlice)
+                let globalCache = layerCache?[j - 1]
+                fullMask = createAttentionMask(h: h, cache: globalCache)
             }
-            slidingWindowMask = createAttentionMask(h: h, cache: layerCache?.compactMap { $0 })
+            let slidingCache = layerCache?.first ?? nil
+            slidingWindowMask = createAttentionMask(
+                h: h, cache: slidingCache, windowSize: config.slidingWindow)
         }
 
         for (i, layer) in layers.enumerated() {
@@ -963,8 +965,6 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         attentionMask: MLXArray?
     ) -> (MLXArray, MLXArray?) {
         let embedDim = inputsEmbeds.dim(2)
-        let batchSize = inputIds.dim(0)
-        let sequenceLength = inputIds.dim(1)
 
         // Scale image features to match text embedding magnitude
         let scaledImageFeatures = imageFeatures / sqrt(Float(config.textConfiguration.hiddenSize))
@@ -976,10 +976,6 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         let imageTokenId = 262144  // Image token used after expansion
 
         // Create masks for different token types
-        let textMask = MLX.logicalAnd(
-            MLX.notEqual(inputIds, MLXArray(imageTokenId)),
-            MLX.notEqual(inputIds, MLXArray(padTokenId))
-        )
         let imageMask = MLX.equal(inputIds, MLXArray(imageTokenId))
         let padMask = MLX.equal(inputIds, MLXArray(padTokenId))
 
@@ -1016,7 +1012,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     {
         guard let imagePixels = input.image?.pixels else {
             // Text-only input
-            let convertedCache = cache.compactMap { $0 as? KVCache }
+            let convertedCache = cache.compactMap { $0 as KVCache }
             let result = languageModel(
                 input.text.tokens, cache: convertedCache, inputEmbedding: nil, mask: nil)
             return .logits(result)
@@ -1028,7 +1024,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
             mask: input.text.mask
         )
 
-        let convertedCache = cache.compactMap { $0 as? KVCache }
+        let convertedCache = cache.compactMap { $0 as KVCache }
         // Use causal masking for text generation
         let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .causal
 
@@ -1047,15 +1043,6 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        let lmHeadKeys = weights.keys.filter { $0.contains("lm_head") }
-
-        // Also check attention layer structures
-        let attnKeys = weights.keys.filter {
-            $0.contains("self_attn")
-                && ($0.contains("q_proj") || $0.contains("k_proj") || $0.contains("v_proj")
-                    || $0.contains("o_proj"))
-        }
-
         // Handle language model sanitization first (quantization, weight tying, etc.)
         var processedWeights = languageModel.sanitize(
             weights: weights, quantizationConfig: config.quantization)
@@ -1086,10 +1073,10 @@ public class Gemma3Processor: UserInputProcessor {
         // Force the correct size for vision model alignment
         userProcessing.resize = targetSize
 
-        let processedImages = try images.map { image in
+        let processedImages = images.map { image in
             let processedImage = MediaProcessing.apply(image, processing: userProcessing)
             let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-            let resizedImage = try MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
+            let resizedImage = MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
             let normalizedImage = MediaProcessing.normalize(
                 resizedImage, mean: config.imageMeanTuple, std: config.imageStdTuple)
             return MediaProcessing.asMLXArray(normalizedImage)

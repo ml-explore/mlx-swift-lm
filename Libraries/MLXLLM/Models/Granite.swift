@@ -121,7 +121,6 @@ private class TransformerBlock: Module {
     let residualMultiplier: Float
 
     public init(_ args: GraniteConfiguration) {
-        let attentionHeads = args.attentionHeads
         let hiddenSize = args.hiddenSize
 
         self._attention.wrappedValue = Attention(args)
@@ -169,7 +168,7 @@ private class GraniteModelInner: Module {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs) * embeddingMultiplier
 
-        let mask = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])
@@ -271,7 +270,7 @@ public struct GraniteConfiguration: Codable, Sendable {
         self.maxPositionEmbeddings = try container.decode(Int.self, forKey: .maxPositionEmbeddings)
         self.kvHeads = try container.decode(Int.self, forKey: .kvHeads)
         self.attentionBias = try container.decode(Bool.self, forKey: .attentionBias)
-        self.mlpBias = try container.decode(Bool.self, forKey: .mlpBias) ?? false
+        self.mlpBias = try container.decode(Bool.self, forKey: .mlpBias)
         self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000000.0
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
