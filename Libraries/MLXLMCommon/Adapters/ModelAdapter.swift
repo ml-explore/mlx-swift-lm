@@ -29,6 +29,8 @@ public protocol ModelAdapter: Sendable {
     func unload(from model: LanguageModel)
 }
 
+typealias SendableModelAdapter = ModelAdapter & Sendable
+
 /// Extension to `LanguageModel` providing convenience methods for adapter usage.
 extension LanguageModel {
 
