@@ -85,8 +85,9 @@ public struct ApertusConfiguration: Codable, Sendable {
         // Optional fields with defaults
         self.numKeyValueHeads =
             try container.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
-        self.tieWordEmbeddings = try container.decodeIfPresent(
-            Bool.self, forKey: .tieWordEmbeddings) ?? true
+        self.tieWordEmbeddings =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .tieWordEmbeddings) ?? true
         self.maxPositionEmbeddings = try container.decodeIfPresent(
             Int.self, forKey: .maxPositionEmbeddings)
         self.ropeTheta =
@@ -95,7 +96,7 @@ public struct ApertusConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
-        
+
         if let ropeScaling {
             if ropeScaling["factor"] == nil {
                 throw DecodingError.dataCorruptedError(
@@ -396,7 +397,7 @@ private class ApertusModelInner: Module {
 
     public init(_ args: ApertusConfiguration) {
         precondition(args.vocabSize > 0)
-        
+
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabSize,
             dimensions: args.hiddenSize
@@ -457,7 +458,7 @@ public class ApertusModel: Module, LLMModel, KVCacheDimensionProvider {
             !$0.key.contains("self_attn.rotary_emb.inv_freq")
         }
     }
-    
+
     public func messageGenerator(tokenizer: any Tokenizer) -> any MessageGenerator {
         // some models allow the system role and some do not -- this is enforced
         // by the chat template (code).
