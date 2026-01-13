@@ -663,7 +663,7 @@ private class PixelUnshuffleBlock: Module, UnaryLayer {
 /// LFM2 VL VLM `UserInputProcessor`.
 ///
 /// This is meant to be used with ``LFM2VL`` and is typically created by ``VLMModelFactory``.
-public class LFM2VLProcessor: UserInputProcessor {
+public struct LFM2VLProcessor: UserInputProcessor {
     private let config: LFM2VLProcessorConfiguration
     private let tokenizer: any Tokenizer
 
