@@ -189,7 +189,8 @@ private enum Vision {
                 [batchSize, maxLength, embedDim], dtype: sourceDtype)
 
             // Reshape from [H, W, embedDim] to [1, embedDim, H, W] once before loop
-            let reshapedEmbeddings = positionalEmbeddings
+            let reshapedEmbeddings =
+                positionalEmbeddings
                 .transposed(2, 0, 1)
                 .reshaped(1, embedDim, srcH, srcW)
 
@@ -205,7 +206,8 @@ private enum Vision {
                 )
 
                 // Reshape to [targetH * targetW, embedDim]
-                let resizedEmbeddings = interpolated
+                let resizedEmbeddings =
+                    interpolated
                     .reshaped(embedDim, targetH * targetW)
                     .transposed(1, 0)
 

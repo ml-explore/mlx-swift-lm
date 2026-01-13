@@ -309,7 +309,10 @@ public func bicubicInterpolate(
 
     // Create parameters tensor
     let params = MLXArray(
-        [scaleH, scaleW, alignCorners ? 1.0 : 0.0, antialiasFlag, filterScaleH, filterScaleW, support]
+        [
+            scaleH, scaleW, alignCorners ? 1.0 : 0.0, antialiasFlag, filterScaleH, filterScaleW,
+            support,
+        ]
     ).asType(.float32)
 
     // Create dimensions tensor
