@@ -194,8 +194,8 @@ private func makeNearestInterpolationKernel() -> MLXFast.MLXFastKernel {
 // MARK: - Kernel Manager
 
 /// Manages Metal kernels for interpolation operations.
-public final class InterpolationKernelManager: Sendable {
-    public static let shared = InterpolationKernelManager()
+private final class InterpolationKernelManager: Sendable {
+    static let shared = InterpolationKernelManager()
 
     let bicubicKernel: MLXFast.MLXFastKernel
     let nearestKernel: MLXFast.MLXFastKernel
