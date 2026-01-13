@@ -173,64 +173,41 @@ private enum Vision {
                 embeddingCount: numPatches, dimensions: embedDim)
         }
 
-        /// Resize positional embeddings using bilinear interpolation
+        /// Resize positional embeddings using bicubic interpolation
         static func resizePositionalEmbeddings(
             positionalEmbeddings: MLXArray,
             spatialShapes: MLXArray,
             maxLength: Int
         ) -> MLXArray {
             let batchSize = spatialShapes.dim(0)
+            let srcH = positionalEmbeddings.dim(0)
+            let srcW = positionalEmbeddings.dim(1)
             let embedDim = positionalEmbeddings.dim(-1)
             let sourceDtype = positionalEmbeddings.dtype
 
             let resultedPositionalEmbeddings = MLXArray.zeros(
                 [batchSize, maxLength, embedDim], dtype: sourceDtype)
 
-            // Get the spatial dimensions of the positional embeddings
-            let srcH = positionalEmbeddings.dim(0)
-            let srcW = positionalEmbeddings.dim(1)
+            // Reshape from [H, W, embedDim] to [1, embedDim, H, W] once before loop
+            let reshapedEmbeddings = positionalEmbeddings
+                .transposed(2, 0, 1)
+                .reshaped(1, embedDim, srcH, srcW)
 
             for i in 0 ..< batchSize {
                 let shape = spatialShapes[i]
                 let targetH = shape[0].item(Int.self)
                 let targetW = shape[1].item(Int.self)
 
-                // Simple bilinear interpolation for positional embeddings
-                let resizedEmbeddings = MLXArray.zeros(
-                    [targetH * targetW, embedDim], dtype: sourceDtype)
+                // Bicubic interpolation
+                let interpolated = bicubicInterpolate(
+                    reshapedEmbeddings,
+                    size: (targetH, targetW)
+                )
 
-                for ty in 0 ..< targetH {
-                    for tx in 0 ..< targetW {
-                        // Map target coordinates to source coordinates
-                        let sy = Float(ty) * Float(srcH - 1) / Float(max(targetH - 1, 1))
-                        let sx = Float(tx) * Float(srcW - 1) / Float(max(targetW - 1, 1))
-
-                        let sy0 = Int(floor(sy))
-                        let sx0 = Int(floor(sx))
-                        let sy1 = min(sy0 + 1, srcH - 1)
-                        let sx1 = min(sx0 + 1, srcW - 1)
-
-                        let fy = sy - Float(sy0)
-                        let fx = sx - Float(sx0)
-
-                        // Bilinear interpolation
-                        let v00 = positionalEmbeddings[sy0, sx0]
-                        let v01 = positionalEmbeddings[sy0, sx1]
-                        let v10 = positionalEmbeddings[sy1, sx0]
-                        let v11 = positionalEmbeddings[sy1, sx1]
-
-                        let fy1 = 1 - fy
-                        let fx1 = 1 - fx
-                        let w00 = v00 * fy1 * fx1
-                        let w01 = v01 * fy1 * fx
-                        let w10 = v10 * fy * fx1
-                        let w11 = v11 * fy * fx
-                        let interpolated = w00 + w01 + w10 + w11
-
-                        let idx = ty * targetW + tx
-                        resizedEmbeddings[idx] = interpolated
-                    }
-                }
+                // Reshape to [targetH * targetW, embedDim]
+                let resizedEmbeddings = interpolated
+                    .reshaped(embedDim, targetH * targetW)
+                    .transposed(1, 0)
 
                 let numPositions = targetH * targetW
                 resultedPositionalEmbeddings[i, 0 ..< numPositions] = resizedEmbeddings
