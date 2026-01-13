@@ -4,6 +4,7 @@
 //
 //  Bicubic and Nearest interpolation using Metal kernels.
 //  Port of the Python MLX interpolation kernels.
+//  https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/kernels.py
 //
 
 import Foundation

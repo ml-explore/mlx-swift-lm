@@ -1,4 +1,4 @@
-// Port of https://github.com/ml-explore/mlx-vlm/tree/main/mlx_vlm/models/lfm2_vl
+// Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/lfm2_vl
 
 import CoreImage
 import Foundation
