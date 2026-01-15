@@ -4,7 +4,7 @@ import MLXNN
 
 /// Su Scaled Rotary Position Embedding.
 /// Switches between short and long factors based on sequence length.
-public class SuScaledRoPE: Module {
+public class SuScaledRoPE: Module, OffsetLayer {
     let dimensions: Int
     let originalMaxPositionEmbeddings: Int
     let _shortFreqs: MLXArray
