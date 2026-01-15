@@ -1,7 +1,6 @@
 import CoreImage
 import Foundation
 import MLX
-import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
@@ -1010,7 +1009,7 @@ public struct PixtralProcessorConfiguration: Codable, Sendable {
 
 // MARK: - Processor
 
-public class PixtralProcessor: UserInputProcessor {
+public struct PixtralProcessor: UserInputProcessor {
     private let config: PixtralProcessorConfiguration
     private let tokenizer: any Tokenizer
     private let imageTokenId: Int
