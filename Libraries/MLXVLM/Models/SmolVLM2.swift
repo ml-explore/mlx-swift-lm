@@ -360,7 +360,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
         }
     }
     
-    private func processFrames(_ frames:[UserInput.VideoFrame]) async throws -> ProcessedFrames
+    private func processFrames(_ frames:[VideoFrame]) async throws -> ProcessedFrames
     {
         return try await MediaProcessing.asProcessedSequence(frames, targetFPS: { duration in
             // 1 fps for duration >= 10s, apply a multiplier if smaller
@@ -372,7 +372,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                     to: CGSize(width: fixedImageSize, height: fixedImageSize), method: CIImage.ResamplingMethod.lanczos
                 )
                 .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-            return UserInput.VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+            return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
         }
     }
     
@@ -391,7 +391,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                     to: CGSize(width: fixedImageSize, height: fixedImageSize), method: CIImage.ResamplingMethod.lanczos
                 )
                 .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-            return UserInput.VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+            return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
         }
     }
 }

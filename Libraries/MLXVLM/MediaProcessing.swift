@@ -5,6 +5,8 @@ import CoreImage.CIFilterBuiltins
 import MLX
 import MLXLMCommon
 
+public typealias VideoFrame = UserInput.VideoFrame
+
 public struct ProcessedFrames {
     let frames: [MLXArray]
     let timestamps: [CMTime]
@@ -324,7 +326,7 @@ public enum MediaProcessing {
 
     static public func asProcessedSequence(
         _ asset: AVAsset, samplesPerSecond: Int,
-        frameProcessing: (UserInput.VideoFrame) throws -> UserInput.VideoFrame = { $0 }
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
         return try await asProcessedSequence(
             asset, maxFrames: Int.max, targetFPS: { _ in Double(samplesPerSecond) },
@@ -333,7 +335,7 @@ public enum MediaProcessing {
 
     static public func asProcessedSequence(
         _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
-        frameProcessing: (UserInput.VideoFrame) throws -> UserInput.VideoFrame = { $0 }
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
         // Use AVAssetImageGenerator to extract frames
         let generator = AVAssetImageGenerator(asset: asset)
@@ -385,9 +387,9 @@ public enum MediaProcessing {
         )
     }
     
-    static public func asProcessedSequence(_ videoFrames:[UserInput.VideoFrame],
+    static public func asProcessedSequence(_ videoFrames:[VideoFrame],
                                            targetFPS: (CMTime) -> Double,
-                                           frameProcessing: (UserInput.VideoFrame) throws -> UserInput.VideoFrame = { $0 }
+                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
         
         precondition( videoFrames.isEmpty == false )

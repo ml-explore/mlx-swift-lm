@@ -793,7 +793,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         }
     }
     
-    private func processFrames(_ frames:[UserInput.VideoFrame], processing:UserInput.Processing) async throws -> ProcessedFrames
+    private func processFrames(_ frames:[VideoFrame], processing:UserInput.Processing) async throws -> ProcessedFrames
     {
         var resizedSize: CGSize = .zero
         
@@ -812,7 +812,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
             }
             let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
-            return UserInput.VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
+            return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
         }
     }
     
@@ -835,7 +835,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
             }
             let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
-            return UserInput.VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
+            return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
         }
     }
     
