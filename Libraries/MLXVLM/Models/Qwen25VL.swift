@@ -1,5 +1,6 @@
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
 
+import AVFoundation
 import CoreImage
 import Foundation
 import Hub
@@ -751,25 +752,10 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         var processedVideo: LMInput.ProcessedVideo?
         if !input.videos.isEmpty {
             var videosAsImageSequences = [[MLXArray]]()
-            var resizedSize: CGSize = .zero
             for video in input.videos {
-                let imageSequence = try await MediaProcessing.asProcessedSequence(
-                    video.asAVAsset(), samplesPerSecond: 2
-                ) { frame in
-                    // first apply the user requested resizing, etc. if any
-                    let resizedImage = MediaProcessing.apply(
-                        frame.frame, processing: input.processing)
-                    if resizedSize == .zero {
-                        let size = resizedImage.extent.size
-                        let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
-                            height: Int(size.height), width: Int(size.width),
-                            factor: config.patchSize * config.mergeSize,
-                            minPixels: config.minPixels, maxPixels: config.maxPixels)
-                        resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
-                    }
-                    let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
-                    return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
-                }
+
+                let imageSequence = try await self.processVideo(video, processing: input.processing)
+                
                 videosAsImageSequences.append(imageSequence.frames)
             }
             let videoPixelsAndFrames = try videosAsImageSequences.map {
@@ -794,6 +780,65 @@ public struct Qwen25VLProcessor: UserInputProcessor {
             image: processedImage,
             video: processedVideo)
     }
+    
+    private func processVideo(_ video:UserInput.Video, processing:UserInput.Processing) async  throws -> ProcessedFrames
+    {
+        switch video
+        {
+        case .frames(let frames):
+            return try await self.processFrames(frames, processing: processing)
+            
+        default:
+            return try await self.processAsset(video.asAVAsset()!, processing: processing)
+        }
+    }
+    
+    private func processFrames(_ frames:[UserInput.VideoFrame], processing:UserInput.Processing) async throws -> ProcessedFrames
+    {
+        var resizedSize: CGSize = .zero
+        
+        return try await MediaProcessing.asProcessedSequence( frames,
+                                                              targetFPS: { _ in Double(2) })
+        { frame in
+            // first apply the user requested resizing, etc. if any
+            let resizedImage = MediaProcessing.apply(
+                frame.frame, processing: processing)
+            if resizedSize == .zero {
+                let size = resizedImage.extent.size
+                let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
+                    height: Int(size.height), width: Int(size.width),
+                    factor: config.patchSize * config.mergeSize,
+                    minPixels: config.minPixels, maxPixels: config.maxPixels)
+                resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
+            }
+            let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
+            return UserInput.VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
+        }
+    }
+    
+    private func processAsset(_ asset:AVAsset, processing:UserInput.Processing ) async throws -> ProcessedFrames
+    {
+        var resizedSize: CGSize = .zero
+
+        return try await MediaProcessing.asProcessedSequence(
+            asset, samplesPerSecond: 2
+        ) { frame in
+            // first apply the user requested resizing, etc. if any
+            let resizedImage = MediaProcessing.apply(
+                frame.frame, processing: processing)
+            if resizedSize == .zero {
+                let size = resizedImage.extent.size
+                let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
+                    height: Int(size.height), width: Int(size.width),
+                    factor: config.patchSize * config.mergeSize,
+                    minPixels: config.minPixels, maxPixels: config.maxPixels)
+                resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
+            }
+            let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
+            return UserInput.VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
+        }
+    }
+    
 }
 
 // MARK: - Model
