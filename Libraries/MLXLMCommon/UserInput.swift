@@ -44,6 +44,8 @@ public struct UserInput {
     public enum Video {
         case avAsset(AVAsset)
         case url(URL)
+        /// Useful for decoded frames held in memory
+        //case frames([Image])
 
         public func asAVAsset() -> AVAsset {
             switch self {
@@ -51,7 +53,9 @@ public struct UserInput {
                 return asset
             case .url(let url):
                 return AVAsset(url: url)
-            }
+//            case .frames:
+//                return nil
+//            }
         }
     }
 
