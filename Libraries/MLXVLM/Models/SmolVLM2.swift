@@ -8,6 +8,7 @@
 import CoreImage
 import CoreMedia
 import Foundation
+import AVFoundation
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -306,24 +307,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 messages: messagesWithSystem(messages))
             let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
-            let video = input.videos[0].asAVAsset()
-
-            let processedFrames = try await MediaProcessing.asProcessedSequence(
-                video,
-                maxFrames: maxVideoFrames,
-                targetFPS: { duration in
-                    // 1 fps for duration >= 10s, apply a multiplier if smaller
-                    max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)
-                }
-            ) { frame in
-                let processedFrame = frame.frame
-                    .toSRGB()
-                    .resampled(
-                        to: CGSize(width: fixedImageSize, height: fixedImageSize), method: .lanczos
-                    )
-                    .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-                return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
-            }
+            let processedFrames = try await self.processInput(input)
 
             let thwFrames = (0 ..< processedFrames.frames.count).map {
                 THW($0, Int(fixedImageSize), Int(fixedImageSize))
@@ -357,6 +341,57 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 text: .init(tokens: promptArray, mask: mask),
                 image: .init(pixels: transposedFrames, frames: thwFrames)
             )
+        }
+    }
+    
+    private func processInput(_ input:UserInput) async  throws -> ProcessedFrames
+    {
+        guard let firstVideo = input.videos.first else {
+            throw VLMError.singleVideoAllowed
+        }
+        
+        switch firstVideo
+        {
+        case .frames(let frames):
+            return try await self.processFrames(frames)
+            
+        default:
+            return try await self.processAsset(firstVideo.asAVAsset()!)
+        }
+    }
+    
+    private func processFrames(_ frames:[UserInput.VideoFrame]) async throws -> ProcessedFrames
+    {
+        return try await MediaProcessing.asProcessedSequence(frames, targetFPS: { duration in
+            // 1 fps for duration >= 10s, apply a multiplier if smaller
+            max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)
+        }) { frame in
+            let processedFrame = frame.frame
+                .toSRGB()
+                .resampled(
+                    to: CGSize(width: fixedImageSize, height: fixedImageSize), method: CIImage.ResamplingMethod.lanczos
+                )
+                .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
+            return UserInput.VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+        }
+    }
+    
+    private func processAsset(_ asset:AVAsset) async throws -> ProcessedFrames
+    {
+        return try await MediaProcessing.asProcessedSequence(asset,
+                                                             maxFrames: maxVideoFrames,
+                                                             targetFPS: { duration in
+            // 1 fps for duration >= 10s, apply a multiplier if smaller
+            max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)
+        }
+        ) { frame in
+            let processedFrame = frame.frame
+                .toSRGB()
+                .resampled(
+                    to: CGSize(width: fixedImageSize, height: fixedImageSize), method: CIImage.ResamplingMethod.lanczos
+                )
+                .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
+            return UserInput.VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
         }
     }
 }
