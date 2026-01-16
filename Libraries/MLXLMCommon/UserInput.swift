@@ -55,7 +55,7 @@ public struct UserInput {
                 return AVAsset(url: url)
 //            case .frames:
 //                return nil
-//            }
+            }
         }
     }
 
