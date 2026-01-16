@@ -45,6 +45,8 @@ public enum LLMTypeRegistry {
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
         "mimo": create(MiMoConfiguration.self, MiMoModel.init),
+        "mimo_v2_flash": create(MiMoV2FlashConfiguration.self, MiMoV2FlashModel.init),
+        "minimax": create(MiniMaxConfiguration.self, MiniMaxModel.init),
         "glm4": create(GLM4Configuration.self, GLM4Model.init),
         "glm4_moe": create(GLM4MoEConfiguration.self, GLM4MoEModel.init),
         "acereason": create(Qwen2Configuration.self, Qwen2Model.init),
