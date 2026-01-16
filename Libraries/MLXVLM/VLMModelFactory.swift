@@ -88,6 +88,8 @@ public enum VLMTypeRegistry {
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
         "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
         "mistral3": create(Mistral3VLMConfiguration.self, Mistral3VLM.init),
+        "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
+        "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
     ])
 }
 
@@ -115,6 +117,8 @@ public enum VLMProcessorTypeRegistry {
             PixtralProcessorConfiguration.self, PixtralProcessor.init),
         "Mistral3Processor": create(
             Mistral3VLMProcessorConfiguration.self, Mistral3VLMProcessor.init),
+        "Lfm2VlProcessor": create(
+            LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
     ])
 }
 
@@ -157,6 +161,16 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let smolvlminstruct4bit = ModelConfiguration(
         id: "mlx-community/SmolVLM-Instruct-4bit",
         defaultPrompt: "Describe the image in English"
+    )
+
+    static public let lfm2_5_vl_1_6B_4bit = ModelConfiguration(
+        id: "mlx-community/LFM2.5-VL-1.6B-4bit",
+        defaultPrompt: ""
+    )
+
+    static public let lfm2_vl_1_6B_4bit = ModelConfiguration(
+        id: "mlx-community/LFM2-VL-1.6B-4bit",
+        defaultPrompt: ""
     )
 
     static public let mistral3_3B_Instruct_4bit = ModelConfiguration(
