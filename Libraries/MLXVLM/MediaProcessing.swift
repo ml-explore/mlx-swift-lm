@@ -389,6 +389,50 @@ public enum MediaProcessing {
             totalDuration: duration
         )
     }
+    
+    static public  func asProcessedSequence(_ videoFrames:[VideoFrame] ,
+                                            frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+                                            targetFPS: (CMTime) -> Double) throws  -> ProcessedFrames
+    {
+        precondition( videoFrames.isEmpty == false )
+                
+        let startTime = videoFrames.first?.timeStamp ?? .zero // TODO:
+        let endTime = videoFrames.last?.timeStamp ?? .zero
+        let timeRangeOfVideoFrames = CMTimeRange(start: startTime, end: endTime)
+        
+        let duration = timeRangeOfVideoFrames.duration
+        
+        let fps = targetFPS(duration)
+        // Note: the round was not present in `asCIImageSequence`, so we may now be passing 1 more frame to Qwen depending on video duration.
+        let estimatedFrames = Int(round(fps * duration.seconds))
+        let desiredFrames = min(estimatedFrames, videoFrames.count)
+        let finalFrameCount = max(desiredFrames, 1)
+
+        let sampledTimeValues = MLXArray.linspace(
+            0, duration.value, count: Int(finalFrameCount)
+        ).asArray(Int64.self)
+
+        // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
+        let timescale = duration.timescale
+        let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
+
+        // Collect the frames
+        var ciImages: [CIImage] = []
+        var timestamps: [CMTime] = []
+
+        for videoFrame in videoFrames {
+            let frame = try frameProcessing(.init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
+            ciImages.append(frame.frame)
+            timestamps.append(frame.timeStamp)
+        }
+
+        let framesAsArrays = ciImages.map { $0.asMLXArray() }
+        return ProcessedFrames(
+            frames: framesAsArrays,
+            timestamps: timestamps,
+            totalDuration: duration
+        )
+    }
 }
 
 // MARK: - Convenience
