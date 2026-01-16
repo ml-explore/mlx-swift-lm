@@ -39,25 +39,37 @@ public struct UserInput {
             }
         }
     }
-
+    
+    public struct VideoFrame {
+        public let frame: CIImage
+        public let timeStamp: CMTime
+        
+        public init(frame: CIImage, timeStamp: CMTime) {
+            self.frame = frame
+            self.timeStamp = timeStamp
+        }
+    }
+    
     /// Representation of a video resource.
     public enum Video {
         case avAsset(AVAsset)
         case url(URL)
         /// Useful for decoded frames held in memory
-        //case frames([Image])
+        case frames([VideoFrame])
 
-        public func asAVAsset() -> AVAsset {
+        public func asAVAsset() -> AVAsset? {
             switch self {
             case .avAsset(let asset):
                 return asset
             case .url(let url):
                 return AVAsset(url: url)
-//            case .frames:
-//                return nil
+            case .frames:
+                return nil
             }
         }
     }
+    
+   
 
     /// Representation of an image resource.
     public enum Image {
@@ -322,7 +334,7 @@ public protocol UserInputProcessor: Sendable {
     func prepare(input: UserInput) async throws -> LMInput
 }
 
-private enum UserInputError: LocalizedError {
+internal enum UserInputError: LocalizedError {
     case notImplemented
     case unableToLoad(URL)
     case arrayError(String)
