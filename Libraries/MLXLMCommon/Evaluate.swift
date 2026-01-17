@@ -142,21 +142,20 @@ public struct TopPSampler: LogitSampler {
     let temp: MLXArray
     let topP: MLXArray
     let randomState: MLXRandom.RandomState
+    let compiled: @Sendable (MLXArray) -> MLXArray
 
     public init(temperature: Float, topP: Float) {
         self.temp = MLXArray(temperature)
         self.topP = MLXArray(topP)
         self.randomState = MLXRandom.RandomState()
-    }
+        self.compiled = compile(inputs: [randomState], outputs: [randomState], shapeless: true) {
+            logits in
+            var logits = logits
+            if logits.dtype == .bfloat16 {
+                logits = logits.asType(.float32)
+            }
 
-    public func sample(logits: MLXArray) -> MLXArray {
-        var logits = logits
-        if logits.dtype == .bfloat16 {
-            logits = logits.asType(.float32)
-        }
-
-        return withRandomState(randomState) {
-            let probs = softmax(logits / temp, axis: -1)
+            let probs = softmax(logits / self.temp, axis: -1)
             let sortedIndices = argSort(probs, axis: -1)
 
             // probs shape is [B,V] and after take it will be [1, B, V], so we squeeze it back to [B, V]
@@ -165,11 +164,15 @@ public struct TopPSampler: LogitSampler {
             let cumulativeProbs = cumsum(sortedProbs, axis: -1)
 
             let topProbs = MLX.where(
-                cumulativeProbs .> (1 - topP), sortedProbs, zeros(like: sortedProbs))
+                cumulativeProbs .> (1 - self.topP), sortedProbs, zeros(like: sortedProbs))
 
-            let sortedToken = categorical(log(topProbs))
+            let sortedToken = MLXRandom.categorical(log(topProbs), key: self.randomState)
             return sortedIndices.squeezed(axis: 0)[sortedToken]
         }
+    }
+
+    public func sample(logits: MLXArray) -> MLXArray {
+        compiled(logits)
     }
 }
 
@@ -177,16 +180,19 @@ public struct TopPSampler: LogitSampler {
 public struct CategoricalSampler: LogitSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
+    let compiled: @Sendable (MLXArray) -> MLXArray
 
     public init(temperature: Float) {
         self.temp = MLXArray(temperature)
         self.randomState = MLXRandom.RandomState()
+        self.compiled = compile(inputs: [randomState], outputs: [randomState], shapeless: true) {
+            logits in
+            MLXRandom.categorical(logits * (1 / self.temp), key: self.randomState)
+        }
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
-        return withRandomState(randomState) {
-            categorical(logits * (1 / temp))
-        }
+        compiled(logits)
     }
 }
 
@@ -447,6 +453,9 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         asyncEval(token)
 
         tokenCount += 1
+        if tokenCount % 256 == 0 {
+            Memory.clearCache()
+        }
 
         return previousY.tokens.item(Int.self)
     }
