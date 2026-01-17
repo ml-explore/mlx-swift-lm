@@ -468,8 +468,6 @@ final class Qwen3NextGatedDeltaNet: Module {
     @ModuleInfo(key: "norm") var norm: Qwen3NextRMSNormGated
     @ModuleInfo(key: "out_proj") var outProj: Linear
 
-    private let rmsNormWeight: MLXArray
-
     init(_ args: Qwen3NextConfiguration) {
         self.hiddenSize = args.hiddenSize
         self.numVHeads = args.linearNumValueHeads
@@ -504,8 +502,6 @@ final class Qwen3NextGatedDeltaNet: Module {
 
         _norm.wrappedValue = Qwen3NextRMSNormGated(dimensions: headVDim, eps: args.rmsNormEps)
         _outProj.wrappedValue = Linear(valueDim, hiddenSize, bias: false)
-
-        self.rmsNormWeight = MLXArray.ones([headKDim])
 
         super.init()
     }
@@ -585,9 +581,9 @@ final class Qwen3NextGatedDeltaNet: Module {
         let vOut = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
         let invScale = pow(Float(headKDim), -0.5)
-        let weight = rmsNormWeight.asType(qOut.dtype)
-        qOut = (invScale * invScale) * MLXFast.rmsNorm(qOut, weight: weight, eps: 1e-6)
-        kOut = invScale * MLXFast.rmsNorm(kOut, weight: weight, eps: 1e-6)
+        qOut = (invScale * invScale)
+            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: 1e-6)
+        kOut = invScale * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: 1e-6)
 
         let (out, newState) = gatedDeltaUpdate(
             q: qOut,
