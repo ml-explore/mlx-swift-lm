@@ -1,0 +1,825 @@
+//
+//  NemotronH.swift
+//  mlx-swift-lm
+//
+//  Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nemotron_h.py
+
+import Foundation
+import MLX
+import MLXLMCommon
+import MLXNN
+
+// MARK: - Block Type
+
+private enum NemotronHBlockType {
+    case mamba    // "M"
+    case attention  // "*"
+    case mlp      // "-"
+    case moe      // "E"
+
+    init(from char: Character) {
+        switch char {
+        case "M": self = .mamba
+        case "*": self = .attention
+        case "-": self = .mlp
+        case "E": self = .moe
+        default: fatalError("Unknown NemotronH block type: \(char)")
+        }
+    }
+}
+
+// MARK: - Activations
+
+/// Squared ReLU activation: relu(x)^2
+private func relu2(_ x: MLXArray) -> MLXArray {
+    let y = MLX.maximum(x, MLXArray(0))
+    return y * y
+}
+
+// MARK: - MambaRMSNormGated
+
+private class NemotronHRMSNormGated: Module {
+    @ParameterInfo(key: "weight") var weight: MLXArray
+    let eps: Float
+    let groupSize: Int
+
+    init(dimensions: Int, eps: Float, groupSize: Int) {
+        self.eps = eps
+        self.groupSize = groupSize
+        self._weight.wrappedValue = MLXArray.ones([dimensions])
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray, gate: MLXArray?) -> MLXArray {
+        var states = x
+        if let gate {
+            states = states * silu(gate)
+        }
+        // Apply RMS norm and weight
+        return MLXFast.rmsNorm(states, weight: weight, eps: eps)
+    }
+}
+
+// MARK: - Mamba2Mixer
+
+private class NemotronHMamba2Mixer: Module {
+    let numHeads: Int
+    let hiddenSize: Int
+    let ssmStateSize: Int
+    let convKernelSize: Int
+    let intermediateSize: Int
+    let numGroups: Int
+    let headDim: Int
+    let timeStepLimit: (Float, Float)
+    let headsPerGroup: Int
+
+    let convDim: Int
+
+    @ModuleInfo(key: "conv1d") var conv1d: Conv1d
+    @ModuleInfo(key: "in_proj") var inProj: Linear
+    @ModuleInfo(key: "out_proj") var outProj: Linear
+
+    @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
+    @ParameterInfo(key: "A_log") var aLog: MLXArray
+    @ParameterInfo(key: "D") var D: MLXArray
+
+    @ModuleInfo(key: "norm") var norm: NemotronHRMSNormGated
+
+    init(_ args: NemotronHConfiguration) {
+        self.numHeads = args.mambaNumHeads
+        self.hiddenSize = args.hiddenSize
+        self.ssmStateSize = args.ssmStateSize
+        self.convKernelSize = args.convKernel
+        self.intermediateSize = args.mambaNumHeads * args.mambaHeadDim
+        self.numGroups = args.nGroups
+        self.headDim = args.mambaHeadDim
+        self.timeStepLimit = (args.timeStepLimitMin, args.timeStepLimitMax)
+        self.headsPerGroup = numHeads / numGroups
+        self.convDim = intermediateSize + 2 * numGroups * ssmStateSize
+
+        self._conv1d.wrappedValue = Conv1d(
+            inputChannels: convDim,
+            outputChannels: convDim,
+            kernelSize: convKernelSize,
+            groups: convDim,
+            bias: args.useConvBias
+        )
+
+        let projectionSize = intermediateSize + convDim + numHeads
+        self._inProj.wrappedValue = Linear(hiddenSize, projectionSize, bias: args.mambaProjBias)
+
+        self._dtBias.wrappedValue = MLXArray.ones([numHeads])
+        let headsRange = (MLXArray(0 ..< numHeads).asType(.float32) + 1)
+        self._aLog.wrappedValue = MLX.log(headsRange)
+        self._D.wrappedValue = MLXArray.ones([numHeads])
+
+        let groupSize = intermediateSize / numGroups
+        self._norm.wrappedValue = NemotronHRMSNormGated(
+            dimensions: intermediateSize,
+            eps: args.layerNormEpsilon,
+            groupSize: groupSize
+        )
+
+        self._outProj.wrappedValue = Linear(intermediateSize, hiddenSize, bias: args.mambaProjBias)
+
+        super.init()
+    }
+
+    private func applyConv(_ input: MLXArray, mask: MLXArray?, cache: MambaCache?) -> MLXArray {
+        var convInput = input
+
+        // Apply mask if present
+        if let mask {
+            let expandedMask = expandedDimensions(mask, axis: -1)
+            convInput = MLX.where(expandedMask, convInput, MLXArray.zeros(like: convInput))
+        }
+
+        let batch = convInput.dim(0)
+        let dtype = convInput.dtype
+        var convState = cache?[0]
+
+        if convState == nil {
+            if convKernelSize > 1 {
+                convState = MLXArray.zeros([batch, convKernelSize - 1, convDim], dtype: dtype)
+            } else {
+                convState = MLXArray.zeros([batch, 0, convDim], dtype: dtype)
+            }
+        }
+
+        var padded = concatenated([convState!, convInput], axis: 1)
+
+        if let cache {
+            let end = padded.dim(1)
+            let start = max(0, end - (convKernelSize - 1))
+            cache[0] = padded[0..., start ..< end, 0...]
+        }
+
+        let convOutput = conv1d(padded)
+        return silu(convOutput)
+    }
+
+    func callAsFunction(
+        _ hiddenStates: MLXArray,
+        mask: MLXArray?,
+        cache: MambaCache?
+    ) -> MLXArray {
+        let projected = inProj(hiddenStates)
+        let splits = split(
+            projected, indices: [intermediateSize, intermediateSize + convDim], axis: -1)
+        let gate = splits[0]
+        let convInput = splits[1]
+        let dt = splits[2]
+
+        let convOutput = applyConv(convInput, mask: mask, cache: cache)
+        let convSplits = split(
+            convOutput,
+            indices: [intermediateSize, intermediateSize + numGroups * ssmStateSize],
+            axis: -1
+        )
+
+        var hidden = convSplits[0]
+        var B = convSplits[1]
+        var C = convSplits[2]
+
+        hidden = hidden.reshaped([hidden.dim(0), hidden.dim(1), numHeads, headDim])
+        B = B.reshaped([B.dim(0), B.dim(1), numGroups, ssmStateSize])
+        C = C.reshaped([C.dim(0), C.dim(1), numGroups, ssmStateSize])
+
+        let dtArray = dt.reshaped([dt.dim(0), dt.dim(1), numHeads])
+
+        let previousState = cache?[1]
+        let (y, nextState) = ssmUpdate(
+            hiddenStates: hidden,
+            ALog: aLog,
+            B: B,
+            C: C,
+            D: D,
+            dt: dtArray,
+            dtBias: dtBias,
+            state: previousState,
+            timeStepLimit: timeStepLimit,
+            mask: mask
+        )
+
+        if let cache {
+            cache[1] = nextState
+        }
+
+        let flattenedY = y.flattened(start: 2)
+        return outProj(norm(flattenedY, gate: gate))
+    }
+}
+
+// MARK: - Attention
+
+private class NemotronHAttention: Module {
+    let args: NemotronHConfiguration
+    let scale: Float
+    let numHeads: Int
+    let numKeyValueHeads: Int
+    let headDim: Int
+
+    @ModuleInfo(key: "q_proj") var wq: Linear
+    @ModuleInfo(key: "k_proj") var wk: Linear
+    @ModuleInfo(key: "v_proj") var wv: Linear
+    @ModuleInfo(key: "o_proj") var wo: Linear
+
+    let rope: RoPE
+
+    init(_ args: NemotronHConfiguration) {
+        self.args = args
+        self.numHeads = args.numAttentionHeads
+        self.numKeyValueHeads = args.numKeyValueHeads
+        self.headDim = args.headDim ?? (args.hiddenSize / args.numAttentionHeads)
+        self.scale = pow(Float(headDim), -0.5)
+
+        let dim = args.hiddenSize
+        let attentionBias = args.attentionBias
+
+        self._wq.wrappedValue = Linear(dim, numHeads * headDim, bias: attentionBias)
+        self._wk.wrappedValue = Linear(dim, numKeyValueHeads * headDim, bias: attentionBias)
+        self._wv.wrappedValue = Linear(dim, numKeyValueHeads * headDim, bias: attentionBias)
+        self._wo.wrappedValue = Linear(numHeads * headDim, dim, bias: attentionBias)
+
+        self.rope = RoPE(
+            dimensions: headDim,
+            traditional: false,
+            base: args.ropeTheta,
+            scale: 1
+        )
+
+        super.init()
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) -> MLXArray {
+        let B = x.dim(0)
+        let L = x.dim(1)
+
+        var queries = wq(x)
+        var keys = wk(x)
+        var values = wv(x)
+
+        queries = queries.reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        keys = keys.reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
+        values = values.reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
+
+        if let cache {
+            queries = rope(queries, offset: cache.offset)
+            keys = rope(keys, offset: cache.offset)
+        } else {
+            queries = rope(queries)
+            keys = rope(keys)
+        }
+
+        let output = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask
+        )
+        .transposed(0, 2, 1, 3)
+        .reshaped(B, L, -1)
+
+        return wo(output)
+    }
+}
+
+// MARK: - MLP
+
+private class NemotronHMLP: Module, UnaryLayer {
+    @ModuleInfo(key: "up_proj") var upProj: Linear
+    @ModuleInfo(key: "down_proj") var downProj: Linear
+
+    init(_ args: NemotronHConfiguration, intermediateSize: Int? = nil) {
+        let intermediate = intermediateSize ?? args.intermediateSize
+        self._upProj.wrappedValue = Linear(args.hiddenSize, intermediate, bias: args.mlpBias)
+        self._downProj.wrappedValue = Linear(intermediate, args.hiddenSize, bias: args.mlpBias)
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        downProj(relu2(upProj(x)))
+    }
+}
+
+// MARK: - MoE Gate
+
+private func groupExpertSelect(
+    gates: MLXArray,
+    eSCB: MLXArray,  // e_score_correction_bias
+    topK: Int,
+    nGroup: Int,
+    topkGroup: Int,
+    routedScalingFactor: Float,
+    normTopkProb: Bool
+) -> (MLXArray, MLXArray) {
+    let (bsz, seqLen) = (gates.dim(0), gates.dim(1))
+
+    // Original scores using sigmoid
+    let origScores = sigmoid(gates.asType(.float32))
+    var scores = origScores + eSCB
+
+    // Group-based selection if n_group > 1
+    if nGroup > 1 {
+        let numExperts = scores.dim(-1)
+        let expertsPerGroup = numExperts / nGroup
+
+        // Reshape to [batch, seq, n_group, experts_per_group]
+        let groupScores = scores.reshaped(bsz, seqLen, nGroup, -1)
+
+        // Get top-2 per group and sum for group scores (using sorted to get top values)
+        let topKGroupScores = sorted(groupScores, axis: -1)[.ellipsis, ..<2].sum(axis: -1, keepDims: true)
+
+        // Keep only top topkGroup groups (zero out the rest)
+        let k = nGroup - topkGroup
+        var groupIdx = argPartition(topKGroupScores, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
+        groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, expertsPerGroup])
+
+        // Zero out scores from non-selected groups
+        scores = putAlong(groupScores, groupIdx, values: MLXArray(0.0), axis: -2)
+
+        // Flatten back
+        scores = flattened(scores, start: -2, end: -1)
+    }
+
+    // Get top-k experts
+    let inds = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+    var finalScores = takeAlong(origScores, inds, axis: -1)
+
+    // Normalize if needed
+    if topK > 1 && normTopkProb {
+        let denominator = finalScores.sum(axis: -1, keepDims: true) + 1e-20
+        finalScores = finalScores / denominator
+    }
+
+    // Apply scaling factor
+    finalScores = finalScores * routedScalingFactor
+
+    return (inds, finalScores)
+}
+
+private class NemotronHMoEGate: Module {
+    let topK: Int
+    let nGroup: Int
+    let topkGroup: Int
+    let routedScalingFactor: Float
+    let normTopkProb: Bool
+
+    @ParameterInfo(key: "weight") var weight: MLXArray
+    @ParameterInfo(key: "e_score_correction_bias") var eSCB: MLXArray
+
+    init(_ args: NemotronHConfiguration) {
+        self.topK = args.numExpertsPerTok
+        self.nGroup = args.nGroup
+        self.topkGroup = args.topkGroup
+        self.routedScalingFactor = args.routedScalingFactor
+        self.normTopkProb = args.normTopkProb
+
+        self._weight.wrappedValue = MLXArray.zeros([args.nRoutedExperts, args.hiddenSize])
+        self._eSCB.wrappedValue = MLXArray.zeros([args.nRoutedExperts])
+
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
+        let gates = MLX.matmul(x, weight.transposed())
+        return groupExpertSelect(
+            gates: gates,
+            eSCB: eSCB,
+            topK: topK,
+            nGroup: nGroup,
+            topkGroup: topkGroup,
+            routedScalingFactor: routedScalingFactor,
+            normTopkProb: normTopkProb
+        )
+    }
+}
+
+// MARK: - SwitchMLP for NemotronH (uses relu2 instead of silu/glu)
+
+private class NemotronHSwitchMLP: Module {
+    @ModuleInfo(key: "fc1") var fc1: SwitchLinear
+    @ModuleInfo(key: "fc2") var fc2: SwitchLinear
+
+    let inputDims: Int
+    let hiddenDims: Int
+    let numExperts: Int
+
+    init(inputDims: Int, hiddenDims: Int, numExperts: Int) {
+        self.inputDims = inputDims
+        self.hiddenDims = hiddenDims
+        self.numExperts = numExperts
+
+        self._fc1.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: hiddenDims, numExperts: numExperts, bias: false)
+        self._fc2.wrappedValue = SwitchLinear(
+            inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: false)
+
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+        var x = MLX.expandedDimensions(x, axes: [-2, -3])
+
+        let doSort = indices.size > 64
+
+        var idx = indices
+        var inverseOrder = MLXArray()
+
+        if doSort {
+            (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
+        }
+
+        var y = fc1(x, idx, sortedIndices: doSort)
+        y = relu2(y)
+        y = fc2(y, idx, sortedIndices: doSort)
+
+        if doSort {
+            y = scatterUnsort(x: y, invOrder: inverseOrder, shape: indices.shape)
+        }
+
+        return MLX.squeezed(y, axis: -2)
+    }
+}
+
+// MARK: - MoE
+
+private class NemotronHMoE: Module, UnaryLayer {
+    let numExpertsPerTok: Int
+    let hasSharedExperts: Bool
+
+    @ModuleInfo(key: "gate") var gate: NemotronHMoEGate
+    @ModuleInfo(key: "switch_mlp") var switchMLP: NemotronHSwitchMLP
+    @ModuleInfo(key: "shared_experts") var sharedExperts: NemotronHMLP?
+
+    init(_ args: NemotronHConfiguration) {
+        self.numExpertsPerTok = args.numExpertsPerTok
+        self.hasSharedExperts = args.nSharedExperts != nil && args.nSharedExperts! > 0
+
+        self._gate.wrappedValue = NemotronHMoEGate(args)
+        self._switchMLP.wrappedValue = NemotronHSwitchMLP(
+            inputDims: args.hiddenSize,
+            hiddenDims: args.moeIntermediateSize,
+            numExperts: args.nRoutedExperts
+        )
+
+        if hasSharedExperts {
+            self._sharedExperts.wrappedValue = NemotronHMLP(
+                args,
+                intermediateSize: args.moeSharedExpertIntermediateSize
+            )
+        }
+
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let (inds, scores) = gate(x)
+        var y = switchMLP(x, inds)
+        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+
+        if let sharedExperts {
+            y = y + sharedExperts(x)
+        }
+
+        return y
+    }
+}
+
+// MARK: - Decoder Block
+
+private class NemotronHBlock: Module {
+    let blockType: NemotronHBlockType
+
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+    @ModuleInfo(key: "mamba") var mamba: NemotronHMamba2Mixer?
+    @ModuleInfo(key: "self_attn") var selfAttn: NemotronHAttention?
+    @ModuleInfo(key: "mlp") var mlp: NemotronHMLP?
+    @ModuleInfo(key: "moe") var moe: NemotronHMoE?
+
+    init(_ args: NemotronHConfiguration, blockType: Character) {
+        self.blockType = NemotronHBlockType(from: blockType)
+
+        self._norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.layerNormEpsilon)
+
+        switch self.blockType {
+        case .mamba:
+            self._mamba.wrappedValue = NemotronHMamba2Mixer(args)
+        case .attention:
+            self._selfAttn.wrappedValue = NemotronHAttention(args)
+        case .mlp:
+            self._mlp.wrappedValue = NemotronHMLP(args)
+        case .moe:
+            self._moe.wrappedValue = NemotronHMoE(args)
+        }
+
+        super.init()
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        ssmMask: MLXArray?,
+        cache: KVCache?
+    ) -> MLXArray {
+        let hidden = norm(x)
+
+        let output: MLXArray
+        switch blockType {
+        case .mamba:
+            output = mamba!(hidden, mask: ssmMask, cache: cache as? MambaCache)
+        case .attention:
+            output = selfAttn!(hidden, mask: attentionMask, cache: cache)
+        case .mlp:
+            output = mlp!(hidden)
+        case .moe:
+            output = moe!(hidden)
+        }
+
+        return x + output
+    }
+}
+
+// MARK: - Model Inner
+
+private class NemotronHModelInner: Module {
+    let args: NemotronHConfiguration
+
+    @ModuleInfo(key: "embeddings") var embeddings: Embedding
+    fileprivate let layers: [NemotronHBlock]
+    @ModuleInfo(key: "norm_f") var normF: RMSNorm
+
+    let firstAttentionIndex: Int?
+    let firstMambaIndex: Int?
+
+    init(_ args: NemotronHConfiguration) {
+        self.args = args
+        precondition(args.vocabSize > 0)
+
+        self._embeddings.wrappedValue = Embedding(
+            embeddingCount: args.vocabSize, dimensions: args.hiddenSize)
+
+        let pattern = Array(args.hybridOverridePattern)
+        self.layers = pattern.map { NemotronHBlock(args, blockType: $0) }
+
+        self._normF.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.layerNormEpsilon)
+
+        // Find first attention and mamba layer indices for mask creation
+        self.firstAttentionIndex = pattern.firstIndex(of: "*")
+        self.firstMambaIndex = pattern.firstIndex(of: "M")
+
+        super.init()
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        var hidden = embeddings(inputs)
+
+        // Create attention mask
+        let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
+            guard let index = firstAttentionIndex,
+                  let cache = cache,
+                  index < cache.count
+            else { return .none }
+            return createAttentionMask(h: hidden, cache: [cache[index]])
+        }()
+
+        // SSM mask is nil for now (same as GraniteMoeHybrid)
+        let ssmMask: MLXArray? = nil
+
+        // Track which cache to use for each layer
+        var cacheCounter = 0
+        for layer in layers {
+            let c: KVCache?
+            if layer.blockType == .mamba || layer.blockType == .attention {
+                c = cache?[cacheCounter]
+                cacheCounter += 1
+            } else {
+                c = nil
+            }
+
+            hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: c)
+        }
+
+        return normF(hidden)
+    }
+}
+
+// MARK: - Main Model
+
+public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider {
+    public let vocabularySize: Int
+    public let kvHeads: [Int]
+
+    private let model: NemotronHModelInner
+    let configuration: NemotronHConfiguration
+
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
+    public init(_ args: NemotronHConfiguration) {
+        self.configuration = args
+        self.vocabularySize = args.vocabSize
+
+        // kvHeads array: non-zero for attention layers, zero for others
+        let pattern = Array(args.hybridOverridePattern)
+        self.kvHeads = pattern.compactMap { char -> Int? in
+            let blockType = NemotronHBlockType(from: char)
+            if blockType == .mamba || blockType == .attention {
+                return blockType == .attention ? args.numKeyValueHeads : 0
+            }
+            return nil
+        }
+
+        self.model = NemotronHModelInner(args)
+
+        if !args.tieWordEmbeddings {
+            self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
+        }
+    }
+
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        var out = model(inputs, cache: cache)
+        if let lmHead {
+            out = lmHead(out)
+        } else {
+            out = model.embeddings.asLinear(out)
+        }
+        return out
+    }
+
+    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        let pattern = Array(configuration.hybridOverridePattern)
+        return pattern.compactMap { char -> KVCache? in
+            let blockType = NemotronHBlockType(from: char)
+            switch blockType {
+            case .mamba:
+                return MambaCache()
+            case .attention:
+                return KVCacheSimple()
+            case .mlp, .moe:
+                return nil  // No cache needed for MLP/MoE layers
+            }
+        }
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        var sanitized = weights
+
+        // Handle conv1d weight axis swap
+        for (key, value) in weights {
+            if key.contains("conv1d.weight"), value.dim(-1) != 1 {
+                sanitized[key] = value.swappedAxes(1, 2)
+            }
+        }
+
+        // Stack experts: backbone.layers.{l}.mixer.experts.{e}.{proj}.weight -> backbone.layers.{l}.mixer.switch_mlp.{proj}.weight
+        for l in 0 ..< configuration.numHiddenLayers {
+            let prefix = "backbone.layers.\(l).mixer"
+            for (m, n) in [("down_proj", "fc2"), ("up_proj", "fc1")] {
+                if sanitized["\(prefix).experts.0.\(m).weight"] != nil {
+                    let toJoin = (0 ..< configuration.nRoutedExperts).compactMap { e in
+                        sanitized.removeValue(forKey: "\(prefix).experts.\(e).\(m).weight")
+                    }
+                    if !toJoin.isEmpty {
+                        sanitized["\(prefix).switch_mlp.\(n).weight"] = MLX.stacked(toJoin)
+                    }
+                }
+            }
+        }
+
+        return sanitized
+    }
+
+    /// Predicate for casting: some parameters should stay in float32
+    public var castPredicate: ((String) -> Bool)? {
+        { key in
+            !key.contains("e_score_correction_bias") && !key.contains("A_log")
+        }
+    }
+}
+
+// MARK: - Configuration
+
+public struct NemotronHConfiguration: Codable, Sendable {
+    var modelType: String = "nemotron_h"
+    var vocabSize: Int
+    var hiddenSize: Int
+    var numHiddenLayers: Int
+    var numAttentionHeads: Int
+    var numKeyValueHeads: Int
+    var attentionBias: Bool
+    var mambaNumHeads: Int
+    var mambaHeadDim: Int
+    var mambaProjBias: Bool
+    var ssmStateSize: Int
+    var convKernel: Int
+    var nGroups: Int
+    var intermediateSize: Int
+    var moeIntermediateSize: Int
+    var moeSharedExpertIntermediateSize: Int
+    var nRoutedExperts: Int
+    var nSharedExperts: Int?
+    var numExpertsPerTok: Int
+    var hybridOverridePattern: String
+    var layerNormEpsilon: Float
+    var mlpBias: Bool
+    var useBias: Bool
+    var useConvBias: Bool
+    var tieWordEmbeddings: Bool
+    var ropeTheta: Float
+    var headDim: Int?
+    var nGroup: Int
+    var topkGroup: Int
+    var normTopkProb: Bool
+    var routedScalingFactor: Float
+
+    private var _timeStepLimit: [Float]?
+
+    var timeStepLimitMin: Float { _timeStepLimit?.first ?? 0.0 }
+    var timeStepLimitMax: Float { _timeStepLimit?.last ?? 1e30 }
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case vocabSize = "vocab_size"
+        case hiddenSize = "hidden_size"
+        case numHiddenLayers = "num_hidden_layers"
+        case numAttentionHeads = "num_attention_heads"
+        case numKeyValueHeads = "num_key_value_heads"
+        case attentionBias = "attention_bias"
+        case mambaNumHeads = "mamba_num_heads"
+        case mambaHeadDim = "mamba_head_dim"
+        case mambaProjBias = "mamba_proj_bias"
+        case ssmStateSize = "ssm_state_size"
+        case convKernel = "conv_kernel"
+        case nGroups = "n_groups"
+        case intermediateSize = "intermediate_size"
+        case moeIntermediateSize = "moe_intermediate_size"
+        case moeSharedExpertIntermediateSize = "moe_shared_expert_intermediate_size"
+        case nRoutedExperts = "n_routed_experts"
+        case nSharedExperts = "n_shared_experts"
+        case numExpertsPerTok = "num_experts_per_tok"
+        case hybridOverridePattern = "hybrid_override_pattern"
+        case layerNormEpsilon = "layer_norm_epsilon"
+        case mlpBias = "mlp_bias"
+        case useBias = "use_bias"
+        case useConvBias = "use_conv_bias"
+        case tieWordEmbeddings = "tie_word_embeddings"
+        case ropeTheta = "rope_theta"
+        case headDim = "head_dim"
+        case nGroup = "n_group"
+        case topkGroup = "topk_group"
+        case normTopkProb = "norm_topk_prob"
+        case routedScalingFactor = "routed_scaling_factor"
+        case _timeStepLimit = "time_step_limit"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "nemotron_h"
+        self.vocabSize = try container.decode(Int.self, forKey: .vocabSize)
+        self.hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
+        self.numHiddenLayers = try container.decode(Int.self, forKey: .numHiddenLayers)
+        self.numAttentionHeads = try container.decode(Int.self, forKey: .numAttentionHeads)
+        self.numKeyValueHeads = try container.decode(Int.self, forKey: .numKeyValueHeads)
+        self.attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
+        self.mambaNumHeads = try container.decode(Int.self, forKey: .mambaNumHeads)
+        self.mambaHeadDim = try container.decode(Int.self, forKey: .mambaHeadDim)
+        self.mambaProjBias = try container.decodeIfPresent(Bool.self, forKey: .mambaProjBias) ?? false
+        self.ssmStateSize = try container.decode(Int.self, forKey: .ssmStateSize)
+        self.convKernel = try container.decode(Int.self, forKey: .convKernel)
+        self.nGroups = try container.decode(Int.self, forKey: .nGroups)
+        self.intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
+        self.moeIntermediateSize = try container.decode(Int.self, forKey: .moeIntermediateSize)
+        self.moeSharedExpertIntermediateSize = try container.decode(Int.self, forKey: .moeSharedExpertIntermediateSize)
+        self.nRoutedExperts = try container.decode(Int.self, forKey: .nRoutedExperts)
+        self.nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts)
+        self.numExpertsPerTok = try container.decode(Int.self, forKey: .numExpertsPerTok)
+        self.hybridOverridePattern = try container.decode(String.self, forKey: .hybridOverridePattern)
+        self.layerNormEpsilon = try container.decodeIfPresent(Float.self, forKey: .layerNormEpsilon) ?? 1e-5
+        self.mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) ?? false
+        self.useBias = try container.decodeIfPresent(Bool.self, forKey: .useBias) ?? false
+        self.useConvBias = try container.decodeIfPresent(Bool.self, forKey: .useConvBias) ?? true
+        self.tieWordEmbeddings = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000
+        self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
+        self.nGroup = try container.decodeIfPresent(Int.self, forKey: .nGroup) ?? 1
+        self.topkGroup = try container.decodeIfPresent(Int.self, forKey: .topkGroup) ?? 1
+        self.normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? false
+        self.routedScalingFactor = try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.0
+        self._timeStepLimit = try container.decodeIfPresent([Float].self, forKey: ._timeStepLimit)
+    }
+}
+
+// MARK: - LoRA
+
+extension NemotronHModel: LoRAModel {
+    public var loraLayers: [Module] {
+        model.layers
+    }
+}
