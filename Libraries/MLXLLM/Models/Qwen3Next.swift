@@ -196,6 +196,7 @@ private func gatedDeltaOps(
 ) -> (MLXArray, MLXArray) {
     let B = q.dim(0)
     let T = q.dim(1)
+    let Hk = q.dim(2)
     let Dk = q.dim(3)
     let Hv = v.dim(2)
     let Dv = v.dim(3)
@@ -310,7 +311,6 @@ private func gatedDeltaUpdate(
     let g = computeGatedDeltaG(aLog, a, dtBias)
 
     let B = q.dim(0)
-    let Hk = q.dim(2)
     let Dk = q.dim(3)
     let Hv = v.dim(2)
     let Dv = v.dim(3)
