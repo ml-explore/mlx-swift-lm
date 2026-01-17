@@ -7,7 +7,5 @@ Common language model code.
 - [MLXEmbedders](MLXEmbedders)
 - [MLXLLM](MLXLLM)
 - [MLXLMCommon](MLXLMCommon)
-- [MLXMNIST](MLXMNIST)
 - [MLXVLM](MLXVLM)
-- [StableDiffusion](StableDiffusion)
 

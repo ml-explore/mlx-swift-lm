@@ -50,7 +50,7 @@ struct ModelLoadingBenchmarks {
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await LLMModelFactory.shared.load(hub: hub, configuration: config) { _ in }
-        GPU.clearCache()
+        Memory.clearCache()
 
         // Benchmark multiple runs
         let runs = 7
@@ -69,7 +69,7 @@ struct ModelLoadingBenchmarks {
             print("LLM load run \(i): \(String(format: "%.0f", elapsed))ms")
 
             // Clear GPU cache to ensure independent measurements
-            GPU.clearCache()
+            Memory.clearCache()
         }
 
         BenchmarkStats(times: times).printSummary(label: "LLM load")
@@ -85,7 +85,7 @@ struct ModelLoadingBenchmarks {
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await VLMModelFactory.shared.load(hub: hub, configuration: config) { _ in }
-        GPU.clearCache()
+        Memory.clearCache()
 
         // Benchmark multiple runs
         let runs = 7
@@ -104,7 +104,7 @@ struct ModelLoadingBenchmarks {
             print("VLM load run \(i): \(String(format: "%.0f", elapsed))ms")
 
             // Clear GPU cache to ensure independent measurements
-            GPU.clearCache()
+            Memory.clearCache()
         }
 
         BenchmarkStats(times: times).printSummary(label: "VLM load")
