@@ -73,13 +73,13 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen3VLMessageGenerator().generate(from: input)
         var promptTokens = try tokenizer.applyChatTemplate(messages: messages, tools: input.tools)
-
+        
         if input.images.isEmpty, input.videos.isEmpty {
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray).asType(.int8)
             return LMInput(text: .init(tokens: promptArray, mask: mask))
         }
-
+        
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
             let imageFrames = try input.images.map {
@@ -87,7 +87,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             }
             let concatenated = concatenated(imageFrames.map { $0.0 })
             processedImage = .init(pixels: concatenated, frames: imageFrames.map { $0.1 })
-
+            
             if let frames = processedImage?.frames {
                 promptTokens = try QwenVL.replacePaddingTokens(
                     in: promptTokens,
@@ -97,16 +97,32 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     tokenizer: tokenizer)
             }
         }
-
+        
         var processedVideo: LMInput.ProcessedVideo?
         if !input.videos.isEmpty {
             var accumulatedFrames: [[MLXArray]] = []
-
+            
             for video in input.videos {
-                let sequence = try await self.processVideo(video, processing: input.processing)
+                var resizedSize: CGSize = .zero
+                let sequence = try await MediaProcessing.asProcessedSequence( video, targetFPS: { _ in Double(2) })
+                { frame in
+                    let processed = MediaProcessing.apply(frame.frame, processing: input.processing)
+                    if resizedSize == .zero {
+                        let size = processed.extent.size
+                        let (height, width) = try QwenVL.targetSize(
+                            height: Int(size.height),
+                            width: Int(size.width),
+                            factor: config.patchSize * config.mergeSize,
+                            minPixels: config.minPixels,
+                            maxPixels: config.maxPixels)
+                        resizedSize = CGSize(width: width, height: height)
+                    }
+                    let finalImage = preprocess(image: processed, resizedSize: resizedSize)
+                    return VideoFrame(frame: finalImage, timeStamp: frame.timeStamp)
+                }
                 accumulatedFrames.append(sequence.frames)
             }
-
+            
             let videoFrames = try accumulatedFrames.map {
                 try QwenVL.patchify(
                     images: $0,
@@ -114,10 +130,10 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     patchSize: config.patchSize,
                     temporalPatchSize: config.temporalPatchSize)
             }
-
+            
             let concatenated = concatenated(videoFrames.map { $0.0 })
             processedVideo = .init(pixels: concatenated, frames: videoFrames.map { $0.1 })
-
+            
             if let frames = processedVideo?.frames {
                 promptTokens = try QwenVL.replacePaddingTokens(
                     in: promptTokens,
@@ -127,70 +143,14 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     tokenizer: tokenizer)
             }
         }
-
+        
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-
+        
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
             image: processedImage,
             video: processedVideo)
-    }
-    
-    private func processVideo(_ video:UserInput.Video, processing:UserInput.Processing) async  throws -> ProcessedFrames
-    {
-        switch video
-        {
-        case .frames(let frames):
-            return try await self.processFrames(frames, processing: processing)
-            
-        default:
-            return try await self.processAsset(video.asAVAsset()!, processing: processing)
-        }
-    }
-    
-    private func processFrames(_ frames:[VideoFrame], processing:UserInput.Processing) async throws -> ProcessedFrames
-    {
-        var resizedSize: CGSize = .zero
-
-        return try await MediaProcessing.asProcessedSequence( frames, targetFPS: { _ in Double(2) })
-        { frame in
-            let processed = MediaProcessing.apply(frame.frame, processing: processing)
-            if resizedSize == .zero {
-                let size = processed.extent.size
-                let (height, width) = try QwenVL.targetSize(
-                    height: Int(size.height),
-                    width: Int(size.width),
-                    factor: config.patchSize * config.mergeSize,
-                    minPixels: config.minPixels,
-                    maxPixels: config.maxPixels)
-                resizedSize = CGSize(width: width, height: height)
-            }
-            let finalImage = preprocess(image: processed, resizedSize: resizedSize)
-            return VideoFrame(frame: finalImage, timeStamp: frame.timeStamp)
-        }
-    }
-    
-    private func processAsset(_ asset:AVAsset, processing:UserInput.Processing ) async throws -> ProcessedFrames
-    {
-        var resizedSize: CGSize = .zero
-
-        return try await MediaProcessing.asProcessedSequence( asset, samplesPerSecond: 2)
-        { frame in
-            let processed = MediaProcessing.apply(frame.frame, processing: processing)
-            if resizedSize == .zero {
-                let size = processed.extent.size
-                let (height, width) = try QwenVL.targetSize(
-                    height: Int(size.height),
-                    width: Int(size.width),
-                    factor: config.patchSize * config.mergeSize,
-                    minPixels: config.minPixels,
-                    maxPixels: config.maxPixels)
-                resizedSize = CGSize(width: width, height: height)
-            }
-            let finalImage = preprocess(image: processed, resizedSize: resizedSize)
-            return VideoFrame(frame: finalImage, timeStamp: frame.timeStamp)
-        }
     }
 }
 

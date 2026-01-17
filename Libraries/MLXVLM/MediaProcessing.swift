@@ -324,16 +324,43 @@ public enum MediaProcessing {
         return ciImages
     }
 
-    static public func asProcessedSequence(
-        _ asset: AVAsset, samplesPerSecond: Int,
-        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
-    ) async throws -> ProcessedFrames {
-        return try await asProcessedSequence(
-            asset, maxFrames: Int.max, targetFPS: { _ in Double(samplesPerSecond) },
-            frameProcessing: frameProcessing)
+    private static func validateAsset(_ asset:AVAsset) async throws {
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        
+        guard !tracks.isEmpty,
+              let videoTrack = tracks.first
+        else { throw VLMError.processing("Video file has no video tracks") }
+        
+        let isDecodable = try await videoTrack.load(.isDecodable)
+        
+        if !isDecodable {
+            throw VLMError.processing("Video file is not decodable")
+        }
     }
-
-    static public func asProcessedSequence(
+    
+    static public func asProcessedSequence(_ video: UserInput.Video,
+                                           targetFPS: (CMTime) -> Double,
+                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+                                           maxFrames:Int = Int.max
+    ) async throws -> ProcessedFrames {
+     
+        switch video
+        {
+        case .avAsset(let asset):
+            try await Self.validateAsset(asset)
+            return try await Self.asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            
+        case .url(let url):
+            let asset =  AVAsset(url: url)
+            try await Self.validateAsset(asset)
+            return try await Self.asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            
+        case .frames(let videoFrames):
+            return try await Self.asProcessedSequence(videoFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+        }
+    }
+ 
+    static private func asProcessedSequence(
         _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
@@ -387,7 +414,7 @@ public enum MediaProcessing {
         )
     }
     
-    static public func asProcessedSequence(_ videoFrames:[VideoFrame],
+    static private func asProcessedSequence(_ videoFrames:[VideoFrame],
                                            targetFPS: (CMTime) -> Double,
                                            frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
@@ -412,7 +439,6 @@ public enum MediaProcessing {
         
         // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
         let timescale = duration.timescale
-        let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
         
         // Collect the frames
         var ciImages: [CIImage] = []
