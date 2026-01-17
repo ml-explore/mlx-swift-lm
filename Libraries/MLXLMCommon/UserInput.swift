@@ -57,14 +57,15 @@ public struct UserInput {
         /// Useful for decoded frames held in memory
         case frames([VideoFrame])
 
-        public func asAVAsset() -> AVAsset? {
+        @available(*, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly")
+        public func asAVAsset() -> AVAsset {
             switch self {
             case .avAsset(let asset):
                 return asset
             case .url(let url):
                 return AVAsset(url: url)
             case .frames:
-                return nil
+                fatalError("calling asAVAsset() on Video Input with VideoFames provided is unsupported and deprecated - please use MediaProcessing.asProcessedSequence() instead")
             }
         }
     }
