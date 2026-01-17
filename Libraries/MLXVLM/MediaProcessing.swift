@@ -439,12 +439,14 @@ public enum MediaProcessing {
         
         // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
         let timescale = duration.timescale
+        let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
+        let videoFramesToSample = videoFrames.filter { sampledTimes.contains($0.timeStamp) }
         
         // Collect the frames
         var ciImages: [CIImage] = []
         var timestamps: [CMTime] = []
-        
-        for videoFrame in videoFrames {
+                
+        for videoFrame in videoFramesToSample {
             let frame = try frameProcessing(.init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
             ciImages.append(frame.frame)
             timestamps.append(frame.timeStamp)
