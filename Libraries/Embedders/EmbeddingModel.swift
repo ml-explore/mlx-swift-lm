@@ -35,7 +35,9 @@ public actor ModelContainer {
     let pooler: Pooling
 
     public init(
-        model: EmbeddingModel, tokenizer: Tokenizer, pooler: Pooling = Pooling(strategy: .none)
+        model: EmbeddingModel,
+        tokenizer: Tokenizer,
+        pooler: Pooling = Pooling(strategy: .none)
     ) {
         self.model = model
         self.tokenizer = tokenizer
@@ -44,7 +46,9 @@ public actor ModelContainer {
 
     /// build the model and tokenizer without passing non-sendable data over isolation barriers
     public init(
-        hub: HubApi, modelDirectory: URL, configuration: ModelConfiguration
+        hub: HubApi,
+        modelDirectory: URL,
+        configuration: ModelConfiguration
     ) async throws {
         // Load tokenizer config and model in parallel using async let.
         async let tokenizerConfigTask = loadTokenizerConfig(
@@ -62,8 +66,7 @@ public actor ModelContainer {
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<R>(_ action: @Sendable (EmbeddingModel, Tokenizer, Pooling) throws -> R)
-        rethrows
-        -> R
+        rethrows -> R
     {
         try action(model, tokenizer, pooler)
     }
@@ -97,17 +100,23 @@ public struct EmbeddingModelOutput {
 
 public protocol EmbeddingModel: Module {
     var vocabularySize: Int { get }
+
     func callAsFunction(
-        _ inputs: MLXArray, positionIds: MLXArray?, tokenTypeIds: MLXArray?,
+        _ inputs: MLXArray,
+        positionIds: MLXArray?,
+        tokenTypeIds: MLXArray?,
         attentionMask: MLXArray?
     ) -> EmbeddingModelOutput
+
     /// Optionally preprocess the weights and modify / remove values as needed.
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
 }
 
 extension EmbeddingModel {
     func callAsFunction(
-        _ inputs: MLXArray, positionIds: MLXArray? = nil, tokenTypeIds: MLXArray? = nil,
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
         attentionMask: MLXArray? = nil
     ) -> EmbeddingModelOutput {
         return callAsFunction(
