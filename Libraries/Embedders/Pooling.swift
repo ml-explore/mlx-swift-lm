@@ -69,7 +69,9 @@ public class Pooling: Module {
     }
 
     public func callAsFunction(
-        _ inputs: EmbeddingModelOutput, mask: MLXArray? = nil, normalize: Bool = false,
+        _ inputs: EmbeddingModelOutput,
+        mask: MLXArray? = nil,
+        normalize: Bool = false,
         applyLayerNorm: Bool = false
     ) -> MLXArray {
         let _mask = mask ?? MLXArray.ones(Array(inputs.hiddenStates?.shape[0 ..< 2] ?? [0]))

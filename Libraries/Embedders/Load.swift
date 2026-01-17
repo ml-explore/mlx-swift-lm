@@ -51,7 +51,8 @@ public enum EmbedderError: LocalizedError {
 }
 
 func prepareModelDirectory(
-    hub: HubApi, configuration: ModelConfiguration,
+    hub: HubApi,
+    configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void
 ) async throws -> URL {
     do {
@@ -84,7 +85,8 @@ func prepareModelDirectory(
 
 /// Load and return the model and tokenizer
 public func load(
-    hub: HubApi = HubApi(), configuration: ModelConfiguration,
+    hub: HubApi = HubApi(),
+    configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> (EmbeddingModel, Tokenizer) {
     let modelDirectory = try await prepareModelDirectory(
@@ -164,7 +166,8 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 /// Load and return the model and tokenizer wrapped in a ``ModelContainer`` (provides
 /// thread safe access).
 public func loadModelContainer(
-    hub: HubApi = HubApi(), configuration: ModelConfiguration,
+    hub: HubApi = HubApi(),
+    configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> ModelContainer {
     let modelDirectory = try await prepareModelDirectory(

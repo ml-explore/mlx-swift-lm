@@ -34,7 +34,9 @@ public struct ModelConfiguration: Sendable {
     public let overrideTokenizer: String?
 
     public init(
-        id: String, tokenizerId: String? = nil, overrideTokenizer: String? = nil
+        id: String,
+        tokenizerId: String? = nil,
+        overrideTokenizer: String? = nil
     ) {
         self.id = .id(id)
         self.tokenizerId = tokenizerId
@@ -42,7 +44,9 @@ public struct ModelConfiguration: Sendable {
     }
 
     public init(
-        directory: URL, tokenizerId: String? = nil, overrideTokenizer: String? = nil
+        directory: URL,
+        tokenizerId: String? = nil,
+        overrideTokenizer: String? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId

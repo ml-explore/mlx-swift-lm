@@ -13,9 +13,10 @@ public func loadTokenizer(configuration: ModelConfiguration, hub: HubApi) async 
         tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
 }
 
-func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async throws -> (
-    Config, Config
-) {
+func loadTokenizerConfig(
+    configuration: ModelConfiguration,
+    hub: HubApi
+) async throws -> (Config, Config) {
     // from AutoTokenizer.from() -- this lets us override parts of the configuration
     let config: LanguageModelConfigurationFromHub
 

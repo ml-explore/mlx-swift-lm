@@ -69,7 +69,6 @@ private class TransformerBlock: Module {
     func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         let attentionOut = attention(inputs, keys: inputs, values: inputs, mask: mask)
         let preNorm = preLayerNorm(inputs + attentionOut)
-
         let mlpOut = down(gelu(up(preNorm)))
         return postLayerNorm(mlpOut + preNorm)
     }
@@ -133,11 +132,11 @@ public class BertModel: Module, EmbeddingModel {
     }
 
     public func callAsFunction(
-        _ inputs: MLXArray, positionIds: MLXArray? = nil, tokenTypeIds: MLXArray? = nil,
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
         attentionMask: MLXArray? = nil
-    )
-        -> EmbeddingModelOutput
-    {
+    ) -> EmbeddingModelOutput {
         var inp = inputs
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
