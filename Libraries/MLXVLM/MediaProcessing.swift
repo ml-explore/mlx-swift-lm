@@ -329,12 +329,12 @@ public enum MediaProcessing {
         
         guard !tracks.isEmpty,
               let videoTrack = tracks.first
-        else { throw VLMError.processing("Video file has no video tracks") }
+        else { throw VLMError.noVideoTrackFound }
         
         let isDecodable = try await videoTrack.load(.isDecodable)
         
         if !isDecodable {
-            throw VLMError.processing("Video file is not decodable")
+            throw VLMError.videoNotDecodable
         }
     }
     
