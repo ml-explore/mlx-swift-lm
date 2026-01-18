@@ -339,6 +339,16 @@ public enum MediaProcessing {
     }
     
     static public func asProcessedSequence(_ video: UserInput.Video,
+                                           samplesPerSecond: Int,
+                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+    ) async throws -> ProcessedFrames {
+        return try await asProcessedSequence(video,
+                                             targetFPS: { _ in Double(samplesPerSecond) },
+                                             frameProcessing: frameProcessing,
+                                             maxFrames: Int.max)
+    }
+    
+    static public func asProcessedSequence(_ video: UserInput.Video,
                                            targetFPS: (CMTime) -> Double,
                                            frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
                                            maxFrames:Int = Int.max
@@ -348,19 +358,37 @@ public enum MediaProcessing {
         {
         case .avAsset(let asset):
             try await Self.validateAsset(asset)
-            return try await Self.asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            return try await _asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
             
         case .url(let url):
             let asset =  AVAsset(url: url)
             try await Self.validateAsset(asset)
-            return try await Self.asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            return try await _asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
             
         case .frames(let videoFrames):
-            return try await Self.asProcessedSequence(videoFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            return try await _asProcessedSequence(videoFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
         }
     }
  
-    static private func asProcessedSequence(
+    @available(*, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly")
+    static public func asProcessedSequence(
+        _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
+    ) async throws -> ProcessedFrames {
+        return try await Self._asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+    }
+    
+    @available(*, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly")
+    static public func asProcessedSequence(
+        _ asset: AVAsset, samplesPerSecond: Int,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
+    ) async throws -> ProcessedFrames {
+        return try await _asProcessedSequence(
+            asset, maxFrames: Int.max, targetFPS: { _ in Double(samplesPerSecond) },
+            frameProcessing: frameProcessing)
+    }
+    
+    static private func _asProcessedSequence(
         _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
@@ -414,7 +442,7 @@ public enum MediaProcessing {
         )
     }
     
-    static private func asProcessedSequence(_ videoFrames:[VideoFrame],
+    static private func _asProcessedSequence(_ videoFrames:[VideoFrame],
                                            targetFPS: (CMTime) -> Double,
                                            frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
