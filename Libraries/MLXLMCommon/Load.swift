@@ -64,7 +64,8 @@ public func downloadModel(
 public func loadWeights(
     modelDirectory: URL, model: LanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
-    perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
+    forProductionInference: Bool = false
 ) throws {
     // load the weights
     var weights = [String: MLXArray]()
@@ -72,7 +73,12 @@ public func loadWeights(
         at: modelDirectory, includingPropertiesForKeys: nil)!
     for case let url as URL in enumerator {
         if url.pathExtension == "safetensors" {
-            let w = try loadArrays(url: url)
+            let w =
+                if forProductionInference {
+                    try loadArrays(url: url, stream: .cpu)
+                } else {
+                    try loadArrays(url: url)
+                }
             for (key, value) in w {
                 weights[key] = value
             }
@@ -97,9 +103,21 @@ public func loadWeights(
         }
     }
 
+    // Move weights to the default device if requested (inference mode).
+    if forProductionInference && Device.defaultDevice().deviceType == .gpu {
+        for (key, value) in weights {
+            weights[key] = add(value, 0, stream: .default)
+        }
+    }
+
     // apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
     try model.update(parameters: parameters, verify: [.all])
+
+    if forProductionInference {
+        // Ensure inference mode (some models gate fast kernels on training == false).
+        model.train(false)
+    }
 
     eval(model)
 }

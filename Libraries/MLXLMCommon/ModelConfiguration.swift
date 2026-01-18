@@ -30,6 +30,9 @@ public struct ModelConfiguration: Sendable {
     /// overrides for TokenizerModel/knownTokenizers -- useful before swift-transformers is updated
     public let overrideTokenizer: String?
 
+    /// Set true to optimize model loading for production inference.
+    public let forProductionInference: Bool
+
     /// A reasonable default prompt for the model
     public var defaultPrompt: String
 
@@ -39,6 +42,7 @@ public struct ModelConfiguration: Sendable {
     public init(
         id: String, revision: String = "main",
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
+        forProductionInference: Bool = false,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         preparePrompt: (@Sendable (String) -> String)? = nil
@@ -46,6 +50,7 @@ public struct ModelConfiguration: Sendable {
         self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
+        self.forProductionInference = forProductionInference
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
     }
@@ -53,12 +58,14 @@ public struct ModelConfiguration: Sendable {
     public init(
         directory: URL,
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
+        forProductionInference: Bool = false,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = []
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
+        self.forProductionInference = forProductionInference
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
     }

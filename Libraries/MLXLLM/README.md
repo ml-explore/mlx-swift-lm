@@ -36,6 +36,7 @@ The following models have been tried:
 - mlx-community/Phi-3.5-MoE-instruct-4bit
 - mlx-community/Phi-3.5-mini-instruct-4bit
 - mlx-community/Qwen1.5-0.5B-Chat-4bit
+- mlx-community/Qwen3-Next-80B-A3B-Instruct-MLX-4bit
 - mlx-community/SmolLM-135M-Instruct-4bit
 - mlx-community/gemma-2-2b-it-4bit
 - mlx-community/gemma-2-9b-it-4bit
@@ -55,6 +56,7 @@ Currently supported model types are:
 - PhiMoE
 - Qwen2
 - Qwen3
+- Qwen3Next
 - Starcoder2
 - MiMo
 - GLM4

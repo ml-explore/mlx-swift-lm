@@ -45,6 +45,7 @@ More advanced APIs are available for those that need them, see <doc:using-model>
 - ``PhiMoEModel``
 - ``Qwen2Model``
 - ``Qwen3Model``
+- ``Qwen3NextModel``
 - ``Starcoder2Model``
 - ``MiMoModel``
 - ``GLM4Model``
