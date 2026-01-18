@@ -261,10 +261,14 @@ private func gatedDeltaKernel(
 
     let kernel: MLXFast.MLXFastKernel?
     if isVectorized {
-        kernel = mask == nil ? GatedDeltaKernelManager.shared.kernelVec
+        kernel =
+            mask == nil
+            ? GatedDeltaKernelManager.shared.kernelVec
             : GatedDeltaKernelManager.shared.kernelVecMasked
     } else {
-        kernel = mask == nil ? GatedDeltaKernelManager.shared.kernel
+        kernel =
+            mask == nil
+            ? GatedDeltaKernelManager.shared.kernel
             : GatedDeltaKernelManager.shared.kernelMasked
     }
 
@@ -565,7 +569,8 @@ public final class Qwen3NextGatedDeltaNet: Module {
         )
 
         if let mask {
-            mixedQKV = MLX.where(expandedDimensions(mask, axis: -1), mixedQKV, MLXArray.zeros(like: mixedQKV))
+            mixedQKV = MLX.where(
+                expandedDimensions(mask, axis: -1), mixedQKV, MLXArray.zeros(like: mixedQKV))
         }
 
         let convInput = concatenated([convState, mixedQKV], axis: 1)
@@ -581,7 +586,8 @@ public final class Qwen3NextGatedDeltaNet: Module {
         let vOut = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
         let invScale = pow(Float(headKDim), -0.5)
-        qOut = (invScale * invScale)
+        qOut =
+            (invScale * invScale)
             * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: 1e-6)
         kOut = invScale * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: 1e-6)
 
@@ -683,7 +689,8 @@ final class Qwen3NextDecoderLayer: Module {
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
-        let useMoE = !args.mlpOnlyLayers.contains(layerIdx)
+        let useMoE =
+            !args.mlpOnlyLayers.contains(layerIdx)
             && args.numExperts > 0
             && (layerIdx + 1) % args.decoderSparseStep == 0
 
@@ -764,7 +771,8 @@ public class Qwen3NextModelInner: Module {
         for (i, layer) in layers.enumerated() {
             let mask = layer.isLinear ? ssmMask : nil
             let attnMask = layer.isLinear ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
-            hiddenStates = layer(hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
+            hiddenStates = layer(
+                hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
         }
 
         return norm(hiddenStates)
@@ -939,7 +947,8 @@ public struct Qwen3NextConfiguration: Codable, Sendable {
         let container: KeyedDecodingContainer<Qwen3NextConfiguration.CodingKeys> =
             try decoder.container(keyedBy: Qwen3NextConfiguration.CodingKeys.self)
 
-        self.modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "qwen3_next"
+        self.modelType =
+            try container.decodeIfPresent(String.self, forKey: .modelType) ?? "qwen3_next"
         self.hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
         self.hiddenLayers = try container.decode(Int.self, forKey: .hiddenLayers)
         self.intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
@@ -967,7 +976,8 @@ public struct Qwen3NextConfiguration: Codable, Sendable {
         self.normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? false
         self.tieWordEmbeddings =
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
-        self.attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
+        self.attentionBias =
+            try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
         self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)

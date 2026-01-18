@@ -75,6 +75,41 @@ struct ModelLoadingBenchmarks {
         BenchmarkStats(times: times).printSummary(label: "LLM load")
     }
 
+    /// Benchmark LLM model loading with forProductionInference
+    /// Tests: baseline behavior with default load path
+    @Test(.enabled(if: benchmarksEnabled))
+    func loadLLMProductionInference() async throws {
+        let modelId = "mlx-community/Qwen3-0.6B-4bit"
+        let hub = HubApi()
+        let config = ModelConfiguration(id: modelId, forProductionInference: true)
+
+        // Warm-up run: ensure model is downloaded and caches are primed
+        _ = try await LLMModelFactory.shared.load(hub: hub, configuration: config) { _ in }
+        GPU.clearCache()
+
+        // Benchmark multiple runs
+        let runs = 7
+        var times: [Double] = []
+
+        for i in 1 ... runs {
+            let start = CFAbsoluteTimeGetCurrent()
+
+            _ = try await LLMModelFactory.shared.load(
+                hub: hub,
+                configuration: config
+            ) { _ in }
+
+            let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            times.append(elapsed)
+            print("LLM load (no production) run \(i): \(String(format: "%.0f", elapsed))ms")
+
+            // Clear GPU cache to ensure independent measurements
+            GPU.clearCache()
+        }
+
+        BenchmarkStats(times: times).printSummary(label: "LLM load (no production)")
+    }
+
     /// Benchmark VLM model loading
     /// Tests: parallel tokenizer/weights, single config.json read, parallel processor config
     @Test(.enabled(if: benchmarksEnabled))

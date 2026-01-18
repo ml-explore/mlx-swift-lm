@@ -28,6 +28,16 @@ on the `ModelRegistry` types or they can be created:
 let modelConfiguration = ModelConfiguration(id: "mlx-community/llama3_8B_4bit")
 ```
 
+If you are loading a model for production inference, you can enable the
+inference-optimized loading path:
+
+```swift
+let modelConfiguration = ModelConfiguration(
+    id: "mlx-community/llama3_8B_4bit",
+    forProductionInference: true
+)
+```
+
 The flow inside the `ModelFactory` goes like this:
 
 ```swift
@@ -57,7 +67,7 @@ load models, if needed.
 - UserInput
 - LMInput
 - generate()
-    - NaiveStreamingDetokenizer
+    - StreamingDetokenizer
     - TokenIterator
 
 ## Evaluating a Model

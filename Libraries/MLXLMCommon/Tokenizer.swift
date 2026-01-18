@@ -201,12 +201,12 @@ public struct BPEStreamingDetokenizer: StreamingDetokenizer {
             }
         }
 
-        addRange(33...126)
-        addRange(161...172)
-        addRange(174...255)
+        addRange(33 ... 126)
+        addRange(161 ... 172)
+        addRange(174 ... 255)
 
         var n = 0
-        for value in 0...255 {
+        for value in 0 ... 255 {
             let byte = UInt8(value)
             if byteSet.contains(byte) {
                 if let scalar = UnicodeScalar(value) {
