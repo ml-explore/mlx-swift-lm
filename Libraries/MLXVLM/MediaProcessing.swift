@@ -8,9 +8,9 @@ import MLXLMCommon
 public typealias VideoFrame = UserInput.VideoFrame
 
 public struct ProcessedFrames {
-    let frames: [MLXArray]
-    let timestamps: [CMTime]
-    let totalDuration: CMTime
+    public let frames: [MLXArray]
+    public let timestamps: [CMTime]
+    public let totalDuration: CMTime
 }
 
 private let context = CIContext()
