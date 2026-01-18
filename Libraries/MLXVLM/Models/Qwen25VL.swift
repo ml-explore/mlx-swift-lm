@@ -1,5 +1,6 @@
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
 
+import AVFoundation
 import CoreImage
 import Foundation
 import Hub
@@ -751,10 +752,12 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         var processedVideo: LMInput.ProcessedVideo?
         if !input.videos.isEmpty {
             var videosAsImageSequences = [[MLXArray]]()
-            var resizedSize: CGSize = .zero
             for video in input.videos {
+
+                var resizedSize: CGSize = .zero
+
                 let imageSequence = try await MediaProcessing.asProcessedSequence(
-                    video.asAVAsset(), samplesPerSecond: 2
+                    video, targetFPS: { _ in Double(2) }
                 ) { frame in
                     // first apply the user requested resizing, etc. if any
                     let resizedImage = MediaProcessing.apply(
@@ -770,6 +773,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                     let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
                     return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
                 }
+
                 videosAsImageSequences.append(imageSequence.frames)
             }
             let videoPixelsAndFrames = try videosAsImageSequences.map {

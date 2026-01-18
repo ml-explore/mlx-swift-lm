@@ -6,7 +6,7 @@ import MLX
 import MLXLMCommon
 import Tokenizers
 
-public enum VLMError: LocalizedError {
+public enum VLMError: LocalizedError, Equatable {
     case imageRequired
     case maskRequired
     case singleImageAllowed
@@ -14,6 +14,8 @@ public enum VLMError: LocalizedError {
     case singleMediaTypeAllowed
     case imageProcessingFailure(String)
     case processing(String)
+    case noVideoTrackFound
+    case videoNotDecodable
 
     public var errorDescription: String? {
         switch self {
@@ -33,6 +35,10 @@ public enum VLMError: LocalizedError {
             return String(localized: "Failed to process the image: \(details)")
         case .processing(let details):
             return String(localized: "Processing error: \(details)")
+        case .noVideoTrackFound:
+            return String(localized: "Video file has no video tracks.")
+        case .videoNotDecodable:
+            return String(localized: "Video file not decodable.")
         }
     }
 }
