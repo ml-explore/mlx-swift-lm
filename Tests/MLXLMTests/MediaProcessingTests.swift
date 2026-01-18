@@ -125,5 +125,6 @@ public class MediaProcesingTests : XCTestCase
         }
         
         XCTAssert(frames.frames.count == 10)
+        XCTAssert(frames.frames[0].shape == [1, 3, 224, 224])
     }
 }
