@@ -324,61 +324,72 @@ public enum MediaProcessing {
         return ciImages
     }
 
-    private static func validateAsset(_ asset:AVAsset) async throws {
+    private static func validateAsset(_ asset: AVAsset) async throws {
         let tracks = try await asset.loadTracks(withMediaType: .video)
-        
+
         guard !tracks.isEmpty,
-              let videoTrack = tracks.first
+            let videoTrack = tracks.first
         else { throw VLMError.noVideoTrackFound }
-        
+
         let isDecodable = try await videoTrack.load(.isDecodable)
-        
+
         if !isDecodable {
             throw VLMError.videoNotDecodable
         }
     }
-    
-    static public func asProcessedSequence(_ video: UserInput.Video,
-                                           samplesPerSecond: Int,
-                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+
+    static public func asProcessedSequence(
+        _ video: UserInput.Video,
+        samplesPerSecond: Int,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
     ) async throws -> ProcessedFrames {
-        return try await asProcessedSequence(video,
-                                             targetFPS: { _ in Double(samplesPerSecond) },
-                                             frameProcessing: frameProcessing,
-                                             maxFrames: Int.max)
+        return try await asProcessedSequence(
+            video,
+            targetFPS: { _ in Double(samplesPerSecond) },
+            frameProcessing: frameProcessing,
+            maxFrames: Int.max)
     }
-    
-    static public func asProcessedSequence(_ video: UserInput.Video,
-                                           targetFPS: (CMTime) -> Double,
-                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
-                                           maxFrames:Int = Int.max
+
+    static public func asProcessedSequence(
+        _ video: UserInput.Video,
+        targetFPS: (CMTime) -> Double,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+        maxFrames: Int = Int.max
     ) async throws -> ProcessedFrames {
-     
+
         switch video
         {
         case .avAsset(let asset):
             try await Self.validateAsset(asset)
-            return try await _asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
-            
+            return try await _asProcessedSequence(
+                asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+
         case .url(let url):
-            let asset =  AVAsset(url: url)
+            let asset = AVAsset(url: url)
             try await Self.validateAsset(asset)
-            return try await _asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
-            
+            return try await _asProcessedSequence(
+                asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+
         case .frames(let videoFrames):
-            return try await _asProcessedSequence(videoFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+            return try await _asProcessedSequence(
+                videoFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
         }
     }
- 
-    @available(*, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly")
+
+    @available(
+        *, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
+    )
     static public func asProcessedSequence(
         _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
-        return try await Self._asProcessedSequence(asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
+        return try await Self._asProcessedSequence(
+            asset, maxFrames: maxFrames, targetFPS: targetFPS, frameProcessing: frameProcessing)
     }
-    
-    @available(*, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly")
+
+    @available(
+        *, deprecated, message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
+    )
     static public func asProcessedSequence(
         _ asset: AVAsset, samplesPerSecond: Int,
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
@@ -387,7 +398,7 @@ public enum MediaProcessing {
             asset, maxFrames: Int.max, targetFPS: { _ in Double(samplesPerSecond) },
             frameProcessing: frameProcessing)
     }
-    
+
     static private func _asProcessedSequence(
         _ asset: AVAsset, maxFrames: Int, targetFPS: (CMTime) -> Double,
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
@@ -441,45 +452,47 @@ public enum MediaProcessing {
             totalDuration: duration
         )
     }
-    
-    static private func _asProcessedSequence(_ videoFrames:[VideoFrame],
-                                           targetFPS: (CMTime) -> Double,
-                                           frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
+
+    static private func _asProcessedSequence(
+        _ videoFrames: [VideoFrame],
+        targetFPS: (CMTime) -> Double,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
-        
-        precondition( videoFrames.isEmpty == false )
-        
-        let startTime = videoFrames.first?.timeStamp ?? .zero // TODO:
+
+        precondition(videoFrames.isEmpty == false)
+
+        let startTime = videoFrames.first?.timeStamp ?? .zero  // TODO:
         let endTime = videoFrames.last?.timeStamp ?? .zero
         let timeRangeOfVideoFrames = CMTimeRange(start: startTime, end: endTime)
-        
+
         let duration = timeRangeOfVideoFrames.duration
-        
+
         let fps = targetFPS(duration)
         // Note: the round was not present in `asCIImageSequence`, so we may now be passing 1 more frame to Qwen depending on video duration.
         let estimatedFrames = Int(round(fps * duration.seconds))
         let desiredFrames = min(estimatedFrames, videoFrames.count)
         let finalFrameCount = max(desiredFrames, 1)
-        
+
         let sampledTimeValues = MLXArray.linspace(
             0, duration.value, count: Int(finalFrameCount)
         ).asArray(Int64.self)
-        
+
         // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
         let timescale = duration.timescale
         let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
         let videoFramesToSample = videoFrames.filter { sampledTimes.contains($0.timeStamp) }
-        
+
         // Collect the frames
         var ciImages: [CIImage] = []
         var timestamps: [CMTime] = []
-                
+
         for videoFrame in videoFramesToSample {
-            let frame = try frameProcessing(.init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
+            let frame = try frameProcessing(
+                .init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
             ciImages.append(frame.frame)
             timestamps.append(frame.timeStamp)
         }
-        
+
         let framesAsArrays = ciImages.map { $0.asMLXArray() }
         return ProcessedFrames(
             frames: framesAsArrays,

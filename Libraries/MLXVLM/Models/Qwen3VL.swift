@@ -73,13 +73,13 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen3VLMessageGenerator().generate(from: input)
         var promptTokens = try tokenizer.applyChatTemplate(messages: messages, tools: input.tools)
-        
+
         if input.images.isEmpty, input.videos.isEmpty {
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray).asType(.int8)
             return LMInput(text: .init(tokens: promptArray, mask: mask))
         }
-        
+
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
             let imageFrames = try input.images.map {
@@ -87,7 +87,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             }
             let concatenated = concatenated(imageFrames.map { $0.0 })
             processedImage = .init(pixels: concatenated, frames: imageFrames.map { $0.1 })
-            
+
             if let frames = processedImage?.frames {
                 promptTokens = try QwenVL.replacePaddingTokens(
                     in: promptTokens,
@@ -97,15 +97,16 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     tokenizer: tokenizer)
             }
         }
-        
+
         var processedVideo: LMInput.ProcessedVideo?
         if !input.videos.isEmpty {
             var accumulatedFrames: [[MLXArray]] = []
-            
+
             for video in input.videos {
                 var resizedSize: CGSize = .zero
-                let sequence = try await MediaProcessing.asProcessedSequence( video, targetFPS: { _ in Double(2) })
-                { frame in
+                let sequence = try await MediaProcessing.asProcessedSequence(
+                    video, targetFPS: { _ in Double(2) }
+                ) { frame in
                     let processed = MediaProcessing.apply(frame.frame, processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
@@ -122,7 +123,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                 }
                 accumulatedFrames.append(sequence.frames)
             }
-            
+
             let videoFrames = try accumulatedFrames.map {
                 try QwenVL.patchify(
                     images: $0,
@@ -130,10 +131,10 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     patchSize: config.patchSize,
                     temporalPatchSize: config.temporalPatchSize)
             }
-            
+
             let concatenated = concatenated(videoFrames.map { $0.0 })
             processedVideo = .init(pixels: concatenated, frames: videoFrames.map { $0.1 })
-            
+
             if let frames = processedVideo?.frames {
                 promptTokens = try QwenVL.replacePaddingTokens(
                     in: promptTokens,
@@ -143,10 +144,10 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     tokenizer: tokenizer)
             }
         }
-        
+
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        
+
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
             image: processedImage,

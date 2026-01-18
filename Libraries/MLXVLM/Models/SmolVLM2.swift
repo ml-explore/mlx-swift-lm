@@ -5,10 +5,10 @@
 //  Created by Pedro Cuenca on 20/3/25.
 //
 
+import AVFoundation
 import CoreImage
 import CoreMedia
 import Foundation
-import AVFoundation
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -308,20 +308,24 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
             let video = input.videos[0]
-                
-            let processedFrames = try await MediaProcessing.asProcessedSequence(video, targetFPS: { duration in
-                // 1 fps for duration >= 10s, apply a multiplier if smaller
-                max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1) }) { frame in
-                
-                    let processedFrame = frame.frame
-                        .toSRGB()
-                        .resampled(
-                            to: CGSize(width: fixedImageSize, height: fixedImageSize), method: CIImage.ResamplingMethod.lanczos
-                        )
-                        .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-                    return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+
+            let processedFrames = try await MediaProcessing.asProcessedSequence(
+                video,
+                targetFPS: { duration in
+                    // 1 fps for duration >= 10s, apply a multiplier if smaller
+                    max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)
                 }
-            
+            ) { frame in
+
+                let processedFrame = frame.frame
+                    .toSRGB()
+                    .resampled(
+                        to: CGSize(width: fixedImageSize, height: fixedImageSize),
+                        method: CIImage.ResamplingMethod.lanczos
+                    )
+                    .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
+                return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+            }
 
             let thwFrames = (0 ..< processedFrames.frames.count).map {
                 THW($0, Int(fixedImageSize), Int(fixedImageSize))

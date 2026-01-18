@@ -753,10 +753,12 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         if !input.videos.isEmpty {
             var videosAsImageSequences = [[MLXArray]]()
             for video in input.videos {
-                
+
                 var resizedSize: CGSize = .zero
 
-                let imageSequence = try await MediaProcessing.asProcessedSequence(video, targetFPS:  { _ in Double(2) }) { frame in
+                let imageSequence = try await MediaProcessing.asProcessedSequence(
+                    video, targetFPS: { _ in Double(2) }
+                ) { frame in
                     // first apply the user requested resizing, etc. if any
                     let resizedImage = MediaProcessing.apply(
                         frame.frame, processing: input.processing)
@@ -771,7 +773,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                     let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
                     return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
                 }
-                
+
                 videosAsImageSequences.append(imageSequence.frames)
             }
             let videoPixelsAndFrames = try videosAsImageSequences.map {
