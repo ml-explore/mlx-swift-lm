@@ -67,8 +67,25 @@ private class NemotronHRMSNormGated: Module {
         if let gate {
             states = states * silu(gate)
         }
-        // Apply RMS norm and weight
-        return MLXFast.rmsNorm(states, weight: weight, eps: eps)
+
+        // Python: x = mx.unflatten(x, axis=-1, shape=(-1, self.group_size))
+        // Reshape [..., hidden] -> [..., nGroups, groupSize] for per-group normalization
+        let shape = states.shape
+        var newShape = Array(shape.dropLast())
+        newShape.append(-1)
+        newShape.append(groupSize)
+        let unflattened = states.reshaped(newShape)
+
+        // Python: x = mx.fast.rms_norm(x, weight=None, eps=self.eps)
+        // Apply RMS norm per group WITHOUT scaling (pass ones as weight)
+        // Swift rmsNorm doesn't accept nil, so we use identity weight
+        let identityWeight = MLXArray.ones([groupSize])
+        let normed = MLXFast.rmsNorm(unflattened, weight: identityWeight, eps: eps)
+
+        // Python: return self.weight * x.flatten(-2)
+        // Flatten back to [..., hidden] and apply learned weight
+        let flattened = normed.reshaped(shape)
+        return weight * flattened
     }
 }
 
@@ -158,7 +175,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
             }
         }
 
-        var padded = concatenated([convState!, convInput], axis: 1)
+        let padded = concatenated([convState!, convInput], axis: 1)
 
         if let cache {
             let end = padded.dim(1)
@@ -246,7 +263,9 @@ private class NemotronHAttention: Module, NemotronHMixer {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: RoPE
+    // NOTE: NemotronH attention does NOT use RoPE (unlike most transformer models)
+    // The Python implementation at mlx_lm/models/nemotron_h.py lines 247-274 shows
+    // direct attention without position embeddings
 
     init(_ args: NemotronHConfiguration) {
         self.args = args
@@ -263,13 +282,6 @@ private class NemotronHAttention: Module, NemotronHMixer {
         self._wv.wrappedValue = Linear(dim, numKeyValueHeads * headDim, bias: attentionBias)
         self._wo.wrappedValue = Linear(numHeads * headDim, dim, bias: attentionBias)
 
-        self.rope = RoPE(
-            dimensions: headDim,
-            traditional: false,
-            base: args.ropeTheta,
-            scale: 1
-        )
-
         super.init()
     }
 
@@ -281,21 +293,11 @@ private class NemotronHAttention: Module, NemotronHMixer {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        var queries = wq(x)
-        var keys = wk(x)
-        var values = wv(x)
+        let queries = wq(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        let keys = wk(x).reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
+        let values = wv(x).reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
 
-        queries = queries.reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        keys = keys.reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
-        values = values.reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
-
-        if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
-        } else {
-            queries = rope(queries)
-            keys = rope(keys)
-        }
+        // No RoPE applied - NemotronH attention uses direct attention without position embeddings
 
         let output = attentionWithCacheUpdate(
             queries: queries,
@@ -608,8 +610,11 @@ private class NemotronHBackbone: Module {
     @ModuleInfo(key: "layers") var layers: [NemotronHBlock]
     @ModuleInfo(key: "norm_f") var normF: RMSNorm
 
-    let firstAttentionIndex: Int?
-    let firstMambaIndex: Int?
+    // Cache indices (into the cache list, not pattern indices)
+    // Python: fa_idx counts Mamba layers before first Attention
+    // Python: ssm_idx counts Attention layers before first Mamba
+    let firstAttentionCacheIndex: Int?
+    let firstMambaCacheIndex: Int?
 
     init(_ args: NemotronHConfiguration) {
         self.args = args
@@ -623,9 +628,32 @@ private class NemotronHBackbone: Module {
 
         self._normF.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.layerNormEpsilon)
 
-        // Find first attention and mamba layer indices for mask creation
-        self.firstAttentionIndex = pattern.firstIndex(of: "*")
-        self.firstMambaIndex = pattern.firstIndex(of: "M")
+        // Calculate cache indices (only Mamba + Attention have caches)
+        // fa_idx: count Mamba layers (M) before the first Attention layer (*)
+        var faIdx: Int? = nil
+        var mambaCount = 0
+        for char in pattern {
+            if char == "*" {
+                faIdx = mambaCount
+                break
+            } else if char == "M" {
+                mambaCount += 1
+            }
+        }
+        self.firstAttentionCacheIndex = faIdx
+
+        // ssm_idx: count Attention layers (*) before the first Mamba layer (M)
+        var ssmIdx: Int? = nil
+        var attnCount = 0
+        for char in pattern {
+            if char == "M" {
+                ssmIdx = attnCount
+                break
+            } else if char == "*" {
+                attnCount += 1
+            }
+        }
+        self.firstMambaCacheIndex = ssmIdx
 
         super.init()
     }
@@ -633,17 +661,25 @@ private class NemotronHBackbone: Module {
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var hidden = embeddings(inputs)
 
-        // Create attention mask
+        // Create attention mask using the first attention layer's cache
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let index = firstAttentionIndex,
+            guard let cacheIdx = firstAttentionCacheIndex,
                   let cache = cache,
-                  index < cache.count
+                  cacheIdx < cache.count
             else { return .none }
-            return createAttentionMask(h: hidden, cache: [cache[index]])
+            return createAttentionMask(h: hidden, cache: cache[cacheIdx])
         }()
 
-        // SSM mask is nil for now (same as GraniteMoeHybrid)
-        let ssmMask: MLXArray? = nil
+        // Create SSM mask using the first Mamba layer's cache
+        // Python: ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
+        let ssmMask: MLXArray? = {
+            guard let cacheIdx = firstMambaCacheIndex,
+                  let cache = cache,
+                  cacheIdx < cache.count,
+                  let mambaCache = cache[cacheIdx] as? MambaCache
+            else { return nil }
+            return mambaCache.makeMask(N: hidden.dim(1))
+        }()
 
         // Track which cache to use for each layer
         var cacheCounter = 0
