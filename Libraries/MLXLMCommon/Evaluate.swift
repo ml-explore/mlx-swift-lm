@@ -78,6 +78,9 @@ public struct GenerateParameters: Sendable {
     /// top p sampling
     public var topP: Float
 
+    /// top k sampling (nil implies no top-k filtering)
+    public var topK: Int?
+
     /// penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -94,7 +97,8 @@ public struct GenerateParameters: Sendable {
         topP: Float = 1.0,
         repetitionPenalty: Float? = nil,
         repetitionContextSize: Int = 20,
-        prefillStepSize: Int = 512
+        prefillStepSize: Int = 512,
+        topK: Int? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -103,6 +107,7 @@ public struct GenerateParameters: Sendable {
         self.quantizedKVStart = quantizedKVStart
         self.temperature = temperature
         self.topP = topP
+        self.topK = topK
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
         self.prefillStepSize = prefillStepSize
@@ -111,6 +116,8 @@ public struct GenerateParameters: Sendable {
     public func sampler() -> LogitSampler {
         if temperature == 0 {
             return ArgMaxSampler()
+        } else if let topK, topK > 0 {
+            return TopKTopPSampler(temperature: temperature, topP: topP, topK: topK)
         } else if topP > 0 && topP < 1 {
             return TopPSampler(temperature: temperature, topP: topP)
         } else {
@@ -137,42 +144,125 @@ public struct ArgMaxSampler: LogitSampler {
     }
 }
 
-/// Sampler that uses `topP` and `temperature` to sample the logits.
-public struct TopPSampler: LogitSampler {
+private func logSoftmax(_ logits: MLXArray) -> MLXArray {
+    logits - logits.logSumExp(axis: -1, keepDims: true)
+}
+
+private func applyTopP(_ logprobs: MLXArray, topP: Float) -> MLXArray {
+    let probs = exp(logprobs)
+    let sortedIndices = argSort(logprobs, axis: -1)
+    let sortedProbs = takeAlong(probs, sortedIndices, axis: -1)
+    let cumulativeProbs = cumsum(sortedProbs, axis: -1)
+
+    let vocabSize = sortedIndices.shape.last ?? 0
+    if vocabSize == 0 {
+        return logprobs
+    }
+
+    let inverseIndices = putAlong(
+        zeros(like: sortedIndices),
+        sortedIndices,
+        values: arange(vocabSize, dtype: sortedIndices.dtype),
+        axis: -1
+    )
+
+    let cumulativeOriginal = takeAlong(cumulativeProbs, inverseIndices, axis: -1)
+    return MLX.where(
+        cumulativeOriginal .> (1 - topP),
+        logprobs,
+        MLXArray(-Float.infinity)
+    )
+}
+
+private func applyTopK(_ logprobs: MLXArray, topK: Int) -> MLXArray {
+    let vocabSize = logprobs.shape.last ?? 0
+    if topK <= 0 || topK >= vocabSize {
+        return logprobs
+    }
+    let maskIdx = argPartition(-logprobs, kth: topK - 1, axis: -1)[.ellipsis, topK...]
+    return putAlong(logprobs, maskIdx, values: MLXArray(-Float.infinity), axis: -1)
+}
+
+/// Sampler that uses `topK`, optional `topP`, and `temperature` to sample the logits.
+public struct TopKTopPSampler: LogitSampler {
     let temp: MLXArray
-    let topP: MLXArray
+    let topPValue: Float
+    let topK: Int
     let randomState: MLXRandom.RandomState
-    let compiled: @Sendable (MLXArray) -> MLXArray
+    let compiledSample: @Sendable (MLXArray) -> MLXArray
 
-    public init(temperature: Float, topP: Float) {
-        self.temp = MLXArray(temperature)
-        self.topP = MLXArray(topP)
-        self.randomState = MLXRandom.RandomState()
-        self.compiled = compile(inputs: [randomState], outputs: [randomState], shapeless: true) {
-            logits in
-            var logits = logits
-            if logits.dtype == .bfloat16 {
-                logits = logits.asType(.float32)
+    public init(temperature: Float, topP: Float, topK: Int) {
+        let tempArray = MLXArray(temperature)
+        let state = MLXRandom.RandomState()
+        let topPValue = topP
+        let k = topK
+        let useTopP = topPValue > 0 && topPValue < 1
+        let useTopK = k > 0
+
+        self.temp = tempArray
+        self.topPValue = topPValue
+        self.topK = k
+        self.randomState = state
+        self.compiledSample = compile(inputs: [state], outputs: [state]) { logprobs in
+            var filtered = logSoftmax(logprobs)
+            if useTopP {
+                filtered = applyTopP(filtered, topP: topPValue)
             }
-
-            let probs = softmax(logits / self.temp, axis: -1)
-            let sortedIndices = argSort(probs, axis: -1)
-
-            // probs shape is [B,V] and after take it will be [1, B, V], so we squeeze it back to [B, V]
-            let sortedProbs = take(probs, sortedIndices, axis: -1).squeezed(axis: 0)
-
-            let cumulativeProbs = cumsum(sortedProbs, axis: -1)
-
-            let topProbs = MLX.where(
-                cumulativeProbs .> (1 - self.topP), sortedProbs, zeros(like: sortedProbs))
-
-            let sortedToken = MLXRandom.categorical(log(topProbs), key: self.randomState)
-            return sortedIndices.squeezed(axis: 0)[sortedToken]
+            if useTopK {
+                filtered = applyTopK(filtered, topK: k)
+            }
+            return MLXRandom.categorical(filtered * (1 / tempArray), key: state)
         }
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
-        compiled(logits)
+        var logits = logits
+        if logits.dtype == .bfloat16 {
+            logits = logits.asType(.float32)
+        }
+        if logits.shape.count == 1 {
+            logits = logits.expandedDimensions(axis: 0)
+        }
+
+        return compiledSample(logits)
+    }
+}
+
+/// Sampler that uses `topP` and `temperature` to sample the logits.
+public struct TopPSampler: LogitSampler {
+    let temp: MLXArray
+    let topPValue: Float
+    let randomState: MLXRandom.RandomState
+    let compiledSample: @Sendable (MLXArray) -> MLXArray
+
+    public init(temperature: Float, topP: Float) {
+        let tempArray = MLXArray(temperature)
+        let state = MLXRandom.RandomState()
+        let topPValue = topP
+        let useTopP = topPValue > 0 && topPValue < 1
+
+        self.temp = tempArray
+        self.topPValue = topPValue
+        self.randomState = state
+        self.compiledSample = compile(inputs: [state], outputs: [state]) { logprobs in
+            var filtered = logSoftmax(logprobs)
+            if useTopP {
+                filtered = applyTopP(filtered, topP: topPValue)
+            }
+            return MLXRandom.categorical(filtered * (1 / tempArray), key: state)
+        }
+    }
+
+    public func sample(logits: MLXArray) -> MLXArray {
+        var logits = logits
+        if logits.dtype == .bfloat16 {
+            logits = logits.asType(.float32)
+        }
+        if logits.shape.count == 1 {
+            logits = logits.expandedDimensions(axis: 0)
+        }
+
+        return compiledSample(logits)
     }
 }
 
@@ -180,19 +270,16 @@ public struct TopPSampler: LogitSampler {
 public struct CategoricalSampler: LogitSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
-    let compiled: @Sendable (MLXArray) -> MLXArray
 
     public init(temperature: Float) {
-        self.temp = MLXArray(temperature)
-        self.randomState = MLXRandom.RandomState()
-        self.compiled = compile(inputs: [randomState], outputs: [randomState], shapeless: true) {
-            logits in
-            MLXRandom.categorical(logits * (1 / self.temp), key: self.randomState)
-        }
+        let tempArray = MLXArray(temperature)
+        let state = MLXRandom.RandomState()
+        self.temp = tempArray
+        self.randomState = state
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
-        compiled(logits)
+        MLXRandom.categorical(logits * (1 / temp), key: randomState)
     }
 }
 
@@ -273,6 +360,7 @@ public struct RepetitionContext: LogitProcessor {
 /// Port of `generate_step()` from https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/utils.py
 ///
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
+
 public struct TokenIterator: Sequence, IteratorProtocol {
     let model: any LanguageModel
     var state: LMOutput.State?
@@ -284,6 +372,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 
     var tokenCount = 0
     let maxTokens: Int?
+    let cacheClearInterval: Int?
 
     // Cache quantization parameters
     let kvBits: Int?
@@ -292,6 +381,13 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 
     // Internal metrics
     var promptPrefillTime: TimeInterval = 0.0
+
+    private static func makeCacheClearInterval() -> Int? {
+        let env = ProcessInfo.processInfo.environment
+        guard let value = env["MLXLM_CLEAR_CACHE_EVERY"] else { return nil }
+        guard let parsed = Int(value) else { return nil }
+        return parsed > 0 ? parsed : nil
+    }
 
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:parameters:)``.
@@ -313,6 +409,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.cacheClearInterval = TokenIterator.makeCacheClearInterval()
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -346,6 +443,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.cacheClearInterval = TokenIterator.makeCacheClearInterval()
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -378,6 +476,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
+        self.cacheClearInterval = TokenIterator.makeCacheClearInterval()
 
         // No cache quantization for this direct initialization
         self.kvBits = nil
@@ -453,7 +552,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         asyncEval(token)
 
         tokenCount += 1
-        if tokenCount % 256 == 0 {
+        if let interval = cacheClearInterval, interval > 0, tokenCount % interval == 0 {
             Memory.clearCache()
         }
 
@@ -653,7 +752,7 @@ public func generate(
     let now = Date.timeIntervalSinceReferenceDate
     let generateTime = now - start
 
-    // TokenIterator uses `asyncEval()` to keep the pipeline full. If the caller
+    // TokenIterator uses `asyncEval()` by default to keep the pipeline full. If the caller
     // exits the program right away, those tasks will still be executing and will
     // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
     // to make sure it is complete.
@@ -835,7 +934,9 @@ public func generate(
                 })
 
         var tokenCount = 0
-        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        let detokEveryEnv = ProcessInfo.processInfo.environment["MLXLM_DETOK_EVERY"]
+        let detokEvery = max(1, Int(detokEveryEnv ?? "") ?? 1)
+        var detokenizer = makeStreamingDetokenizer(tokenizer: context.tokenizer)
         let toolCallProcessor = ToolCallProcessor()
 
         for token in iterator {
@@ -856,19 +957,29 @@ public func generate(
                 break
             }
 
+            tokenCount += 1
             detokenizer.append(token: token)
-            if let chunk = detokenizer.next() {
-                tokenCount += 1
+            if tokenCount % detokEvery == 0 {
+                if let chunk = detokenizer.next(), !chunk.isEmpty {
+                    // Process chunk through the tool call processor
+                    if let textToYield = toolCallProcessor.processChunk(chunk) {
+                        continuation.yield(.chunk(textToYield))
+                    }
 
-                // Process chunk through the tool call processor
-                if let textToYield = toolCallProcessor.processChunk(chunk) {
-                    continuation.yield(.chunk(textToYield))
+                    // Check if we have a complete tool call
+                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                        continuation.yield(.toolCall(toolCall))
+                    }
                 }
+            }
+        }
 
-                // Check if we have a complete tool call
-                if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                    continuation.yield(.toolCall(toolCall))
-                }
+        if let finalChunk = detokenizer.next(), !finalChunk.isEmpty {
+            if let textToYield = toolCallProcessor.processChunk(finalChunk) {
+                continuation.yield(.chunk(textToYield))
+            }
+            if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                continuation.yield(.toolCall(toolCall))
             }
         }
 

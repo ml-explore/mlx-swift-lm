@@ -346,7 +346,7 @@ final class Qwen3NextRMSNormGated: Module {
     }
 }
 
-final class Qwen3NextAttention: Module {
+public final class Qwen3NextAttention: Module {
     let args: Qwen3NextConfiguration
     let scale: Float
 
@@ -390,7 +390,7 @@ final class Qwen3NextAttention: Module {
         super.init()
     }
 
-    func callAsFunction(
+    public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         let B = x.dim(0)
@@ -447,7 +447,7 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     }
 }
 
-final class Qwen3NextGatedDeltaNet: Module {
+public final class Qwen3NextGatedDeltaNet: Module {
     let hiddenSize: Int
     let numVHeads: Int
     let numKHeads: Int
@@ -538,7 +538,7 @@ final class Qwen3NextGatedDeltaNet: Module {
         return (q, k, v, z, b, a)
     }
 
-    func callAsFunction(
+    public func callAsFunction(
         _ inputs: MLXArray,
         mask: MLXArray? = nil,
         cache: MambaCache? = nil
@@ -802,23 +802,23 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        let maxKVSize = parameters?.maxKVSize
         return model.layers.map { layer in
             if layer.isLinear {
                 return MambaCache()
-            } else {
-                return KVCacheSimple()
             }
+            if let maxKVSize {
+                // Preallocate the full cache in one shot to avoid repeated concatenations.
+                let cache = KVCacheSimple()
+                cache.step = maxKVSize
+                return cache
+            }
+            return KVCacheSimple()
         }
     }
 
     public func makeCache() -> [KVCache] {
-        return model.layers.map { layer in
-            if layer.isLinear {
-                return MambaCache()
-            } else {
-                return KVCacheSimple()
-            }
-        }
+        return newCache(parameters: nil)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

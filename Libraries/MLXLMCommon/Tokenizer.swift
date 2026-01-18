@@ -8,13 +8,47 @@ struct TokenizerError: Error {
     let message: String
 }
 
+private enum StreamingDetokenizerKind {
+    case naive
+    case bpe
+}
+
+private final class StreamingDetokenizerRegistry: @unchecked Sendable {
+    static let shared = StreamingDetokenizerRegistry()
+    private let lock = NSLock()
+    private var kinds: [ObjectIdentifier: StreamingDetokenizerKind] = [:]
+
+    func set(kind: StreamingDetokenizerKind, for tokenizer: Tokenizer) {
+        let key = ObjectIdentifier(tokenizer as AnyObject)
+        lock.withLock {
+            kinds[key] = kind
+        }
+    }
+
+    func kind(for tokenizer: Tokenizer) -> StreamingDetokenizerKind? {
+        let key = ObjectIdentifier(tokenizer as AnyObject)
+        return lock.withLock { kinds[key] }
+    }
+}
+
 public func loadTokenizer(configuration: ModelConfiguration, hub: HubApi) async throws -> Tokenizer
 {
-    let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
+    var (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
         configuration: configuration, hub: hub)
 
-    return try PreTrainedTokenizer(
-        tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+    if let overrideTokenizer = configuration.overrideTokenizer {
+        if var dictionary = tokenizerConfig.dictionary() {
+            dictionary["tokenizer_class"] = .init(overrideTokenizer)
+            tokenizerConfig = Config(dictionary)
+        }
+    }
+
+    let tokenizer = try AutoTokenizer.from(
+        tokenizerConfig: tokenizerConfig,
+        tokenizerData: tokenizerData
+    )
+    registerStreamingDetokenizerKind(tokenizer: tokenizer, tokenizerData: tokenizerData)
+    return tokenizer
 }
 
 public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async throws -> (
@@ -154,4 +188,111 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
         return String(new)
     }
 
+}
+
+public struct BPEStreamingDetokenizer: StreamingDetokenizer {
+    private static let byteDecoder: [UnicodeScalar: UInt8] = {
+        var byteSet = Set<UInt8>()
+        var mapping: [UnicodeScalar: UInt8] = [:]
+
+        func addRange(_ range: ClosedRange<Int>) {
+            for value in range {
+                byteSet.insert(UInt8(value))
+            }
+        }
+
+        addRange(33...126)
+        addRange(161...172)
+        addRange(174...255)
+
+        var n = 0
+        for value in 0...255 {
+            let byte = UInt8(value)
+            if byteSet.contains(byte) {
+                if let scalar = UnicodeScalar(value) {
+                    mapping[scalar] = byte
+                }
+            } else {
+                if let scalar = UnicodeScalar(256 + n) {
+                    mapping[scalar] = byte
+                }
+                n += 1
+            }
+        }
+        return mapping
+    }()
+
+    private let tokenizer: Tokenizer
+    private var tokenCache: [Int: String] = [:]
+    private var unflushed: String = ""
+    private var hasEmitted: Bool = false
+
+    public init(tokenizer: Tokenizer) {
+        self.tokenizer = tokenizer
+    }
+
+    public mutating func append(token: Int) {
+        let value: String
+        if let cached = tokenCache[token] {
+            value = cached
+        } else {
+            let resolved = tokenizer.convertIdToToken(token) ?? "!"
+            tokenCache[token] = resolved
+            value = resolved
+        }
+        unflushed.append(contentsOf: value)
+    }
+
+    public mutating func next() -> String? {
+        guard !unflushed.isEmpty else { return nil }
+        let decoded = decodeBytes(unflushed)
+        if decoded.hasSuffix("\u{fffd}") {
+            return nil
+        }
+        var output = decoded
+        if !hasEmitted, output.first == " " {
+            output.removeFirst()
+        }
+        unflushed = ""
+        if !output.isEmpty {
+            hasEmitted = true
+        }
+        return output
+    }
+
+    private func decodeBytes(_ text: String) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(text.utf8.count)
+        for scalar in text.unicodeScalars {
+            if let byte = Self.byteDecoder[scalar] {
+                bytes.append(byte)
+            } else {
+                bytes.append(contentsOf: String(scalar).utf8)
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+private func registerStreamingDetokenizerKind(tokenizer: Tokenizer, tokenizerData: Config) {
+    let kind = inferStreamingDetokenizerKind(tokenizerData)
+    StreamingDetokenizerRegistry.shared.set(kind: kind, for: tokenizer)
+}
+
+private func inferStreamingDetokenizerKind(_ tokenizerData: Config) -> StreamingDetokenizerKind {
+    let decoderType = tokenizerData["decoder"]["type"].string()
+    if decoderType == "ByteLevel" {
+        return .bpe
+    }
+    return .naive
+}
+
+func makeStreamingDetokenizer(tokenizer: Tokenizer) -> any StreamingDetokenizer {
+    let kind = StreamingDetokenizerRegistry.shared.kind(for: tokenizer) ?? .naive
+    switch kind {
+    case .bpe:
+        return BPEStreamingDetokenizer(tokenizer: tokenizer)
+    case .naive:
+        return NaiveStreamingDetokenizer(tokenizer: tokenizer)
+    }
 }
