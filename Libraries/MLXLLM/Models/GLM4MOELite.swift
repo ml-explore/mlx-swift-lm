@@ -499,8 +499,10 @@ public struct GLM4MoELiteConfiguration: Codable, Sendable {
         self.qkRopeHeadDim = try container.decode(Int.self, forKey: .qkRopeHeadDim)
         self.qkNopeHeadDim = try container.decode(Int.self, forKey: .qkNopeHeadDim)
         self.vHeadDim = try container.decode(Int.self, forKey: .vHeadDim)
-        self.topkMethod = try container.decodeIfPresent(String.self, forKey: .topkMethod) ?? "noaux_tc"
-        self.scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
+        self.topkMethod =
+            try container.decodeIfPresent(String.self, forKey: .topkMethod) ?? "noaux_tc"
+        self.scoringFunc =
+            try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
         self.normTopkProb =
             try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? true
         self.nGroup = try container.decodeIfPresent(Int.self, forKey: .nGroup) ?? 1
@@ -523,7 +525,8 @@ public struct GLM4MoELiteConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Float.self, forKey: .attentionDropout) ?? 0.0
         self.partialRotaryFactor =
             try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 1.0
-        self.tieWordEmbeddings = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
+        self.tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
             ?? false
         self.numNextnPredictLayers =
             try container.decodeIfPresent(Int.self, forKey: .numNextnPredictLayers) ?? 1
