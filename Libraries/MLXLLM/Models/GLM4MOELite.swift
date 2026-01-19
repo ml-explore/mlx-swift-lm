@@ -134,8 +134,8 @@ class GLM4MoELiteAttention: Module {
             qPe = rope(qPe, offset: cache.offset)
             kPe = rope(kPe, offset: cache.offset)
         } else {
-            qPe = rope(qPe)
-            kPe = rope(kPe)
+            qPe = rope(qPe, offset: 0)
+            kPe = rope(kPe, offset: 0)
         }
         kPe = repeated(kPe, count: numHeads, axis: 1)
 
