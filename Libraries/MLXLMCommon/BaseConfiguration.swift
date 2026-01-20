@@ -149,6 +149,9 @@ public struct BaseConfiguration: Codable, Sendable {
 
     var quantizationContainer: QuantizationContainer?
 
+    /// EOS token IDs from config.json. Can be a single Int or an array of Ints.
+    public var eosTokenIds: IntOrIntArray?
+
     @available(*, deprecated, message: "Please use perLayerQuantization instead")
     public var quantization: Quantization? {
         quantizationContainer?.quantization
@@ -161,5 +164,6 @@ public struct BaseConfiguration: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case quantizationContainer = "quantization"
+        case eosTokenIds = "eos_token_id"
     }
 }

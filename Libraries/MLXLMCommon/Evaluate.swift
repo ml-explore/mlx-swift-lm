@@ -613,11 +613,16 @@ public func generate(
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
-    let additionalEOSTokenIds = Set(
-        (context.configuration.extraEOSTokens)
-            .compactMap {
-                context.tokenizer.convertTokenToId($0)
-            })
+    // Build complete EOS token set from all sources
+    var eosTokenIds = context.configuration.eosTokenIds
+    if let tokenizerEos = context.tokenizer.eosTokenId {
+        eosTokenIds.insert(tokenizerEos)
+    }
+    for token in context.configuration.extraEOSTokens {
+        if let id = context.tokenizer.convertTokenToId(token) {
+            eosTokenIds.insert(id)
+        }
+    }
 
     var tokens = [Int]()
 
@@ -629,9 +634,7 @@ public func generate(
             start = now
         }
 
-        if token == context.tokenizer.unknownTokenId || token == context.tokenizer.eosTokenId
-            || additionalEOSTokenIds.contains(token)
-        {
+        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
             break
         }
         tokens.append(token)
@@ -706,11 +709,16 @@ public func generate(
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
-    let additionalEOSTokenIds = Set(
-        (context.configuration.extraEOSTokens)
-            .compactMap {
-                context.tokenizer.convertTokenToId($0)
-            })
+    // Build complete EOS token set from all sources
+    var eosTokenIds = context.configuration.eosTokenIds
+    if let tokenizerEos = context.tokenizer.eosTokenId {
+        eosTokenIds.insert(tokenizerEos)
+    }
+    for token in context.configuration.extraEOSTokens {
+        if let id = context.tokenizer.convertTokenToId(token) {
+            eosTokenIds.insert(id)
+        }
+    }
 
     var tokenCount = 0
 
@@ -723,9 +731,7 @@ public func generate(
         }
 
         // Check for end-of-sequence tokens
-        if token == context.tokenizer.unknownTokenId || token == context.tokenizer.eosTokenId
-            || additionalEOSTokenIds.contains(token)
-        {
+        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
             break
         }
 
@@ -819,11 +825,16 @@ public func generate(
         var start = Date.timeIntervalSinceReferenceDate
         var promptTime: TimeInterval = 0
 
-        let additionalEOSTokenIds = Set(
-            context.configuration.extraEOSTokens
-                .compactMap {
-                    context.tokenizer.convertTokenToId($0)
-                })
+        // Build complete EOS token set from all sources
+        var eosTokenIds = context.configuration.eosTokenIds
+        if let tokenizerEos = context.tokenizer.eosTokenId {
+            eosTokenIds.insert(tokenizerEos)
+        }
+        for token in context.configuration.extraEOSTokens {
+            if let id = context.tokenizer.convertTokenToId(token) {
+                eosTokenIds.insert(id)
+            }
+        }
 
         var tokenCount = 0
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
@@ -840,10 +851,7 @@ public func generate(
                 start = now
             }
 
-            if token == context.tokenizer.unknownTokenId
-                || token == context.tokenizer.eosTokenId
-                || additionalEOSTokenIds.contains(token)
-            {
+            if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
                 break
             }
 

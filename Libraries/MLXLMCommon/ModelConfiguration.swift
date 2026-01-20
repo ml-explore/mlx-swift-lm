@@ -33,14 +33,18 @@ public struct ModelConfiguration: Sendable {
     /// A reasonable default prompt for the model
     public var defaultPrompt: String
 
-    /// Additional tokens to use for end of string
+    /// Additional tokens to use for end of string (specified as strings, converted to IDs at runtime)
     public var extraEOSTokens: Set<String>
+
+    /// EOS token IDs loaded from config.json/generation_config.json
+    public var eosTokenIds: Set<Int> = []
 
     public init(
         id: String, revision: String = "main",
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
+        eosTokenIds: Set<Int> = [],
         preparePrompt: (@Sendable (String) -> String)? = nil
     ) {
         self.id = .id(id, revision: revision)
@@ -48,19 +52,22 @@ public struct ModelConfiguration: Sendable {
         self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.eosTokenIds = eosTokenIds
     }
 
     public init(
         directory: URL,
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
-        extraEOSTokens: Set<String> = []
+        extraEOSTokens: Set<String> = [],
+        eosTokenIds: Set<Int> = []
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.eosTokenIds = eosTokenIds
     }
 
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
