@@ -44,7 +44,6 @@ public struct ModelConfiguration: Sendable {
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
-        eosTokenIds: Set<Int> = [],
         preparePrompt: (@Sendable (String) -> String)? = nil
     ) {
         self.id = .id(id, revision: revision)
@@ -52,7 +51,6 @@ public struct ModelConfiguration: Sendable {
         self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
-        self.eosTokenIds = eosTokenIds
     }
 
     public init(
