@@ -70,6 +70,15 @@ load models, if needed.
     - StreamingDetokenizer
     - TokenIterator
 
+## Wired Memory Limit (GPU)
+
+When running on the GPU, generation is wrapped in `Memory.withWiredLimit(...)`
+using `GPU.deviceInfo().maxRecommendedWorkingSetSize` for the duration of the
+generation loop. This mirrors MLX's Python behavior and helps keep allocations
+resident during long prefill/decode sequences. The wired limit is restored when
+generation completes. Because the wired limit is a global setting, avoid
+concurrent generations that require different limits.
+
 ## Evaluating a Model
 
 Once a model is loaded you can evaluate a prompt or series of

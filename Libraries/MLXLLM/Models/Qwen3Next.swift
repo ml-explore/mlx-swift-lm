@@ -12,6 +12,62 @@ import MLXNN
 
 // MARK: - Gated Delta Kernel Helpers
 
+// MARK: - Sigmoid Multiply Kernel Helpers
+
+private func makeSigmoidMulKernel() -> MLXFast.MLXFastKernel? {
+    let source = """
+        uint idx = thread_position_in_grid.x;
+        if (idx >= N) { return; }
+        float x_f = static_cast<float>(x[idx]);
+        float g_f = static_cast<float>(gate[idx]);
+        float y = x_f / (1.0f + fast::exp(-g_f));
+        out[idx] = static_cast<T>(y);
+        """
+
+    return MLXFast.metalKernel(
+        name: "sigmoid_mul",
+        inputNames: ["x", "gate"],
+        outputNames: ["out"],
+        source: source
+    )
+}
+
+private final class SigmoidMulKernelManager {
+    static let shared = SigmoidMulKernelManager()
+
+    let kernel: MLXFast.MLXFastKernel?
+
+    private init() {
+        kernel = makeSigmoidMulKernel()
+    }
+}
+
+private func sigmoidMultiply(_ x: MLXArray, _ gate: MLXArray) -> MLXArray {
+    guard x.shape == gate.shape else {
+        return x * sigmoid(gate)
+    }
+    guard let kernel = SigmoidMulKernelManager.shared.kernel else {
+        return x * sigmoid(gate)
+    }
+    let count = x.size
+    if count == 0 {
+        return x
+    }
+    let threads = min(256, count)
+    let outputs = kernel(
+        [x, gate],
+        template: [
+            ("T", x.dtype),
+            ("N", count),
+        ],
+        grid: (count, 1, 1),
+        threadGroup: (threads, 1, 1),
+        outputShapes: [x.shape],
+        outputDTypes: [x.dtype]
+    )
+    return outputs[0]
+}
+
 private func computeGatedDeltaG(_ aLog: MLXArray, _ a: MLXArray, _ dtBias: MLXArray) -> MLXArray {
     let decay = exp(-exp(aLog.asType(.float32)) * softplus(a + dtBias))
     return decay.asType(aLog.dtype)
@@ -431,7 +487,7 @@ public final class Qwen3NextAttention: Module {
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
-        return oProj(output * sigmoid(gate))
+        return oProj(sigmoidMultiply(output, gate))
     }
 }
 
@@ -816,7 +872,7 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
                 return MambaCache()
             }
             if let maxKVSize {
-                // Preallocate the full cache in one shot to avoid repeated concatenations.
+                // Preallocate full KV buffers up front without sliding-window semantics.
                 let cache = KVCacheSimple()
                 cache.step = maxKVSize
                 return cache

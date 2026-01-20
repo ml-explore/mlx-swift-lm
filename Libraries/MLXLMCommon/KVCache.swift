@@ -1565,18 +1565,30 @@ public func maybeQuantizeKVCache(
     kvGroupSize: Int = 64,
     quantizedKVStart: Int = 0
 ) {
-    guard let kvBits = kvBits,
-        !cache.isEmpty,
-        !(cache[0] is QuantizedKVCache),
-        cache[0].offset > quantizedKVStart
-    else {
+    guard let kvBits = kvBits, !cache.isEmpty else {
         return
     }
+
+    // Quantize when any KV cache has progressed past the threshold.
+    let shouldQuantize = cache.contains { kv in
+        if kv is QuantizedKVCache { return false }
+        if let simple = kv as? KVCacheSimple {
+            return simple.offset > quantizedKVStart
+        }
+        if let rotating = kv as? RotatingKVCache {
+            return rotating.offset > quantizedKVStart
+        }
+        return false
+    }
+    guard shouldQuantize else { return }
 
     for i in 0 ..< cache.count {
         // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
             cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+        } else if let rotatingCache = cache[i] as? RotatingKVCache {
+            // RotatingKVCache quantization is not implemented; skip for now.
+            _ = rotatingCache
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
         // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }

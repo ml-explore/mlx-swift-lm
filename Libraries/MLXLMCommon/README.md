@@ -88,6 +88,21 @@ load models, if needed.
     - NaiveStreamingDetokenizer
     - TokenIterator
 
+## Wired Memory Limit (GPU)
+
+When running on the GPU, MLXLMCommon wraps generation in a temporary wired memory
+limit using `Memory.withWiredLimit(...)`. The limit is set to
+`GPU.deviceInfo().maxRecommendedWorkingSetSize` for the duration of generation,
+then restored afterward. This matches the behavior used by MLX's Python tooling
+and helps keep allocations resident during long prefill/decode loops.
+
+Notes:
+- This wrapper is applied automatically inside `generate(...)` and
+  `TokenIterator` creation paths. You do not need to add your own wrapper in
+  application code unless you want to override the limit.
+- The wired limit is a global setting, so avoid running multiple generations
+  concurrently with different limits.
+
 ## Using a Model
 
 Once a model is loaded you can evaluate a prompt or series of
@@ -146,4 +161,3 @@ The stream is stopped after we hit a maximum number of tokens:
     }
 }
 ```
-
