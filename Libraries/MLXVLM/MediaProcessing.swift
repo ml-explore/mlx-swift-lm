@@ -346,15 +346,16 @@ public enum MediaProcessing {
         return try await asProcessedSequence(
             video,
             targetFPS: { _ in Double(samplesPerSecond) },
-            frameProcessing: frameProcessing,
-            maxFrames: Int.max)
+            maxFrames: Int.max,
+            frameProcessing: frameProcessing
+        )
     }
 
     static public func asProcessedSequence(
         _ video: UserInput.Video,
         targetFPS: (CMTime) -> Double,
-        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
-        maxFrames: Int = Int.max
+        maxFrames: Int = Int.max,
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
 
         switch video
