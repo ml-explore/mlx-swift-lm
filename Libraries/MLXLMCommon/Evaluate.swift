@@ -763,6 +763,9 @@ public func generate(
 ///   - cache: optional ``KVCache``
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context, including the model itself and associated tokenizer.
+///   - wiredMemory: Optional wired memory policy. This is opt-in and only applied on GPU devices
+///     that support wired memory control (macOS 15 / iOS 18 / tvOS 18 or newer). Defaults to
+///     ``WiredMemoryLimit/default``.
 /// - Returns: An `AsyncStream` that emits `Generation` values, including generated text chunks (`.chunk`),
 ///   tool calls (`.toolCall`), and completion information (`.info`).
 /// - Throws: An error if the `TokenIterator` initialization fails due to invalid input or model configuration.
@@ -792,12 +795,13 @@ public func generate(
 /// }
 /// ```
 public func generate(
-    input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext
+    input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
+    wiredMemory: WiredMemoryLimit = .default
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     return generate(
-        input: input, context: context, iterator: iterator)
+        input: input, context: context, iterator: iterator, wiredMemory: wiredMemory)
 }
 
 /// Low-level token generation using a ``TokenIterator``, returning an `AsyncStream<Generation>`.
@@ -809,76 +813,78 @@ public func generate(
 /// - Returns: An `AsyncStream` that emits `Generation` values
 public func generate(
     input: LMInput, context: ModelContext,
-    iterator: TokenIterator
+    iterator: TokenIterator, wiredMemory: WiredMemoryLimit = .default
 ) -> AsyncStream<Generation> {
 
     let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
-        var start = Date.timeIntervalSinceReferenceDate
-        var promptTime: TimeInterval = 0
+        await wiredMemory.withWiredMemory {
+            var start = Date.timeIntervalSinceReferenceDate
+            var promptTime: TimeInterval = 0
 
-        let additionalEOSTokenIds = Set(
-            context.configuration.extraEOSTokens
-                .compactMap {
-                    context.tokenizer.convertTokenToId($0)
-                })
+            let additionalEOSTokenIds = Set(
+                context.configuration.extraEOSTokens
+                    .compactMap {
+                        context.tokenizer.convertTokenToId($0)
+                    })
 
-        var tokenCount = 0
-        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
-        let toolCallProcessor = ToolCallProcessor()
+            var tokenCount = 0
+            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+            let toolCallProcessor = ToolCallProcessor()
 
-        for token in iterator {
+            for token in iterator {
 
-            // Check for cancellation on every loop iteration.
-            if Task.isCancelled { break }
+                // Check for cancellation on every loop iteration.
+                if Task.isCancelled { break }
 
-            if promptTime == 0 {
-                let now = Date.timeIntervalSinceReferenceDate
-                promptTime = now - start
-                start = now
-            }
-
-            if token == context.tokenizer.unknownTokenId
-                || token == context.tokenizer.eosTokenId
-                || additionalEOSTokenIds.contains(token)
-            {
-                break
-            }
-
-            detokenizer.append(token: token)
-            if let chunk = detokenizer.next() {
-                tokenCount += 1
-
-                // Process chunk through the tool call processor
-                if let textToYield = toolCallProcessor.processChunk(chunk) {
-                    continuation.yield(.chunk(textToYield))
+                if promptTime == 0 {
+                    let now = Date.timeIntervalSinceReferenceDate
+                    promptTime = now - start
+                    start = now
                 }
 
-                // Check if we have a complete tool call
-                if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                    continuation.yield(.toolCall(toolCall))
+                if token == context.tokenizer.unknownTokenId
+                    || token == context.tokenizer.eosTokenId
+                    || additionalEOSTokenIds.contains(token)
+                {
+                    break
+                }
+
+                detokenizer.append(token: token)
+                if let chunk = detokenizer.next() {
+                    tokenCount += 1
+
+                    // Process chunk through the tool call processor
+                    if let textToYield = toolCallProcessor.processChunk(chunk) {
+                        continuation.yield(.chunk(textToYield))
+                    }
+
+                    // Check if we have a complete tool call
+                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                        continuation.yield(.toolCall(toolCall))
+                    }
                 }
             }
+
+            let now = Date.timeIntervalSinceReferenceDate
+            let generateTime = now - start
+
+            let info = GenerateCompletionInfo(
+                promptTokenCount: input.text.tokens.size,
+                generationTokenCount: tokenCount,
+                promptTime: promptTime + iterator.promptPrefillTime,
+                generationTime: generateTime
+            )
+            continuation.yield(.info(info))
+
+            // Synchronize with the stream to ensure tasks are completed
+            Stream().synchronize()
+
+            // Finalize the stream
+            continuation.finish()
         }
-
-        let now = Date.timeIntervalSinceReferenceDate
-        let generateTime = now - start
-
-        let info = GenerateCompletionInfo(
-            promptTokenCount: input.text.tokens.size,
-            generationTokenCount: tokenCount,
-            promptTime: promptTime + iterator.promptPrefillTime,
-            generationTime: generateTime
-        )
-        continuation.yield(.info(info))
-
-        // Synchronize with the stream to ensure tasks are completed
-        Stream().synchronize()
-
-        // Finalize the stream
-        continuation.finish()
     }
 
     // When the consumer cancels (or ends) the stream, cancel our underlying task.
