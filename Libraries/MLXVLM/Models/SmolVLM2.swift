@@ -5,7 +5,6 @@
 //  Created by Pedro Cuenca on 20/3/25.
 //
 
-import AVFoundation
 import CoreImage
 import CoreMedia
 import Foundation

@@ -1,6 +1,5 @@
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
 
-import AVFoundation
 import CoreImage
 import Foundation
 import Hub

@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import AVFoundation
 import CoreImage
 import Foundation
 import Hub
