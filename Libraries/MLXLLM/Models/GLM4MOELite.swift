@@ -216,48 +216,6 @@ class GLM4MoELiteAttention: Module {
             return oProj(output)
         }
 
-        let useFastPrefill = L > 1 && (cache == nil || cache?.offset == 0)
-        if useFastPrefill {
-            var kv = kvBProj(kvLatent)
-            kv = kv.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
-
-            let splitKv = split(kv, indices: [qkNopeHeadDim], axis: -1)
-            let kNope = splitKv[0]
-            let values = splitKv[1]
-
-            if let cache {
-                qPe = rope(qPe, offset: cache.offset)
-                kPe = rope(kPe, offset: cache.offset)
-            } else {
-                qPe = rope(qPe, offset: 0)
-                kPe = rope(kPe, offset: 0)
-            }
-
-            let kPeFull = repeated(kPe, count: numHeads, axis: 1)
-            let keys = concatenated([kNope, kPeFull], axis: -1)
-            let queries = concatenated([qNope, qPe], axis: -1)
-
-            var output = MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
-                scale: scale,
-                mask: mask
-            )
-
-            if let cache {
-                let kvLatentExpanded = expandedDimensions(kvLatent, axis: 1)
-                let keysLatent = concatenated([kvLatentExpanded, kPe], axis: -1)
-                if let quantizedCache = cache as? QuantizedKVCacheProtocol {
-                    _ = quantizedCache.updateQuantized(keys: keysLatent, values: kvLatentExpanded)
-                } else {
-                    _ = cache.update(keys: keysLatent, values: kvLatentExpanded)
-                }
-            }
-
-            output = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)
-            return oProj(output)
-        }
         let kvLatentExpanded = expandedDimensions(kvLatent, axis: 1)
         let (wk, wv, wkScales, wkBiases, wvScales, wvBiases) = splitKvBProjIfNeeded()
 
