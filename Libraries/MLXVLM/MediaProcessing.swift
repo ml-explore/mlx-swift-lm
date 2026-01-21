@@ -462,7 +462,7 @@ public enum MediaProcessing {
 
         precondition(videoFrames.isEmpty == false)
 
-        let startTime = videoFrames.first?.timeStamp ?? .zero  // TODO:
+        let startTime = videoFrames.first?.timeStamp ?? .zero
         let endTime = videoFrames.last?.timeStamp ?? .zero
         let timeRangeOfVideoFrames = CMTimeRange(start: startTime, end: endTime)
 
@@ -480,18 +480,36 @@ public enum MediaProcessing {
 
         // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
         let timescale = duration.timescale
-        let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
-        let videoFramesToSample = videoFrames.filter { sampledTimes.contains($0.timeStamp) }
 
         // Collect the frames
         var ciImages: [CIImage] = []
         var timestamps: [CMTime] = []
 
-        for videoFrame in videoFramesToSample {
-            let frame = try frameProcessing(
-                .init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
-            ciImages.append(frame.frame)
-            timestamps.append(frame.timeStamp)
+        // See https://github.com/ml-explore/mlx-swift-lm/pull/64#discussion_r2713532157
+        // for rationalle for the follwing timing code
+
+        var frameIndex = videoFrames.startIndex
+        for value in sampledTimeValues {
+            let targetTime = CMTime(value: value, timescale: timescale)
+
+            // find the last frame <= the targetTime
+            var targetIndex: Int?
+            while frameIndex < videoFrames.endIndex {
+                if videoFrames[frameIndex].timeStamp > targetTime {
+                    break
+                } else {
+                    targetIndex = frameIndex
+                    frameIndex += 1
+                }
+            }
+
+            if let targetIndex {
+                let videoFrame = videoFrames[targetIndex]
+                let frame = try frameProcessing(
+                    .init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
+                ciImages.append(frame.frame)
+                timestamps.append(frame.timeStamp)
+            }
         }
 
         let framesAsArrays = ciImages.map { $0.asMLXArray() }
