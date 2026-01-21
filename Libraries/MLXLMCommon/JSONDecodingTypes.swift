@@ -2,6 +2,50 @@
 
 import Foundation
 
+// MARK: - IntOrIntArray
+
+/// Decodes a JSON value that can be either a single Int or an array of Ints.
+/// Used for fields like `eos_token_id` which may appear as `128001` or `[128001, 128008]`.
+public struct IntOrIntArray: Codable, Sendable, Equatable {
+    public let values: [Int]
+
+    public init(_ values: [Int]) {
+        self.values = values
+    }
+
+    public init(_ value: Int) {
+        self.values = [value]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let array = try? container.decode([Int].self) {
+            self.values = array
+        } else if let single = try? container.decode(Int.self) {
+            self.values = [single]
+        } else {
+            throw DecodingError.typeMismatch(
+                IntOrIntArray.self,
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Expected Int or [Int]"
+                )
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        if values.count == 1 {
+            try container.encode(values[0])
+        } else {
+            try container.encode(values)
+        }
+    }
+}
+
+// MARK: - StringOrNumber
+
 /// Representation of a heterogenous type in a JSON configuration file.
 ///
 /// This can be: a string, a numeric value or an array of numeric values.

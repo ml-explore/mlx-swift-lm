@@ -296,6 +296,21 @@ public final class VLMModelFactory: ModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // Load EOS token IDs from config.json, with optional override from generation_config.json
+        var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+        let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
+        if let generationData = try? Data(contentsOf: generationConfigURL),
+            let generationConfig = try? JSONDecoder().decode(
+                GenerationConfigFile.self, from: generationData),
+            let genEosIds = generationConfig.eosTokenIds?.values
+        {
+            eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
+        }
+
+        // Create mutable configuration with loaded EOS token IDs
+        var mutableConfiguration = configuration
+        mutableConfiguration.eosTokenIds = eosTokenIds
+
         // Load tokenizer, processor config, and weights in parallel using async let.
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
@@ -335,7 +350,8 @@ public final class VLMModelFactory: ModelFactory {
             processorType: processorType, tokenizer: tokenizer)
 
         return .init(
-            configuration: configuration, model: model, processor: processor, tokenizer: tokenizer)
+            configuration: mutableConfiguration, model: model, processor: processor,
+            tokenizer: tokenizer)
     }
 
 }
