@@ -872,11 +872,6 @@ public func generateTask(
                 eosTokenIds.insert(id)
             }
         }
-        let additionalEOSTokenIds = Set(
-            modelConfiguration.extraEOSTokens
-                .compactMap {
-                    tokenizer.convertTokenToId($0)
-                })
 
         var tokenCount = 0
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
