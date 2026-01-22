@@ -35,6 +35,22 @@ public enum WiredMemoryLimit: Sendable, Equatable {
     ///
     /// - Note: This affects a global MLX setting, so concurrent callers should avoid
     ///   changing the limit at the same time.
+    public func withWiredMemory<R>(_ body: () throws -> R) rethrows -> R {
+        guard Device.defaultDevice().deviceType == .gpu else {
+            return try body()
+        }
+
+        guard let limit = resolvedLimitBytes() else {
+            return try body()
+        }
+
+        return try Memory.withWiredLimit(limit, body)
+    }
+
+    /// Execute a block while applying the requested wired memory limit, if supported.
+    ///
+    /// - Note: This affects a global MLX setting, so concurrent callers should avoid
+    ///   changing the limit at the same time.
     public func withWiredMemory<R>(_ body: () async throws -> R) async rethrows -> R {
         guard Device.defaultDevice().deviceType == .gpu else {
             return try await body()

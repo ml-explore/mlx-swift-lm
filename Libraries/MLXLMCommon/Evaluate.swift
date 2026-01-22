@@ -547,22 +547,26 @@ public func generate(
     promptTokens: [Int], parameters: GenerateParameters, model: any LanguageModel,
     tokenizer: Tokenizer,
     extraEOSTokens: Set<String>? = nil,
+    wiredMemory: WiredMemoryLimit = .default,
     didGenerate: ([Int]) -> GenerateDisposition
 ) throws -> GenerateResult {
-    let tokens = MLXArray(promptTokens)
-    let iterator = try TokenIterator(
-        prompt: tokens, model: model, parameters: parameters)
+    return try wiredMemory.withWiredMemory {
+        let tokens = MLXArray(promptTokens)
+        let iterator = try TokenIterator(
+            prompt: tokens, model: model, parameters: parameters)
 
-    // this is a compatibility cover -- create the required values
-    // for the iteration
-    let input = LMInput(tokens: tokens)
-    let configuration = ModelConfiguration(id: "stand-in", extraEOSTokens: extraEOSTokens ?? [])
-    let context = ModelContext(
-        configuration: configuration, model: model, processor: StandInUserInputProcessor(),
-        tokenizer: tokenizer)
+        // this is a compatibility cover -- create the required values
+        // for the iteration
+        let input = LMInput(tokens: tokens)
+        let configuration = ModelConfiguration(id: "stand-in", extraEOSTokens: extraEOSTokens ?? [])
+        let context = ModelContext(
+            configuration: configuration, model: model, processor: StandInUserInputProcessor(),
+            tokenizer: tokenizer)
 
-    return generate(
-        input: input, context: context, iterator: iterator, didGenerate: didGenerate)
+        return generate(
+            input: input, context: context, iterator: iterator, wiredMemory: wiredMemory,
+            didGenerate: didGenerate)
+    }
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
@@ -582,12 +586,16 @@ public func generate(
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
+    wiredMemory: WiredMemoryLimit = .default,
     didGenerate: ([Int]) -> GenerateDisposition
 ) throws -> GenerateResult {
-    let iterator = try TokenIterator(
-        input: input, model: context.model, parameters: parameters)
-    return generate(
-        input: input, context: context, iterator: iterator, didGenerate: didGenerate)
+    return try wiredMemory.withWiredMemory {
+        let iterator = try TokenIterator(
+            input: input, model: context.model, parameters: parameters)
+        return generate(
+            input: input, context: context, iterator: iterator, wiredMemory: wiredMemory,
+            didGenerate: didGenerate)
+    }
 }
 
 /// Low-level token generation using a ``TokenIterator``.
@@ -608,57 +616,60 @@ public func generate(
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
+    wiredMemory: WiredMemoryLimit = .default,
     didGenerate: ([Int]) -> GenerateDisposition
 ) -> GenerateResult {
-    var start = Date.timeIntervalSinceReferenceDate
-    var promptTime: TimeInterval = 0
+    wiredMemory.withWiredMemory {
+        var start = Date.timeIntervalSinceReferenceDate
+        var promptTime: TimeInterval = 0
 
-    // Build complete EOS token set from all sources
-    var eosTokenIds = context.configuration.eosTokenIds
-    if let tokenizerEos = context.tokenizer.eosTokenId {
-        eosTokenIds.insert(tokenizerEos)
+        // Build complete EOS token set from all sources
+        var eosTokenIds = context.configuration.eosTokenIds
+        if let tokenizerEos = context.tokenizer.eosTokenId {
+            eosTokenIds.insert(tokenizerEos)
+        }
+        for token in context.configuration.extraEOSTokens {
+            if let id = context.tokenizer.convertTokenToId(token) {
+                eosTokenIds.insert(id)
+            }
+        }
+
+        var tokens = [Int]()
+
+        for token in iterator {
+            // compute the timing for the prompt
+            if tokens.isEmpty {
+                let now = Date.timeIntervalSinceReferenceDate
+                promptTime = now - start
+                start = now
+            }
+
+            if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
+                break
+            }
+            tokens.append(token)
+
+            if didGenerate(tokens) == .stop {
+                break
+            }
+        }
+
+        let now = Date.timeIntervalSinceReferenceDate
+        let generateTime = now - start
+
+        // TokenIterator uses `asyncEval()` to keep the pipeline full. If the caller
+        // exits the program right away, those tasks will still be executing and will
+        // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
+        // to make sure it is complete.
+        Stream().synchronize()
+
+        return GenerateResult(
+            inputText: input.text, tokens: tokens,
+            output: context.tokenizer.decode(tokens: tokens),
+            promptTime: promptTime + iterator.promptPrefillTime,
+            generateTime: generateTime
+        )
     }
-    for token in context.configuration.extraEOSTokens {
-        if let id = context.tokenizer.convertTokenToId(token) {
-            eosTokenIds.insert(id)
-        }
-    }
-
-    var tokens = [Int]()
-
-    for token in iterator {
-        // compute the timing for the prompt
-        if tokens.isEmpty {
-            let now = Date.timeIntervalSinceReferenceDate
-            promptTime = now - start
-            start = now
-        }
-
-        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
-            break
-        }
-        tokens.append(token)
-
-        if didGenerate(tokens) == .stop {
-            break
-        }
-    }
-
-    let now = Date.timeIntervalSinceReferenceDate
-    let generateTime = now - start
-
-    // TokenIterator uses `asyncEval()` to keep the pipeline full. If the caller
-    // exits the program right away, those tasks will still be executing and will
-    // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
-    // to make sure it is complete.
-    Stream().synchronize()
-
-    return GenerateResult(
-        inputText: input.text, tokens: tokens,
-        output: context.tokenizer.decode(tokens: tokens),
-        promptTime: promptTime + iterator.promptPrefillTime,
-        generateTime: generateTime
-    )
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
@@ -678,12 +689,16 @@ public func generate(
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
+    wiredMemory: WiredMemoryLimit = .default,
     didGenerate: (Int) -> GenerateDisposition
 ) throws -> GenerateCompletionInfo {
-    let iterator = try TokenIterator(
-        input: input, model: context.model, parameters: parameters)
-    return generate(
-        input: input, context: context, iterator: iterator, didGenerate: didGenerate)
+    return try wiredMemory.withWiredMemory {
+        let iterator = try TokenIterator(
+            input: input, model: context.model, parameters: parameters)
+        return generate(
+            input: input, context: context, iterator: iterator, wiredMemory: wiredMemory,
+            didGenerate: didGenerate)
+    }
 }
 
 /// Low-level token generation using a ``TokenIterator``.
@@ -704,57 +719,60 @@ public func generate(
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
+    wiredMemory: WiredMemoryLimit = .default,
     didGenerate: (Int) -> GenerateDisposition
 ) -> GenerateCompletionInfo {
-    var start = Date.timeIntervalSinceReferenceDate
-    var promptTime: TimeInterval = 0
+    wiredMemory.withWiredMemory {
+        var start = Date.timeIntervalSinceReferenceDate
+        var promptTime: TimeInterval = 0
 
-    // Build complete EOS token set from all sources
-    var eosTokenIds = context.configuration.eosTokenIds
-    if let tokenizerEos = context.tokenizer.eosTokenId {
-        eosTokenIds.insert(tokenizerEos)
+        // Build complete EOS token set from all sources
+        var eosTokenIds = context.configuration.eosTokenIds
+        if let tokenizerEos = context.tokenizer.eosTokenId {
+            eosTokenIds.insert(tokenizerEos)
+        }
+        for token in context.configuration.extraEOSTokens {
+            if let id = context.tokenizer.convertTokenToId(token) {
+                eosTokenIds.insert(id)
+            }
+        }
+
+        var tokenCount = 0
+
+        for token in iterator {
+            // Compute the timing for the prompt
+            if promptTime == 0 {
+                let now = Date.timeIntervalSinceReferenceDate
+                promptTime = now - start
+                start = now
+            }
+
+            // Check for end-of-sequence tokens
+            if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
+                break
+            }
+
+            tokenCount += 1
+
+            // Invoke the callback with the current token
+            if didGenerate(token) == .stop {
+                break
+            }
+        }
+
+        let now = Date.timeIntervalSinceReferenceDate
+        let generateTime = now - start
+
+        // Synchronize with the stream to ensure tasks are completed
+        Stream().synchronize()
+
+        return GenerateCompletionInfo(
+            promptTokenCount: input.text.tokens.size,
+            generationTokenCount: tokenCount,
+            promptTime: promptTime + iterator.promptPrefillTime,
+            generationTime: generateTime
+        )
     }
-    for token in context.configuration.extraEOSTokens {
-        if let id = context.tokenizer.convertTokenToId(token) {
-            eosTokenIds.insert(id)
-        }
-    }
-
-    var tokenCount = 0
-
-    for token in iterator {
-        // Compute the timing for the prompt
-        if promptTime == 0 {
-            let now = Date.timeIntervalSinceReferenceDate
-            promptTime = now - start
-            start = now
-        }
-
-        // Check for end-of-sequence tokens
-        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
-            break
-        }
-
-        tokenCount += 1
-
-        // Invoke the callback with the current token
-        if didGenerate(token) == .stop {
-            break
-        }
-    }
-
-    let now = Date.timeIntervalSinceReferenceDate
-    let generateTime = now - start
-
-    // Synchronize with the stream to ensure tasks are completed
-    Stream().synchronize()
-
-    return GenerateCompletionInfo(
-        promptTokenCount: input.text.tokens.size,
-        generationTokenCount: tokenCount,
-        promptTime: promptTime + iterator.promptPrefillTime,
-        generationTime: generateTime
-    )
 }
 
 /// Generates tokens asynchronously using the provided language model input, parameters, and context.
@@ -864,7 +882,7 @@ public func generateTask(
 
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
-        await wiredMemory.withWiredMemory {
+        wiredMemory.withWiredMemory {
             let iterator = iterator.consume()
 
             var start = Date.timeIntervalSinceReferenceDate
