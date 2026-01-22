@@ -12,10 +12,10 @@ import MLXNN
 // MARK: - Block Type
 
 private enum NemotronHBlockType {
-    case mamba    // "M"
+    case mamba  // "M"
     case attention  // "*"
-    case mlp      // "-"
-    case moe      // "E"
+    case mlp  // "-"
+    case moe  // "E"
 
     init(from char: Character) {
         switch char {
@@ -378,7 +378,8 @@ private func groupExpertSelect(
         let groupScores = scores.reshaped(bsz, seqLen, nGroup, -1)
 
         // Get top-2 per group and sum for group scores (using sorted to get top values)
-        let topKGroupScores = sorted(groupScores, axis: -1)[.ellipsis, ..<2].sum(axis: -1, keepDims: true)
+        let topKGroupScores = sorted(groupScores, axis: -1)[.ellipsis, ..<2].sum(
+            axis: -1, keepDims: true)
 
         // Keep only top topkGroup groups (zero out the rest)
         let k = nGroup - topkGroup
@@ -656,8 +657,8 @@ private class NemotronHBackbone: Module {
         // Create attention mask using the first attention layer's cache
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
             guard let cacheIdx = firstAttentionCacheIndex,
-                  let cache = cache,
-                  cacheIdx < cache.count
+                let cache = cache,
+                cacheIdx < cache.count
             else { return .none }
             return createAttentionMask(h: hidden, cache: cache[cacheIdx])
         }()
@@ -666,9 +667,9 @@ private class NemotronHBackbone: Module {
         // Python: ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
         let ssmMask: MLXArray? = {
             guard let cacheIdx = firstMambaCacheIndex,
-                  let cache = cache,
-                  cacheIdx < cache.count,
-                  let mambaCache = cache[cacheIdx] as? MambaCache
+                let cache = cache,
+                cacheIdx < cache.count,
+                let mambaCache = cache[cacheIdx] as? MambaCache
             else { return nil }
             return mambaCache.makeMask(N: hidden.dim(1))
         }()
@@ -795,39 +796,39 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
 // MARK: - Configuration
 
 public struct NemotronHConfiguration: Codable, Sendable {
-    var modelType: String = "nemotron_h"
-    var vocabSize: Int
-    var hiddenSize: Int
-    var numHiddenLayers: Int
-    var numAttentionHeads: Int
-    var numKeyValueHeads: Int
-    var attentionBias: Bool
-    var mambaNumHeads: Int
-    var mambaHeadDim: Int
-    var mambaProjBias: Bool
-    var ssmStateSize: Int
-    var convKernel: Int
-    var nGroups: Int
-    var intermediateSize: Int
-    var moeIntermediateSize: Int
-    var moeSharedExpertIntermediateSize: Int
-    var nRoutedExperts: Int
-    var nSharedExperts: Int?
-    var numExpertsPerTok: Int
-    var hybridOverridePattern: String
-    var layerNormEpsilon: Float
-    var mlpBias: Bool
-    var useBias: Bool
-    var useConvBias: Bool
-    var tieWordEmbeddings: Bool
-    var ropeTheta: Float
-    var headDim: Int?
-    var nGroup: Int
-    var topkGroup: Int
-    var normTopkProb: Bool
-    var routedScalingFactor: Float
-    var timeStepLimitMin: Float
-    var timeStepLimitMax: Float
+    public var modelType: String = "nemotron_h"
+    public var vocabSize: Int
+    public var hiddenSize: Int
+    public var numHiddenLayers: Int
+    public var numAttentionHeads: Int
+    public var numKeyValueHeads: Int
+    public var attentionBias: Bool
+    public var mambaNumHeads: Int
+    public var mambaHeadDim: Int
+    public var mambaProjBias: Bool
+    public var ssmStateSize: Int
+    public var convKernel: Int
+    public var nGroups: Int
+    public var intermediateSize: Int
+    public var moeIntermediateSize: Int
+    public var moeSharedExpertIntermediateSize: Int
+    public var nRoutedExperts: Int
+    public var nSharedExperts: Int?
+    public var numExpertsPerTok: Int
+    public var hybridOverridePattern: String
+    public var layerNormEpsilon: Float
+    public var mlpBias: Bool
+    public var useBias: Bool
+    public var useConvBias: Bool
+    public var tieWordEmbeddings: Bool
+    public var ropeTheta: Float
+    public var headDim: Int?
+    public var nGroup: Int
+    public var topkGroup: Int
+    public var normTopkProb: Bool
+    public var routedScalingFactor: Float
+    public var timeStepLimitMin: Float
+    public var timeStepLimitMax: Float
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -883,29 +884,37 @@ public struct NemotronHConfiguration: Codable, Sendable {
         nGroups = try container.decode(Int.self, forKey: .nGroups)
         intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
         moeIntermediateSize = try container.decode(Int.self, forKey: .moeIntermediateSize)
-        moeSharedExpertIntermediateSize = try container.decode(Int.self, forKey: .moeSharedExpertIntermediateSize)
+        moeSharedExpertIntermediateSize = try container.decode(
+            Int.self, forKey: .moeSharedExpertIntermediateSize)
         nRoutedExperts = try container.decode(Int.self, forKey: .nRoutedExperts)
         nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts)
         numExpertsPerTok = try container.decode(Int.self, forKey: .numExpertsPerTok)
-        layerNormEpsilon = try container.decodeIfPresent(Float.self, forKey: .layerNormEpsilon) ?? 1e-5
+        layerNormEpsilon =
+            try container.decodeIfPresent(Float.self, forKey: .layerNormEpsilon) ?? 1e-5
         mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) ?? false
         useBias = try container.decodeIfPresent(Bool.self, forKey: .useBias) ?? false
         useConvBias = try container.decodeIfPresent(Bool.self, forKey: .useConvBias) ?? true
-        tieWordEmbeddings = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000.0
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
         nGroup = try container.decodeIfPresent(Int.self, forKey: .nGroup) ?? 1
         topkGroup = try container.decodeIfPresent(Int.self, forKey: .topkGroup) ?? 1
         normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? true
-        routedScalingFactor = try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.0
+        routedScalingFactor =
+            try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.0
 
         // Handle hybrid_override_pattern - can be string or array of strings
         if let patternString = try? container.decode(String.self, forKey: .hybridOverridePattern) {
             hybridOverridePattern = patternString
-        } else if let patternArray = try? container.decode([String].self, forKey: .hybridOverridePattern) {
+        } else if let patternArray = try? container.decode(
+            [String].self, forKey: .hybridOverridePattern)
+        {
             hybridOverridePattern = patternArray.joined()
         } else {
-            throw DecodingError.dataCorruptedError(forKey: .hybridOverridePattern, in: container, debugDescription: "hybrid_override_pattern must be string or array of strings")
+            throw DecodingError.dataCorruptedError(
+                forKey: .hybridOverridePattern, in: container,
+                debugDescription: "hybrid_override_pattern must be string or array of strings")
         }
 
         // Handle time_step_limit - can be array [min, max] or separate fields
@@ -914,8 +923,11 @@ public struct NemotronHConfiguration: Codable, Sendable {
             timeStepLimitMin = limits[0]
             timeStepLimitMax = limits.count > 1 ? limits[1] : limits[0]
         } else {
-            timeStepLimitMin = try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMin) ?? 0.0
-            timeStepLimitMax = try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMax) ?? Float.infinity
+            timeStepLimitMin =
+                try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMin) ?? 0.0
+            timeStepLimitMax =
+                try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMax)
+                ?? Float.infinity
         }
     }
 
