@@ -510,6 +510,48 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
             }
         }
 
+        let headDim = configuration.qkNopeHeadDim + configuration.vHeadDim
+        let numHeads = configuration.attentionHeads
+        for l in 0 ..< configuration.hiddenLayers {
+            let attnPrefix = "model.layers.\(l).self_attn"
+            let kvWeightKey = "\(attnPrefix).kv_b_proj.weight"
+            let kvScalesKey = "\(attnPrefix).kv_b_proj.scales"
+            let kvBiasesKey = "\(attnPrefix).kv_b_proj.biases"
+            let wkWeightKey = "\(attnPrefix).wk_b_proj_weight"
+            let wvWeightKey = "\(attnPrefix).wv_b_proj_weight"
+            let wkScalesKey = "\(attnPrefix).wk_b_proj_scales"
+            let wvScalesKey = "\(attnPrefix).wv_b_proj_scales"
+            let wkBiasesKey = "\(attnPrefix).wk_b_proj_biases"
+            let wvBiasesKey = "\(attnPrefix).wv_b_proj_biases"
+
+            if sanitized[kvWeightKey] == nil,
+                let wkWeight = sanitized[wkWeightKey],
+                let wvWeight = sanitized[wvWeightKey]
+            {
+                let merged = concatenated([wkWeight, wvWeight], axis: 1)
+                    .reshaped(numHeads * headDim, -1)
+                sanitized[kvWeightKey] = merged
+
+                if let wkScales = sanitized[wkScalesKey], let wvScales = sanitized[wvScalesKey] {
+                    let mergedScales = concatenated([wkScales, wvScales], axis: 1)
+                        .reshaped(numHeads * headDim, -1)
+                    sanitized[kvScalesKey] = mergedScales
+                }
+
+                if let wkBiases = sanitized[wkBiasesKey], let wvBiases = sanitized[wvBiasesKey] {
+                    let mergedBiases = concatenated([wkBiases, wvBiases], axis: 1)
+                        .reshaped(numHeads * headDim, -1)
+                    sanitized[kvBiasesKey] = mergedBiases
+                }
+            }
+
+            for key in [
+                wkWeightKey, wvWeightKey, wkScalesKey, wvScalesKey, wkBiasesKey, wvBiasesKey,
+            ] {
+                sanitized[key] = nil
+            }
+        }
+
         let numMptLayers = configuration.numNextnPredictLayers
         if numMptLayers > 0 {
             sanitized = sanitized.filter { key, _ in
