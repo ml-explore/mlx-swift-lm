@@ -358,11 +358,11 @@ class MoEGate: Module {
         var scores = sigmoid(hiddenStates)
         let scoresForChoice = scores + e_score_correction_bias
         let groupScores = scoresForChoice.reshaped(bsz, seqLen, self.nGroup, -1)
-        let topKGroup = sorted(groupScores, axis: -1)[.ellipsis, ..<2].sum(axis: -1, keepDims: true)
+        let topKGroup = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
         var k = nGroup - (topkGroup ?? 1)
         var groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
         groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, (nRoutedExperts ?? 1) / nGroup])
-        scores = putAlong(groupScores, groupIdx, values: MLXArray(0.0), axis: -2)
+        scores = putAlong(groupScores, stopGradient(groupIdx), values: MLXArray(0.0), axis: -2)
         scores = flattened(scores, start: -2, end: -1)
 
         k = topK ?? 1

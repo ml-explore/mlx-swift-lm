@@ -31,7 +31,8 @@ class NomicEmbedding: Module {
     }
 
     func callAsFunction(
-        _ inputIds: MLXArray, positionIds: MLXArray? = nil,
+        _ inputIds: MLXArray,
+        positionIds: MLXArray? = nil,
         tokenTypeIds: MLXArray? = nil
     ) -> MLXArray {
         var words = wordEmbeddings(inputIds)
@@ -78,11 +79,11 @@ private class MLP: Module, UnaryLayer {
 }
 
 func computeBaseFrequency(
-    base: Float, dims: Int, ropeType: String,
+    base: Float,
+    dims: Int,
+    ropeType: String,
     ropeScaling: [String: StringOrNumber]?
-)
-    -> Float
-{
+) -> Float {
     if ropeType != "llama3" {
         return base
     }
@@ -137,8 +138,12 @@ private class DynamicNTKScalingRoPE: Module {
     let ropeScaling: [String: StringOrNumber]?
 
     init(
-        dims: Int, maxPositionEmbeddings: Int?, traditional: Bool = false,
-        base: Float = 10000, scale: Float = 1.0, ropeType: String = "default",
+        dims: Int,
+        maxPositionEmbeddings: Int?,
+        traditional: Bool = false,
+        base: Float = 10000,
+        scale: Float = 1.0,
+        ropeType: String = "default",
         ropeScaling: [String: StringOrNumber]? = nil
     ) {
         self.dims = dims
@@ -346,11 +351,11 @@ public class NomicBertModel: Module, EmbeddingModel {
     }
 
     public func callAsFunction(
-        _ inputs: MLXArray, positionIds: MLXArray? = nil, tokenTypeIds: MLXArray? = nil,
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
         attentionMask: MLXArray? = nil
-    )
-        -> EmbeddingModelOutput
-    {
+    ) -> EmbeddingModelOutput {
         var inp = inputs
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)

@@ -3,21 +3,37 @@
 import Foundation
 import Hub
 
-/// Registry of models and any overrides that go with them, e.g. prompt augmentation.
-/// If asked for an unknown configuration this will use the model/tokenizer as is.
+/// A registry and configuration provider for embedding models.
 ///
-/// The Python tokenizers have a very rich set of implementations and configuration. The
-/// swift-tokenizers code handles a good chunk of that and this is a place to augment that
-/// implementation, if needed.
+/// `ModelConfiguration` manages how models are identified (either via Hugging Face Hub IDs or local file URLs)
+/// and provides a mechanism to override tokenizer settings. It includes a global registry of
+/// well-known models (like BGE, E5, and Snowflake Arctic) to simplify initialization.
+///
+/// ### Example
+/// ```swift
+/// // Using a pre-registered model
+/// let config = ModelConfiguration.bge_small
+///
+/// // Using a custom local directory
+/// let customConfig = ModelConfiguration(directory: myURL)
+/// ```
 public struct ModelConfiguration: Sendable {
 
+    /// The backing storage for the model's location.
     public enum Identifier: Sendable {
+        /// A Hugging Face Hub repository identifier (e.g., "BAAI/bge-small-en-v1.5").
         case id(String)
+        /// A file system URL pointing to a local model directory.
         case directory(URL)
     }
 
+    /// The model's identifier (ID or Directory).
     public var id: Identifier
 
+    /// A display-friendly name for the model.
+    ///
+    /// For Hub models, this returns the repo ID. For local directories,
+    /// it returns a path-based name (e.g., "ParentDir/ModelDir").
     public var name: String {
         switch id {
         case .id(let string):
@@ -27,32 +43,54 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
-    /// pull the tokenizer from an alternate id
+    /// An optional alternate Hub ID to use specifically for loading the tokenizer.
+    ///
+    /// Use this if the model weights and tokenizer configuration are hosted in different repositories.
     public let tokenizerId: String?
 
-    /// overrides for TokenizerModel/knownTokenizers -- useful before swift-transformers is updated
+    /// An optional override string for specifying a specific tokenizer implementation.
+    ///
+    /// This is useful for providing compatibility hints to `swift-tokenizers` before
+    /// official support is updated.
     public let overrideTokenizer: String?
 
+    /// Initializes a configuration using a Hub repository ID.
+    /// - Parameters:
+    ///   - id: The Hugging Face repo ID.
+    ///   - tokenizerId: Optional alternate repo for the tokenizer.
+    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
     public init(
-        id: String, tokenizerId: String? = nil, overrideTokenizer: String? = nil
+        id: String,
+        tokenizerId: String? = nil,
+        overrideTokenizer: String? = nil
     ) {
         self.id = .id(id)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
     }
 
+    /// Initializes a configuration using a local directory.
+    /// - Parameters:
+    ///   - directory: The `URL` of the model on disk.
+    ///   - tokenizerId: Optional alternate repo for the tokenizer.
+    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
     public init(
-        directory: URL, tokenizerId: String? = nil, overrideTokenizer: String? = nil
+        directory: URL,
+        tokenizerId: String? = nil,
+        overrideTokenizer: String? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
     }
 
+    /// Resolves the local file system URL where the model is (or will be) stored.
+    ///
+    /// - Parameter hub: The `HubApi` used to resolve Hub paths.
+    /// - Returns: A `URL` pointing to the local directory.
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
         switch id {
         case .id(let id):
-            // download the model weights and config
             let repo = Hub.Repo(id: id)
             return hub.localRepoLocation(repo)
 
@@ -61,9 +99,14 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    // MARK: - Registry Management
+
+    /// Global registry of available model configurations.
     @MainActor
     public static var registry = [String: ModelConfiguration]()
 
+    /// Registers an array of configurations into the global registry.
+    /// - Parameter configurations: The models to register.
     @MainActor
     public static func register(configurations: [ModelConfiguration]) {
         bootstrap()
@@ -73,6 +116,13 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    /// Retrieves a configuration by its ID or name.
+    ///
+    /// If the ID is not found in the registry, a new `ModelConfiguration` is
+    /// created on-the-fly using the provided string as a Hub ID.
+    ///
+    /// - Parameter id: The model name or Hub ID.
+    /// - Returns: A `ModelConfiguration` instance.
     @MainActor
     public static func configuration(id: String) -> ModelConfiguration {
         bootstrap()
@@ -84,6 +134,7 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    /// Returns all registered model configurations.
     @MainActor
     public static var models: some Collection<ModelConfiguration> & Sendable {
         bootstrap()
@@ -91,23 +142,40 @@ public struct ModelConfiguration: Sendable {
     }
 }
 
+// MARK: - Predefined Models
+
 extension ModelConfiguration {
+    /// BGE Micro v2 (TaylorAI) - optimized for extremely low latency.
     public static let bge_micro = ModelConfiguration(id: "TaylorAI/bge-micro-v2")
+    /// GTE Tiny - a small, efficient embedding model.
     public static let gte_tiny = ModelConfiguration(id: "TaylorAI/gte-tiny")
+    /// MiniLM-L6 - the industry-standard small embedding model.
     public static let minilm_l6 = ModelConfiguration(id: "sentence-transformers/all-MiniLM-L6-v2")
+    /// Snowflake Arctic Embed XS.
     public static let snowflake_xs = ModelConfiguration(id: "Snowflake/snowflake-arctic-embed-xs")
+    /// MiniLM-L12 - a more accurate version of MiniLM.
     public static let minilm_l12 = ModelConfiguration(id: "sentence-transformers/all-MiniLM-L12-v2")
+    /// BGE Small en v1.5.
     public static let bge_small = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
+    /// Multilingual E5 Small - supports over 100 languages.
     public static let multilingual_e5_small = ModelConfiguration(
         id: "intfloat/multilingual-e5-small")
+    /// BGE Base en v1.5.
     public static let bge_base = ModelConfiguration(id: "BAAI/bge-base-en-v1.5")
+    /// Nomic Embed Text v1.
     public static let nomic_text_v1 = ModelConfiguration(id: "nomic-ai/nomic-embed-text-v1")
+    /// Nomic Embed Text v1.5 - supports Matryoshka embeddings.
     public static let nomic_text_v1_5 = ModelConfiguration(id: "nomic-ai/nomic-embed-text-v1.5")
+    /// BGE Large en v1.5.
     public static let bge_large = ModelConfiguration(id: "BAAI/bge-large-en-v1.5")
+    /// Snowflake Arctic Embed L.
     public static let snowflake_lg = ModelConfiguration(id: "Snowflake/snowflake-arctic-embed-l")
+    /// BGE-M3 - Multi-lingual, Multi-functional, Multi-granularity.
     public static let bge_m3 = ModelConfiguration(id: "BAAI/bge-m3")
+    /// Mixedbread AI Large v1.
     public static let mixedbread_large = ModelConfiguration(
         id: "mixedbread-ai/mxbai-embed-large-v1")
+    /// Qwen3 Embedding 0.6B - 4-bit quantized version.
     public static let qwen3_embedding = ModelConfiguration(
         id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
 
@@ -117,37 +185,24 @@ extension ModelConfiguration {
         case bootstrapped
     }
 
+    /// Internal state to ensure the registry is only populated once.
     @MainActor
     static private var bootstrapState = BootstrapState.idle
 
+    /// Populates the registry with default models if it hasn't been done already.
     @MainActor
     static func bootstrap() {
         switch bootstrapState {
         case .idle:
             bootstrapState = .bootstrapping
             register(configurations: [
-                bge_micro,
-                gte_tiny,
-                minilm_l6,
-                snowflake_xs,
-                minilm_l12,
-                bge_small,
-                multilingual_e5_small,
-                bge_base,
-                nomic_text_v1,
-                nomic_text_v1_5,
-                bge_large,
-                snowflake_lg,
-                bge_m3,
-                mixedbread_large,
-                qwen3_embedding,
+                bge_micro, gte_tiny, minilm_l6, snowflake_xs, minilm_l12,
+                bge_small, multilingual_e5_small, bge_base, nomic_text_v1,
+                nomic_text_v1_5, bge_large, snowflake_lg, bge_m3,
+                mixedbread_large, qwen3_embedding,
             ])
             bootstrapState = .bootstrapped
-
-        case .bootstrapping:
-            break
-
-        case .bootstrapped:
+        case .bootstrapping, .bootstrapped:
             break
         }
     }

@@ -1,6 +1,6 @@
 name: Build and Test
 
-on: pull_request  
+on: pull_request
 
 permissions:
   contents: read
@@ -14,13 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: recursive           
+          submodules: recursive
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:
-            activate-environment: true
-     
+          activate-environment: true
+
       - name: Setup pre-commit
         shell: sh
         run: |
@@ -58,12 +58,12 @@ jobs:
         run: |
           cd /tmp/swift-format
           ln -s "$(swift build --show-bin-path -c release)/swift-format" /usr/local/bin/swift-format
-     
+
       - name: Configure safe directory for git
         shell: sh
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-     
+
       - name: Run style checks
         shell: sh
         run: |
@@ -77,13 +77,16 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-     
+
       - name: Verify MetalToolchain installed
         shell: bash
         run: xcodebuild -showComponent MetalToolchain
-            
+
       - name: Build (Xcode, macOS)
         shell: sh
+        env:
+          # workaround for CI failure
+          DEVELOPER_DIR: /Applications/Xcode-latest.app
         run: |
           xcodebuild -version
           xcrun --show-sdk-build-version
@@ -93,6 +96,9 @@ jobs:
 
       - name: Run Tests (Xcode, macOS)
         shell: sh
+        env:
+          # workaround for CI failure
+          DEVELOPER_DIR: /Applications/Xcode-latest.app
         run: |
           xcrun xctest ~/Library/Developer/Xcode/DerivedData/mlx-swift-lm-*/Build/Products/Debug/MLXLMTests.xctest
 

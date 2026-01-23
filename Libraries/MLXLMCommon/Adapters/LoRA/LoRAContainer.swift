@@ -68,17 +68,26 @@ public struct LoRAConfiguration: Sendable, Codable {
 /// A container for managing LoRA or DoRA adapters and applying them to a language model.
 ///
 /// This struct conforms to `ModelAdapter` and can dynamically inject, remove, or fuse adapters into a model at runtime.
-public struct LoRAContainer: ModelAdapter {
+public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
     /// The configuration used to construct this adapter container.
     public let configuration: LoRAConfiguration
+
     /// The parameter values for the adapter modules.
+    ///
+    /// * Important: this contains MLXArray which is not Sendable, but in this case
+    /// we ensure that they are fully evaluated and never updated.  These static MLXArrays
+    /// are usable across threads but we cannot prove so to the type checker so this
+    /// is left as `@unchecked Sendable`.
     public let parameters: ModuleParameters
 
     public init(
         configuration: LoRAConfiguration,
-        parameters: ModuleParameters
+        parameters: consuming ModuleParameters
     ) {
+        // ensure that the parameters are fully evaluated before we promise
+        // that they are Sendable
+        eval(parameters)
         self.configuration = configuration
         self.parameters = parameters
     }

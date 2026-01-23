@@ -4,11 +4,25 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Configuration for the `Pooling` layer, typically loaded from a JSON file.
+///
+/// This struct defines which pooling strategy to apply and the output dimensions,
+/// mapping keys from the standard `sentence-transformers` configuration format.
 public struct PoolingConfiguration: Codable {
+
+    /// The target output dimension for the embeddings.
     public let dimension: Int
+
+    /// Whether to use the CLS token (special classification token) for pooling.
     public let poolingModeClsToken: Bool
+
+    /// Whether to use the mean of all sequence tokens for pooling.
     public let poolingModeMeanTokens: Bool
+
+    /// Whether to use the maximum value across sequence tokens for pooling.
     public let poolingModeMaxTokens: Bool
+
+    /// Whether to use the last token in the sequence for pooling.
     public let poolingModeLastToken: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -20,6 +34,13 @@ public struct PoolingConfiguration: Codable {
     }
 }
 
+/// Loads a `Pooling` module from a specific model directory.
+///
+/// It looks for a configuration file located at `1_Pooling/config.json` within the provided directory.
+/// If the file is missing or invalid, it returns a `Pooling` module with strategy `.none`.
+///
+/// - Parameter modelDirectory: The base URL of the model weights and configuration.
+/// - Returns: An initialized `Pooling` module.
 func loadPooling(modelDirectory: URL) -> Pooling {
     let configurationURL = modelDirectory.appending(components: "1_Pooling", "config.json")
     guard
@@ -32,18 +53,38 @@ func loadPooling(modelDirectory: URL) -> Pooling {
     return Pooling(config: poolingConfig)
 }
 
+/// A module that performs pooling operations on hidden states to produce fixed-sized sentence embeddings.
+///
+/// `Pooling` takes the sequence of hidden states from a transformer model and collapses them
+/// into a single vector using strategies like mean, max, or token selection.
 public class Pooling: Module {
+
+    /// Supported pooling strategies.
     public enum Strategy {
+        /// Average all token embeddings (weighted by mask).
         case mean
+        /// Use the pooled output (CLS) provided by the model.
         case cls
+        /// Use the first token in the sequence.
         case first
+        /// Use the last token in the sequence.
         case last
+        /// Use the maximum value across the sequence length for each dimension.
         case max
+        /// Return the existing pooled output or the raw hidden states.
         case none
     }
+
+    /// The active strategy used for pooling hidden states.
     public private(set) var strategy: Strategy
+
+    /// Optional dimension to truncate the resulting embedding to.
     public private(set) var dimension: Int?
 
+    /// Initializes a `Pooling` module with a specific strategy.
+    /// - Parameters:
+    ///   - strategy: The `Strategy` to use for pooling.
+    ///   - dimension: An optional integer to truncate the output vector.
     public init(
         strategy: Strategy, dimension: Int? = nil
     ) {
@@ -51,6 +92,12 @@ public class Pooling: Module {
         self.dimension = dimension
     }
 
+    /// Initializes a `Pooling` module from a `PoolingConfiguration`.
+    ///
+    /// The initialization follows a priority order: CLS > Mean > Max > Last.
+    /// If no specific mode is enabled in the config, it defaults to `.first`.
+    ///
+    /// - Parameter config: The configuration object containing pooling flags.
     public init(
         config: PoolingConfiguration
     ) {
@@ -68,8 +115,18 @@ public class Pooling: Module {
         }
     }
 
+    /// Processes the input hidden states according to the configured strategy.
+    ///
+    /// - Parameters:
+    ///   - inputs: The `EmbeddingModelOutput` containing hidden states and/or pooled output.
+    ///   - mask: An optional `MLXArray` mask (usually 1 for tokens, 0 for padding).
+    ///   - normalize: If `true`, L2 normalizes the resulting vector.
+    ///   - applyLayerNorm: If `true`, applies Layer Normalization before truncation/normalization.
+    /// - Returns: An `MLXArray` representing the pooled embedding.
     public func callAsFunction(
-        _ inputs: EmbeddingModelOutput, mask: MLXArray? = nil, normalize: Bool = false,
+        _ inputs: EmbeddingModelOutput,
+        mask: MLXArray? = nil,
+        normalize: Bool = false,
         applyLayerNorm: Bool = false
     ) -> MLXArray {
         let _mask = mask ?? MLXArray.ones(Array(inputs.hiddenStates?.shape[0 ..< 2] ?? [0]))
@@ -96,15 +153,19 @@ public class Pooling: Module {
         case .none:
             pooled = inputs.pooledOutput ?? inputs.hiddenStates!
         }
+
         if applyLayerNorm {
             pooled = MLXFast.layerNorm(pooled, eps: 1e-5)
         }
+
         if let dimension {
             pooled = pooled[0..., 0 ..< dimension]
         }
+
         if normalize {
             pooled = pooled / norm(pooled, axis: -1, keepDims: true)
         }
+
         return pooled
     }
 }
