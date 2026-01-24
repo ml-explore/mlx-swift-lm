@@ -17,7 +17,7 @@ extension LLMModel {
 
     /// Default prepare step for ``LLMModel``.
     ///
-    /// This will evaluate the prompt in chunks until there is a small amount of
+    /// This will evaluate the prompt in chunks until there is a small number of
     /// tokens left to feed into the `TokenIterator`.
     public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
         -> PrepareResult

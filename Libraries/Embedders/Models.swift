@@ -158,7 +158,8 @@ extension ModelConfiguration {
     /// BGE Small en v1.5.
     public static let bge_small = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
     /// Multilingual E5 Small - supports over 100 languages.
-    public static let multilingual_e5_small = ModelConfiguration(id: "intfloat/multilingual-e5-small")
+    public static let multilingual_e5_small = ModelConfiguration(
+        id: "intfloat/multilingual-e5-small")
     /// BGE Base en v1.5.
     public static let bge_base = ModelConfiguration(id: "BAAI/bge-base-en-v1.5")
     /// Nomic Embed Text v1.
@@ -172,9 +173,11 @@ extension ModelConfiguration {
     /// BGE-M3 - Multi-lingual, Multi-functional, Multi-granularity.
     public static let bge_m3 = ModelConfiguration(id: "BAAI/bge-m3")
     /// Mixedbread AI Large v1.
-    public static let mixedbread_large = ModelConfiguration(id: "mixedbread-ai/mxbai-embed-large-v1")
+    public static let mixedbread_large = ModelConfiguration(
+        id: "mixedbread-ai/mxbai-embed-large-v1")
     /// Qwen3 Embedding 0.6B - 4-bit quantized version.
-    public static let qwen3_embedding = ModelConfiguration(id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
+    public static let qwen3_embedding = ModelConfiguration(
+        id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
 
     private enum BootstrapState: Sendable {
         case idle

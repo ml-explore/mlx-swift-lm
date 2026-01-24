@@ -47,6 +47,7 @@ public enum LLMTypeRegistry {
         "mimo": create(MiMoConfiguration.self, MiMoModel.init),
         "glm4": create(GLM4Configuration.self, GLM4Model.init),
         "glm4_moe": create(GLM4MoEConfiguration.self, GLM4MoEModel.init),
+        "glm4_moe_lite": create(GLM4MoELiteConfiguration.self, GLM4MoELiteModel.init),
         "acereason": create(Qwen2Configuration.self, Qwen2Model.init),
         "falcon_h1": create(FalconH1Configuration.self, FalconH1Model.init),
         "bitnet": create(BitnetConfiguration.self, BitnetModel.init),
@@ -505,6 +506,21 @@ public final class LLMModelFactory: ModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // Load EOS token IDs from config.json, with optional override from generation_config.json
+        var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+        let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
+        if let generationData = try? Data(contentsOf: generationConfigURL),
+            let generationConfig = try? JSONDecoder().decode(
+                GenerationConfigFile.self, from: generationData),
+            let genEosIds = generationConfig.eosTokenIds?.values
+        {
+            eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
+        }
+
+        // Create mutable configuration with loaded EOS token IDs
+        var mutableConfiguration = configuration
+        mutableConfiguration.eosTokenIds = eosTokenIds
+
         // Load tokenizer and weights in parallel using async let.
         async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
 
@@ -522,11 +538,12 @@ public final class LLMModelFactory: ModelFactory {
             }
 
         let processor = LLMUserInputProcessor(
-            tokenizer: tokenizer, configuration: configuration,
+            tokenizer: tokenizer, configuration: mutableConfiguration,
             messageGenerator: messageGenerator)
 
         return .init(
-            configuration: configuration, model: model, processor: processor, tokenizer: tokenizer)
+            configuration: mutableConfiguration, model: model, processor: processor,
+            tokenizer: tokenizer)
     }
 
 }

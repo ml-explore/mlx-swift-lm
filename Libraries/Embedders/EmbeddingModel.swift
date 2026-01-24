@@ -66,7 +66,8 @@ public actor ModelContainer {
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<R>(_ action: @Sendable (EmbeddingModel, Tokenizer, Pooling) throws -> R)
-        rethrows -> R {
+        rethrows -> R
+    {
         try action(model, tokenizer, pooler)
     }
 }

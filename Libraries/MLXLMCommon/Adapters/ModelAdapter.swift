@@ -17,7 +17,7 @@ public enum ModelAdapterError: Error {
 }
 
 /// Protocol defining an adapter that can modify a `LanguageModel`.
-public protocol ModelAdapter {
+public protocol ModelAdapter: Sendable {
 
     /// Loads the adapter into the specified model.
     func load(into model: LanguageModel) throws
@@ -28,6 +28,8 @@ public protocol ModelAdapter {
     /// Unloads the adapter from the specified model.
     func unload(from model: LanguageModel)
 }
+
+public typealias SendableModelAdapter = ModelAdapter & Sendable
 
 /// Extension to `LanguageModel` providing convenience methods for adapter usage.
 extension LanguageModel {

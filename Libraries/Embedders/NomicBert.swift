@@ -355,7 +355,7 @@ public class NomicBertModel: Module, EmbeddingModel {
         positionIds: MLXArray? = nil,
         tokenTypeIds: MLXArray? = nil,
         attentionMask: MLXArray? = nil
-    )  -> EmbeddingModelOutput {
+    ) -> EmbeddingModelOutput {
         var inp = inputs
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
