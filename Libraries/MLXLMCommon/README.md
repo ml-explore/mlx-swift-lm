@@ -149,24 +149,10 @@ The stream is stopped after we hit a maximum number of tokens:
 
 ### Wired Memory (Optional)
 
-The AsyncStream-based `generate` overload accepts a `wiredMemory` option to
-temporarily raise the wired memory limit during generation:
-
-```swift
-let stream = try MLXLMCommon.generate(
-    input: input,
-    parameters: generateParameters,
-    context: context,
-    wiredMemory: .max
-)
-```
-
+Use the policy-based API to coordinate a single global wired limit across tasks.
 This is opt-in and only applies on GPU devices that support wired memory control
 (macOS 15 / iOS 18 / tvOS 18 or newer). On unsupported platforms or devices it is
 silently ignored.
-
-For concurrent workloads, use the policy-based API to coordinate a single global
-wired limit across tasks:
 
 ```swift
 let policy = WiredSumPolicy()

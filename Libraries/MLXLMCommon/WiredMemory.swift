@@ -41,65 +41,6 @@ private func maxRecommendedWorkingSetBytes() -> Int? {
     return Int(maxBytes)
 }
 
-/// Control wired memory behavior for generation.
-///
-/// This is opt-in and no-ops on unsupported platforms or non-GPU devices.
-public enum WiredMemoryLimit: Sendable, Equatable {
-    /// Leave the wired memory limit unchanged.
-    case `default`
-    /// Set a fixed wired limit in bytes for the duration of a block.
-    case fixed(bytes: Int)
-    /// Use the device recommended maximum working set size.
-    case max
-
-    /// Resolve the requested limit to bytes, or nil if no change should be applied.
-    public func resolvedLimitBytes() -> Int? {
-        switch self {
-        case .default:
-            return nil
-        case .fixed(let bytes):
-            return bytes > 0 ? bytes : nil
-        case .max:
-            guard let maxBytes = maxRecommendedWorkingSetBytes() else { return nil }
-            return maxBytes
-        }
-    }
-
-    /// Execute a block while applying the requested wired memory limit, if supported.
-    ///
-    /// - Note: This affects a global MLX setting. Limits are coordinated through a
-    ///   single manager to remain safe under concurrency.
-    public func withWiredMemory<R>(_ body: () throws -> R) rethrows -> R {
-        guard WiredMemoryBackend.isSupported else {
-            return try body()
-        }
-
-        guard let limit = resolvedLimitBytes() else {
-            return try body()
-        }
-
-        let ticket = WiredMemoryTicket(size: 0, policy: WiredFixedPolicy(limit: limit))
-        return try WiredMemoryTicket.withWiredLimitSync(ticket, body)
-    }
-
-    /// Execute a block while applying the requested wired memory limit, if supported.
-    ///
-    /// - Note: This affects a global MLX setting. Limits are coordinated through a
-    ///   single manager to remain safe under concurrency.
-    public func withWiredMemory<R>(_ body: () async throws -> R) async rethrows -> R {
-        guard WiredMemoryBackend.isSupported else {
-            return try await body()
-        }
-
-        guard let limit = resolvedLimitBytes() else {
-            return try await body()
-        }
-
-        let ticket = WiredMemoryTicket(size: 0, policy: WiredFixedPolicy(limit: limit))
-        return try await WiredMemoryTicket.withWiredLimit(ticket, body)
-    }
-}
-
 /// Debug event emitted by ``WiredMemoryManager`` when coordinating wired memory changes.
 public struct WiredMemoryEvent: Sendable {
     public enum Kind: String, Sendable {

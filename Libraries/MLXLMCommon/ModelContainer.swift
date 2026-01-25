@@ -153,7 +153,6 @@ public final class ModelContainer: Sendable {
     /// - Parameters:
     ///   - input: Prepared language model input (transferred via `sending`)
     ///   - parameters: Generation parameters
-    ///   - wiredMemory: Optional wired memory policy
     ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination
     /// - Returns: An AsyncStream of generation events
     /// - Note: The `sending` parameter indicates the input is transferred (not shared),
@@ -161,7 +160,6 @@ public final class ModelContainer: Sendable {
     public func generate(
         input: consuming sending LMInput,
         parameters: GenerateParameters,
-        wiredMemory: WiredMemoryLimit = .default,
         wiredMemoryTicket: WiredMemoryTicket? = nil
     ) async throws -> AsyncStream<Generation> {
         let input = SendableBox(input)
@@ -178,7 +176,6 @@ public final class ModelContainer: Sendable {
                 input: input.consume(),
                 parameters: parameters,
                 context: context,
-                wiredMemory: wiredMemory,
                 wiredMemoryTicket: wiredMemoryTicket
             )
         }
