@@ -61,6 +61,7 @@ Currently supported model types are:
 - GLM4
 - GLM4MOE
 - AceReason
+- NemotronH
 
 See [llm-tool](../../Tools/llm-tool)
 
