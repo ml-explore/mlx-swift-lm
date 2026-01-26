@@ -153,12 +153,14 @@ public final class ModelContainer: Sendable {
     /// - Parameters:
     ///   - input: Prepared language model input (transferred via `sending`)
     ///   - parameters: Generation parameters
+    ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination
     /// - Returns: An AsyncStream of generation events
     /// - Note: The `sending` parameter indicates the input is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
     public func generate(
         input: consuming sending LMInput,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
     ) async throws -> AsyncStream<Generation> {
         let input = SendableBox(input)
 
@@ -173,7 +175,8 @@ public final class ModelContainer: Sendable {
             try MLXLMCommon.generate(
                 input: input.consume(),
                 parameters: parameters,
-                context: context
+                context: context,
+                wiredMemoryTicket: wiredMemoryTicket
             )
         }
     }

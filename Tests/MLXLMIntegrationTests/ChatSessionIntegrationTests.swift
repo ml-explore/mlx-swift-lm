@@ -14,8 +14,6 @@ import XCTest
 /// Tests for the streamlined API using real models
 public class ChatSessionIntegrationTests: XCTestCase {
 
-    static let llmModelId = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-    static let vlmModelId = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     nonisolated(unsafe) static var llmContainer: ModelContainer!
     nonisolated(unsafe) static var vlmContainer: ModelContainer!
 
@@ -26,16 +24,12 @@ public class ChatSessionIntegrationTests: XCTestCase {
         let vlmExpectation = XCTestExpectation(description: "Load VLM")
 
         Task {
-            llmContainer = try await LLMModelFactory.shared.loadContainer(
-                configuration: .init(id: llmModelId)
-            )
+            llmContainer = try await IntegrationTestModels.shared.llmContainer()
             llmExpectation.fulfill()
         }
 
         Task {
-            vlmContainer = try await VLMModelFactory.shared.loadContainer(
-                configuration: .init(id: vlmModelId)
-            )
+            vlmContainer = try await IntegrationTestModels.shared.vlmContainer()
             vlmExpectation.fulfill()
         }
 

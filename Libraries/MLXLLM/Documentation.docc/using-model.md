@@ -118,3 +118,31 @@ The stream is stopped after we hit a maximum number of tokens:
     }
 }
 ```
+
+### Wired Memory (Optional)
+
+Use the policy-based API to coordinate a single global wired limit across tasks.
+This is opt-in and only applies on GPU devices that support wired memory control
+(macOS 15 / iOS 18 / tvOS 18 or newer). On unsupported platforms or devices it is
+silently ignored.
+
+```swift
+let policy = WiredSumPolicy()
+let ticket = policy.ticket(size: estimatedBytes)
+
+let stream = try MLXLMCommon.generate(
+    input: input,
+    parameters: generateParameters,
+    context: context,
+    wiredMemoryTicket: ticket
+)
+```
+
+Policies are pure and compute a single limit for all active tickets. Built-in
+policies include `WiredSumPolicy`, `WiredMaxPolicy`, and `WiredFixedPolicy`.
+Use `WiredMemoryTicket.withWiredLimit` for cancellation-safe start/end pairing.
+
+Policies can also gate concurrency by implementing `canAdmit`. When admission is
+denied, `start()` suspends until capacity is available. For debugging, the
+`WiredMemoryManager.events()` stream emits changes in DEBUG builds and is a no-op
+in release builds.

@@ -147,3 +147,58 @@ The stream is stopped after we hit a maximum number of tokens:
 }
 ```
 
+### Wired Memory (Optional)
+
+Use the policy-based API to coordinate a single global wired limit across tasks.
+This is opt-in and only applies on GPU devices that support wired memory control
+(macOS 15 / iOS 18 / tvOS 18 or newer). On unsupported platforms or devices it is
+silently ignored.
+
+```swift
+let policy = WiredSumPolicy()
+let ticket = policy.ticket(size: estimatedBytes)
+
+let stream = try MLXLMCommon.generate(
+    input: input,
+    parameters: generateParameters,
+    context: context,
+    wiredMemoryTicket: ticket
+)
+```
+
+Tickets are cheap handles into a shared manager that serializes updates and
+restores the baseline when the last ticket completes.
+
+#### Policies and Tickets
+
+`WiredMemoryPolicy` is pure: it computes a desired limit from the baseline and
+the active ticket sizes. The library includes a few policies:
+
+- `WiredSumPolicy` (default): `baseline + sum(activeSizes)` with an optional cap.
+- `WiredMaxPolicy`: `max(baseline, max(activeSizes))`.
+- `WiredFixedPolicy`: fixed limit while any ticket is active.
+
+Tickets are safe to start/end multiple times (extra ends are ignored). For
+structured usage, wrap work with `WiredMemoryTicket.withWiredLimit` to ensure
+start/end pairing and cancellation safety:
+
+```swift
+let policy = WiredSumPolicy()
+let ticket = policy.ticket(size: estimatedBytes)
+
+try await WiredMemoryTicket.withWiredLimit(ticket) {
+    // run inference
+}
+```
+
+#### Admission Control (Optional)
+
+Policies can also gate concurrency by overriding `canAdmit`. If admission is
+denied, `start()` suspends until capacity is available and resumes when tickets
+end. This helps prevent over-commit when many inferences launch at once.
+
+#### Debug Event Stream
+
+Use `WiredMemoryManager.events()` to observe policy stacking and limit changes
+in DEBUG builds. The stream is empty in release builds, so event logging is a
+no-op in production.
