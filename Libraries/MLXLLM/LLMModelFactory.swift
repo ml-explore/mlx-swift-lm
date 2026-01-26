@@ -268,7 +268,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let glm4_9b_4bit = ModelConfiguration(
         id: "mlx-community/GLM-4-9B-0414-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: "Why is the sky blue?",
+        toolCallFormat: .glm4Moe
     )
 
     static public let acereason_7b_4bit = ModelConfiguration(
@@ -298,7 +299,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let lfm2_1_2b_4bit = ModelConfiguration(
         id: "mlx-community/LFM2-1.2B-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: "Why is the sky blue?",
+        toolCallFormat: .lfm2
     )
 
     static public let exaone_4_0_1_2b_4bit = ModelConfiguration(
@@ -333,7 +335,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let lfm2_8b_a1b_3bit_mlx = ModelConfiguration(
         id: "mlx-community/LFM2-8B-A1B-3bit-MLX",
-        defaultPrompt: ""
+        defaultPrompt: "",
+        toolCallFormat: .lfm2
     )
 
     static public let nanochat_d20_mlx = ModelConfiguration(
@@ -520,6 +523,11 @@ public final class LLMModelFactory: ModelFactory {
         // Create mutable configuration with loaded EOS token IDs
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
+
+        // Auto-detect tool call format from model type if not explicitly set
+        if mutableConfiguration.toolCallFormat == nil {
+            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
+        }
 
         // Load tokenizer and weights in parallel using async let.
         async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)

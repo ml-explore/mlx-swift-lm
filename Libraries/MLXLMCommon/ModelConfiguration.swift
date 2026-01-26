@@ -39,11 +39,15 @@ public struct ModelConfiguration: Sendable {
     /// EOS token IDs loaded from config.json/generation_config.json
     public var eosTokenIds: Set<Int> = []
 
+    /// Tool call format for this model (nil = default JSON format)
+    public var toolCallFormat: ToolCallFormat?
+
     public init(
         id: String, revision: String = "main",
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
+        toolCallFormat: ToolCallFormat? = nil,
         preparePrompt: (@Sendable (String) -> String)? = nil
     ) {
         self.id = .id(id, revision: revision)
@@ -51,6 +55,7 @@ public struct ModelConfiguration: Sendable {
         self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.toolCallFormat = toolCallFormat
     }
 
     public init(
@@ -58,7 +63,8 @@ public struct ModelConfiguration: Sendable {
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
-        eosTokenIds: Set<Int> = []
+        eosTokenIds: Set<Int> = [],
+        toolCallFormat: ToolCallFormat? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
@@ -66,6 +72,7 @@ public struct ModelConfiguration: Sendable {
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
+        self.toolCallFormat = toolCallFormat
     }
 
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
