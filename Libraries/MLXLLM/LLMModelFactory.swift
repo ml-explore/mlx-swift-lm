@@ -269,7 +269,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let glm4_9b_4bit = ModelConfiguration(
         id: "mlx-community/GLM-4-9B-0414-4bit",
         defaultPrompt: "Why is the sky blue?",
-        toolCallFormat: .glm4Moe
+        toolCallFormat: .glm4
     )
 
     static public let acereason_7b_4bit = ModelConfiguration(

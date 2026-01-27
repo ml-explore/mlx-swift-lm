@@ -150,8 +150,8 @@ public class ToolCallIntegrationTests: XCTestCase {
 
         let config = await container.configuration
         XCTAssertEqual(
-            config.toolCallFormat, .glm4Moe,
-            "GLM4 model should auto-detect .glm4Moe tool call format"
+            config.toolCallFormat, .glm4,
+            "GLM4 model should auto-detect .glm4 tool call format"
         )
     }
 

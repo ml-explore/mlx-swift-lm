@@ -46,9 +46,9 @@ public class ToolCallProcessor {
 
     /// Initialize with a specific tool call format.
     /// - Parameters:
-    ///   - format: The tool call format to use (defaults to `.default` for JSON format)
+    ///   - format: The tool call format to use (defaults to `.json` for standard JSON format)
     ///   - tools: Optional tool schemas for type-aware parsing
-    public init(format: ToolCallFormat = .default, tools: [[String: any Sendable]]? = nil) {
+    public init(format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) {
         self.parser = format.createParser()
         self.tools = tools
     }

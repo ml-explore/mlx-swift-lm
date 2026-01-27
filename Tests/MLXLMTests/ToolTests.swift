@@ -185,7 +185,7 @@ struct ToolTests {
 
     @Test("Test GLM4 Format via ToolCallProcessor")
     func testGLM4FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .glm4Moe)
+        let processor = ToolCallProcessor(format: .glm4)
         let content =
             "<tool_call>search<arg_key>query</arg_key><arg_value>machine learning</arg_value></tool_call>"
 
@@ -227,7 +227,7 @@ struct ToolTests {
 
     @Test("Test Gemma Format via ToolCallProcessor")
     func testGemmaFormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .gemmaFunction)
+        let processor = ToolCallProcessor(format: .gemma)
         let content = "<start_function_call>call:calculator{expression:2+2}<end_function_call>"
 
         _ = processor.processChunk(content)
@@ -254,7 +254,7 @@ struct ToolTests {
 
     @Test("Test Kimi K2 Format via ToolCallProcessor")
     func testKimiK2FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .kimi)
+        let processor = ToolCallProcessor(format: .kimiK2)
         let content =
             "<|tool_calls_section_begin|>functions.search:0<|tool_call_argument_begin|>{\"query\": \"swift\"}<|tool_calls_section_end|>"
 
@@ -282,7 +282,7 @@ struct ToolTests {
 
     @Test("Test MiniMax M2 Format via ToolCallProcessor")
     func testMiniMaxM2FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .minimax)
+        let processor = ToolCallProcessor(format: .minimaxM2)
         let content =
             "<minimax:tool_call><invoke name=\"search\"><parameter name=\"query\">AI news</parameter></invoke></minimax:tool_call>"
 
@@ -294,20 +294,23 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("AI news"))
     }
 
-    // MARK: - ToolCallFormat Convenience Properties Tests
+    // MARK: - ToolCallFormat Serialization Tests
 
-    @Test("Test ToolCallFormat Convenience Properties")
-    func testToolCallFormatConvenienceProperties() throws {
-        // Test that convenience properties create the correct formats
-        #expect(ToolCallFormat.default == .json(startTag: "<tool_call>", endTag: "</tool_call>"))
-        #expect(
-            ToolCallFormat.lfm2
-                == .json(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>"))
-        #expect(ToolCallFormat.qwen3Coder == .xmlFunction)
-        #expect(ToolCallFormat.glm4Moe == .glm4)
-        #expect(ToolCallFormat.gemmaFunction == .gemma)
-        #expect(ToolCallFormat.kimi == .kimiK2)
-        #expect(ToolCallFormat.minimax == .minimaxM2)
+    @Test("Test ToolCallFormat Raw Values for Serialization")
+    func testToolCallFormatRawValues() throws {
+        // Test that raw values are suitable for JSON/CLI serialization
+        #expect(ToolCallFormat.json.rawValue == "json")
+        #expect(ToolCallFormat.lfm2.rawValue == "lfm2")
+        #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
+        #expect(ToolCallFormat.glm4.rawValue == "glm4")
+        #expect(ToolCallFormat.gemma.rawValue == "gemma")
+        #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
+        #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+
+        // Test round-trip via raw value
+        for format in ToolCallFormat.allCases {
+            #expect(ToolCallFormat(rawValue: format.rawValue) == format)
+        }
     }
 
     // MARK: - Format Inference Tests
@@ -320,13 +323,13 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "lfm2_moe") == .lfm2)
 
         // GLM4 models
-        #expect(ToolCallFormat.infer(from: "glm4") == .glm4Moe)
-        #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4Moe)
-        #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4Moe)
+        #expect(ToolCallFormat.infer(from: "glm4") == .glm4)
+        #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4)
+        #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4)
 
         // Gemma models
-        #expect(ToolCallFormat.infer(from: "gemma") == .gemmaFunction)
-        #expect(ToolCallFormat.infer(from: "GEMMA") == .gemmaFunction)
+        #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
+        #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
 
         // Unknown models should return nil (use default)
         #expect(ToolCallFormat.infer(from: "llama") == nil)

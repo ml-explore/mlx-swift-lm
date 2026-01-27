@@ -34,15 +34,21 @@ public protocol ToolCallParser: Sendable {
 /// This enum defines the various tool call formats used by different LLM families.
 /// Each format has its own syntax for encoding function names and arguments.
 ///
+/// The raw string values can be used for JSON serialization or CLI parameters.
+///
 /// Reference: https://github.com/ml-explore/mlx-lm/tree/main/mlx_lm/tool_parsers
-public enum ToolCallFormat: Sendable, Equatable {
-    /// JSON format with configurable start/end tags.
+public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
+    /// Default JSON format used by Llama, Qwen, and most models.
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
-    case json(startTag: String, endTag: String)
+    case json
+
+    /// LFM2 JSON format with model-specific tags.
+    /// Example: `<|tool_call_start|>{"name": "func", "arguments": {...}}<|tool_call_end|>`
+    case lfm2
 
     /// XML function format used by Qwen3 Coder.
     /// Example: `<function=name><parameter=key>value</parameter></function>`
-    case xmlFunction
+    case xmlFunction = "xml_function"
 
     /// GLM4 format with arg_key/arg_value tags.
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
@@ -54,38 +60,11 @@ public enum ToolCallFormat: Sendable, Equatable {
 
     /// Kimi K2 format with functions prefix.
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
-    case kimiK2
+    case kimiK2 = "kimi_k2"
 
     /// MiniMax M2 format with invoke/parameter tags.
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
-    case minimaxM2
-
-    // MARK: - Convenience Properties
-
-    /// Default JSON format used by Llama, Qwen, and most models.
-    public static let `default` = ToolCallFormat.json(
-        startTag: "<tool_call>", endTag: "</tool_call>"
-    )
-
-    /// LFM2 JSON format with model-specific tags.
-    public static let lfm2 = ToolCallFormat.json(
-        startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>"
-    )
-
-    /// Qwen3 Coder XML function format.
-    public static let qwen3Coder = ToolCallFormat.xmlFunction
-
-    /// GLM4 MoE format.
-    public static let glm4Moe = ToolCallFormat.glm4
-
-    /// Gemma function call format.
-    public static let gemmaFunction = ToolCallFormat.gemma
-
-    /// Kimi K2 format.
-    public static let kimi = ToolCallFormat.kimiK2
-
-    /// MiniMax M2 format.
-    public static let minimax = ToolCallFormat.minimaxM2
+    case minimaxM2 = "minimax_m2"
 
     // MARK: - Factory Methods
 
@@ -93,8 +72,10 @@ public enum ToolCallFormat: Sendable, Equatable {
     /// - Returns: A parser instance configured for this format
     public func createParser() -> any ToolCallParser {
         switch self {
-        case .json(let startTag, let endTag):
-            return JSONToolCallParser(startTag: startTag, endTag: endTag)
+        case .json:
+            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        case .lfm2:
+            return JSONToolCallParser(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser()
         case .glm4:
@@ -120,9 +101,9 @@ public enum ToolCallFormat: Sendable, Equatable {
         case "lfm2", "lfm2_moe":
             return .lfm2
         case "glm4", "glm4_moe", "glm4_moe_lite":
-            return .glm4Moe
+            return .glm4
         case "gemma":
-            return .gemmaFunction
+            return .gemma
         default:
             return nil
         }
