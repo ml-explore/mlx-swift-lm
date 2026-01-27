@@ -59,6 +59,8 @@ Currently supported model types are:
 - Qwen3-Next
 - Starcoder2
 - MiMo
+- MiMo_v2_flash
+- MiniMax
 - GLM4
 - GLM4MOE
 - AceReason
