@@ -51,8 +51,8 @@ variety of open weights LLMs and VLMs using this simplified API:
 ```swift
 let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
 let session = ChatSession(model)
-print(try await session.respond(to: "What are two things to see in San Francisco?")
-print(try await session.respond(to: "How about a great place to eat?")
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
 Or use the underlying API to control every aspect of the evaluation.
