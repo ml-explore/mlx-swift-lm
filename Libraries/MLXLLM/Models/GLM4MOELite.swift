@@ -8,8 +8,122 @@
 
 import Foundation
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
+
+// MARK: - MultiLinear
+
+class MultiLinear: Module, Quantizable {
+    let inputDims: Int
+    let outputDims: Int
+    let numHeads: Int
+
+    @ParameterInfo(key: "weight") var weight: MLXArray
+
+    init(inputDims: Int, outputDims: Int, numHeads: Int) {
+        self.inputDims = inputDims
+        self.outputDims = outputDims
+        self.numHeads = numHeads
+
+        let scale = sqrt(1.0 / Float(inputDims))
+        _weight.wrappedValue = MLXRandom.uniform(
+            low: -scale,
+            high: scale,
+            [numHeads, outputDims, inputDims]
+        )
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        return x.matmul(weight.swappedAxes(-1, -2))
+    }
+
+    // MARK: - Quantizable conformance
+
+    public func toQuantized(groupSize: Int, bits: Int, mode: QuantizationMode) -> Module {
+        return QuantizedMultiLinear(
+            weight: weight,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+    }
+}
+
+// MARK: - QuantizedMultiLinear
+
+/// Quantized version of MultiLinear that handles packed 4-bit weights.
+/// This is the Swift equivalent of Python's QuantizedMultiLinear class (lines 89-129 in glm4_moe_lite.py).
+class QuantizedMultiLinear: Module, Quantized {
+    public let groupSize: Int
+    public let bits: Int
+    public let mode: QuantizationMode
+
+    @ParameterInfo(key: "weight") var weight: MLXArray
+    @ParameterInfo(key: "scales") var scales: MLXArray
+    @ParameterInfo(key: "biases") var biases: MLXArray?
+
+    /// Initialize from non-quantized weights (for conversion from MultiLinear)
+    init(
+        weight: MLXArray,
+        groupSize: Int,
+        bits: Int,
+        mode: QuantizationMode = .affine
+    ) {
+        self.groupSize = groupSize
+        self.bits = bits
+        self.mode = mode
+
+        let (quantizedWeight, scales, biases) = MLX.quantized(
+            weight, groupSize: groupSize, bits: bits, mode: mode
+        )
+        _weight.wrappedValue = quantizedWeight
+        _scales.wrappedValue = scales
+        _biases.wrappedValue = biases
+
+        super.init()
+        self.freeze()
+    }
+
+    /// Initialize with pre-quantized weights and scales (for loading from file)
+    init(
+        weight: MLXArray,
+        scales: MLXArray,
+        biases: MLXArray?,
+        groupSize: Int,
+        bits: Int,
+        mode: QuantizationMode = .affine
+    ) {
+        self.groupSize = groupSize
+        self.bits = bits
+        self.mode = mode
+
+        _weight.wrappedValue = weight
+        _scales.wrappedValue = scales
+        _biases.wrappedValue = biases
+
+        super.init()
+        self.freeze()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        // Use quantizedMM for efficient quantized matrix multiplication
+        // The weight is in shape [numHeads, outputDims, inputDims(packed)]
+        return quantizedMM(
+            x,
+            weight,
+            scales: scales,
+            biases: biases,
+            transpose: true,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+    }
+}
+
+// MARK: - Attention
 
 class GLM4MoELiteAttention: Module {
     let config: GLM4MoELiteConfiguration
@@ -33,7 +147,8 @@ class GLM4MoELiteAttention: Module {
     @ModuleInfo(key: "o_proj") var oProj: Linear
     @ModuleInfo(key: "kv_a_proj_with_mqa") var kvAProjWithMqa: Linear
     @ModuleInfo(key: "kv_a_layernorm") var kvALayerNorm: RMSNorm
-    @ModuleInfo(key: "kv_b_proj") var kvBProj: Linear
+    @ModuleInfo(key: "embed_q") var embedQ: Module  // Can be MultiLinear or QuantizedMultiLinear
+    @ModuleInfo(key: "unembed_out") var unembedOut: Module  // Can be MultiLinear or QuantizedMultiLinear
 
     init(_ config: GLM4MoELiteConfiguration) {
         self.config = config
@@ -63,10 +178,15 @@ class GLM4MoELiteAttention: Module {
             bias: config.attentionBias
         )
         _kvALayerNorm.wrappedValue = RMSNorm(dimensions: kvLoraRank, eps: config.rmsNormEps)
-        _kvBProj.wrappedValue = Linear(
-            kvLoraRank,
-            numHeads * (qHeadDim - qkRopeHeadDim + vHeadDim),
-            bias: false
+        _embedQ.wrappedValue = MultiLinear(
+            inputDims: qkNopeHeadDim,
+            outputDims: kvLoraRank,
+            numHeads: numHeads
+        )
+        _unembedOut.wrappedValue = MultiLinear(
+            inputDims: kvLoraRank,
+            outputDims: vHeadDim,
+            numHeads: numHeads
         )
         _oProj.wrappedValue = Linear(
             numHeads * vHeadDim, hiddenSize, bias: config.attentionBias)
@@ -100,6 +220,17 @@ class GLM4MoELiteAttention: Module {
         )
     }
 
+    /// Helper to call a MultiLinear or QuantizedMultiLinear module
+    private func callMultiLinear(_ module: Module, _ x: MLXArray) -> MLXArray {
+        if let multiLinear = module as? MultiLinear {
+            return multiLinear(x)
+        } else if let quantized = module as? QuantizedMultiLinear {
+            return quantized(x)
+        } else {
+            fatalError("Module must be MultiLinear or QuantizedMultiLinear")
+        }
+    }
+
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
@@ -114,7 +245,7 @@ class GLM4MoELiteAttention: Module {
 
         q = q.reshaped(B, L, numHeads, qHeadDim).transposed(0, 2, 1, 3)
         let splitQ = split(q, indices: [qkNopeHeadDim], axis: -1)
-        let qNope = splitQ[0]
+        var qNope = splitQ[0]
         var qPe = splitQ[1]
 
         var compressedKv = kvAProjWithMqa(x)
@@ -122,37 +253,46 @@ class GLM4MoELiteAttention: Module {
         compressedKv = splitCompressedKv[0]
         var kPe = splitCompressedKv[1]
         kPe = kPe.reshaped(B, L, 1, qkRopeHeadDim).transposed(0, 2, 1, 3)
+        var kvLatent = kvALayerNorm(compressedKv)
 
-        var kv = kvBProj(kvALayerNorm(compressedKv))
-        kv = kv.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
+        let offset = cache?.offset ?? 0
+        qPe = rope(qPe, offset: offset)
+        kPe = rope(kPe, offset: offset)
 
-        let splitKv = split(kv, indices: [qkNopeHeadDim], axis: -1)
-        let kNope = splitKv[0]
-        let values = splitKv[1]
+        // Expand kvLatent for attention: [B, L, kvLoraRank] -> [B, 1, L, kvLoraRank]
+        kvLatent = expandedDimensions(kvLatent, axis: 1)
 
+        // Transform q_nope through embed_q
+        qNope = callMultiLinear(embedQ, qNope)
+
+        // Create keys for attention (and caching)
+        var keys = concatenated([kvLatent, kPe], axis: -1)
+
+        // Update cache with compressed representation
         if let cache {
-            qPe = rope(qPe, offset: cache.offset)
-            kPe = rope(kPe, offset: cache.offset)
-        } else {
-            qPe = rope(qPe, offset: 0)
-            kPe = rope(kPe, offset: 0)
+            let dummyValues = MLX.zeros([B, 1, L, 0])
+            (keys, _) = cache.update(keys: keys, values: dummyValues)
         }
-        kPe = repeated(kPe, count: numHeads, axis: 1)
 
-        let keys = concatenated([kNope, kPe], axis: -1)
+        // Values are kvLatent (everything except the rope part)
+        let values = keys[.ellipsis, ..<(-qkRopeHeadDim)]
+
+        // Create queries
         let queries = concatenated([qNope, qPe], axis: -1)
 
-        let output = attentionWithCacheUpdate(
+        // Compute attention
+        var output = MLXFast.scaledDotProductAttention(
             queries: queries,
             keys: keys,
             values: values,
-            cache: cache,
             scale: scale,
             mask: mask
         )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
 
+        // Transform output through unembed_out
+        output = callMultiLinear(unembedOut, output)
+
+        output = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)
         return oProj(output)
     }
 }
@@ -376,6 +516,8 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
 
         for l in 0 ..< configuration.hiddenLayers {
             let prefix = "model.layers.\(l)"
+
+            // Stack experts
             for n in ["gate_proj", "down_proj", "up_proj"] {
                 for k in ["weight", "scales", "biases"] {
                     let key = "\(prefix).mlp.experts.0.\(n).\(k)"
@@ -387,6 +529,53 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
                         sanitized["\(prefix).mlp.switch_mlp.\(n).\(k)"] = MLX.stacked(toJoin)
                     }
                 }
+            }
+
+            // Convert kv_b_proj to embed_q and unembed_out
+            let attnPrefix = "\(prefix).self_attn"
+            if sanitized["\(attnPrefix).kv_b_proj.weight"] != nil {
+                let isQuantized = sanitized["\(attnPrefix).kv_b_proj.scales"] != nil
+                var v = sanitized.removeValue(forKey: "\(attnPrefix).kv_b_proj.weight")!
+                let headDim = configuration.qkNopeHeadDim + configuration.vHeadDim
+
+                var inferredBits = 0
+                var inferredGroupSize = 0
+
+                if isQuantized {
+                    let dims = configuration.kvLoraRank
+                    let scales = sanitized.removeValue(forKey: "\(attnPrefix).kv_b_proj.scales")!
+                    let biases = sanitized.removeValue(forKey: "\(attnPrefix).kv_b_proj.biases")!
+                    // Infer bits and group size
+                    inferredBits = (v.dim(-1) * 32) / dims
+                    inferredGroupSize = dims / scales.dim(-1)
+                    v = dequantized(v, scales: scales, biases: biases, groupSize: inferredGroupSize, bits: inferredBits)
+                }
+
+                let numHeads = configuration.attentionHeads
+                v = v.reshaped(numHeads, headDim, -1)
+                var wk = v[0..., ..<configuration.qkNopeHeadDim, 0...].swappedAxes(-1, -2)
+                var wv = v[0..., configuration.qkNopeHeadDim..., 0...]
+
+                // Make contiguous
+                wk = contiguous(wk)
+                wv = contiguous(wv)
+
+                if isQuantized {
+                    let (qWk, qWkScales, qWkBiases) = MLX.quantized(
+                        wk, groupSize: inferredGroupSize, bits: inferredBits)
+                    let (qWv, qWvScales, qWvBiases) = MLX.quantized(
+                        wv, groupSize: inferredGroupSize, bits: inferredBits)
+
+                    sanitized["\(attnPrefix).embed_q.scales"] = qWkScales
+                    sanitized["\(attnPrefix).unembed_out.scales"] = qWvScales
+                    sanitized["\(attnPrefix).embed_q.biases"] = qWkBiases
+                    sanitized["\(attnPrefix).unembed_out.biases"] = qWvBiases
+                    wk = qWk
+                    wv = qWv
+                }
+
+                sanitized["\(attnPrefix).embed_q.weight"] = wk
+                sanitized["\(attnPrefix).unembed_out.weight"] = wv
             }
         }
 
@@ -505,7 +694,7 @@ public struct GLM4MoELiteConfiguration: Codable, Sendable {
         self.nGroup = try container.decode(Int.self, forKey: .nGroup)
         self.topkGroup = try container.decode(Int.self, forKey: .topkGroup)
         self.numExpertsPerTok = try container.decode(Int.self, forKey: .numExpertsPerTok)
-        self.moeLayerFreq = try container.decode(Int.self, forKey: .moeLayerFreq)
+        self.moeLayerFreq = try container.decodeIfPresent(Int.self, forKey: .moeLayerFreq) ?? 1
         self.firstKDenseReplace = try container.decode(Int.self, forKey: .firstKDenseReplace)
         self.maxPositionEmbeddings = try container.decode(Int.self, forKey: .maxPositionEmbeddings)
         self.rmsNormEps = try container.decode(Float.self, forKey: .rmsNormEps)
