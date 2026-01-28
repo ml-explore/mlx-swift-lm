@@ -267,15 +267,12 @@ class GLM4MoELiteAttention: Module {
 
         // Create keys for attention (and caching)
         var keys = concatenated([kvLatent, kPe], axis: -1)
+        var values = kvLatent  // Values are the compressed KV latent
 
         // Update cache with compressed representation
         if let cache {
-            let dummyValues = MLX.zeros([B, 1, L, 0])
-            (keys, _) = cache.update(keys: keys, values: dummyValues)
+            (keys, values) = cache.update(keys: keys, values: values)
         }
-
-        // Values are kvLatent (everything except the rope part)
-        let values = keys[.ellipsis, ..<(-qkRopeHeadDim)]
 
         // Create queries
         let queries = concatenated([qNope, qPe], axis: -1)
