@@ -11,7 +11,7 @@ import Foundation
 import MLX
 
 // MARK: - Kernel Sources
-
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 private func makeBicubicInterpolationKernel() -> MLXFast.MLXFastKernel {
     let header = """
         // Bicubic kernel function
@@ -452,3 +452,4 @@ public func nearestInterpolate(
 ) -> MLXArray {
     nearestInterpolate(x, scaleFactor: (scaleFactor, scaleFactor))
 }
+#endif

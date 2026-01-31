@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
 import Foundation
 import MLX
 import Tokenizers
@@ -47,7 +46,7 @@ public final class ChatSession {
         _ model: ModelContainer,
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
@@ -73,7 +72,7 @@ public final class ChatSession {
         _ model: ModelContext,
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
@@ -101,7 +100,7 @@ public final class ChatSession {
         instructions: String? = nil,
         history: consuming [Chat.Message],
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
@@ -130,7 +129,7 @@ public final class ChatSession {
         instructions: String? = nil,
         history: [Chat.Message],
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {

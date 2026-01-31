@@ -7,6 +7,7 @@
 
 import Foundation
 import MLX
+import MLXFast
 import MLXNN
 
 public enum Gemma {

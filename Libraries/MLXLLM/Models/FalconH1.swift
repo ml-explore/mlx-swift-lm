@@ -7,6 +7,7 @@
 
 import Foundation
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
 
@@ -318,7 +319,7 @@ class FalconH1Attention: Module {
             keys: keys,
             values: values,
             scale: scale,
-            mask: mask
+            mask: mask.map { .array($0) } ?? .none
         )
 
         output = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)

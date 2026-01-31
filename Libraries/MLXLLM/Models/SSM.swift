@@ -7,6 +7,8 @@
 
 import Foundation
 import MLX
+import MLXFast
+import MLXLMCommon
 import MLXNN
 
 public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Float, Float))
@@ -16,103 +18,115 @@ public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Floa
     return MLX.clip(dt, min: timeStepLimit.0, max: timeStepLimit.1)
 }
 
-private func makeSSMKernel() -> MLXFast.MLXFastKernel? {
-    let source = """
-            auto n = thread_position_in_grid.z;
-            auto h_idx = n % H;
-            auto g_idx = n / G;
-            constexpr int n_per_t = Ds / 32;
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+    private func makeSSMKernel() -> MLXFast.MLXFastKernel? {
+        let source = """
+                auto n = thread_position_in_grid.z;
+                auto h_idx = n % H;
+                auto g_idx = n / G;
+                constexpr int n_per_t = Ds / 32;
 
-            auto x = X + n * Dh;
-            out += n * Dh;
-            auto i_state = state_in + n * Dh * Ds;
-            auto o_state = state_out + n * Dh * Ds;
+                auto x = X + n * Dh;
+                out += n * Dh;
+                auto i_state = state_in + n * Dh * Ds;
+                auto o_state = state_out + n * Dh * Ds;
 
-            // C and B have shape [batch, group, state_dim]
-            // C and B need to be offset by group size
-            auto C_ = C + g_idx * Ds;
-            auto B_ = B + g_idx * Ds;
+                // C and B have shape [batch, group, state_dim]
+                // C and B need to be offset by group size
+                auto C_ = C + g_idx * Ds;
+                auto B_ = B + g_idx * Ds;
 
-            auto ds_idx = thread_position_in_threadgroup.x;
-            auto d_idx = thread_position_in_grid.y;
+                auto ds_idx = thread_position_in_threadgroup.x;
+                auto d_idx = thread_position_in_grid.y;
 
-            auto dt_ = static_cast<float>(dt[n]);
-            auto A = -fast::exp(static_cast<float>(A_log[h_idx]));
-            auto dA = fast::exp(A * dt_);
+                auto dt_ = static_cast<float>(dt[n]);
+                auto A = -fast::exp(static_cast<float>(A_log[h_idx]));
+                auto dA = fast::exp(A * dt_);
 
-            float acc = 0.0;
-            auto x_ = static_cast<float>(x[d_idx]);
+                float acc = 0.0;
+                auto x_ = static_cast<float>(x[d_idx]);
 
-            for (int i = 0; i < n_per_t; ++i) {
-                auto s_idx = n_per_t * ds_idx + i;
-                auto idx = d_idx * Ds + s_idx;
-                auto dB_by_x = x_ * dt_ * static_cast<float>(B_[s_idx]);
-                auto state = dA * i_state[idx] + dB_by_x;
-                o_state[idx] = static_cast<T>(state);
-                acc += state * C_[s_idx];
-            }
-            acc = simd_sum(acc);
-            if (thread_index_in_simdgroup == 0) {
-                out[d_idx] = static_cast<T>(acc + x_ * D[h_idx]);
-            }
-        """
+                for (int i = 0; i < n_per_t; ++i) {
+                    auto s_idx = n_per_t * ds_idx + i;
+                    auto idx = d_idx * Ds + s_idx;
+                    auto dB_by_x = x_ * dt_ * static_cast<float>(B_[s_idx]);
+                    auto state = dA * i_state[idx] + dB_by_x;
+                    o_state[idx] = static_cast<T>(state);
+                    acc += state * C_[s_idx];
+                }
+                acc = simd_sum(acc);
+                if (thread_index_in_simdgroup == 0) {
+                    out[d_idx] = static_cast<T>(acc + x_ * D[h_idx]);
+                }
+            """
 
-    return MLXFast.metalKernel(
-        name: "ssm_kernel",
-        inputNames: ["X", "A_log", "B", "C", "D", "dt", "state_in"],
-        outputNames: ["out", "state_out"],
-        source: source
-    )
-}
-
-private final class SSMKernelManager: Sendable {
-    static let shared = SSMKernelManager()
-
-    let ssmKernel: MLXFast.MLXFastKernel?
-
-    private init() {
-        ssmKernel = makeSSMKernel()
-    }
-}
-
-func ssmUpdateKernel(
-    hiddenStates: MLXArray,
-    ALog: MLXArray,
-    B: MLXArray,
-    C: MLXArray,
-    D: MLXArray,
-    dt: MLXArray,
-    dtBias: MLXArray,
-    state: MLXArray,
-    timeStepLimit: (Float, Float)
-) -> (MLXArray, MLXArray) {
-    let (n, _, h, d) = hiddenStates.shape4
-    let inputType = hiddenStates.dtype
-    let (hb, ds) = (B.dim(-2), B.dim(-1))
-
-    let dt = computeDt(dt, dtBias, timeStepLimit)
-
-    guard let kernel = SSMKernelManager.shared.ssmKernel else {
-        fatalError("SSM kernel not available")
+        return MLXFast.metalKernel(
+            name: "ssm_kernel",
+            inputNames: ["X", "A_log", "B", "C", "D", "dt", "state_in"],
+            outputNames: ["out", "state_out"],
+            source: source
+        )
     }
 
-    let outputs = kernel(
-        [hiddenStates, ALog, B, C, D, dt, state],
-        template: [
-            ("T", inputType),
-            ("Dh", d),
-            ("Ds", ds),
-            ("H", h),
-            ("G", h / hb),
-        ],
-        grid: (32, d, h * n),
-        threadGroup: (32, 8, 1),
-        outputShapes: [[n, 1, h, d], state.shape],
-        outputDTypes: [inputType, inputType]
-    )
+    private final class SSMKernelManager: Sendable {
+        static let shared = SSMKernelManager()
 
-    return (outputs[0], outputs[1])
-}
+        let ssmKernel: MLXFast.MLXFastKernel?
+
+        private init() {
+            ssmKernel = makeSSMKernel()
+        }
+    }
+
+    private func ssmKernelAvailable() -> Bool {
+        return SSMKernelManager.shared.ssmKernel != nil
+    }
+#else
+    private func ssmKernelAvailable() -> Bool {
+        return false
+    }
+#endif
+
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+    func ssmUpdateKernel(
+        hiddenStates: MLXArray,
+        ALog: MLXArray,
+        B: MLXArray,
+        C: MLXArray,
+        D: MLXArray,
+        dt: MLXArray,
+        dtBias: MLXArray,
+        state: MLXArray,
+        timeStepLimit: (Float, Float)
+    ) -> (MLXArray, MLXArray) {
+        let (n, _, h, d) = hiddenStates.shape4
+        let inputType = hiddenStates.dtype
+        let (hb, ds) = (B.dim(-2), B.dim(-1))
+
+        let dt = computeDt(dt, dtBias, timeStepLimit)
+
+        guard let kernel = SSMKernelManager.shared.ssmKernel else {
+            fatalError("SSM kernel not available")
+        }
+
+        let outputs = kernel(
+            [hiddenStates, ALog, B, C, D, dt, state],
+            template: [
+                ("T", inputType),
+                ("Dh", d),
+                ("Ds", ds),
+                ("H", h),
+                ("G", h / hb),
+            ],
+            grid: (32, d, h * n),
+            threadGroup: (32, 8, 1),
+            outputShapes: [[n, 1, h, d], state.shape],
+            outputDTypes: [inputType, inputType]
+        )
+
+        return (outputs[0], outputs[1])
+    }
+#endif
 
 public func segsum(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
     let l = x.dim(-1)
@@ -205,33 +219,35 @@ public func ssmUpdate(
 ) -> (MLXArray, MLXArray) {
     let seqLen = hiddenStates.dim(1)
 
-    if seqLen == 1,
-        let state = state,
-        SSMKernelManager.shared.ssmKernel != nil
-    {
-        return ssmUpdateKernel(
-            hiddenStates: hiddenStates,
-            ALog: ALog,
-            B: B,
-            C: C,
-            D: D,
-            dt: dt,
-            dtBias: dtBias,
-            state: state,
-            timeStepLimit: timeStepLimit
-        )
-    } else {
-        return ssmAttn(
-            x: hiddenStates,
-            ALog: ALog,
-            B: B,
-            C: C,
-            D: D,
-            dt: dt,
-            dtBias: dtBias,
-            state: state,
-            timeStepLimit: timeStepLimit,
-            mask: mask
-        )
-    }
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        if seqLen == 1,
+            let state = state,
+            ssmKernelAvailable()
+        {
+            return ssmUpdateKernel(
+                hiddenStates: hiddenStates,
+                ALog: ALog,
+                B: B,
+                C: C,
+                D: D,
+                dt: dt,
+                dtBias: dtBias,
+                state: state,
+                timeStepLimit: timeStepLimit
+            )
+        }
+    #endif
+
+    return ssmAttn(
+        x: hiddenStates,
+        ALog: ALog,
+        B: B,
+        C: C,
+        D: D,
+        dt: dt,
+        dtBias: dtBias,
+        state: state,
+        timeStepLimit: timeStepLimit,
+        mask: mask
+    )
 }

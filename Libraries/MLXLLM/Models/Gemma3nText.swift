@@ -9,6 +9,7 @@
 
 import Foundation
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
 
@@ -170,7 +171,10 @@ class RMSNoScale: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        MLXFast.rmsNorm(x, weight: MLXArray.mlxNone, eps: eps)
+        // RMS norm without weight: weight * x * rsqrt(mean(x^2) + eps)
+        // Since weight is none, we just compute x * rsqrt(mean(x^2) + eps)
+        let meanSquare = mean(x * x, axis: -1, keepDims: true)
+        return x * rsqrt(meanSquare + eps)
     }
 }
 
