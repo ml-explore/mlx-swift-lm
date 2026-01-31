@@ -14,7 +14,7 @@ import MLXNN
 /// - **GQA/MQA Support**: Flexible number of query vs key-value heads.
 /// - **Dynamic RoPE**: Support for linear scaling of rotary embeddings.
 private class Attention: Module {
-    
+
     let args: Qwen3Configuration
     let scale: Float
 
@@ -22,7 +22,7 @@ private class Attention: Module {
     @ModuleInfo(key: "q_proj") var wq: Linear
     @ModuleInfo(key: "k_proj") var wk: Linear
     @ModuleInfo(key: "v_proj") var wv: Linear
-    
+
     /// Final output projection
     @ModuleInfo(key: "o_proj") var wo: Linear
 
@@ -42,7 +42,7 @@ private class Attention: Module {
         let heads = args.attentionHeads
         let kvHeads = args.kvHeads
         let headDim = args.headDim
-        
+
         // Softmax scaling factor: 1 / sqrt(headDim)
         self.scale = Float(pow(Double(headDim), -0.5))
 
@@ -59,9 +59,9 @@ private class Attention: Module {
         // Handle Rotary Embedding Scaling (Linear scaling logic)
         var ropeScale: Float = 1
         if let ropeScaling = args.ropeScaling,
-           let typeValue = ropeScaling["type"],
-           case .string(let type) = typeValue, type == "linear",
-           let factorValue = ropeScaling["factor"]
+            let typeValue = ropeScaling["type"],
+            case .string(let type) = typeValue, type == "linear",
+            let factorValue = ropeScaling["factor"]
         {
             switch factorValue {
             case .float(let v):
@@ -123,8 +123,8 @@ private class Attention: Module {
             scale: scale,
             mask: mask
         )
-        .transposed(0, 2, 1, 3) // Restore [Batch, Length, Heads, HeadDim]
-        .reshaped(B, L, -1)    // Flatten heads: [Batch, Length, HiddenSize]
+        .transposed(0, 2, 1, 3)  // Restore [Batch, Length, Heads, HeadDim]
+        .reshaped(B, L, -1)  // Flatten heads: [Batch, Length, HiddenSize]
 
         // 5. Final output projection
         return wo(output)
@@ -139,13 +139,13 @@ private class Attention: Module {
 /// It uses a "Gated Linear Unit" approach where one projection acts as a filter (gate)
 /// for the other before projecting back to the model's hidden state dimension.
 private class MLP: Module, UnaryLayer {
-    
+
     /// Projection from model dimension to a higher-dimensional hidden space (gate branch).
     @ModuleInfo(key: "gate_proj") var gate: Linear
-    
+
     /// Projection from the hidden space back to the model dimension.
     @ModuleInfo(key: "down_proj") var down: Linear
-    
+
     /// Projection from model dimension to a higher-dimensional hidden space (value branch).
     @ModuleInfo(key: "up_proj") var up: Linear
 
@@ -182,16 +182,16 @@ private class MLP: Module, UnaryLayer {
 /// before each sub-layer. It uses residual connections (skip connections) to allow
 /// gradients to flow through deep stacks of blocks.
 private class TransformerBlock: Module {
-    
+
     /// The self-attention mechanism (includes QK-Norm and RoPE).
     @ModuleInfo(key: "self_attn") var attention: Attention
-    
+
     /// The feed-forward network (SwiGLU).
     let mlp: MLP
 
     /// Normalization applied before the attention layer.
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
-    
+
     /// Normalization applied before the MLP layer.
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
@@ -201,7 +201,7 @@ private class TransformerBlock: Module {
         // Initialize the two main processing sub-layers
         _attention.wrappedValue = Attention(args)
         self.mlp = MLP(dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
-        
+
         // Initialize RMSNorm layers with the specified epsilon for numerical stability
         _inputLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize,
@@ -228,12 +228,12 @@ private class TransformerBlock: Module {
         // Apply Pre-Norm -> Attention -> Residual Connection
         var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
-        
+
         // 2. MLP Sub-layer
         // Apply Pre-Norm -> MLP -> Residual Connection
         r = mlp(postAttentionLayerNorm(h))
         let out = h + r
-        
+
         return out
     }
 }
@@ -246,13 +246,13 @@ private class TransformerBlock: Module {
 /// and the final output normalization. It does not include the LM head (the mapping
 /// back to vocabulary logits).
 private class Qwen3ModelInner: Module {
-    
+
     /// Maps input token IDs to dense vectors.
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     /// The sequence of Transformer layers that form the depth of the model.
     fileprivate let layers: [TransformerBlock]
-    
+
     /// The final normalization layer applied after all transformer blocks.
     let norm: RMSNorm
 
@@ -271,7 +271,7 @@ private class Qwen3ModelInner: Module {
         self.layers = (0 ..< args.hiddenLayers).map { _ in
             TransformerBlock(args)
         }
-        
+
         // 3. Initialize final RMSNorm
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
@@ -307,17 +307,17 @@ private class Qwen3ModelInner: Module {
 /// This class conforms to `EmbeddingModel`, making it suitable for use as a base
 /// for Causal Language Models or as a standalone encoder for generating text embeddings.
 public class Qwen3Model: Module, EmbeddingModel {
-    
+
     /// The size of the vocabulary used for tokenization.
     public let vocabularySize: Int
-    
+
     /// An array specifying the number of KV heads for each layer.
     /// Useful for initializing KV caches during inference.
     public let kvHeads: [Int]
 
     /// The internal backbone processing the embeddings and transformer blocks.
     @ModuleInfo(key: "model") private var model: Qwen3ModelInner
-    
+
     /// The immutable configuration used to build the model.
     let configuration: Qwen3Configuration
 
@@ -346,10 +346,10 @@ public class Qwen3Model: Module, EmbeddingModel {
     ) -> EmbeddingModelOutput {
         // Pass the input through the inner model backbone
         let out = model(inputIds, cache: nil)
-        
+
         return EmbeddingModelOutput(
             hiddenStates: out,
-            pooledOutput: nil // Qwen is typically used without a specific pooler head
+            pooledOutput: nil  // Qwen is typically used without a specific pooler head
         )
     }
 
@@ -389,40 +389,40 @@ public class Qwen3Model: Module, EmbeddingModel {
 /// This struct conforms to `Codable` to allow loading from standard JSON configuration files
 /// and `Sendable` for safe use across concurrent Swift tasks.
 public struct Qwen3Configuration: Codable, Sendable {
-    
+
     /// Dimensionality of the encoder layers and the pooler layer.
     var hiddenSize: Int
-    
+
     /// Number of hidden layers in the Transformer encoder.
     var hiddenLayers: Int
-    
+
     /// Dimensionality of the "intermediate" (feed-forward) layer.
     var intermediateSize: Int
-    
+
     /// Number of attention heads for each attention layer in the Transformer encoder.
     var attentionHeads: Int
-    
+
     /// The epsilon value used by the RMSNorm layers.
     var rmsNormEps: Float
-    
+
     /// Vocabulary size of the Qwen3 model.
     var vocabularySize: Int
-    
+
     /// Number of key-value heads for Grouped Query Attention (GQA).
     var kvHeads: Int
-    
+
     /// The base frequency for the Rotary Positional Embeddings (RoPE).
     var ropeTheta: Float = 1_000_000
-    
+
     /// Dimensionality of each attention head.
     var headDim: Int
-    
+
     /// Optional scaling configuration for RoPE (e.g., for context length extension).
     var ropeScaling: [String: StringOrNumber]? = nil
-    
+
     /// Whether to share weights between the input embeddings and the output projection.
     var tieWordEmbeddings = false
-    
+
     /// The maximum sequence length that this model might ever be used with.
     var maxPositionEmbeddings: Int = 32768
 
@@ -454,11 +454,14 @@ public struct Qwen3Configuration: Codable, Sendable {
         self.vocabularySize = try container.decode(Int.self, forKey: .vocabularySize)
         self.kvHeads = try container.decode(Int.self, forKey: .kvHeads)
         self.headDim = try container.decode(Int.self, forKey: .headDim)
-        
+
         // Decode optional fields with fallback defaults
         self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000
-        self.ropeScaling = try container.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeScaling)
-        self.tieWordEmbeddings = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
-        self.maxPositionEmbeddings = try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
+        self.ropeScaling = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeScaling)
+        self.tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        self.maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
     }
 }

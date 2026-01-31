@@ -37,19 +37,19 @@ class NomicEmbedding: Module {
     /// - Parameter config: The `NomicBertConfiguration` containing vocabulary sizes, dimensions, and flags.
     init(_ config: NomicBertConfiguration) {
         typeVocabularySize = config.typeVocabularySize
-        
+
         // Initialize Word Embeddings
         _wordEmbeddings.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize,
             dimensions: config.embedDim
         )
-        
+
         // Initialize Layer Normalization
         _norm.wrappedValue = LayerNorm(
             dimensions: config.embedDim,
             eps: config.layerNormEps
         )
-        
+
         // Conditionally initialize Token Type Embeddings
         if config.typeVocabularySize > 0 {
             _tokenTypeEmbeddings.wrappedValue = Embedding(
@@ -57,7 +57,7 @@ class NomicEmbedding: Module {
                 dimensions: config.embedDim
             )
         }
-        
+
         // Conditionally initialize Position Embeddings
         if config.maxPositionEmbeddings > 0 {
             _positionEmbeddings.wrappedValue = Embedding(
@@ -89,18 +89,18 @@ class NomicEmbedding: Module {
         if let tokenTypeIds, let tokenTypeEmbeddings {
             words += tokenTypeEmbeddings(tokenTypeIds)
         }
-        
+
         // 3. Determine Position IDs
         // If specific position IDs are not provided, we create a range [0, 1, ... seq_len]
         // and broadcast it to match the batch shape.
         let positions =
             positionIds ?? broadcast(MLXArray.arange(inputIds.dim(1)), to: inputIds.shape)
-        
+
         // 4. Add Position Embeddings (if applicable)
         if let positionEmbeddings {
             words += positionEmbeddings(positions)
         }
-        
+
         // 5. Apply Normalization
         return norm(words)
     }
@@ -117,15 +117,15 @@ class NomicEmbedding: Module {
 /// The forward pass corresponds to:
 /// $$ Output = \text{Down}(\text{Up}(x) \odot \text{SiLU}(\text{Gate}(x))) $$
 private class MLP: Module, UnaryLayer {
-    
+
     /// The "up" projection layer (creates the values).
     /// Projects from `embedDim` to `hiddenFeatures`.
     @ModuleInfo(key: "fc11") var up: Linear
-    
+
     /// The "gate" projection layer (creates the attention mask/filter).
     /// Projects from `embedDim` to `hiddenFeatures`.
     @ModuleInfo(key: "fc12") var gate: Linear
-    
+
     /// The "down" projection layer.
     /// Projects from `hiddenFeatures` back to `embedDim`.
     @ModuleInfo(key: "fc2") var down: Linear
@@ -149,13 +149,13 @@ private class MLP: Module, UnaryLayer {
     /// - Parameter config: Configuration defining embedding dimensions and bias settings.
     init(_ config: NomicBertConfiguration) {
         let hiddenFeatures = MLP.scaledHiddenFeatures(config: config)
-        
+
         _up.wrappedValue = Linear(
             config.embedDim, hiddenFeatures, bias: config.mlpFc1Bias)
-        
+
         _gate.wrappedValue = Linear(
             config.embedDim, hiddenFeatures, bias: config.mlpFc1Bias)
-        
+
         _down.wrappedValue = Linear(
             hiddenFeatures, config.embedDim, bias: config.mlpFc2Bias)
     }
@@ -234,26 +234,26 @@ func computeBaseFrequency(
 /// - Note: The scaling logic follows the formula:
 ///   $$ \text{base}' = \text{base} \cdot \left(\frac{L_{seq}}{L_{max}}\right)^{\frac{d}{d-2}} $$
 private class DynamicNTKScalingRoPE: Module {
-    
+
     /// The dimension of the embedding vector to rotate (usually `head_dim`).
     let dims: Int
-    
+
     /// The maximum sequence length the model was trained on (e.g., 2048 or 4096).
     /// Used as the threshold to trigger dynamic scaling.
     let maxPositionEmbeddings: Int?
-    
+
     /// Whether to use traditional RoPE (interleaved) or standard ordering.
     let traditional: Bool
-    
+
     /// The base frequency (theta), typically 10000.0 or 1000000.0.
     let base: Float
-    
+
     /// The linear scaling factor applied to the frequency.
     var scale: Float
-    
+
     /// The type of RoPE scaling configuration (e.g., "dynamic", "linear").
     let ropeType: String
-    
+
     /// Dictionary containing scaling configuration details.
     let ropeScaling: [String: StringOrNumber]?
 
@@ -301,22 +301,22 @@ private class DynamicNTKScalingRoPE: Module {
     func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         let seqLen = x.dim(1) + offset
         var base = self.base
-        
+
         // Dynamic NTK Scaling Logic
         if let maxPositionEmbeddings, seqLen > maxPositionEmbeddings {
             // Calculate the ratio of current length to max trained length
             let factorAdjustment = Float(seqLen) / Float(maxPositionEmbeddings) - 1
-            
+
             // Calculate the exponent for NTK scaling: d / (d - 2)
             let dimensionRatio = Float(dims) / Float(Float(dims) - 2)
-            
+
             // Calculate the new scaling factor
             let adjustedScale = scale * pow(1 + factorAdjustment, dimensionRatio)
-            
+
             // Apply scaling to the base frequency
             base *= adjustedScale
         }
-        
+
         // Apply the rotation using the (potentially adjusted) base.
         return MLXFast.RoPE(
             x,
@@ -343,17 +343,17 @@ private class DynamicNTKScalingRoPE: Module {
 /// 4. Applying a softmax normalization and weighting the Values.
 /// 5. Projecting the final output back to the embedding dimension.
 private class Attention: Module {
-    
+
     /// The number of parallel attention heads.
     let numHeads: Int
-    
+
     /// The dimensionality of a single attention head (`embedDim / numHeads`).
     let headDim: Int
 
     /// A fused linear layer that projects the input into Queries, Keys, and Values simultaneously.
     /// Output shape: `[batch, seq_len, 3 * embed_dim]`
     @ModuleInfo(key: "Wqkv") var wqkv: Linear
-    
+
     /// The final output projection layer.
     /// Input shape: `[batch, seq_len, embed_dim]`
     @ModuleInfo(key: "out_proj") var wo: Linear
@@ -378,11 +378,11 @@ private class Attention: Module {
 
     /// The selected positional encoding strategy.
     let rope: PositionalEncoding
-    
+
     /// The portion of the head dimension to apply rotary embeddings to.
     /// (Some architectures only rotate the first half or partial percentage of the vector).
     let rotaryEmbDim: Int
-    
+
     /// The scaling factor for the dot product ($\sqrt{d_{head}}$).
     /// Used to normalize gradients and prevent softmax saturation.
     let normFactor: Float
@@ -394,11 +394,11 @@ private class Attention: Module {
         // Fused QKV Projection: Projects to 3x embedding dimension
         _wqkv.wrappedValue = Linear(
             config.embedDim, 3 * config.embedDim, bias: config.qkvProjBias)
-        
+
         // Output Projection
         _wo.wrappedValue = Linear(
             config.embedDim, config.embedDim, bias: config.qkvProjBias)
-        
+
         numHeads = config.numHeads
         headDim = config.embedDim / numHeads
         rotaryEmbDim = Int(Float(headDim) * config.rotaryEmbFraction)
@@ -436,7 +436,7 @@ private class Attention: Module {
     /// - Returns: Contextualized output tensor of shape `[batch, seq_len, embed_dim]`.
     func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         let (B, L) = (inputs.dim(0), inputs.dim(1))
-        
+
         // 1. Fused Projection: Project inputs to combined QKV
         // 2. Split: Separate the combined tensor into Query, Key, and Value tensors
         let queryPos = numHeads * headDim
@@ -459,7 +459,7 @@ private class Attention: Module {
             queries = rope.applyEncoding(queries)
             keys = rope.applyEncoding(keys)
         }
-        
+
         // 5. Scaled Dot-Product Attention
         // Calculate raw attention scores: Q * K^T
         var scores = queries.matmul(keys.transposed(0, 1, 3, 2)) / normFactor
@@ -468,7 +468,7 @@ private class Attention: Module {
         if let mask {
             scores = scores + mask
         }
-        
+
         // 7. Softmax Normalization
         let probs = softmax(scores, axis: -1)
 
@@ -476,7 +476,7 @@ private class Attention: Module {
         // Weighted sum of Values: probs * V
         // Reshape back to [B, L, hidden]
         let output = matmul(probs, values).transposed(0, 2, 1, 3).reshaped(B, L, -1)
-        
+
         // 9. Final Output Projection
         return wo(output)
     }
@@ -495,16 +495,16 @@ private class Attention: Module {
 /// $$ H_1 = \text{LayerNorm}(x + \text{Attention}(x)) $$
 /// $$ Output = \text{LayerNorm}(H_1 + \text{MLP}(H_1)) $$
 private class TransformerBlock: Module {
-    
+
     /// The Multi-Head Self-Attention layer.
     @ModuleInfo(key: "attn") var attention: Attention
-    
+
     /// Layer Normalization applied after the self-attention block.
     @ModuleInfo(key: "norm1") var postAttentionLayerNorm: LayerNorm
-    
+
     /// Layer Normalization applied after the MLP block.
     @ModuleInfo(key: "norm2") var outputLayerNorm: LayerNorm
-    
+
     /// The Feed-Forward Network (SwiGLU).
     @ModuleInfo(key: "mlp") var mlp: MLP
 
@@ -514,7 +514,7 @@ private class TransformerBlock: Module {
     init(_ config: NomicBertConfiguration) {
         _attention.wrappedValue = Attention(config)
         _mlp.wrappedValue = MLP(config)
-        
+
         // Initialize LayerNorms with embedding dimension and epsilon
         _outputLayerNorm.wrappedValue = LayerNorm(
             dimensions: config.embedDim, eps: config.layerNormEps)
@@ -531,14 +531,14 @@ private class TransformerBlock: Module {
     func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         // 1. Self-Attention
         let attentionOut = attention(inputs, mask: mask)
-        
+
         // 2. Add & Norm (Post-Attention)
         // Residual connection: inputs + attention output
         let addAndNorm = postAttentionLayerNorm(attentionOut + inputs)
-        
+
         // 3. Feed-Forward Network (MLP)
         let mlpOut = mlp(addAndNorm)
-        
+
         // 4. Add & Norm (Output)
         // Residual connection: (attn_output) + mlp output
         return outputLayerNorm(addAndNorm + mlpOut)
@@ -557,14 +557,14 @@ private class TransformerBlock: Module {
 /// The forward pass consists of a non-linear transformation followed by a projection:
 /// $$ \text{Logits} = \text{Decoder}(\text{LayerNorm}(\text{SiLU}(\text{Dense}(x)))) $$
 private class LMHead: Module {
-    
+
     /// A dense projection layer that transforms the embedding space before prediction.
     /// Shape: `[embed_dim, embed_dim]`
     @ModuleInfo(key: "dense") var dense: Linear
-    
+
     /// Layer normalization applied after the activation function.
     @ModuleInfo(key: "ln") var layerNorm: LayerNorm
-    
+
     /// The final output decoder that projects embeddings to vocabulary logits.
     /// Shape: `[embed_dim, vocab_size]`
     @ModuleInfo(key: "decoder") var decoder: Linear
@@ -576,11 +576,11 @@ private class LMHead: Module {
         // 1. Transform layer
         _dense.wrappedValue = Linear(
             config.embedDim, config.embedDim, bias: config.mlpFc1Bias)
-        
+
         // 2. Normalization layer
         _layerNorm.wrappedValue = LayerNorm(
             dimensions: config.embedDim, eps: config.layerNormEps)
-        
+
         // 3. Output projection (Vocab projection)
         _decoder.wrappedValue = Linear(
             config.embedDim, config.vocabularySize, bias: config.mlpFc1Bias)
@@ -609,7 +609,7 @@ private class LMHead: Module {
 /// The output of this module represents the contextualized representation of the
 /// input sequence, often referred to as the "last hidden state".
 private class Encoder: Module {
-    
+
     /// The stack of transformer layers.
     ///
     /// MLX will automatically register these as submodules, ensuring their parameters
@@ -644,13 +644,13 @@ private class Encoder: Module {
     ///            Shape: `[batch, seq_len, embed_dim]`
     func callAsFunction(_ inputs: MLXArray, attentionMask: MLXArray? = nil) -> MLXArray {
         var outputs = inputs
-        
+
         // Sequentially pass the output of one layer as the input to the next.
         // The attention mask remains constant across all layers.
         for layer in layers {
             outputs = layer(outputs, mask: attentionMask)
         }
-        
+
         return outputs
     }
 }
@@ -664,21 +664,21 @@ private class Encoder: Module {
 /// It also handles weight key sanitization to ensure compatibility with checkpoints
 /// trained in other frameworks (e.g., PyTorch / Hugging Face).
 public class NomicBertModel: Module, EmbeddingModel {
-    
+
     /// The optional Language Model head.
     /// Used for Masked Language Modeling (MLM) or token prediction.
     @ModuleInfo(key: "lm_head") fileprivate var lmHead: LMHead?
-    
+
     /// The embedding layer responsible for token, position, and segment embeddings.
     @ModuleInfo(key: "embeddings") var embedder: NomicEmbedding
-    
+
     /// The optional pooler layer.
     /// Used to extract a single vector representation for the whole sequence (usually from the [CLS] token).
     let pooler: Linear?
-    
+
     /// The stack of Transformer blocks.
     fileprivate let encoder: Encoder
-    
+
     /// The size of the vocabulary.
     public var vocabularySize: Int
 
@@ -703,7 +703,7 @@ public class NomicBertModel: Module, EmbeddingModel {
         } else {
             self.pooler = nil
         }
-        
+
         // Initialize LM Head (for training/masked prediction)
         if lmHead {
             _lmHead.wrappedValue = LMHead(config)
@@ -731,12 +731,12 @@ public class NomicBertModel: Module, EmbeddingModel {
         attentionMask: MLXArray? = nil
     ) -> EmbeddingModelOutput {
         var inp = inputs
-        
+
         // 1. Un-squeeze input if it lacks a batch dimension (e.g., shape [seq_len] -> [1, seq_len])
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
         }
-        
+
         // 2. Process Attention Mask
         // Input: Binary mask (1 = valid, 0 = mask).
         // Operation: .log().
@@ -748,25 +748,25 @@ public class NomicBertModel: Module, EmbeddingModel {
                 1, 2,
             ]).log()
         }
-        
+
         // 3. Encoder Pass
         let outputs = encoder(
             embedder(
                 inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds),
             attentionMask: mask)
-        
+
         // 4a. Return LM Head Output (if active)
         if let lmHead {
             return EmbeddingModelOutput(hiddenStates: lmHead(outputs), pooledOutput: nil)
         }
-        
+
         // 4b. Return Pooled Output (if active)
         // Takes the first token (index 0, usually [CLS]), projects it, and applies Tanh.
         if let pooler {
             return EmbeddingModelOutput(
                 hiddenStates: outputs, pooledOutput: tanh(pooler(outputs[0..., 0])))
         }
-        
+
         // 4c. Return Raw Hidden States
         return EmbeddingModelOutput(hiddenStates: outputs, pooledOutput: nil)
     }
@@ -781,14 +781,18 @@ public class NomicBertModel: Module, EmbeddingModel {
         weights.reduce(into: [:]) { result, item in
             let key = item.key
                 .replacingOccurrences(of: "emb_ln", with: "embeddings.norm")
-                .replacingOccurrences(of: "bert.", with: "") // Remove namespace prefix
+                .replacingOccurrences(of: "bert.", with: "")  // Remove namespace prefix
                 // Remap LM Head keys
-                .replacingOccurrences(of: "cls.predictions.transform.dense.", with: "lm_head.dense.")
-                .replacingOccurrences(of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln.")
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.dense.", with: "lm_head.dense."
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln."
+                )
                 .replacingOccurrences(of: "cls.predictions.decoder", with: "lm_head.decoder")
                 // Remap Pooler keys
                 .replacingOccurrences(of: "pooler.dense.", with: "pooler.")
-            
+
             result[key] = item.value
         }
     }
@@ -802,80 +806,80 @@ public class NomicBertModel: Module, EmbeddingModel {
 /// It includes robust default values for many properties, ensuring backward compatibility with
 /// various model checkpoints.
 public struct NomicBertConfiguration: Decodable, Sendable {
-    
+
     // MARK: - Normalization & Optimization
-    
+
     /// The epsilon value used for numerical stability in Layer Normalization.
     /// Added to the variance to prevent division by zero: $\frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}}$
     var layerNormEps: Float = 1e-12
-    
+
     /// The maximum sequence length the model was explicitly trained on.
     /// This is used as the reference length ($L_{train}$) for Dynamic NTK scaling calculations.
     var maxTrainedPositions: Int = 2048
-    
+
     // MARK: - Bias Flags
-    
+
     /// Whether to include a bias term in the first linear layer of the MLP (Up/Gate projections).
     var mlpFc1Bias: Bool = false
-    
+
     /// Whether to include a bias term in the second linear layer of the MLP (Down projection).
     var mlpFc2Bias: Bool = false
-    
+
     /// Whether to include a bias term in the Query, Key, and Value projections in the Attention layer.
     var qkvProjBias: Bool = false
-    
+
     // MARK: - Dimensions
-    
+
     /// The dimensionality of the encoder layers and the pooler layer (hidden size).
     var embedDim: Int = 768
-    
+
     /// The number of attention heads for each attention layer.
     var numHeads: Int = 12
-    
+
     /// The dimensionality of the "intermediate" (hidden) layer in the Feed-Forward Network (MLP).
     var MLPDim: Int = 3072
-    
+
     /// The number of hidden layers in the Transformer encoder.
     var numLayers: Int = 12
-    
+
     // MARK: - Rotary Embeddings (RoPE)
-    
+
     /// The base frequency ($\theta$) used for computing Rotary Positional Embeddings.
     /// Standard values are typically 10,000 or 1,000,000.
     var rotaryEmbBase: Float = 1000
-    
+
     /// The fraction of the head dimension to apply rotary embeddings to.
     /// If 1.0, the entire head vector is rotated. If < 1.0, only the first $d \times fraction$ dimensions are rotated.
     var rotaryEmbFraction: Float = 1.0
-    
+
     /// Determines the pairing strategy for the rotation.
     /// - `false`: Splits the head into two halves, pairing index $i$ with $i + d/2$.
     /// - `true`: Pairs adjacent indices $i$ with $i+1$.
     var rotaryEmbInterleaved: Bool = false
-    
+
     /// Optional base for scaling the rotary embeddings (specific to Nomic's implementation).
     var rotaryEmbScaleBase: Float?
-    
+
     /// The linear scaling factor applied to the RoPE frequency.
     /// Used for Dynamic NTK scaling to extend context length.
     var rotaryScalingFactor: Float?
-    
+
     // MARK: - Vocabulary
-    
+
     /// The size of the vocabulary for segment/token type embeddings.
     /// Typically 2 (Sentence A and Sentence B).
     var typeVocabularySize: Int = 2
-    
+
     /// The size of the main token vocabulary.
     /// This dictates the input dimension of the embedding layer and the output dimension of the LM Head.
     var vocabularySize: Int = 30528
-    
+
     /// The maximum length for absolute position embeddings.
     /// Note: Nomic BERT primarily uses RoPE, so this is often set to 0 or unused unless specific absolute embeddings are configured.
     var maxPositionEmbeddings: Int = 0
 
     // MARK: - Coding Keys
-    
+
     /// Maps the snake_case keys found in standard JSON config files (e.g., from Hugging Face)
     /// to the camelCase property names used in this Swift struct.
     enum CodingKeys: String, CodingKey {
@@ -894,13 +898,13 @@ public struct NomicBertConfiguration: Decodable, Sendable {
         case rotaryEmbScaleBase = "rotary_emb_scale_base"
         case rotaryScalingFactor = "rotary_scaling_factor"
         case typeVocabularySize = "type_vocab_size"
-        case useCache = "use_cache" // Present in JSON but unused in this struct
+        case useCache = "use_cache"  // Present in JSON but unused in this struct
         case vocabularySize = "vocab_size"
         case maxPositionEmbeddings = "max_position_embeddings"
     }
 
     // MARK: - Decoder
-    
+
     /// Decodes the configuration from an external representation (like JSON).
     ///
     /// This initializer manually decodes each property, providing fallback default values
@@ -909,100 +913,100 @@ public struct NomicBertConfiguration: Decodable, Sendable {
         let container: KeyedDecodingContainer<NomicBertConfiguration.CodingKeys> =
             try decoder.container(
                 keyedBy: NomicBertConfiguration.CodingKeys.self)
-        
+
         // Decoding with explicit default values for robustness
         layerNormEps =
             try container.decodeIfPresent(
                 Float.self,
                 forKey: NomicBertConfiguration.CodingKeys.layerNormEps.self)
             ?? 1e-12
-        
+
         maxTrainedPositions =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.maxTrainedPositions.self)
             ?? 2048
-            
+
         mlpFc1Bias =
             try container.decodeIfPresent(
                 Bool.self,
                 forKey: NomicBertConfiguration.CodingKeys.mlpFc1Bias.self)
             ?? false
-            
+
         mlpFc2Bias =
             try container.decodeIfPresent(
                 Bool.self,
                 forKey: NomicBertConfiguration.CodingKeys.mlpFc2Bias.self)
             ?? false
-            
+
         embedDim =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.embedDim.self) ?? 768
-                
+
         numHeads =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.numHeads.self) ?? 12
-                
+
         MLPDim =
             try container.decodeIfPresent(
                 Int.self, forKey: NomicBertConfiguration.CodingKeys.MLPDim.self)
             ?? 3072
-            
+
         numLayers =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.numLayers.self) ?? 12
-                
+
         qkvProjBias =
             try container.decodeIfPresent(
                 Bool.self,
                 forKey: NomicBertConfiguration.CodingKeys.qkvProjBias.self)
             ?? false
-            
+
         rotaryEmbBase =
             try container.decodeIfPresent(
                 Float.self,
                 forKey: NomicBertConfiguration.CodingKeys.rotaryEmbBase.self)
             ?? 1000
-            
+
         rotaryEmbFraction =
             try container.decodeIfPresent(
                 Float.self,
                 forKey: NomicBertConfiguration.CodingKeys.rotaryEmbFraction.self
             ) ?? 1.0
-            
+
         rotaryEmbInterleaved =
             try container.decodeIfPresent(
                 Bool.self,
                 forKey: NomicBertConfiguration.CodingKeys.rotaryEmbInterleaved.self)
             ?? false
-            
+
         rotaryEmbScaleBase =
             try container.decodeIfPresent(
                 Float.self,
                 forKey: NomicBertConfiguration.CodingKeys.rotaryEmbScaleBase)
             ?? nil
-            
+
         rotaryScalingFactor =
             try container.decodeIfPresent(
                 Float.self,
                 forKey: NomicBertConfiguration.CodingKeys.rotaryScalingFactor)
             ?? nil
-            
+
         typeVocabularySize =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.typeVocabularySize.self)
             ?? 2
-            
+
         vocabularySize =
             try container.decodeIfPresent(
                 Int.self,
                 forKey: NomicBertConfiguration.CodingKeys.vocabularySize.self)
             ?? 30528
-            
+
         maxPositionEmbeddings =
             try container.decodeIfPresent(
                 Int.self,

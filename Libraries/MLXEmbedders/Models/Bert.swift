@@ -298,11 +298,12 @@ public class BertModel: Module, EmbeddingModel {
     ) -> EmbeddingModelOutput {
         var inp = inputs
         if inp.ndim == 1 {
-            inp = inp.reshaped(1, -1) // Ensure batch dimension exists
+            inp = inp.reshaped(1, -1)  // Ensure batch dimension exists
         }
 
         // Convert 1/0 mask to log-space (0 and -inf) for the attention mechanism
-        let mask = attentionMask == nil
+        let mask =
+            attentionMask == nil
             ? nil
             : attentionMask!
                 .asType(embedder.wordEmbeddings.weight.dtype)
@@ -344,11 +345,19 @@ public class BertModel: Module, EmbeddingModel {
                 .replacingOccurrences(of: ".output.dense.", with: ".linear2.")
                 .replacingOccurrences(of: ".LayerNorm.", with: ".norm.")
                 .replacingOccurrences(of: "pooler.dense.", with: "pooler.")
-                .replacingOccurrences(of: "cls.predictions.transform.dense.", with: "lm_head.dense.")
-                .replacingOccurrences(of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln.")
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.dense.", with: "lm_head.dense."
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln."
+                )
                 .replacingOccurrences(of: "cls.predictions.decoder", with: "lm_head.decoder")
-                .replacingOccurrences(of: "cls.predictions.transform.norm.weight", with: "lm_head.ln.weight")
-                .replacingOccurrences(of: "cls.predictions.transform.norm.bias", with: "lm_head.ln.bias")
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.norm.weight", with: "lm_head.ln.weight"
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.norm.bias", with: "lm_head.ln.bias"
+                )
                 .replacingOccurrences(of: "cls.predictions.bias", with: "lm_head.decoder.bias")
                 .replacingOccurrences(of: "bert.", with: "")
 
@@ -475,9 +484,11 @@ public struct BertConfiguration: Decodable, Sendable {
 
         // Load common properties
         layerNormEps = try container.decodeIfPresent(Float.self, forKey: .layerNormEps) ?? 1e-12
-        maxTrainedPositions = try container.decodeIfPresent(Int.self, forKey: .maxTrainedPositions) ?? 2048
+        maxTrainedPositions =
+            try container.decodeIfPresent(Int.self, forKey: .maxTrainedPositions) ?? 2048
         vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 30528
-        maxPositionEmbeddings = try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 0
+        maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 0
         modelType = try container.decode(String.self, forKey: .modelType)
 
         // Switch decoding logic based on model type
@@ -487,15 +498,15 @@ public struct BertConfiguration: Decodable, Sendable {
             numHeads = try distilBertConfig.decodeIfPresent(Int.self, forKey: .numHeads) ?? 12
             interDim = try distilBertConfig.decodeIfPresent(Int.self, forKey: .interDim) ?? 3072
             numLayers = try distilBertConfig.decodeIfPresent(Int.self, forKey: .numLayers) ?? 12
-            typeVocabularySize = 0 // DistilBERT does not use segment embeddings
+            typeVocabularySize = 0  // DistilBERT does not use segment embeddings
         } else {
             let bertConfig = try decoder.container(keyedBy: BertCodingKeys.self)
             embedDim = try bertConfig.decodeIfPresent(Int.self, forKey: .embedDim) ?? 768
             numHeads = try bertConfig.decodeIfPresent(Int.self, forKey: .numHeads) ?? 12
             interDim = try bertConfig.decodeIfPresent(Int.self, forKey: .interDim) ?? 3072
             numLayers = try bertConfig.decodeIfPresent(Int.self, forKey: .numLayers) ?? 12
-            typeVocabularySize = try bertConfig.decodeIfPresent(Int.self, forKey: .typeVocabularySize) ?? 2
+            typeVocabularySize =
+                try bertConfig.decodeIfPresent(Int.self, forKey: .typeVocabularySize) ?? 2
         }
     }
 }
-

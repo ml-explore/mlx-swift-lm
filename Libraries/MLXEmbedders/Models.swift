@@ -199,7 +199,7 @@ extension ModelConfiguration {
                 bge_micro, gte_tiny, minilm_l6, snowflake_xs, minilm_l12,
                 bge_small, multilingual_e5_small, bge_base, nomic_text_v1,
                 nomic_text_v1_5, bge_large, snowflake_lg, bge_m3,
-                mixedbread_large, qwen3_embedding
+                mixedbread_large, qwen3_embedding,
             ])
             bootstrapState = .bootstrapped
         case .bootstrapping, .bootstrapped:
