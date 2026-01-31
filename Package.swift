@@ -33,7 +33,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift", condition: .when(platforms: [.macOS, .iOS, .visionOS, .watchOS, .tvOS])),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
@@ -52,7 +52,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift", condition: .when(platforms: [.macOS, .iOS, .visionOS, .watchOS, .tvOS])),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
@@ -108,7 +108,7 @@ let package = Package(
             name: "MLXEmbedders",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift", condition: .when(platforms: [.macOS, .iOS, .visionOS, .watchOS, .tvOS])),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "MLXLinalg", package: "mlx-swift"),

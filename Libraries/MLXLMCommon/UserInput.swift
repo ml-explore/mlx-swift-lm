@@ -1,7 +1,14 @@
 // Copyright © 2024 Apple Inc.
 
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import AVFoundation
+#endif
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
+#endif
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+import CoreGraphics
+#endif
 import Foundation
 import MLX
 import Tokenizers
@@ -42,9 +49,12 @@ public struct UserInput: Sendable {
 
     /// Representation of a video resource.
     public enum Video: Sendable {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         case avAsset(AVAsset)
+        #endif
         case url(URL)
 
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         public func asAVAsset() -> AVAsset {
             switch self {
             case .avAsset(let asset):
@@ -53,14 +63,18 @@ public struct UserInput: Sendable {
                 return AVAsset(url: url)
             }
         }
+        #endif
     }
 
     /// Representation of an image resource.
     public enum Image: Sendable {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         case ciImage(CIImage)
+        #endif
         case url(URL)
         case array(MLXArray)
 
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         public func asCIImage() throws -> CIImage {
             switch self {
             case .ciImage(let image):
@@ -117,15 +131,32 @@ public struct UserInput: Sendable {
                     format: .RGBA8, colorSpace: cs)
             }
         }
+        #endif
     }
 
     /// Representation of processing to apply to media.
     public struct Processing: Sendable {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         public var resize: CGSize?
+        public var resizeWidth: Int? { resize?.width }
+        public var resizeHeight: Int? { resize?.height }
 
         public init(resize: CGSize? = nil) {
             self.resize = resize
         }
+
+        public init(resizeWidth: Int? = nil, resizeHeight: Int? = nil) {
+            self.resize = CGSize(width: resizeWidth, height: resizeHeight)
+        }
+        #else
+        public var resizeWidth: Int?
+        public var resizeHeight: Int?
+
+        public init(resizeWidth: Int? = nil, resizeHeight: Int? = nil) {
+            self.resizeWidth = resizeWidth
+            self.resizeHeight = resizeHeight
+        }
+        #endif
     }
 
     /// The prompt to evaluate.
@@ -327,11 +358,11 @@ private enum UserInputError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notImplemented:
-            return String(localized: "This functionality is not implemented.")
+            return "This functionality is not implemented."
         case .unableToLoad(let url):
-            return String(localized: "Unable to load image from URL: \(url.path).")
+            return "Unable to load image from URL: \(url.path)."
         case .arrayError(let message):
-            return String(localized: "Error processing image array: \(message).")
+            return "Error processing image array: \(message)."
         }
     }
 }

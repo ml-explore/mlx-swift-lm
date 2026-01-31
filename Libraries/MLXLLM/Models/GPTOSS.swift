@@ -7,7 +7,9 @@
 
 import Foundation
 import MLX
+#if canImport(MLXFast)
 import MLXFast
+#endif
 import MLXLMCommon
 import MLXNN
 import MLXRandom
@@ -331,7 +333,7 @@ private class AttentionBlock: Module {
         let vHat = MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v,
             scale: smScale,
-            mask: mask)
+            mask: .array(mask))
 
         return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
     }

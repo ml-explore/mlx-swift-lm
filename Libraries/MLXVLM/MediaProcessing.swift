@@ -1,5 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import AVFoundation
 import CoreImage.CIFilterBuiltins
 import MLX
@@ -433,3 +434,4 @@ extension CIImage {
         return MediaProcessing.asMLXArray(self, colorSpace: colorSpace)
     }
 }
+#endif

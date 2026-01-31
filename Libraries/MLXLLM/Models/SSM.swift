@@ -7,7 +7,10 @@
 
 import Foundation
 import MLX
+#if canImport(MLXFast)
 import MLXFast
+#endif
+import MLXLMCommon
 import MLXNN
 
 public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Float, Float))
@@ -17,6 +20,7 @@ public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Floa
     return MLX.clip(dt, min: timeStepLimit.0, max: timeStepLimit.1)
 }
 
+#if canImport(MLXFast)
 private func makeSSMKernel() -> MLXFast.MLXFastKernel? {
     let source = """
             auto n = thread_position_in_grid.z;
@@ -76,6 +80,16 @@ private final class SSMKernelManager: @unchecked Sendable {
     }
 }
 
+private func ssmKernelAvailable() -> Bool {
+    return SSMKernelManager.shared.ssmKernel != nil
+}
+#else
+private func ssmKernelAvailable() -> Bool {
+    return false
+}
+#endif
+
+#if canImport(MLXFast)
 func ssmUpdateKernel(
     hiddenStates: MLXArray,
     ALog: MLXArray,
@@ -114,6 +128,7 @@ func ssmUpdateKernel(
 
     return (outputs[0], outputs[1])
 }
+#endif
 
 public func segsum(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
     let l = x.dim(-1)
@@ -206,9 +221,10 @@ public func ssmUpdate(
 ) -> (MLXArray, MLXArray) {
     let seqLen = hiddenStates.dim(1)
 
+#if canImport(MLXFast)
     if seqLen == 1,
         let state = state,
-        SSMKernelManager.shared.ssmKernel != nil
+        ssmKernelAvailable()
     {
         return ssmUpdateKernel(
             hiddenStates: hiddenStates,
@@ -221,18 +237,19 @@ public func ssmUpdate(
             state: state,
             timeStepLimit: timeStepLimit
         )
-    } else {
-        return ssmAttn(
-            x: hiddenStates,
-            ALog: ALog,
-            B: B,
-            C: C,
-            D: D,
-            dt: dt,
-            dtBias: dtBias,
-            state: state,
-            timeStepLimit: timeStepLimit,
-            mask: mask
-        )
     }
+#endif
+
+    return ssmAttn(
+        x: hiddenStates,
+        ALog: ALog,
+        B: B,
+        C: C,
+        D: D,
+        dt: dt,
+        dtBias: dtBias,
+        state: state,
+        timeStepLimit: timeStepLimit,
+        mask: mask
+    )
 }

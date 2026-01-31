@@ -27,7 +27,7 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
 
     /// All predefined model types.
     private static func all() -> [String: @Sendable (URL) throws -> any LanguageModel] {
-        [
+        var models: [String: @Sendable (URL) throws -> any LanguageModel] = [
             "mistral": create(LlamaConfiguration.self, LlamaModel.init),
             "llama": create(LlamaConfiguration.self, LlamaModel.init),
             "phi": create(PhiConfiguration.self, PhiModel.init),
@@ -53,7 +53,6 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "glm4": create(GLM4Configuration.self, GLM4Model.init),
             "acereason": create(Qwen2Configuration.self, Qwen2Model.init),
             "falcon_h1": create(FalconH1Configuration.self, FalconH1Model.init),
-            "bitnet": create(BitnetConfiguration.self, BitnetModel.init),
             "smollm3": create(SmolLM3Configuration.self, SmolLM3Model.init),
             "ernie4_5": create(Ernie45Configuration.self, Ernie45Model.init),
             "lfm2": create(LFM2Configuration.self, LFM2Model.init),
@@ -67,6 +66,13 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "lfm2_moe": create(LFM2MoEConfiguration.self, LFM2MoEModel.init),
             "nanochat": create(NanoChatConfiguration.self, NanoChatModel.init),
         ]
+
+        // Bitnet requires Metal custom kernels and is only available on Apple platforms
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        models["bitnet"] = create(BitnetConfiguration.self, BitnetModel.init)
+        #endif
+
+        return models
     }
 }
 

@@ -2,7 +2,9 @@
 
 import Foundation
 import MLX
+#if canImport(MLXFast)
 import MLXFast
+#endif
 import MLXLMCommon
 import MLXNN
 
@@ -83,7 +85,8 @@ private class Attention: Module {
         }
 
         let output = MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: values, scale: scale, mask: mask
+            queries: queries, keys: keys, values: values, scale: scale,
+            mask: mask.map { .array($0) } ?? .none
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)

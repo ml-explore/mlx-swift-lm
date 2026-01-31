@@ -7,6 +7,9 @@
 
 import Foundation
 import MLX
+#if canImport(MLXFast)
+import MLXFast
+#endif
 import MLXLMCommon
 import MLXNN
 
@@ -318,7 +321,7 @@ private class Attention: Module {
             keys: keys,
             values: values,
             scale: scale,
-            mask: mask
+            mask: mask.map { .array($0) } ?? .none
         )
 
         output = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)

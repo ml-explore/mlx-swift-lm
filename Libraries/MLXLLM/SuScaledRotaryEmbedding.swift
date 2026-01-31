@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
 
 public class SuScaledRotaryEmbedding: Module {

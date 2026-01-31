@@ -2,6 +2,9 @@
 
 import Foundation
 import MLX
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+import CoreGraphics
+#endif
 
 /// Implementation of simplified API -- see ``ChatSession``.
 private class Generator {
@@ -73,7 +76,7 @@ private class Generator {
                 input: input, context: context, iterator: iterator
             ) { _ in .more }
 
-            Stream.gpu.synchronize()
+            Stream().synchronize()
 
             return result.output
         }
@@ -113,7 +116,7 @@ private class Generator {
                     }
                 }
 
-                Stream.gpu.synchronize()
+                Stream().synchronize()
 
                 continuation.finish()
             } catch {
@@ -162,6 +165,7 @@ public class ChatSession {
     ///   - generateParameters: parameters that control the generation of output, e.g. token limits and temperature
     ///   - processing: optional media processing instructions
     ///   - additionalContext: optional context (model/tokenizer specific)
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
     public init(
         _ model: ModelContainer, instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
@@ -172,6 +176,18 @@ public class ChatSession {
             model: .container(model), instructions: instructions, processing: processing,
             generateParameters: generateParameters, additionalContext: additionalContext)
     }
+    #else
+    public init(
+        _ model: ModelContainer, instructions: String? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(),
+        additionalContext: [String: Any]? = nil
+    ) {
+        self.generator = .init(
+            model: .container(model), instructions: instructions, processing: processing,
+            generateParameters: generateParameters, additionalContext: additionalContext)
+    }
+    #endif
 
     /// Initialize the `ChatSession`.
     ///
@@ -181,6 +197,7 @@ public class ChatSession {
     ///   - generateParameters: parameters that control the generation of output, e.g. token limits and temperature
     ///   - processing: optional media processing instructions
     ///   - additionalContext: optional context (model/tokenizer specific)
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
     public init(
         _ model: ModelContext, instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
@@ -191,6 +208,18 @@ public class ChatSession {
             model: .context(model), instructions: instructions, processing: processing,
             generateParameters: generateParameters, additionalContext: additionalContext)
     }
+    #else
+    public init(
+        _ model: ModelContext, instructions: String? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(),
+        additionalContext: [String: Any]? = nil
+    ) {
+        self.generator = .init(
+            model: .context(model), instructions: instructions, processing: processing,
+            generateParameters: generateParameters, additionalContext: additionalContext)
+    }
+    #endif
 
     /// Produces a response to a prompt.
     ///

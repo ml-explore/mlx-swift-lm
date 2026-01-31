@@ -1,6 +1,9 @@
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
 import MLX
+#if canImport(MLXFast)
 import MLXFast
+#endif
 import MLXLMCommon
 import MLXNN
 import Tokenizers
@@ -549,6 +552,7 @@ private class VisionAttention: Module {
         keys = keys.reshaped(B, S, numHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, S, numHeads, -1).transposed(0, 2, 1, 3)
 
+#if canImport(MLXFast)
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
             keys: keys,
@@ -558,6 +562,30 @@ private class VisionAttention: Module {
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
+#else
+        let maskArray: MLXArray?
+        switch mask {
+        case .none:
+            maskArray = nil
+        case .causal:
+            let qL = queries.dim(-2)
+            let kL = keys.dim(-1)
+            let qIndices = MLXArray(0..<qL) + MLXArray(kL - qL)
+            let kIndices = MLXArray(0..<kL)
+            maskArray = greaterEqual(expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
+        case .array(let arr):
+            maskArray = arr
+        }
+        let output = MLX.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: maskArray
+        )
+        .transposed(0, 2, 1, 3)
+        .reshaped(B, L, -1)
+#endif
 
         return outputProj(output)
     }
@@ -1213,3 +1241,4 @@ extension Gemma3: LoRAModel {
         languageModel.model.layers
     }
 }
+#endif

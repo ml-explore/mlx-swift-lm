@@ -1,3 +1,4 @@
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
 import Foundation
 import Hub
@@ -256,3 +257,5 @@ public struct QwenVL {
     }
 
 }
+
+#endif

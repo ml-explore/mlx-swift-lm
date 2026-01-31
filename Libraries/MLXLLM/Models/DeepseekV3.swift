@@ -2,7 +2,9 @@
 
 import Foundation
 import MLX
+#if canImport(MLXFast)
 import MLXFast
+#endif
 import MLXLLM
 import MLXLMCommon
 import MLXNN
