@@ -100,8 +100,8 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
-    @Test("Test JSON Tool Call Parser - LFM2 Tags")
-    func testJSONParserLFM2Tags() throws {
+    @Test("Test JSON Tool Call Parser - Custom Tags")
+    func testJSONParserCustomTags() throws {
         let parser = JSONToolCallParser(
             startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         let content =
@@ -113,11 +113,93 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("swift programming"))
     }
 
-    @Test("Test LFM2 Format via ToolCallProcessor")
+    // MARK: - Pythonic Format Tests (LFM2/LFM2.5)
+
+    @Test("Test Pythonic Tool Call Parser - Basic")
+    func testPythonicParserBasic() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[get_weather(location='Paris', unit='celsius')]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Double Quotes")
+    func testPythonicParserDoubleQuotes() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[search(query=\"swift programming\")]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift programming"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Without Brackets")
+    func testPythonicParserWithoutBrackets() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>current_time(timezone='UTC')<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "current_time")
+        #expect(toolCall.function.arguments["timezone"] == .string("UTC"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - No Arguments")
+    func testPythonicParserNoArguments() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[current_time()]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "current_time")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Type Conversion")
+    func testPythonicParserTypeConversion() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "set_temperature",
+                    "parameters": [
+                        "properties": [
+                            "value": ["type": "integer"],
+                            "enabled": ["type": "boolean"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+        let content =
+            "<|tool_call_start|>[set_temperature(value='25', enabled='true')]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.name == "set_temperature")
+        #expect(toolCall.function.arguments["value"] == .int(25))
+        #expect(toolCall.function.arguments["enabled"] == .bool(true))
+    }
+
+    @Test("Test LFM2 Format via ToolCallProcessor - Pythonic")
     func testLFM2FormatProcessor() throws {
         let processor = ToolCallProcessor(format: .lfm2)
         let content =
-            "<|tool_call_start|>{\"name\": \"calculator\", \"arguments\": {\"expression\": \"2+2\"}}<|tool_call_end|>"
+            "<|tool_call_start|>[calculator(expression='2+2')]<|tool_call_end|>"
 
         _ = processor.processChunk(content)
 

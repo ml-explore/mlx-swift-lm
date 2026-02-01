@@ -42,8 +42,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
     case json
 
-    /// LFM2 JSON format with model-specific tags.
-    /// Example: `<|tool_call_start|>{"name": "func", "arguments": {...}}<|tool_call_end|>`
+    /// LFM2/LFM2.5 Pythonic format with model-specific tags.
+    /// Example: `<|tool_call_start|>[func(arg='value')]<|tool_call_end|>`
     case lfm2
 
     /// XML function format used by Qwen3 Coder.
@@ -75,7 +75,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         case .json:
             return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .lfm2:
-            return JSONToolCallParser(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+            return PythonicToolCallParser(
+                startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser()
         case .glm4:
