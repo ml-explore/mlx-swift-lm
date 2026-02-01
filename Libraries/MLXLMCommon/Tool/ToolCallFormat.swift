@@ -97,15 +97,23 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// - Parameter modelType: The `model_type` value from config.json
     /// - Returns: The appropriate `ToolCallFormat`, or `nil` to use the default format
     public static func infer(from modelType: String) -> ToolCallFormat? {
-        switch modelType.lowercased() {
-        case "lfm2", "lfm2_moe":
+        let type = modelType.lowercased()
+
+        // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
+        if type.hasPrefix("lfm2") {
             return .lfm2
-        case "glm4", "glm4_moe", "glm4_moe_lite":
-            return .glm4
-        case "gemma":
-            return .gemma
-        default:
-            return nil
         }
+
+        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
+        if type.hasPrefix("glm4") {
+            return .glm4
+        }
+
+        // Gemma
+        if type == "gemma" {
+            return .gemma
+        }
+
+        return nil
     }
 }

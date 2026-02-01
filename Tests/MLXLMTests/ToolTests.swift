@@ -317,15 +317,20 @@ struct ToolTests {
 
     @Test("Test ToolCallFormat Inference from Model Type")
     func testToolCallFormatInference() throws {
-        // LFM2 models
+        // LFM2 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "lfm2") == .lfm2)
         #expect(ToolCallFormat.infer(from: "LFM2") == .lfm2)
         #expect(ToolCallFormat.infer(from: "lfm2_moe") == .lfm2)
+        #expect(ToolCallFormat.infer(from: "lfm2_5") == .lfm2)
+        #expect(ToolCallFormat.infer(from: "LFM2_5") == .lfm2)
+        #expect(ToolCallFormat.infer(from: "lfm25") == .lfm2)
 
-        // GLM4 models
+        // GLM4 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "glm4") == .glm4)
         #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4)
         #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4)
+        #expect(ToolCallFormat.infer(from: "glm4_5") == .glm4)
+        #expect(ToolCallFormat.infer(from: "GLM4_5") == .glm4)
 
         // Gemma models
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
