@@ -72,6 +72,23 @@ can load the model, and file-size estimates are a close approximation when you c
 For inference workloads, keep **weights**, **KV cache**, and **activation** budgets separate so
 policies can scale the wired limit based on what is actually active.
 
+## Policy-only budgeting on CPU
+
+If wired memory control is unavailable (CPU-only execution), you can still use
+policies for admission gating and budgeting by enabling policy-only mode on the
+manager. This keeps ticket tracking and limit math active without attempting to
+change the wired limit.
+
+```swift
+let manager = WiredMemoryManager(
+    configuration: .init(policyOnlyWhenUnsupported: true)
+)
+```
+
+You can also provide `baselineOverride` (a fixed budget), or rely on
+`GPU.maxRecommendedWorkingSetBytes()` when running on Apple Silicon with unified
+memory.
+
 ## Estimating KV cache and attention workspace
 
 Inference tickets are typically driven by **KV cache** (persistent) plus **prefill workspace**
