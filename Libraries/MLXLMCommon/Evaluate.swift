@@ -920,7 +920,9 @@ public func generateTask(
 
             var tokenCount = 0
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-            let toolCallProcessor = ToolCallProcessor()
+            let toolCallProcessor = ToolCallProcessor(
+                format: modelConfiguration.toolCallFormat ?? .json
+            )
 
             for token in iterator {
 
