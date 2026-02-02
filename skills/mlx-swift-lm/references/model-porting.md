@@ -48,6 +48,7 @@ public struct YourModelConfiguration: Codable, Sendable {
     var hiddenLayers: Int
     var attentionHeads: Int
     var kvHeads: Int
+    var intermediateSize: Int
     var vocabularySize: Int
     var rmsNormEps: Float
     var ropeTheta: Float = 10_000
@@ -59,6 +60,7 @@ public struct YourModelConfiguration: Codable, Sendable {
         case hiddenLayers = "num_hidden_layers"
         case attentionHeads = "num_attention_heads"
         case kvHeads = "num_key_value_heads"
+        case intermediateSize = "intermediate_size"
         case vocabularySize = "vocab_size"
         case rmsNormEps = "rms_norm_eps"
         case ropeTheta = "rope_theta"
@@ -72,6 +74,7 @@ public struct YourModelConfiguration: Codable, Sendable {
         hiddenLayers = try c.decode(Int.self, forKey: .hiddenLayers)
         attentionHeads = try c.decode(Int.self, forKey: .attentionHeads)
         kvHeads = try c.decodeIfPresent(Int.self, forKey: .kvHeads) ?? attentionHeads
+        intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
         vocabularySize = try c.decode(Int.self, forKey: .vocabularySize)
         rmsNormEps = try c.decode(Float.self, forKey: .rmsNormEps)
         ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000
@@ -364,6 +367,16 @@ If you need custom keys, override `loraDefaultKeys`.
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
     configuration: ModelConfiguration(id: "mlx-community/YourModel-4bit")
 )
-let output = try await modelContainer.generate(prompt: "Hello")
-print(output)
+
+let parameters = GenerateParameters()
+let input = try await modelContainer.prepare(
+    input: UserInput(prompt: "Hello")
+)
+
+let stream = try await modelContainer.generate(input: input, parameters: parameters)
+for await event in stream {
+    if case let .chunk(text) = event {
+        print(text, terminator: "")
+    }
+}
 ```
