@@ -383,6 +383,88 @@ final class WiredMemoryIntegrationTests: XCTestCase {
         XCTAssertFalse(sawSummed, "Expected shared weights not to be double counted.")
     }
 
+    /// Measurement helpers should return a budget at least as large as the observed peak
+    /// and not exceed a reasonable threshold beyond it.
+    ///
+    /// ## Methodology
+    /// - Model weights: extremely stable, derived from unchanging nbytes
+    /// - KV: pretty stable with deterministic chunk size, measurable by nbytes
+    /// - Attn workspace: high variability, changes with kernel code updates
+    ///
+    /// This test ensures the utilities for estimating model weights are accurate, such that you
+    /// can reliably use `.weightBytes` as a `.reservation` ticket, and the remaining
+    /// usages for `.active` tickets.
+    ///
+    /// We confirm that attention workspace comes out nearly the same with two different input
+    /// length prefills to confirm extraction for attention is accurate.
+    func testMeasurementBudgetNotBelowPeak() async throws {
+        let container = try await IntegrationTestModels.shared.llmContainer()
+        let smallTokenCount = 128
+        let largeTokenCount = 512
+        let prefillStepSize = 128
+        let smallParameters = GenerateParameters(maxTokens: 1, prefillStepSize: prefillStepSize)
+        let largeParameters = GenerateParameters(maxTokens: 1, prefillStepSize: prefillStepSize)
+
+        let smallResult = try await container.perform { context in
+            Memory.clearCache()
+            let previousPeak = Memory.peakMemory
+            Memory.peakMemory = 0
+            _ = previousPeak
+            return try await WiredMemoryUtils.tune(
+                context: context,
+                tokenCount: smallTokenCount,
+                parameters: smallParameters,
+                resetPeakMemory: false
+            )
+        }
+
+        let largeResult = try await container.perform { context in
+            Memory.clearCache()
+            let previousPeak = Memory.peakMemory
+            Memory.peakMemory = 0
+            _ = previousPeak
+            return try await WiredMemoryUtils.tune(
+                context: context,
+                tokenCount: largeTokenCount,
+                parameters: largeParameters,
+                resetPeakMemory: false
+            )
+        }
+
+        XCTAssertGreaterThan(smallResult.weightBytes, 0)
+        XCTAssertGreaterThan(smallResult.kvBytes, 0)
+        XCTAssertGreaterThan(smallResult.peakActiveBytes, 0)
+        XCTAssertGreaterThanOrEqual(smallResult.totalBytes, smallResult.peakActiveBytes)
+
+        XCTAssertGreaterThan(largeResult.weightBytes, 0)
+        XCTAssertGreaterThan(largeResult.kvBytes, 0)
+        XCTAssertGreaterThan(largeResult.peakActiveBytes, 0)
+        XCTAssertGreaterThanOrEqual(largeResult.totalBytes, largeResult.peakActiveBytes)
+
+        XCTAssertGreaterThanOrEqual(largeResult.kvBytes, smallResult.kvBytes)
+        XCTAssertGreaterThanOrEqual(largeResult.peakActiveBytes, smallResult.peakActiveBytes)
+
+        let mib = 1024 * 1024
+        let tolerance = 1 * mib
+        XCTAssertLessThanOrEqual(
+            smallResult.totalBytes,
+            smallResult.peakActiveBytes + tolerance,
+            "Expected measured budget to stay near the observed peak (small)."
+        )
+        XCTAssertLessThanOrEqual(
+            largeResult.totalBytes,
+            largeResult.peakActiveBytes + tolerance,
+            "Expected measured budget to stay near the observed peak (large)."
+        )
+
+        let workspaceDelta = abs(smallResult.workspaceBytes - largeResult.workspaceBytes)
+        XCTAssertLessThanOrEqual(
+            workspaceDelta,
+            tolerance,
+            "Expected workspace estimate to be stable across identical prefill sizes."
+        )
+    }
+
     /// Collects events until the predicate matches or a timeout fires.
     private static func collectEvents(
         stream: AsyncStream<WiredMemoryEvent>,

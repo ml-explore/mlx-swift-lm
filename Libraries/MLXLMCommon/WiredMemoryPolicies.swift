@@ -104,3 +104,71 @@ public struct WiredFixedPolicy: WiredMemoryPolicy, Hashable, Sendable {
         bytes
     }
 }
+
+/// Budget policy: `baseline + baseBytes + sum(activeSizes)`, optionally capped.
+///
+/// This policy is useful when you want to bake a learned or precomputed budget
+/// (for example, weights + workspace) into the limit calculation while still
+/// accounting for active tickets.
+///
+/// - Note: Pass a stable `id` if you intend to recreate the policy and keep it
+///   grouped with existing tickets.
+///
+/// ### Example
+/// ```swift
+/// let base = weightsBytes + workspaceBytes
+/// let policy = WiredBudgetPolicy(baseBytes: base)
+/// let ticket = policy.ticket(size: kvBytes, kind: .active)
+/// try await ticket.withWiredLimit {
+///     // run inference
+/// }
+/// ```
+public struct WiredBudgetPolicy: WiredMemoryPolicy, Hashable, Sendable {
+    /// Stable policy identifier used for grouping.
+    public let id: AnyHashable
+    /// Base budget in bytes (e.g. weights + workspace).
+    public let baseBytes: Int
+    /// Optional absolute cap (bytes) for the computed limit.
+    public let cap: Int?
+
+    /// Creates a budget policy with an optional cap and stable id.
+    public init(
+        baseBytes: Int,
+        cap: Int? = nil,
+        id: AnyHashable = UUID()
+    ) {
+        self.baseBytes = max(0, baseBytes)
+        self.cap = cap
+        self.id = id
+    }
+
+    public static func == (lhs: WiredBudgetPolicy, rhs: WiredBudgetPolicy) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    /// Computes the desired limit for the current active set.
+    public func limit(baseline: Int, activeSizes: [Int]) -> Int {
+        let sum = activeSizes.reduce(0, +)
+        return clamp(baseline + baseBytes + sum)
+    }
+
+    /// Admission is denied if the projected limit would exceed the cap.
+    public func canAdmit(baseline: Int, activeSizes: [Int], newSize: Int) -> Bool {
+        let projected = baseline + baseBytes + activeSizes.reduce(0, +) + max(0, newSize)
+        return clamp(projected) == projected
+    }
+
+    private func clamp(_ value: Int) -> Int {
+        if let cap {
+            return min(value, max(0, cap))
+        }
+        if let maxBytes = GPU.maxRecommendedWorkingSetBytes() {
+            return min(value, maxBytes)
+        }
+        return value
+    }
+}

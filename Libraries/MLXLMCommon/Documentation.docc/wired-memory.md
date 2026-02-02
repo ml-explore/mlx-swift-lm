@@ -63,6 +63,24 @@ sizes, and MLX `Memory.snapshot()` right after load (no inference):
 These examples suggest that **`nbytes` is a reliable basis** for a reservation ticket when you
 can load the model, and file-size estimates are a close approximation when you cannot.
 
+## Diagnostic utilities
+
+MLXLMCommon includes lightweight helpers to measure real memory usage so you can
+model tickets based on observed behavior rather than only static estimates.
+The utilities are policy-agnostic; use the measurements to size tickets or
+validate a policy's budget assumptions.
+
+Use `WiredMemoryUtils.tune(...)` to capture:
+
+- `weightBytes` from `nbytes` (stable)
+- `kvBytes` from actual cache arrays after prefill
+- `workspaceBytes` from the prefill peak (transient)
+
+The returned `WiredMemoryMeasurement` can be used to build a budget policy or to
+validate manual calculations. For multimodal models, prefer the overload that
+accepts a prepared `LMInput` or a `UserInput` so the measurement includes image
+or video tensors.
+
 ## Practical guidance for tickets
 
 - If you **can load**: compute `nbytes` once at load time and reuse it for the model's lifetime.
