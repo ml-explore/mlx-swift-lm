@@ -140,7 +140,7 @@ struct ToolTests {
         #expect(toolCall.function.arguments["value"] == .int(25))
         #expect(toolCall.function.arguments["enabled"] == .bool(true))
     }
-    
+
     // MARK: - Python Function Format Tests
 
     @Test("Test Python Tool Call Parser - Basic")
@@ -332,7 +332,7 @@ struct ToolTests {
         #expect(toolCall.function.arguments["off"] == .bool(false))
         #expect(toolCall.function.arguments["none"] == .null)
     }
-    
+
     // MARK: - LFM2 Format Tests
 
     @Test("Test LFM2 Format via ToolCallProcessor")
