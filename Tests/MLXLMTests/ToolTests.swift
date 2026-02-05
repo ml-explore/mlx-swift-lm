@@ -100,33 +100,6 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
-    @Test("Test JSON Tool Call Parser - LFM2 Tags")
-    func testJSONParserLFM2Tags() throws {
-        let parser = JSONToolCallParser(
-            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
-        let content =
-            "<|tool_call_start|>{\"name\": \"search\", \"arguments\": {\"query\": \"swift programming\"}}<|tool_call_end|>"
-
-        let toolCall = try #require(parser.parse(content: content, tools: nil))
-
-        #expect(toolCall.function.name == "search")
-        #expect(toolCall.function.arguments["query"] == .string("swift programming"))
-    }
-
-    @Test("Test LFM2 Format via ToolCallProcessor")
-    func testLFM2FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .lfm2)
-        let content =
-            "<|tool_call_start|>{\"name\": \"calculator\", \"arguments\": {\"expression\": \"2+2\"}}<|tool_call_end|>"
-
-        _ = processor.processChunk(content)
-
-        #expect(processor.toolCalls.count == 1)
-        let toolCall = try #require(processor.toolCalls.first)
-        #expect(toolCall.function.name == "calculator")
-        #expect(toolCall.function.arguments["expression"] == .string("2+2"))
-    }
-
     // MARK: - XML Function Format Tests (Qwen3 Coder)
 
     @Test("Test XML Function Parser - Qwen3 Coder Format")
@@ -166,6 +139,228 @@ struct ToolTests {
         #expect(toolCall.function.name == "set_temperature")
         #expect(toolCall.function.arguments["value"] == .int(25))
         #expect(toolCall.function.arguments["enabled"] == .bool(true))
+    }
+    
+    // MARK: - Python Function Format Tests
+
+    @Test("Test Python Tool Call Parser - Basic")
+    func testPythonToolCallParserBasic() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[get_weather(location=\"Paris\")]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+    }
+
+    @Test("Test Python Tool Call Parser - Multiple Arguments")
+    func testPythonToolCallParserMultipleArgs() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[get_candidate_status(candidate_id=\"12345\", include_history=true)]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_candidate_status")
+        #expect(toolCall.function.arguments["candidate_id"] == .string("12345"))
+        #expect(toolCall.function.arguments["include_history"] == .bool(true))
+    }
+
+    @Test("Test Python Tool Call Parser - Numeric Arguments")
+    func testPythonToolCallParserNumericArgs() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[calculate(x=42, y=3.14, enabled=false)]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "calculate")
+        #expect(toolCall.function.arguments["x"] == .int(42))
+        #expect(toolCall.function.arguments["y"] == .double(3.14))
+        #expect(toolCall.function.arguments["enabled"] == .bool(false))
+    }
+
+    @Test("Test Python Tool Call Parser - Escaped Strings")
+    func testPythonToolCallParserEscapedStrings() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[search(query=\"hello\\nworld\")]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("hello\nworld"))
+    }
+
+    @Test("Test Python Tool Call Parser - Single Quotes")
+    func testPythonToolCallParserSingleQuotes() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[search(query='single quoted')]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("single quoted"))
+    }
+
+    @Test("Test Python Tool Call Parser - None/Null Value")
+    func testPythonToolCallParserNullValue() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[set_value(key=\"test\", value=None)]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "set_value")
+        #expect(toolCall.function.arguments["key"] == .string("test"))
+        #expect(toolCall.function.arguments["value"] == .null)
+    }
+
+    @Test("Test Python Tool Call Parser - Single Quotes With Escapes")
+    func testPythonToolCallParserSingleQuotesWithEscapes() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            #"<|tool_call_start|>[find(name='O\'Hara, "Alex"')]<|tool_call_end|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "find")
+        #expect(toolCall.function.arguments["name"] == .string("O'Hara, \"Alex\""))
+    }
+
+    @Test("Test Python Tool Call Parser - Without Brackets")
+    func testPythonToolCallParserWithoutBrackets() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>get_latest_news(query=\"Apple\", sortBy=\"popularity\")<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_latest_news")
+        #expect(toolCall.function.arguments["query"] == .string("Apple"))
+        #expect(toolCall.function.arguments["sortBy"] == .string("popularity"))
+    }
+
+    @Test("Test Python Tool Call Parser - Trailing Comma")
+    func testPythonToolCallParserTrailingComma() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[get_stock_price(symbol=\"AAPL\"), ]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_stock_price")
+        #expect(toolCall.function.arguments["symbol"] == .string("AAPL"))
+    }
+
+    @Test("Test Python Tool Call Parser - Commas Inside Quoted String")
+    func testPythonToolCallParserCommasInString() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[foo(msg='a, b, c')]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "foo")
+        #expect(toolCall.function.arguments["msg"] == .string("a, b, c"))
+    }
+
+    @Test("Test Python Tool Call Parser - Nested Parens In String")
+    func testPythonToolCallParserNestedParensInString() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            #"<|tool_call_start|>[fn(expr="(a, b), c")]<|tool_call_end|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "fn")
+        #expect(toolCall.function.arguments["expr"] == .string("(a, b), c"))
+    }
+
+    @Test("Test Python Tool Call Parser - Whitespace And Noise")
+    func testPythonToolCallParserWhitespaceAndNoise() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>  [  ,  foo(a=1)  ,  ]  <|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "foo")
+        #expect(toolCall.function.arguments["a"] == .int(1))
+    }
+
+    @Test("Test Python Tool Call Parser - Location With Comma")
+    func testPythonToolCallParserLocationWithComma() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[get_current_weather(location=\"Paris, France\")]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_current_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris, France"))
+    }
+
+    @Test("Test Python Tool Call Parser - All Value Types")
+    func testPythonToolCallParserAllValueTypes() throws {
+        let parser = PythonToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[fn(count=3, pi=3.14, ok=true, off=false, none=null)]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["count"] == .int(3))
+        #expect(toolCall.function.arguments["pi"] == .double(3.14))
+        #expect(toolCall.function.arguments["ok"] == .bool(true))
+        #expect(toolCall.function.arguments["off"] == .bool(false))
+        #expect(toolCall.function.arguments["none"] == .null)
+    }
+    
+    // MARK: - LFM2 Format Tests
+
+    @Test("Test LFM2 Format via ToolCallProcessor")
+    func testLFM2FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .lfm2)
+        let content =
+            "<|tool_call_start|>[get_status(id=\"abc123\")]<|tool_call_end|>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_status")
+        #expect(toolCall.function.arguments["id"] == .string("abc123"))
+    }
+
+    @Test("Test LFM2 Format via ToolCallProcessor - Calculator")
+    func testLFM2FormatProcessorCalculator() throws {
+        let processor = ToolCallProcessor(format: .lfm2)
+        let content =
+            "<|tool_call_start|>[calculator(expression=\"2+2\")]<|tool_call_end|>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "calculator")
+        #expect(toolCall.function.arguments["expression"] == .string("2+2"))
     }
 
     // MARK: - GLM4 Format Tests

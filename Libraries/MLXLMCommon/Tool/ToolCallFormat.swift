@@ -42,7 +42,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
     case json
 
-    /// LFM2 JSON format with model-specific tags.
+    /// LFM2 Python-style format with model-specific tags.
     /// Example: `<|tool_call_start|>{"name": "func", "arguments": {...}}<|tool_call_end|>`
     case lfm2
 
@@ -75,7 +75,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         case .json:
             return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .lfm2:
-            return JSONToolCallParser(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+            return PythonToolCallParser(
+                startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser()
         case .glm4:
