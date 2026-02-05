@@ -43,7 +43,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     case json
 
     /// LFM2 Python-style format with model-specific tags.
-    /// Example: `<|tool_call_start|>{"name": "func", "arguments": {...}}<|tool_call_end|>`
+    /// Example: `<|tool_call_start|>[name(parameter="value")]<|tool_call_end|>`
     case lfm2
 
     /// XML function format used by Qwen3 Coder.

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Apple Inc.
+// Copyright © 2025 Apple Inc.
 
 import Foundation
 
