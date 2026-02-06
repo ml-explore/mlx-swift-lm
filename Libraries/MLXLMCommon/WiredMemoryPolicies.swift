@@ -3,6 +3,14 @@
 import Foundation
 import MLX
 
+private func recommendedWorkingSetBytes() -> Int? {
+    #if canImport(Metal)
+        GPU.maxRecommendedWorkingSetBytes()
+    #else
+        nil
+    #endif
+}
+
 /// Sum policy: `baseline + sum(activeSizes)`, optionally capped.
 ///
 /// This is the most common policy for inference workloads. Each ticket adds to
@@ -45,7 +53,7 @@ public struct WiredSumPolicy: WiredMemoryPolicy, Hashable, Sendable {
         if let cap {
             return min(value, max(0, cap))
         }
-        if let maxBytes = GPU.maxRecommendedWorkingSetBytes() {
+        if let maxBytes = recommendedWorkingSetBytes() {
             return min(value, maxBytes)
         }
         return value
@@ -125,7 +133,7 @@ public struct WiredFixedPolicy: WiredMemoryPolicy, Hashable, Sendable {
 /// ```
 public struct WiredBudgetPolicy: WiredMemoryPolicy, Hashable, Sendable {
     /// Stable policy identifier used for grouping.
-    public let id: AnyHashable
+    public let identifier: UUID
     /// Base budget in bytes (e.g. weights + workspace).
     public let baseBytes: Int
     /// Optional absolute cap (bytes) for the computed limit.
@@ -135,19 +143,19 @@ public struct WiredBudgetPolicy: WiredMemoryPolicy, Hashable, Sendable {
     public init(
         baseBytes: Int,
         cap: Int? = nil,
-        id: AnyHashable = UUID()
+        id: UUID = UUID()
     ) {
         self.baseBytes = max(0, baseBytes)
         self.cap = cap
-        self.id = id
+        self.identifier = id
     }
 
     public static func == (lhs: WiredBudgetPolicy, rhs: WiredBudgetPolicy) -> Bool {
-        lhs.id == rhs.id
+        lhs.identifier == rhs.identifier
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
+        hasher.combine(identifier)
     }
 
     /// Computes the desired limit for the current active set.
@@ -166,7 +174,7 @@ public struct WiredBudgetPolicy: WiredMemoryPolicy, Hashable, Sendable {
         if let cap {
             return min(value, max(0, cap))
         }
-        if let maxBytes = GPU.maxRecommendedWorkingSetBytes() {
+        if let maxBytes = recommendedWorkingSetBytes() {
             return min(value, maxBytes)
         }
         return value

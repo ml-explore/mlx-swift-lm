@@ -95,12 +95,13 @@ policies can scale the wired limit based on what is actually active.
 If wired memory control is unavailable (CPU-only execution), you can still use
 policies for admission gating and budgeting by enabling policy-only mode on the
 manager. This keeps ticket tracking and limit math active without attempting to
-change the wired limit.
+change the wired limit. Policy-only mode defaults to `true` on unsupported
+backends.
 
 ```swift
-let manager = WiredMemoryManager(
-    configuration: .init(policyOnlyWhenUnsupported: true)
-)
+await WiredMemoryManager.shared.updateConfiguration { configuration in
+    configuration.policyOnlyWhenUnsupported = true
+}
 ```
 
 You can also provide `baselineOverride` (a fixed budget), or rely on

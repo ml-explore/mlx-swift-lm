@@ -97,8 +97,8 @@ final class WiredMemoryIntegrationTests: XCTestCase {
             throw XCTSkip("No recommended working set size available.")
         }
 
-        let manager = WiredMemoryManager()
-        let sumPolicy = WiredSumPolicy()
+        let manager = WiredMemoryManager.makeForTesting()
+        let sumPolicy = MLXLMCommon.WiredSumPolicy()
         let customPolicy = DoubleSumPolicy()
 
         let mib = 1024 * 1024
@@ -200,8 +200,8 @@ final class WiredMemoryIntegrationTests: XCTestCase {
         let parameters = GenerateParameters(maxTokens: 8)
         let prompt = "Write one short sentence about the ocean."
 
-        let manager = WiredMemoryManager()
-        let policy = WiredSumPolicy()
+        let manager = WiredMemoryManager.makeForTesting()
+        let policy = MLXLMCommon.WiredSumPolicy()
         let ticket = WiredMemoryTicket(
             size: 64 * 1024 * 1024,
             policy: policy,
@@ -250,7 +250,7 @@ final class WiredMemoryIntegrationTests: XCTestCase {
         let parameters = GenerateParameters(maxTokens: 32)
         let prompt = "Explain why tests exist in one sentence."
 
-        let manager = WiredMemoryManager()
+        let manager = WiredMemoryManager.makeForTesting()
         let policy = SingleActivePolicy()
 
         let ticketA = WiredMemoryTicket(
@@ -324,7 +324,7 @@ final class WiredMemoryIntegrationTests: XCTestCase {
             throw XCTSkip("No recommended working set size available.")
         }
 
-        let manager = WiredMemoryManager()
+        let manager = WiredMemoryManager.makeForTesting()
         let mib = 1024 * 1024
         let sharedWeights = 256 * mib
 

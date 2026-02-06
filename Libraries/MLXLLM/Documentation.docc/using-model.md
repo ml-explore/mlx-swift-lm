@@ -122,11 +122,10 @@ The stream is stopped after we hit a maximum number of tokens:
 ### Wired Memory (Optional)
 
 Use the policy-based API to coordinate a single global wired limit across tasks.
-This is opt-in and only applies on GPU devices that support wired memory control
-(macOS 15 / iOS 18 / tvOS 18 or newer). On unsupported platforms or devices it is
-silently ignored.
 `WiredMemoryManager` and `WiredMemoryTicket` are provided by MLX, while
-LLM-specific policies (like `WiredSumPolicy`) live in MLXLMCommon.
+MLXLMCommon adds LLM-oriented policies (like `WiredFixedPolicy` or capped sum).
+Policy-only admission is enabled by default on unsupported backends so the same
+ticket logic applies on CPU (no OS limit changes are attempted).
 
 ```swift
 let policy = WiredSumPolicy()

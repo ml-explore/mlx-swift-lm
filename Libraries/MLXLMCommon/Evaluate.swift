@@ -5,8 +5,9 @@ import MLX
 import Tokenizers
 
 private func withOptionalWiredLimitSync<R>(_ limit: Int?, _ body: () -> R) -> R {
-    guard let limit else { return body() }
-    return Memory.withWiredLimit(limit, body)
+    // Synchronous wired limit adjustments are deprecated and now a no-op.
+    _ = limit
+    return body()
 }
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
@@ -542,9 +543,8 @@ public enum GenerateDisposition: Sendable {
 ///   - model: model to evaluate
 ///   - tokenizer: tokenizer to convert tokens back into strings and recognize special tokens
 ///   - extraEOSTokens: any additional stop tokens
-///   - wiredMemoryLimit: Optional wired limit (bytes) applied for the duration of
-///     this synchronous call. Use `GPU.maxRecommendedWorkingSetBytes()` if you want
-///     to clamp to Metal's recommended working set size.
+///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
+///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: visitor for the tokens as they are generated
 @available(
     *, deprecated,
@@ -584,9 +584,8 @@ public func generate(
 ///   - input: prepared language model input
 ///   - parameters: parameters controlling the token generation
 ///   - context: model context (model and tokenizer)
-///   - wiredMemoryLimit: Optional wired limit (bytes) applied for the duration of
-///     this synchronous call. Use `GPU.maxRecommendedWorkingSetBytes()` if you want
-///     to clamp to Metal's recommended working set size.
+///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
+///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
 @available(
@@ -615,9 +614,8 @@ public func generate(
 ///   - input: prepared language model input
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
-///   - wiredMemoryLimit: Optional wired limit (bytes) applied for the duration of
-///     this synchronous call. Use `GPU.maxRecommendedWorkingSetBytes()` if you want
-///     to clamp to Metal's recommended working set size.
+///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
+///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
 @available(
@@ -692,9 +690,8 @@ public func generate(
 ///   - input: prepared language model input
 ///   - parameters: parameters controlling the token generation
 ///   - context: model context (model and tokenizer)
-///   - wiredMemoryLimit: Optional wired limit (bytes) applied for the duration of
-///     this synchronous call. Use `GPU.maxRecommendedWorkingSetBytes()` if you want
-///     to clamp to Metal's recommended working set size.
+///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
+///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
 @available(
@@ -723,9 +720,10 @@ public func generate(
 ///   - input: prepared language model input
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
-///   - wiredMemoryLimit: Optional wired limit (bytes) applied for the duration of
-///     this synchronous call. Use `GPU.maxRecommendedWorkingSetBytes()` if you want
-///     to clamp to Metal's recommended working set size.
+///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
+///     longer applies wired limits directly and executes as a no-op wrapper. Use
+///     async generation with `WiredMemoryTicket.withWiredLimit` to coordinate
+///     policy-driven wired memory management.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
 @available(
@@ -987,8 +985,10 @@ public func generateTask(
     }
 
     // When the consumer cancels (or ends) the stream, cancel our underlying task.
-    continuation.onTermination = { _ in
-        task.cancel()
+    continuation.onTermination = { termination in
+        if case .cancelled = termination {
+            task.cancel()
+        }
     }
 
     return (stream, task)
