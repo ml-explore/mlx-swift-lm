@@ -83,7 +83,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
     public init(
         configuration: LoRAConfiguration,
-        parameters: consuming ModuleParameters
+        parameters: ModuleParameters
     ) {
         // ensure that the parameters are fully evaluated before we promise
         // that they are Sendable
