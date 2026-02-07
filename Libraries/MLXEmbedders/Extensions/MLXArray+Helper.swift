@@ -1,9 +1,4 @@
-//
-//  MLXArray+Helper.swift
-//  mlx-swift-lm
-//
-//  Created by Christoph Rohde on 24.01.26.
-//
+// Copyright © 2026 Apple Inc.
 
 import MLX
 
