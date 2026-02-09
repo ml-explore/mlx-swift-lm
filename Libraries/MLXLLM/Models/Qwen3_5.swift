@@ -55,10 +55,6 @@ public class Qwen3_5Model: Module, LLMModel, KVCacheDimensionProvider {
         languageModel.newCache(parameters: parameters)
     }
 
-    public func makeCache() -> [KVCache] {
-        languageModel.makeCache()
-    }
-
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = [String: MLXArray]()
         for (key, value) in weights {

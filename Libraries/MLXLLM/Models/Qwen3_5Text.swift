@@ -454,15 +454,30 @@ public class Qwen3_5TextModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
-    public func makeCache() -> [KVCache] {
-        return newCache(parameters: nil)
-    }
-
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var sanitizedWeights = weights
+        var sanitizedWeights = weights.filter { !$0.key.contains("mtp.") }
 
         if configuration.tieWordEmbeddings {
             sanitizedWeights["lm_head.weight"] = nil
+        }
+
+        let normSuffixes = [
+            ".input_layernorm.weight",
+            ".post_attention_layernorm.weight",
+            "model.norm.weight",
+            ".q_norm.weight",
+            ".k_norm.weight",
+        ]
+
+        for key in Array(sanitizedWeights.keys) {
+            guard let value = sanitizedWeights[key] else { continue }
+            if key.contains("conv1d.weight") && value.dim(-1) != 1 {
+                sanitizedWeights[key] = value.movedAxis(source: 2, destination: 1)
+                continue
+            }
+            if normSuffixes.contains(where: { key.hasSuffix($0) }) && value.ndim == 1 {
+                sanitizedWeights[key] = value + 1.0
+            }
         }
 
         return sanitizedWeights
