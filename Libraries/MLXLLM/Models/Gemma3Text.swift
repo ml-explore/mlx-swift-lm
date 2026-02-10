@@ -375,6 +375,18 @@ public class Gemma3TextModel: Module, LLMModel {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
 
+        let expectedVocab = config.vocabularySize
+        let keysToCheck = [
+            "model.embed_tokens.weight", "model.embed_tokens.scales", "model.embed_tokens.biases",
+            "lm_head.weight", "lm_head.scales", "lm_head.biases",
+        ]
+
+        for key in keysToCheck {
+            if let tensor = processedWeights[key], tensor.dim(0) > expectedVocab {
+                processedWeights[key] = tensor[0 ..< expectedVocab]
+            }
+        }
+
         if processedWeights["lm_head.weight"] == nil {
             ["weight", "scales", "biases"].forEach { key in
                 if let embedWeight = processedWeights["model.embed_tokens.\(key)"] {

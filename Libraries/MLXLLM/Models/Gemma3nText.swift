@@ -1013,6 +1013,22 @@ public class Gemma3nTextModel: Module, LLMModel {
             }
         }
 
+        let expectedVocab = config.vocabSize
+        let keysToCheck = [
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.embed_tokens.scales",
+            "language_model.model.embed_tokens.biases",
+            "language_model.lm_head.weight",
+            "language_model.lm_head.scales",
+            "language_model.lm_head.biases",
+        ]
+
+        for key in keysToCheck {
+            if let tensor = processedWeights[key], tensor.dim(0) > expectedVocab {
+                processedWeights[key] = tensor[0 ..< expectedVocab]
+            }
+        }
+
         return processedWeights
     }
 
