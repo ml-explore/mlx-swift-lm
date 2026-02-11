@@ -42,8 +42,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
     case json
 
-    /// LFM2 JSON format with model-specific tags.
-    /// Example: `<|tool_call_start|>{"name": "func", "arguments": {...}}<|tool_call_end|>`
+    /// LFM2/LFM2.5 Pythonic format with model-specific tags.
+    /// Example: `<|tool_call_start|>[func(arg='value')]<|tool_call_end|>`
     case lfm2
 
     /// XML function format used by Qwen3 Coder.
@@ -75,7 +75,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         case .json:
             return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .lfm2:
-            return JSONToolCallParser(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+            return PythonicToolCallParser(
+                startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser()
         case .glm4:
@@ -97,15 +98,23 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// - Parameter modelType: The `model_type` value from config.json
     /// - Returns: The appropriate `ToolCallFormat`, or `nil` to use the default format
     public static func infer(from modelType: String) -> ToolCallFormat? {
-        switch modelType.lowercased() {
-        case "lfm2", "lfm2_moe":
+        let type = modelType.lowercased()
+
+        // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
+        if type.hasPrefix("lfm2") {
             return .lfm2
-        case "glm4", "glm4_moe", "glm4_moe_lite":
-            return .glm4
-        case "gemma":
-            return .gemma
-        default:
-            return nil
         }
+
+        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
+        if type.hasPrefix("glm4") {
+            return .glm4
+        }
+
+        // Gemma
+        if type == "gemma" {
+            return .gemma
+        }
+
+        return nil
     }
 }
