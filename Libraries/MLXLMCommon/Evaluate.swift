@@ -4,12 +4,6 @@ import Foundation
 import MLX
 import Tokenizers
 
-private func withOptionalWiredLimitSync<R>(_ limit: Int?, _ body: () -> R) -> R {
-    // Synchronous wired limit adjustments are deprecated and now a no-op.
-    _ = limit
-    return body()
-}
-
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
 ///
@@ -629,57 +623,57 @@ public func generate(
     wiredMemoryLimit: Int? = nil,
     didGenerate: ([Int]) -> GenerateDisposition
 ) -> GenerateResult {
-    return withOptionalWiredLimitSync(wiredMemoryLimit) {
-        var start = Date.timeIntervalSinceReferenceDate
-        var promptTime: TimeInterval = 0
+    // Deprecated synchronous wiring path: kept for source compatibility only.
+    _ = wiredMemoryLimit
+    var start = Date.timeIntervalSinceReferenceDate
+    var promptTime: TimeInterval = 0
 
-        // Build complete EOS token set from all sources
-        var eosTokenIds = context.configuration.eosTokenIds
-        if let tokenizerEos = context.tokenizer.eosTokenId {
-            eosTokenIds.insert(tokenizerEos)
-        }
-        for token in context.configuration.extraEOSTokens {
-            if let id = context.tokenizer.convertTokenToId(token) {
-                eosTokenIds.insert(id)
-            }
-        }
-
-        var tokens = [Int]()
-
-        for token in iterator {
-            // compute the timing for the prompt
-            if tokens.isEmpty {
-                let now = Date.timeIntervalSinceReferenceDate
-                promptTime = now - start
-                start = now
-            }
-
-            if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
-                break
-            }
-            tokens.append(token)
-
-            if didGenerate(tokens) == .stop {
-                break
-            }
-        }
-
-        let now = Date.timeIntervalSinceReferenceDate
-        let generateTime = now - start
-
-        // TokenIterator uses `asyncEval()` to keep the pipeline full. If the caller
-        // exits the program right away, those tasks will still be executing and will
-        // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
-        // to make sure it is complete.
-        Stream().synchronize()
-
-        return GenerateResult(
-            inputText: input.text, tokens: tokens,
-            output: context.tokenizer.decode(tokens: tokens),
-            promptTime: promptTime + iterator.promptPrefillTime,
-            generateTime: generateTime
-        )
+    // Build complete EOS token set from all sources
+    var eosTokenIds = context.configuration.eosTokenIds
+    if let tokenizerEos = context.tokenizer.eosTokenId {
+        eosTokenIds.insert(tokenizerEos)
     }
+    for token in context.configuration.extraEOSTokens {
+        if let id = context.tokenizer.convertTokenToId(token) {
+            eosTokenIds.insert(id)
+        }
+    }
+
+    var tokens = [Int]()
+
+    for token in iterator {
+        // compute the timing for the prompt
+        if tokens.isEmpty {
+            let now = Date.timeIntervalSinceReferenceDate
+            promptTime = now - start
+            start = now
+        }
+
+        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
+            break
+        }
+        tokens.append(token)
+
+        if didGenerate(tokens) == .stop {
+            break
+        }
+    }
+
+    let now = Date.timeIntervalSinceReferenceDate
+    let generateTime = now - start
+
+    // TokenIterator uses `asyncEval()` to keep the pipeline full. If the caller
+    // exits the program right away, those tasks will still be executing and will
+    // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
+    // to make sure it is complete.
+    Stream().synchronize()
+
+    return GenerateResult(
+        inputText: input.text, tokens: tokens,
+        output: context.tokenizer.decode(tokens: tokens),
+        promptTime: promptTime + iterator.promptPrefillTime,
+        generateTime: generateTime
+    )
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
@@ -737,57 +731,57 @@ public func generate(
     wiredMemoryLimit: Int? = nil,
     didGenerate: (Int) -> GenerateDisposition
 ) -> GenerateCompletionInfo {
-    return withOptionalWiredLimitSync(wiredMemoryLimit) {
-        var start = Date.timeIntervalSinceReferenceDate
-        var promptTime: TimeInterval = 0
+    // Deprecated synchronous wiring path: kept for source compatibility only.
+    _ = wiredMemoryLimit
+    var start = Date.timeIntervalSinceReferenceDate
+    var promptTime: TimeInterval = 0
 
-        // Build complete EOS token set from all sources
-        var eosTokenIds = context.configuration.eosTokenIds
-        if let tokenizerEos = context.tokenizer.eosTokenId {
-            eosTokenIds.insert(tokenizerEos)
-        }
-        for token in context.configuration.extraEOSTokens {
-            if let id = context.tokenizer.convertTokenToId(token) {
-                eosTokenIds.insert(id)
-            }
-        }
-
-        var tokenCount = 0
-
-        for token in iterator {
-            // Compute the timing for the prompt
-            if promptTime == 0 {
-                let now = Date.timeIntervalSinceReferenceDate
-                promptTime = now - start
-                start = now
-            }
-
-            // Check for end-of-sequence tokens
-            if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
-                break
-            }
-
-            tokenCount += 1
-
-            // Invoke the callback with the current token
-            if didGenerate(token) == .stop {
-                break
-            }
-        }
-
-        let now = Date.timeIntervalSinceReferenceDate
-        let generateTime = now - start
-
-        // Synchronize with the stream to ensure tasks are completed
-        Stream().synchronize()
-
-        return GenerateCompletionInfo(
-            promptTokenCount: input.text.tokens.size,
-            generationTokenCount: tokenCount,
-            promptTime: promptTime + iterator.promptPrefillTime,
-            generationTime: generateTime
-        )
+    // Build complete EOS token set from all sources
+    var eosTokenIds = context.configuration.eosTokenIds
+    if let tokenizerEos = context.tokenizer.eosTokenId {
+        eosTokenIds.insert(tokenizerEos)
     }
+    for token in context.configuration.extraEOSTokens {
+        if let id = context.tokenizer.convertTokenToId(token) {
+            eosTokenIds.insert(id)
+        }
+    }
+
+    var tokenCount = 0
+
+    for token in iterator {
+        // Compute the timing for the prompt
+        if promptTime == 0 {
+            let now = Date.timeIntervalSinceReferenceDate
+            promptTime = now - start
+            start = now
+        }
+
+        // Check for end-of-sequence tokens
+        if token == context.tokenizer.unknownTokenId || eosTokenIds.contains(token) {
+            break
+        }
+
+        tokenCount += 1
+
+        // Invoke the callback with the current token
+        if didGenerate(token) == .stop {
+            break
+        }
+    }
+
+    let now = Date.timeIntervalSinceReferenceDate
+    let generateTime = now - start
+
+    // Synchronize with the stream to ensure tasks are completed
+    Stream().synchronize()
+
+    return GenerateCompletionInfo(
+        promptTokenCount: input.text.tokens.size,
+        generationTokenCount: tokenCount,
+        promptTime: promptTime + iterator.promptPrefillTime,
+        generationTime: generateTime
+    )
 }
 
 /// Generates tokens asynchronously using the provided language model input, parameters, and context.

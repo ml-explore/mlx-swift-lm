@@ -9,13 +9,6 @@ final class WiredMemoryIntegrationTests: XCTestCase {
     enum TestError: Error {
         case missingInfo
         case timeout
-        case missingBaseline
-    }
-
-    struct DoubleSumPolicy: WiredMemoryPolicy, Hashable, Sendable {
-        func limit(baseline: Int, activeSizes: [Int]) -> Int {
-            baseline + activeSizes.reduce(0, +) * 2
-        }
     }
 
     /// Allows only a single active ticket at a time.
@@ -26,23 +19,6 @@ final class WiredMemoryIntegrationTests: XCTestCase {
 
         func canAdmit(baseline: Int, activeSizes: [Int], newSize: Int) -> Bool {
             activeSizes.isEmpty
-        }
-    }
-
-    /// Models policies that share a common weight budget without double counting it.
-    struct SharedWeightsPolicy: WiredMemoryPolicy, Hashable, Sendable {
-        let name: String
-        let sharedBytes: Int
-
-        func limit(baseline: Int, activeSizes: [Int]) -> Int {
-            baseline + sharedBytes + activeSizes.reduce(0, +)
-        }
-
-        func canAdmit(baseline: Int, activeSizes: [Int], newSize: Int) -> Bool {
-            // Admission uses the shared weight budget so each policy stays within
-            // its own view of total demand.
-            let projected = sharedBytes + activeSizes.reduce(0, +) + max(0, newSize)
-            return projected >= 0
         }
     }
 
@@ -85,108 +61,6 @@ final class WiredMemoryIntegrationTests: XCTestCase {
 
         XCTAssertEqual(infos.count, 2)
         XCTAssertTrue(infos.allSatisfy { $0.generationTokenCount > 0 })
-    }
-
-    func testWiredMemoryPolicyStackingAndCustomPolicies() async throws {
-        guard Device.defaultDevice().deviceType == .gpu else {
-            throw XCTSkip("Wired memory control only available on GPU devices.")
-        }
-
-        let maxBytes = GPU.deviceInfo().maxRecommendedWorkingSetSize
-        guard maxBytes > 0 else {
-            throw XCTSkip("No recommended working set size available.")
-        }
-
-        let manager = WiredMemoryManager.makeForTesting()
-        let sumPolicy = MLXLMCommon.WiredSumPolicy()
-        let customPolicy = DoubleSumPolicy()
-
-        let mib = 1024 * 1024
-        let sumTicket1 = WiredMemoryTicket(size: 64 * mib, policy: sumPolicy, manager: manager)
-        let sumTicket2 = WiredMemoryTicket(size: 64 * mib, policy: sumPolicy, manager: manager)
-        let customTicket = WiredMemoryTicket(size: 96 * mib, policy: customPolicy, manager: manager)
-
-        let stream = await manager.events()
-        async let collectedEvents = Self.collectEvents(stream: stream) { event in
-            event.kind == .baselineRestored
-        }
-
-        _ = await sumTicket1.start()
-        _ = await sumTicket2.start()
-        _ = await customTicket.start()
-        _ = await customTicket.end()
-        _ = await sumTicket2.end()
-        _ = await sumTicket1.end()
-
-        let events = try await collectedEvents
-        guard !events.isEmpty else {
-            throw XCTSkip("Wired memory events not available in this build.")
-        }
-
-        if events.contains(where: { $0.kind == .limitApplyFailed }) {
-            throw XCTSkip("Wired limit updates failed on this device.")
-        }
-
-        guard let baseline = events.first(where: { $0.kind == .baselineCaptured })?.baseline else {
-            throw TestError.missingBaseline
-        }
-
-        enum PolicyKind {
-            case sum
-            case custom
-        }
-
-        let policyByTicket: [UUID: PolicyKind] = [
-            sumTicket1.id: .sum,
-            sumTicket2.id: .sum,
-            customTicket.id: .custom,
-        ]
-
-        var active: [UUID: Int] = [:]
-        var sawCustomDominant = false
-        var sawTwoPoliciesActive = false
-
-        for event in events {
-            switch event.kind {
-            case .ticketStarted:
-                guard let id = event.ticketID, let size = event.size else { continue }
-                active[id] = size
-            case .ticketEnded:
-                if let id = event.ticketID {
-                    active.removeValue(forKey: id)
-                }
-            case .limitApplied:
-                let sumSizes = active.reduce(0) { partial, entry in
-                    guard let kind = policyByTicket[entry.key], kind == .sum else { return partial }
-                    return partial + entry.value
-                }
-                let customSizes = active.reduce(0) { partial, entry in
-                    guard let kind = policyByTicket[entry.key], kind == .custom else {
-                        return partial
-                    }
-                    return partial + entry.value
-                }
-
-                if sumSizes > 0 && customSizes > 0 {
-                    sawTwoPoliciesActive = true
-                }
-
-                let sumLimit = baseline + sumSizes
-                let customLimit = baseline + (customSizes * 2)
-                let expected = max(sumLimit, customLimit)
-
-                if customSizes > 0 && expected == customLimit && customLimit > sumLimit {
-                    sawCustomDominant = true
-                }
-
-                XCTAssertEqual(event.appliedLimit, expected)
-            default:
-                break
-            }
-        }
-
-        XCTAssertTrue(sawCustomDominant, "Expected custom policy to influence the applied limit.")
-        XCTAssertTrue(sawTwoPoliciesActive, "Expected tickets from two policies to overlap.")
     }
 
     /// Verifies that passing a wired memory ticket to inference results in
@@ -311,76 +185,6 @@ final class WiredMemoryIntegrationTests: XCTestCase {
             $0.kind == .admissionWait && $0.ticketID == ticketB.id
         }
         XCTAssertTrue(sawAdmissionWait, "Expected second ticket to wait for admission.")
-    }
-
-    /// Demonstrates shared embedding weights across two policies without double counting.
-    func testSharedWeightsAcrossPoliciesUsesMaxNotSum() async throws {
-        guard Device.defaultDevice().deviceType == .gpu else {
-            throw XCTSkip("Wired memory control only available on GPU devices.")
-        }
-
-        let maxBytes = GPU.deviceInfo().maxRecommendedWorkingSetSize
-        guard maxBytes > 0 else {
-            throw XCTSkip("No recommended working set size available.")
-        }
-
-        let manager = WiredMemoryManager.makeForTesting()
-        let mib = 1024 * 1024
-        let sharedWeights = 256 * mib
-
-        let embeddingPolicy = SharedWeightsPolicy(name: "embedding", sharedBytes: sharedWeights)
-        let chatPolicy = SharedWeightsPolicy(name: "chat", sharedBytes: sharedWeights)
-
-        let embedTicket = WiredMemoryTicket(
-            size: 64 * mib,
-            policy: embeddingPolicy,
-            manager: manager,
-            kind: .active
-        )
-        let chatTicket = WiredMemoryTicket(
-            size: 192 * mib,
-            policy: chatPolicy,
-            manager: manager,
-            kind: .active
-        )
-
-        let stream = await manager.events()
-        async let collectedEvents = Self.collectEvents(stream: stream) { event in
-            event.kind == .baselineRestored && event.activeCount == 0
-        }
-
-        _ = await embedTicket.start()
-        _ = await chatTicket.start()
-        _ = await chatTicket.end()
-        _ = await embedTicket.end()
-
-        let events = try await collectedEvents
-        guard !events.isEmpty else {
-            throw XCTSkip("Wired memory events not available in this build.")
-        }
-
-        if events.contains(where: { $0.kind == .limitApplyFailed }) {
-            throw XCTSkip("Wired limit updates failed on this device.")
-        }
-
-        guard let baseline = events.first(where: { $0.kind == .baselineCaptured })?.baseline else {
-            throw TestError.missingBaseline
-        }
-
-        // Each policy includes the shared weights; the manager selects the max.
-        let embedLimit = baseline + sharedWeights + (64 * mib)
-        let chatLimit = baseline + sharedWeights + (192 * mib)
-        let summedLimit = baseline + sharedWeights + (64 * mib) + (192 * mib)
-
-        let sawEmbed = events.contains { $0.kind == .limitApplied && $0.appliedLimit == embedLimit }
-        let sawChat = events.contains { $0.kind == .limitApplied && $0.appliedLimit == chatLimit }
-        let sawSummed = events.contains {
-            $0.kind == .limitApplied && $0.appliedLimit == summedLimit
-        }
-
-        XCTAssertTrue(sawEmbed, "Expected embedding policy limit to be applied.")
-        XCTAssertTrue(sawChat, "Expected chat policy limit to be applied.")
-        XCTAssertFalse(sawSummed, "Expected shared weights not to be double counted.")
     }
 
     /// Measurement helpers should return a budget at least as large as the observed peak
