@@ -532,6 +532,7 @@ private struct SynchronousGenerationLoopResult {
     let promptTime: TimeInterval
     let generateTime: TimeInterval
     let promptPrefillTime: TimeInterval
+    let stopReason: GenerateStopReason
 }
 
 private func buildStopTokenIDs(
@@ -567,6 +568,7 @@ private func runSynchronousGenerationLoop(
 
     var generatedTokens = [Int]()
     var iterator = iterator
+    var stopReason: GenerateStopReason?
 
     while let token = iterator.next() {
         // Compute the timing for the prompt.
@@ -578,13 +580,24 @@ private func runSynchronousGenerationLoop(
 
         // Check for end-of-sequence tokens.
         if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+            stopReason = .stop
             break
         }
 
         generatedTokens.append(token)
 
         if didGenerate(token, generatedTokens) == .stop {
+            stopReason = .cancelled
             break
+        }
+    }
+
+    // If the iterator ends naturally, the max-token limit was reached.
+    if stopReason == nil {
+        if let maxTokens = iterator.maxTokens, iterator.tokenCount >= maxTokens {
+            stopReason = .length
+        } else {
+            stopReason = .cancelled
         }
     }
 
@@ -601,7 +614,8 @@ private func runSynchronousGenerationLoop(
         generatedTokens: generatedTokens,
         promptTime: promptTime,
         generateTime: generateTime,
-        promptPrefillTime: iterator.promptPrefillTime
+        promptPrefillTime: iterator.promptPrefillTime,
+        stopReason: stopReason ?? .cancelled
     )
 }
 
@@ -764,7 +778,8 @@ public func generate(
         promptTokenCount: input.text.tokens.size,
         generationTokenCount: result.generatedTokens.count,
         promptTime: result.promptTime + result.promptPrefillTime,
-        generationTime: result.generateTime
+        generationTime: result.generateTime,
+        stopReason: result.stopReason
     )
 }
 
@@ -993,6 +1008,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
             var tokenCount = 0
+            var stopReason: GenerateStopReason?
 
             let stopTokenIDs = buildStopTokenIDs(
                 modelConfiguration: modelConfiguration,
@@ -1002,6 +1018,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             for token in iterator {
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
+                    stopReason = .cancelled
                     break
                 }
 
@@ -1016,15 +1033,28 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                     if includeStopToken {
                         tokenCount += 1
                         if !handler.onStopToken(token, emit: continuation.yield) {
+                            stopReason = .cancelled
                             break
                         }
                     }
+                    stopReason = .stop
                     break
                 }
 
                 tokenCount += 1
                 if !handler.onToken(token, emit: continuation.yield) {
+                    stopReason = .cancelled
                     break
+                }
+            }
+
+            if stopReason == nil {
+                if Task.isCancelled {
+                    stopReason = .cancelled
+                } else if let maxTokens = iterator.maxTokens, iterator.tokenCount >= maxTokens {
+                    stopReason = .length
+                } else {
+                    stopReason = .cancelled
                 }
             }
 
@@ -1035,7 +1065,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 promptTokenCount: promptTokenCount,
                 generationTokenCount: tokenCount,
                 promptTime: promptTime + iterator.promptPrefillTime,
-                generationTime: generateTime
+                generationTime: generateTime,
+                stopReason: stopReason ?? .cancelled
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -1074,6 +1105,18 @@ private func measure(_ closure: () throws -> Void) rethrows -> TimeInterval {
 
 // MARK: - Generation structs
 
+/// Reason why token generation stopped.
+public enum GenerateStopReason: Sendable {
+    /// Generation stopped because an EOS/unknown stop token was encountered.
+    case stop
+
+    /// Generation stopped because the configured max token limit was reached.
+    case length
+
+    /// Generation stopped due to explicit task cancellation or early stream termination.
+    case cancelled
+}
+
 /// Represents metadata and statistics related to token generation.
 ///
 /// Provides information about the number of tokens processed during both the prompt and generation phases, as well as the time taken for each phase.
@@ -1090,6 +1133,9 @@ public struct GenerateCompletionInfo: Sendable {
     /// The time interval (in seconds) taken to generate the output tokens.
     public let generateTime: TimeInterval
 
+    /// Reason generation stopped.
+    public let stopReason: GenerateStopReason
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -1104,12 +1150,14 @@ public struct GenerateCompletionInfo: Sendable {
         promptTokenCount: Int,
         generationTokenCount: Int,
         promptTime: TimeInterval,
-        generationTime: TimeInterval
+        generationTime: TimeInterval,
+        stopReason: GenerateStopReason = .stop
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
         self.promptTime = promptTime
         self.generateTime = generationTime
+        self.stopReason = stopReason
     }
 
     public func summary() -> String {
