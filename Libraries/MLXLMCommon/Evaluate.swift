@@ -537,8 +537,6 @@ public enum GenerateDisposition: Sendable {
 ///   - model: model to evaluate
 ///   - tokenizer: tokenizer to convert tokens back into strings and recognize special tokens
 ///   - extraEOSTokens: any additional stop tokens
-///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
-///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: visitor for the tokens as they are generated
 @available(
     *, deprecated,
@@ -549,7 +547,6 @@ public func generate(
     promptTokens: [Int], parameters: GenerateParameters, model: any LanguageModel,
     tokenizer: Tokenizer,
     extraEOSTokens: Set<String>? = nil,
-    wiredMemoryLimit: Int? = nil,
     didGenerate: ([Int]) -> GenerateDisposition
 ) throws -> GenerateResult {
     let tokens = MLXArray(promptTokens)
@@ -566,7 +563,6 @@ public func generate(
 
     return generate(
         input: input, context: context, iterator: iterator,
-        wiredMemoryLimit: wiredMemoryLimit,
         didGenerate: didGenerate)
 }
 
@@ -578,8 +574,6 @@ public func generate(
 ///   - input: prepared language model input
 ///   - parameters: parameters controlling the token generation
 ///   - context: model context (model and tokenizer)
-///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
-///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
 @available(
@@ -589,14 +583,12 @@ public func generate(
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
-    wiredMemoryLimit: Int? = nil,
     didGenerate: ([Int]) -> GenerateDisposition
 ) throws -> GenerateResult {
     let iterator = try TokenIterator(
         input: input, model: context.model, parameters: parameters)
     return generate(
         input: input, context: context, iterator: iterator,
-        wiredMemoryLimit: wiredMemoryLimit,
         didGenerate: didGenerate)
 }
 
@@ -608,8 +600,6 @@ public func generate(
 ///   - input: prepared language model input
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
-///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
-///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: the generated output
 @available(
@@ -620,11 +610,8 @@ public func generate(
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
-    wiredMemoryLimit: Int? = nil,
     didGenerate: ([Int]) -> GenerateDisposition
 ) -> GenerateResult {
-    // Deprecated synchronous wiring path: kept for source compatibility only.
-    _ = wiredMemoryLimit
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
@@ -684,8 +671,6 @@ public func generate(
 ///   - input: prepared language model input
 ///   - parameters: parameters controlling the token generation
 ///   - context: model context (model and tokenizer)
-///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
-///     longer applies wired limits; use ticket-based APIs for wiring control.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
 @available(
@@ -695,14 +680,12 @@ public func generate(
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
-    wiredMemoryLimit: Int? = nil,
     didGenerate: (Int) -> GenerateDisposition
 ) throws -> GenerateCompletionInfo {
     let iterator = try TokenIterator(
         input: input, model: context.model, parameters: parameters)
     return generate(
         input: input, context: context, iterator: iterator,
-        wiredMemoryLimit: wiredMemoryLimit,
         didGenerate: didGenerate)
 }
 
@@ -714,10 +697,6 @@ public func generate(
 ///   - input: prepared language model input
 ///   - context: model context (model and tokenizer)
 ///   - iterator: token iterator
-///   - wiredMemoryLimit: Optional wired limit (bytes). This synchronous path no
-///     longer applies wired limits directly and executes as a no-op wrapper. Use
-///     async generation with `WiredMemoryTicket.withWiredLimit` to coordinate
-///     policy-driven wired memory management.
 ///   - didGenerate: token visitor that can output tokens as they are generated and indicate early stop
 /// - Returns: Information about the generation
 @available(
@@ -728,11 +707,8 @@ public func generate(
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
-    wiredMemoryLimit: Int? = nil,
     didGenerate: (Int) -> GenerateDisposition
 ) -> GenerateCompletionInfo {
-    // Deprecated synchronous wiring path: kept for source compatibility only.
-    _ = wiredMemoryLimit
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
