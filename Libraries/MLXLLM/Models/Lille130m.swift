@@ -5,6 +5,8 @@
 //  Created by Sachin Desai on 9/10/25.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/lille130m.py
+
 import Foundation
 import MLX
 import MLXLMCommon

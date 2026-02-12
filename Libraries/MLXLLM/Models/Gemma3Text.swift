@@ -5,7 +5,7 @@
 //  Created by Anthony DePasquale on 14.03.2025.
 //
 
-// Based on https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma3_text.py
+// Based on https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma3_text.py
 
 import Foundation
 import MLX

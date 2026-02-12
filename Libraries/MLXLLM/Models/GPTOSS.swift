@@ -5,6 +5,8 @@
 //  Created by John Mai on 2025/8/6.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gpt_oss.py
+
 import Foundation
 import MLX
 import MLXLMCommon

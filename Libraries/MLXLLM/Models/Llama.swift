@@ -6,7 +6,7 @@ import MLXLMCommon
 import MLXNN
 import Tokenizers
 
-// port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/llama.py
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/llama.py
 
 func computeBaseFrequency(
     base: Float, dims: Int, ropeType: String, ropeScaling: [String: StringOrNumber]?

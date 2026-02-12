@@ -5,6 +5,8 @@
 //  Created by Sai Ramana on 10/26/25.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/jamba.py
+
 import Foundation
 import MLX
 import MLXLMCommon

@@ -10,7 +10,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-// port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/starcoder2.py
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/starcoder2.py
 
 class Starcoder2Attention: Module {
     let args: Starcoder2Configuration
