@@ -10,13 +10,21 @@ struct TokenizerError: Error {
 
 public func loadTokenizer(configuration: ModelConfiguration, hub: HubApi) async throws -> Tokenizer
 {
-    let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
-        configuration: configuration, hub: hub)
-
-    return try PreTrainedTokenizer(
-        tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+    switch configuration.id {
+    case .id(let id, let revision):
+        return try await AutoTokenizer.from(
+            pretrained: configuration.tokenizerId ?? id,
+            hubApi: hub,
+            revision: revision
+        )
+    case .directory(let directory):
+        return try await AutoTokenizer.from(modelFolder: directory, hubApi: hub)
+    }
 }
 
+@available(
+    *, deprecated, message: "Use LanguageModelConfigurationFromHub from swift-transformers directly"
+)
 public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async throws -> (
     Config, Config
 ) {
@@ -48,60 +56,24 @@ public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) 
         config = LanguageModelConfigurationFromHub(modelFolder: directory, hubApi: hub)
     }
 
-    guard var tokenizerConfig = try await config.tokenizerConfig else {
+    guard let tokenizerConfig = try await config.tokenizerConfig else {
         throw TokenizerError(message: "missing config")
     }
     let tokenizerData = try await config.tokenizerData
 
-    tokenizerConfig = updateTokenizerConfig(tokenizerConfig)
-
     return (tokenizerConfig, tokenizerData)
 }
 
-private func updateTokenizerConfig(_ tokenizerConfig: Config) -> Config {
-    // Workaround: replacement tokenizers for unhandled values in swift-transformers
-    if let tokenizerClass = tokenizerConfig.tokenizerClass?.string(),
-        let replacement = replacementTokenizers[tokenizerClass]
-    {
-        if var dictionary = tokenizerConfig.dictionary() {
-            dictionary["tokenizer_class"] = .init(replacement)
-            return Config(dictionary)
-        }
-    }
-    return tokenizerConfig
-}
+@available(
+    *, unavailable,
+    message: "Use AutoTokenizer.register(_:for:) from swift-transformers instead"
+)
+public class TokenizerReplacementRegistry: @unchecked Sendable {}
 
-public class TokenizerReplacementRegistry: @unchecked Sendable {
-
-    // Note: using NSLock as we have very small (just dictionary get/set)
-    // critical sections and expect no contention. this allows the methods
-    // to remain synchronous.
-    private let lock = NSLock()
-
-    /// overrides for TokenizerModel/knownTokenizers
-    private var replacementTokenizers = [
-        "InternLM2Tokenizer": "PreTrainedTokenizer",
-        "Qwen2Tokenizer": "PreTrainedTokenizer",
-        "Qwen3Tokenizer": "PreTrainedTokenizer",
-        "CohereTokenizer": "PreTrainedTokenizer",
-        "GPTNeoXTokenizer": "PreTrainedTokenizer",
-        "TokenizersBackend": "PreTrainedTokenizer",
-    ]
-
-    public subscript(key: String) -> String? {
-        get {
-            lock.withLock {
-                replacementTokenizers[key]
-            }
-        }
-        set {
-            lock.withLock {
-                replacementTokenizers[key] = newValue
-            }
-        }
-    }
-}
-
+@available(
+    *, unavailable,
+    message: "Use AutoTokenizer.register(_:for:) from swift-transformers instead"
+)
 public let replacementTokenizers = TokenizerReplacementRegistry()
 
 public protocol StreamingDetokenizer: IteratorProtocol<String> {

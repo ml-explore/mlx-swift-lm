@@ -22,7 +22,7 @@ public struct ModelConfiguration: Sendable {
     /// The backing storage for the model's location.
     public enum Identifier: Sendable {
         /// A Hugging Face Hub repository identifier (e.g., "BAAI/bge-small-en-v1.5").
-        case id(String)
+        case id(String, revision: String = "main")
         /// A file system URL pointing to a local model directory.
         case directory(URL)
     }
@@ -36,7 +36,7 @@ public struct ModelConfiguration: Sendable {
     /// it returns a path-based name (e.g., "ParentDir/ModelDir").
     public var name: String {
         switch id {
-        case .id(let string):
+        case .id(let string, _):
             string
         case .directory(let url):
             url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
@@ -60,11 +60,11 @@ public struct ModelConfiguration: Sendable {
     ///   - tokenizerId: Optional alternate repo for the tokenizer.
     ///   - overrideTokenizer: Optional specific tokenizer implementation name.
     public init(
-        id: String,
+        id: String, revision: String = "main",
         tokenizerId: String? = nil,
         overrideTokenizer: String? = nil
     ) {
-        self.id = .id(id)
+        self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
         self.overrideTokenizer = overrideTokenizer
     }
@@ -90,7 +90,7 @@ public struct ModelConfiguration: Sendable {
     /// - Returns: A `URL` pointing to the local directory.
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
         switch id {
-        case .id(let id):
+        case .id(let id, _):
             let repo = Hub.Repo(id: id)
             return hub.localRepoLocation(repo)
 
