@@ -32,7 +32,7 @@ public enum WiredMemoryUtils {
     ///
     /// This does not attempt to generate semantically meaningful text; it only ensures
     /// a valid token sequence of the requested length for memory sizing purposes.
-    public static func makeTokenIDs(
+    private static func makeTokenIDs(
         count: Int,
         tokenizer: Tokenizer,
         seedText: String = " hello"
@@ -70,7 +70,7 @@ public enum WiredMemoryUtils {
     ///
     /// - Note: This is intended for text-only models. Multimodal models should
     ///   supply a fully prepared `LMInput` via their processor instead.
-    public static func makeTokenInput(
+    private static func makeTokenInput(
         count: Int,
         tokenizer: Tokenizer,
         seedText: String = " hello"
@@ -89,7 +89,7 @@ public enum WiredMemoryUtils {
     ///   - model: The language model to prefill.
     ///   - parameters: Generation parameters that control prefill behavior.
     /// - Returns: The cache array after prefill, suitable for KV sizing.
-    public static func prefillOnly(
+    private static func prefillOnly(
         input: LMInput,
         model: any LanguageModel,
         parameters: GenerateParameters
