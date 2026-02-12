@@ -1246,7 +1246,9 @@ public enum TokenGeneration: Sendable {
 
     /// Reducer that can be used with `throttle()` to gather elements into a batch
     @Sendable
-    public static func collect(_ batch: [TokenGeneration]?, _ element: TokenGeneration) -> [TokenGeneration] {
+    public static func collect(_ batch: [TokenGeneration]?, _ element: TokenGeneration)
+        -> [TokenGeneration]
+    {
         (batch ?? []) + [element]
     }
 }
