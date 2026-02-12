@@ -91,7 +91,7 @@ let package = Package(
                 .product(name: "Transformers", package: "swift-transformers"),
                 .target(name: "MLXLMCommon"),
             ],
-            path: "Libraries/Embedders",
+            path: "Libraries/MLXEmbedders",
             exclude: [
                 "README.md"
             ]
