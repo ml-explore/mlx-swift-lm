@@ -5,6 +5,8 @@
 //  Created by John Mai on 2025/10/01.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/ssm.py
+
 import Foundation
 import MLX
 import MLXNN

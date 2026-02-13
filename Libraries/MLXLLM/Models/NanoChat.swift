@@ -4,7 +4,7 @@
 //
 //  Created by Sachin Desai 10/15/25.
 //
-//  Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/nanochat.py
+//  Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/nanochat.py
 //
 
 import Foundation

@@ -1,5 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/phi3.py
+
 import Foundation
 import MLX
 import MLXLMCommon

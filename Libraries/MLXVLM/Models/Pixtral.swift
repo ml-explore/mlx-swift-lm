@@ -5,7 +5,7 @@ import MLXLMCommon
 import MLXNN
 import Tokenizers
 
-// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/pixtral
+// Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/pixtral
 
 // MARK: - Vision Configuration
 

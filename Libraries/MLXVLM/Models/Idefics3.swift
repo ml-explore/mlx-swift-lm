@@ -5,6 +5,8 @@
 //  Created by SHUHONG WU on 12/13/24.
 //
 
+// port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/idefics3
+
 import CoreImage
 import Foundation
 import Hub

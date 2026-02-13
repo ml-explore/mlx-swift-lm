@@ -6,7 +6,7 @@ import MLXLMCommon
 import MLXNN
 import Tokenizers
 
-// Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma2.py
+// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma2.py
 
 class Gemma2Attention: Module {
     let args: Gemma2Configuration

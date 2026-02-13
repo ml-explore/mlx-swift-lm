@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-// port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/cohere.py
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cohere.py
 
 class CohereAttention: Module {
 

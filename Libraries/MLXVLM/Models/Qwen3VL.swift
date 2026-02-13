@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+// port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen3_vl
+
 import CoreImage
 import Foundation
 import Hub

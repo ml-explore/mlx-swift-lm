@@ -6,7 +6,7 @@ import MLXLMCommon
 import MLXNN
 import Tokenizers
 
-// Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma.py
+// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma.py
 
 // Specialized norm for Gemma
 class GemmaRMSNorm: Module, UnaryLayer {
