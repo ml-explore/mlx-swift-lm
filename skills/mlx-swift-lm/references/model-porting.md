@@ -369,11 +369,11 @@ let modelContainer = try await LLMModelFactory.shared.loadContainer(
 )
 
 let parameters = GenerateParameters()
-let input = try await modelContainer.prepare(
+let lmInput = try await modelContainer.prepare(
     input: UserInput(prompt: "Hello")
 )
 
-let stream = try await modelContainer.generate(input: input, parameters: parameters)
+let stream = try await modelContainer.generate(input: lmInput, parameters: parameters)
 for await event in stream {
     if case let .chunk(text) = event {
         print(text, terminator: "")

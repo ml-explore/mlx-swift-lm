@@ -1,6 +1,6 @@
 ---
 name: swift-mlx-lm
-description: MLX Swift LM - Run LLMs and VLMs on Apple Silicon using MLX. Covers local inference, streaming, tool calling, LoRA fine-tuning, embeddings, and porting models from Python MLX-LM.
+description: MLX Swift LM - Run LLMs and VLMs on Apple Silicon using MLX. Covers local inference, streaming, wired memory coordination, tool calling, LoRA fine-tuning, embeddings, and model porting.
 triggers:
   - mlx
   - mlx-swift
@@ -9,7 +9,9 @@ triggers:
   - local llm swift
   - vision language model swift
   - lora training swift
-  - port model
+  - wired memory
+  - wiredmemory
+  - wired memory ticket
   - model porting
   - add model support
 ---
@@ -18,12 +20,12 @@ triggers:
 
 ## 1. Overview & Triggers
 
-mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vision-Language Models (VLMs) on Apple Silicon using MLX. It supports local inference, fine-tuning via LoRA/DoRA, and embeddings generation.
+mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vision-Language Models (VLMs) on Apple Silicon using MLX. It supports local inference, streaming generation, wired-memory coordination, tool calling, LoRA/DoRA fine-tuning, and embeddings.
 
 ### When to Use This Skill
 - Running LLM/VLM inference on macOS/iOS with Apple Silicon
 - Streaming text generation from local models
-- Vision tasks with images/video (VLMs)
+- Coordinating concurrent inference with wired-memory policies and tickets
 - Tool calling / function calling with models
 - LoRA adapter training and fine-tuning
 - Text embeddings for RAG/semantic search
@@ -31,10 +33,10 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 
 ### Architecture Overview
 ```
-MLXLMCommon     - Core infrastructure (ModelContainer, ChatSession, KVCache, etc.)
-MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc. - examples, not exhaustive)
-MLXVLM          - Vision-Language Models (Qwen2-VL, PaliGemma, Gemma3, etc. - examples, not exhaustive)
-Embedders       - Embedding models (BGE, Nomic, MiniLM)
+MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, wired memory helpers)
+MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc.)
+MLXVLM          - Vision-Language Models (Qwen-VL, PaliGemma, Gemma3, etc.)
+MLXEmbedders    - Embedding models and pooling utilities
 ```
 
 ## 2. Key File Reference
@@ -43,8 +45,10 @@ Embedders       - Embedding models (BGE, Nomic, MiniLM)
 |---------|-----------|
 | Thread-safe model wrapper | `Libraries/MLXLMCommon/ModelContainer.swift` |
 | Simplified chat API | `Libraries/MLXLMCommon/ChatSession.swift` |
-| Generation & streaming | `Libraries/MLXLMCommon/Evaluate.swift` |
+| Generation & streaming APIs | `Libraries/MLXLMCommon/Evaluate.swift` |
 | KV cache types | `Libraries/MLXLMCommon/KVCache.swift` |
+| Wired-memory policies | `Libraries/MLXLMCommon/WiredMemoryPolicies.swift` |
+| Wired-memory measurement helpers | `Libraries/MLXLMCommon/WiredMemoryUtils.swift` |
 | Model configuration | `Libraries/MLXLMCommon/ModelConfiguration.swift` |
 | Chat message types | `Libraries/MLXLMCommon/Chat.swift` |
 | Tool call processing | `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift` |
@@ -62,20 +66,16 @@ Embedders       - Embedding models (BGE, Nomic, MiniLM)
 import MLXLLM
 import MLXLMCommon
 
-// Load model (downloads from HuggingFace automatically)
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
-// Create chat session
 let session = ChatSession(modelContainer)
 
-// Single response
 let response = try await session.respond(to: "What is Swift?")
 print(response)
 
-// Streaming response
-for try await chunk in session.streamResponse(to: "Explain concurrency") {
+for try await chunk in session.streamResponse(to: "Explain structured concurrency") {
     print(chunk, terminator: "")
 }
 ```
@@ -91,13 +91,12 @@ let modelContainer = try await VLMModelFactory.shared.loadContainer(
 )
 
 let session = ChatSession(modelContainer)
-
-// With image (video is also an optional parameter)
 let image = UserInput.Image.url(imageURL)
+
 let response = try await session.respond(
     to: "Describe this image",
     image: image,
-    video: nil  // Optional video parameter
+    video: nil
 )
 ```
 
@@ -106,7 +105,6 @@ let response = try await session.respond(
 ```swift
 import Embedders
 
-// Note: Embedders uses loadModelContainer() helper (not a factory pattern)
 let container = try await loadModelContainer(
     configuration: ModelConfiguration(id: "mlx-community/bge-small-en-v1.5-mlx")
 )
@@ -130,46 +128,57 @@ let embeddings = await container.perform { model, tokenizer, pooler in
 ```swift
 let session = ChatSession(
     modelContainer,
-    instructions: "You are a helpful assistant",  // System prompt
-    generateParameters: GenerateParameters(
-        maxTokens: 500,
-        temperature: 0.7
-    )
+    instructions: "You are a helpful assistant",
+    generateParameters: GenerateParameters(maxTokens: 500, temperature: 0.7)
 )
 
-// Multi-turn conversation (history preserved automatically)
 let r1 = try await session.respond(to: "What is 2+2?")
 let r2 = try await session.respond(to: "And if you multiply that by 3?")
 
-// Clear session to start fresh
 await session.clear()
 ```
 
-### Streaming with generate()
+### Streaming with `ModelContainer.generate(...)`
 
-For lower-level control, use `generate()` directly:
+For lower-level control, prepare `UserInput` and generate directly:
 
 ```swift
-let input = try await modelContainer.prepare(input: UserInput(prompt: .text("Hello")))
-let stream = try await modelContainer.generate(input: input, parameters: GenerateParameters())
+let userInput = UserInput(prompt: "Hello")
+let lmInput = try await modelContainer.prepare(input: userInput)
+
+let stream = try await modelContainer.generate(
+    input: lmInput,
+    parameters: GenerateParameters()
+)
 
 for await generation in stream {
     switch generation {
     case .chunk(let text):
         print(text, terminator: "")
-    case .info(let info):
-        print("\n\(info.tokensPerSecond) tok/s")
     case .toolCall(let call):
-        // Handle tool call
-        break
+        print("Tool call: \(call.function.name)")
+    case .info(let info):
+        print("\nStop reason: \(info.stopReason)")
+        print("\(info.tokensPerSecond) tok/s")
     }
 }
 ```
 
+### Generation API Surface (Evaluate.swift)
+
+Use these depending on your control needs:
+
+- `generate(input:..., context:...) -> AsyncStream<Generation>`: decoded text + tool calls.
+- `generateTask(...) -> (AsyncStream<Generation>, Task<Void, Never>)`: same output, plus task handle for deterministic cleanup when consumers stop early.
+- `generateTokens(...) -> AsyncStream<TokenGeneration>`: raw token IDs.
+- `generateTokensTask(...) -> (AsyncStream<TokenGeneration>, Task<Void, Never>)`: raw tokens + task handle.
+- `GenerateStopReason`: `.stop`, `.length`, `.cancelled` in final `.info`.
+
+See [references/generation.md](references/generation.md) for full patterns.
+
 ### Tool Calling
 
 ```swift
-// 1. Define tool
 struct WeatherInput: Codable { let location: String }
 struct WeatherOutput: Codable { let temperature: Double; let conditions: String }
 
@@ -177,47 +186,77 @@ let weatherTool = Tool<WeatherInput, WeatherOutput>(
     name: "get_weather",
     description: "Get current weather",
     parameters: [.required("location", type: .string, description: "City name")]
-) { input in
+) { _ in
     WeatherOutput(temperature: 22.0, conditions: "Sunny")
 }
 
-// 2. Include tool schema in request
-let input = UserInput(
+let userInput = UserInput(
     prompt: .text("What's the weather in Tokyo?"),
     tools: [weatherTool.schema]
 )
 
-// 3. Handle tool calls in generation stream
-for await generation in try await modelContainer.generate(input: input, parameters: params) {
+let lmInput = try await modelContainer.prepare(input: userInput)
+let stream = try await modelContainer.generate(input: lmInput, parameters: GenerateParameters())
+
+for await generation in stream {
     switch generation {
-    case .chunk(let text): print(text)
+    case .chunk(let text):
+        print(text, terminator: "")
     case .toolCall(let call):
         let result = try await call.execute(with: weatherTool)
-        print("Weather: \(result.conditions)")
-    case .info: break
+        print("\nWeather: \(result.conditions)")
+    case .info:
+        break
     }
 }
 ```
 
-See [references/tool-calling.md](references/tool-calling.md) for multi-turn and feeding results back.
+See [references/tool-calling.md](references/tool-calling.md) for multi-turn tool loops.
 
 ### GenerateParameters
 
 ```swift
 let params = GenerateParameters(
-    maxTokens: 1000,           // nil = unlimited
-    maxKVSize: 4096,           // Sliding window (uses RotatingKVCache)
-    kvBits: 4,                 // Quantized cache (4 or 8 bit)
-    temperature: 0.7,          // 0 = greedy/argmax
-    topP: 0.9,                 // Nucleus sampling
-    repetitionPenalty: 1.1,    // Penalize repeats
-    repetitionContextSize: 20  // Window for penalty
+    maxTokens: 1000,            // nil = unlimited
+    maxKVSize: 4096,            // Sliding window (RotatingKVCache)
+    kvBits: 4,                  // Quantized cache (4 or 8)
+    kvGroupSize: 64,            // Quantization group size
+    quantizedKVStart: 0,        // Token index to start KV quantization
+    temperature: 0.7,           // 0 = greedy / argmax
+    topP: 0.9,                  // Nucleus sampling
+    repetitionPenalty: 1.1,     // Penalize repeats
+    repetitionContextSize: 20,  // Penalty window
+    prefillStepSize: 512        // Prompt prefill chunk size
 )
 ```
 
-### Prompt Caching / History Re-hydration
+### Wired Memory (Optional)
 
-Restore chat from persisted history:
+Use policy tickets to coordinate concurrent inference memory:
+
+```swift
+let policy = WiredSumPolicy()
+let ticket = policy.ticket(size: estimatedBytes, kind: .active)
+
+let userInput = UserInput(prompt: "Summarize this text")
+let lmInput = try await modelContainer.prepare(input: userInput)
+
+let stream = try await modelContainer.generate(
+    input: lmInput,
+    parameters: GenerateParameters(),
+    wiredMemoryTicket: ticket
+)
+
+for await generation in stream {
+    if case .chunk(let text) = generation {
+        print(text, terminator: "")
+    }
+}
+```
+
+For policy selection, reservations, and measurement-based budgeting, see [references/wired-memory.md](references/wired-memory.md).
+
+### Prompt Caching / History Re-hydration
 
 ```swift
 let history: [Chat.Message] = [
@@ -226,11 +265,7 @@ let history: [Chat.Message] = [
     .assistant("Hi there!")
 ]
 
-let session = ChatSession(
-    modelContainer,
-    history: history
-)
-// Continues from this point
+let session = ChatSession(modelContainer, history: history)
 ```
 
 ## 5. Secondary Workflow: VLM Inference
@@ -238,47 +273,26 @@ let session = ChatSession(
 ### Image Input Types
 
 ```swift
-// From URL (file or remote)
-let image = UserInput.Image.url(fileURL)
-
-// From CIImage
-let image = UserInput.Image.ciImage(ciImage)
-
-// From MLXArray directly
-let image = UserInput.Image.array(mlxArray)
+let imageFromURL = UserInput.Image.url(fileURL)
+let imageFromCI = UserInput.Image.ciImage(ciImage)
+let imageFromArray = UserInput.Image.array(mlxArray)
 ```
 
 ### Video Input
 
 ```swift
-// From URL (file or remote)
-let video = UserInput.Video.url(videoURL)
+let videoFromURL = UserInput.Video.url(videoURL)
+let videoFromAsset = UserInput.Video.avAsset(avAsset)
+let videoFromFrames = UserInput.Video.frames(videoFrames)
 
-// From AVFoundation asset
-let video = UserInput.Video.avAsset(avAsset)
-
-// From pre-extracted frames
-let video = UserInput.Video.frames(videoFrames)
-
-let response = try await session.respond(
-    to: "What happens in this video?",
-    video: video
-)
+let response = try await session.respond(to: "What happens in this video?", video: videoFromURL)
 ```
 
 ### Multiple Images
 
 ```swift
-let images: [UserInput.Image] = [
-    .url(url1),
-    .url(url2)
-]
-
-let response = try await session.respond(
-    to: "Compare these two images",
-    images: images,
-    videos: []
-)
+let images: [UserInput.Image] = [.url(url1), .url(url2)]
+let response = try await session.respond(to: "Compare these two images", images: images, videos: [])
 ```
 
 ### VLM-Specific Processing
@@ -286,9 +300,7 @@ let response = try await session.respond(
 ```swift
 let session = ChatSession(
     modelContainer,
-    processing: UserInput.Processing(
-        resize: CGSize(width: 512, height: 512)  // Resize images
-    )
+    processing: UserInput.Processing(resize: CGSize(width: 512, height: 512))
 )
 ```
 
@@ -297,91 +309,68 @@ let session = ChatSession(
 ### DO
 
 ```swift
-// DO: Use ChatSession for multi-turn conversations
+// DO: Prefer ChatSession for multi-turn chat UX
 let session = ChatSession(modelContainer)
 
-// DO: Use AsyncStream APIs (modern, Swift concurrency)
-for try await chunk in session.streamResponse(to: prompt) { ... }
+// DO: Prepare UserInput before container-level generation
+let userInput = UserInput(prompt: "Hello")
+let lmInput = try await modelContainer.prepare(input: userInput)
 
-// DO: Check Task.isCancelled in long-running loops
-for try await generation in stream {
-    if Task.isCancelled { break }
-    // process generation
-}
-
-// DO: Use ModelContainer.perform() for thread-safe access
-await modelContainer.perform { context in
-    // Access model, tokenizer safely
-    let tokens = try context.tokenizer.applyChatTemplate(messages: messages)
-    return tokens
-}
-
-// DO: When breaking early from generation, use generateTask() to get a task handle
-// This is the lower-level API used internally by ChatSession
-let (stream, task) = generateTask(...)  // Returns (AsyncStream, Task)
-
+// DO: Use task-handle variants for early-stop scenarios
+let (stream, task) = generateTask(
+    promptTokenCount: lmInput.text.tokens.size,
+    modelConfiguration: context.configuration,
+    tokenizer: context.tokenizer,
+    iterator: iterator
+)
 for await item in stream {
     if shouldStop { break }
 }
-await task.value  // Ensures KV cache cleanup before next generation
-```
+await task.value
 
-> `generateTask()` is defined in `Evaluate.swift`. Most users should use `ChatSession` which handles this internally.
+// DO: Use wired tickets when coordinating concurrent workloads
+let ticket = WiredSumPolicy().ticket(size: estimatedBytes)
+let _ = try await modelContainer.generate(input: lmInput, parameters: params, wiredMemoryTicket: ticket)
+```
 
 ### DON'T
 
 ```swift
+// DON'T: Skip prepare(input:) before container-level generation.
+// ModelContainer.generate expects LMInput, not UserInput.
+
 // DON'T: Share MLXArray across tasks (not Sendable)
 let array = MLXArray(...)
-Task { array.sum() }  // Wrong!
+Task { _ = array.sum() } // wrong
 
-// DON'T: Use deprecated callback-based generation
-// Old:
-generate(input: input, parameters: params) { tokens in ... }  // Deprecated
-// New:
-for await generation in try generate(input: input, parameters: params, context: context) { ... }
-
-// DON'T: Use old perform(model, tokenizer) signature
-// Old:
-modelContainer.perform { model, tokenizer in ... }  // Deprecated
-// New:
-modelContainer.perform { context in ... }
-
-// DON'T: Forget to eval() MLXArrays before returning from perform()
-await modelContainer.perform { context in
-    let result = context.model(input)
-    eval(result)  // Required before returning
-    return result.item(Float.self)
+// DON'T: Ignore task completion after early-break on low-level streams
+for await item in stream {
+    if shouldStop { break }
 }
+// await task.value is required for deterministic cleanup
 ```
 
 ### Thread Safety
 
-- `ModelContainer` is `Sendable` and thread-safe
-- `ChatSession` is NOT thread-safe (use from single task)
-- `MLXArray` is NOT `Sendable` - don't pass across isolation boundaries
-- Use `SendableBox` for transferring non-Sendable data in consuming contexts
+- `ModelContainer` is `Sendable` and thread-safe.
+- `ChatSession` is not thread-safe; use one session per task/flow.
+- `MLXArray` is not `Sendable`; keep it inside one isolation domain or use `SendableBox` transfer patterns.
 
 ### Memory Management
 
 ```swift
-// For long contexts, use sliding window cache
-let params = GenerateParameters(maxKVSize: 4096)
-
-// For memory efficiency, use quantized cache
-let params = GenerateParameters(kvBits: 4)  // or 8
-
-// Clear session cache when done
+let slidingWindow = GenerateParameters(maxKVSize: 4096)
+let quantizedKV = GenerateParameters(kvBits: 4, kvGroupSize: 64)
 await session.clear()
 ```
 
 ## 7. Reference Links
 
-For detailed documentation on specific topics, see:
-
 | Reference | When to Use |
 |-----------|-------------|
 | [references/model-container.md](references/model-container.md) | Loading models, ModelContainer API, ModelConfiguration |
+| [references/generation.md](references/generation.md) | `generate`, `generateTask`, raw token streaming APIs |
+| [references/wired-memory.md](references/wired-memory.md) | Wired tickets, policies, budgeting, reservations |
 | [references/kv-cache.md](references/kv-cache.md) | Cache types, memory optimization, cache serialization |
 | [references/concurrency.md](references/concurrency.md) | Thread safety, SerialAccessContainer, async patterns |
 | [references/tool-calling.md](references/tool-calling.md) | Function calling, tool formats, ToolCallProcessor |
@@ -394,42 +383,37 @@ For detailed documentation on specific topics, see:
 
 ## 8. Deprecated Patterns Summary
 
-Most common migrations (see individual reference files for topic-specific deprecations):
-
 | If you see... | Use instead... |
 |---------------|----------------|
-| `generate(... didGenerate:)` callback | `generate(...) -> AsyncStream` |
+| `generate(... didGenerate:)` callback | AsyncStream-based generation APIs |
 | `perform { model, tokenizer in }` | `perform { context in }` |
 | `TokenIterator(prompt: MLXArray)` | `TokenIterator(input: LMInput)` |
 | `ModelRegistry` typealias | `LLMRegistry` or `VLMRegistry` |
 | `createAttentionMask(h:cache:[KVCache]?)` | `createAttentionMask(h:cache:KVCache?)` |
 
-Each reference file contains a "Deprecated Patterns" section with topic-specific migrations.
-
 ## 9. Automatic vs Manual Configuration
 
-### Automatic Behaviors (NO developer action needed)
-
-The framework handles these automatically:
+### Automatic Behaviors
 
 | Feature | Details |
 |---------|---------|
-| **EOS token loading** | Loaded from `config.json` |
-| **EOS token override** | Priority: `generation_config.json` > `config.json` > defaults |
-| **EOS token merging** | All sources merged at generation time |
-| **EOS token detection** | Stops generation automatically when EOS encountered |
-| **Chat template application** | Applied automatically via `applyChatTemplate()` |
-| **Tool call format detection** | Inferred from `model_type` in `config.json` |
-| **Cache type selection** | Based on GenerateParameters (`maxKVSize`, `kvBits`) |
-| **Tokenizer loading** | Loaded from `tokenizer.json` automatically |
-| **Model weights loading** | Downloaded and loaded from HuggingFace |
+| EOS token loading | Loaded from `config.json` |
+| EOS override | `generation_config.json` > `config.json` > defaults |
+| EOS merging | All sources merged at generation time |
+| EOS detection | Stops generation when EOS encountered |
+| Chat template application | Applied by tokenizer / processor path |
+| Tool call format detection | Inferred from `model_type` in `config.json` |
+| Cache type selection | Driven by `GenerateParameters` (`maxKVSize`, `kvBits`) |
+| Tokenizer loading | Loaded automatically from model assets |
+| Model weight loading | Downloaded and loaded from Hugging Face/local directory |
 
-### Optional Configuration (Developer MAY configure)
+### Optional Configuration
 
 | Feature | When to Configure |
 |---------|-------------------|
-| `extraEOSTokens` | Only if model has unlisted stop tokens |
-| `toolCallFormat` | Only to override auto-detection |
-| `maxKVSize` | To enable sliding window cache |
-| `kvBits` | To enable quantized cache (4 or 8 bit) |
-| `maxTokens` | To limit output length |
+| `extraEOSTokens` | Model has unlisted stop tokens |
+| `toolCallFormat` | Override auto-detected tool parser format |
+| `maxKVSize` | Enable sliding window cache |
+| `kvBits`, `kvGroupSize`, `quantizedKVStart` | Enable and tune KV quantization |
+| `prefillStepSize` | Tune prompt prefill chunking/perf tradeoff |
+| `wiredMemoryTicket` | Coordinate policy-based wired-memory limits |

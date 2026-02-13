@@ -170,7 +170,7 @@ Task {
 ### Creating Generation Streams
 
 ```swift
-// Generate returns an AsyncStream
+// API creation can throw; stream iteration itself is non-throwing.
 let stream = try generate(
     input: input,
     parameters: params,
@@ -183,6 +183,21 @@ for await generation in stream {
     case .info(let info): print(info.tokensPerSecond)
     case .toolCall(let call): handleTool(call)
     }
+}
+```
+
+### Throwing Boundaries
+
+```swift
+// ChatSession produces AsyncThrowingStream
+for try await chunk in session.streamResponse(to: prompt) {
+    print(chunk, terminator: "")
+}
+
+// Evaluate.generate produces AsyncStream
+let stream = try generate(input: input, parameters: params, context: context)
+for await event in stream {
+    // non-throwing iteration
 }
 ```
 
@@ -206,6 +221,28 @@ for await item in stream {
 
 // Wait for generation to fully stop
 await task.value
+```
+
+### Raw Token Task Flow
+
+```swift
+let (tokenStream, tokenTask) = try generateTokensTask(
+    input: input,
+    parameters: params,
+    context: context,
+    includeStopToken: false
+)
+
+for await event in tokenStream {
+    switch event {
+    case .token(let tokenID):
+        print(tokenID)
+    case .info(let info):
+        print("stop: \(info.stopReason)")
+    }
+}
+
+await tokenTask.value
 ```
 
 ### Cancellation Handling
@@ -316,7 +353,8 @@ generate(
 )
 
 // USE INSTEAD: AsyncStream-based
-for await generation in generate(input: input, parameters: params, context: context) {
+let stream = try generate(input: input, parameters: params, context: context)
+for await generation in stream {
     // handle generation
 }
 ```

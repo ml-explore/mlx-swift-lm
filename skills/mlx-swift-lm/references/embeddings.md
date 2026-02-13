@@ -5,12 +5,12 @@
 The Embedders library provides text embedding models for semantic search, RAG, clustering, and similarity tasks. It supports BERT-family models with various pooling strategies.
 
 **Files:**
-- `Libraries/Embedders/EmbeddingModel.swift`
-- `Libraries/Embedders/Pooling.swift`
-- `Libraries/Embedders/Models.swift`
-- `Libraries/Embedders/Load.swift`
-- `Libraries/Embedders/Bert.swift`
-- `Libraries/Embedders/NomicBert.swift`
+- `Libraries/MLXEmbedders/EmbeddingModel.swift`
+- `Libraries/MLXEmbedders/Pooling.swift`
+- `Libraries/MLXEmbedders/Models.swift`
+- `Libraries/MLXEmbedders/Load.swift`
+- `Libraries/MLXEmbedders/Models/Bert.swift`
+- `Libraries/MLXEmbedders/Models/NomicBert.swift`
 
 ## Quick Reference
 

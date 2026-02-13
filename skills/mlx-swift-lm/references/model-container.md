@@ -76,6 +76,14 @@ let lmInput = try await container.prepare(input: userInput)
 // Generate with streaming
 let stream = try await container.generate(input: lmInput, parameters: params)
 
+// Generate with wired-memory coordination
+let ticket = WiredSumPolicy().ticket(size: estimatedBytes, kind: .active)
+let streamWithTicket = try await container.generate(
+    input: lmInput,
+    parameters: params,
+    wiredMemoryTicket: ticket
+)
+
 // Encode/decode
 let tokens = await container.encode("Hello world")
 let text = await container.decode(tokens: [1, 2, 3])
@@ -84,6 +92,31 @@ let text = await container.decode(tokens: [1, 2, 3])
 let tokens = try await container.applyChatTemplate(messages: [
     ["role": "user", "content": "Hello"]
 ])
+```
+
+### Generation + Wired Memory
+
+`ModelContainer.generate(...)` accepts an optional `wiredMemoryTicket` so callers can
+coordinate process-wide wired-memory policy with active inference work.
+
+```swift
+let policy = WiredBudgetPolicy(baseBytes: measuredWeightPlusWorkspaceBytes)
+let inferenceTicket = policy.ticket(size: measuredKVBytes, kind: .active)
+
+let userInput = UserInput(prompt: "Summarize this article")
+let lmInput = try await container.prepare(input: userInput)
+
+let stream = try await container.generate(
+    input: lmInput,
+    parameters: GenerateParameters(maxTokens: 400),
+    wiredMemoryTicket: inferenceTicket
+)
+
+for await event in stream {
+    if case .chunk(let text) = event {
+        print(text, terminator: "")
+    }
+}
 ```
 
 ## ModelConfiguration
