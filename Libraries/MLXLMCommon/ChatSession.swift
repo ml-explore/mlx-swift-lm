@@ -3,6 +3,7 @@
 import CoreGraphics
 import Foundation
 import MLX
+import Tokenizers
 
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///
@@ -32,6 +33,7 @@ public final class ChatSession {
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
     public var additionalContext: [String: any Sendable]?
+    public var tools: [ToolSpec]?
 
     /// Initialize the `ChatSession`.
     ///
@@ -46,6 +48,7 @@ public final class ChatSession {
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = model
@@ -53,6 +56,7 @@ public final class ChatSession {
         self.cache = .init(.empty)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.tools = tools
         self.additionalContext = additionalContext
     }
 
@@ -63,12 +67,14 @@ public final class ChatSession {
     ///   - instructions: optional system instructions for the session
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
     ///   - additionalContext: optional model-specific context
     public init(
         _ model: ModelContext,
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = ModelContainer(context: model)
@@ -76,6 +82,7 @@ public final class ChatSession {
         self.cache = .init(.empty)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.tools = tools
         self.additionalContext = additionalContext
     }
 
@@ -95,6 +102,7 @@ public final class ChatSession {
         history: consuming [Chat.Message],
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = model
@@ -102,6 +110,7 @@ public final class ChatSession {
         self.cache = .init(.history(history))
         self.processing = processing
         self.generateParameters = generateParameters
+        self.tools = tools
         self.additionalContext = additionalContext
     }
 
@@ -114,6 +123,7 @@ public final class ChatSession {
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
     ///   - additionalContext: optional model-specific context
     public init(
         _ model: ModelContext,
@@ -121,6 +131,7 @@ public final class ChatSession {
         history: [Chat.Message],
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.model = ModelContainer(context: model)
@@ -128,6 +139,7 @@ public final class ChatSession {
         self.cache = .init(.history(history))
         self.processing = processing
         self.generateParameters = generateParameters
+        self.tools = tools
         self.additionalContext = additionalContext
     }
 
@@ -228,7 +240,7 @@ public final class ChatSession {
         let task = Task {
             [
                 model,
-                instructions, processing, additionalContext, cache, generateParameters
+                instructions, processing, tools, additionalContext, cache, generateParameters
             ] in
             do {
                 try await cache.update { cache in
@@ -281,7 +293,7 @@ public final class ChatSession {
 
                     let userInput = UserInput(
                         chat: messages, processing: processing,
-                        additionalContext: additionalContext)
+                        tools: tools, additionalContext: additionalContext)
                     let input = try await processor.prepare(input: userInput)
 
                     // generate output

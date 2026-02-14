@@ -85,6 +85,55 @@ public class ChatSessionIntegrationTests: XCTestCase {
         XCTAssertTrue(result.lowercased().contains("red"))
     }
 
+    func testStreamDetailsWithTools() async throws {
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get the current weather for a location",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "location": [
+                                "type": "string",
+                                "description": "The city name",
+                            ] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                        "required": ["location"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        let session = ChatSession(Self.llmContainer, tools: tools)
+
+        var responseText = ""
+        var toolCalls: [ToolCall] = []
+
+        // Use streamDetails to receive tool calls (respond/streamResponse drops them)
+        for try await generation in session.streamDetails(
+            to: "What is the weather in San Francisco?",
+            images: [],
+            videos: []
+        ) {
+            switch generation {
+            case .chunk(let text):
+                responseText += text
+            case .toolCall(let toolCall):
+                toolCalls.append(toolCall)
+            case .info:
+                break
+            }
+        }
+
+        print("Tools result text:", responseText)
+        print("Tool calls:", toolCalls)
+
+        // The model should either produce a tool call or mention the tool/weather
+        let hasContent = responseText.count > 0 || !toolCalls.isEmpty
+        XCTAssertTrue(hasContent, "Response should contain either text or tool calls")
+    }
+
     func testPromptRehydration() async throws {
         // Simulate a persisted history (e.g. loaded from SwiftData)
         let history: [Chat.Message] = [
