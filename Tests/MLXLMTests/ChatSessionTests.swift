@@ -98,6 +98,61 @@ public class ChatSessionTests: XCTestCase {
         await session.synchronize()
     }
 
+    func testChatSessionWithTools() async throws {
+        let model = model()
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "location": [
+                                "type": "string",
+                                "description": "City name",
+                            ] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                        "required": ["location"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        let session = ChatSession(model, tools: tools)
+
+        let result = try await session.respond(to: "What is the weather in SF?")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+
+        // second turn to verify tools persist through cache
+        let result2 = try await session.respond(to: "How about NYC?")
+        XCTAssertGreaterThan(result2.count, targetLength, result2)
+    }
+
+    func testChatSessionWithToolsStreaming() async throws {
+        let model = model()
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        let session = ChatSession(model, tools: tools)
+
+        var result = ""
+        for try await part in session.streamResponse(to: "hello") {
+            result += part
+        }
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
     /// something that looks like a view model
     @MainActor class ChatModel {
         let session: ChatSession
