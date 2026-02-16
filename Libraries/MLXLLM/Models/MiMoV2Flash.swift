@@ -191,7 +191,7 @@ class MiMoV2FlashAttention: Module {
 
         return wo(output)
     }
-    
+
     override func updateMissing(
         parameter: String,
         verify: VerifyUpdate,
@@ -202,7 +202,8 @@ class MiMoV2FlashAttention: Module {
             // Keep the default you already set in init (ones([numAttentionHeads]))
             return
         }
-        try super.updateMissing(parameter: parameter, verify: verify, path: path, modulePath: modulePath)
+        try super.updateMissing(
+            parameter: parameter, verify: verify, path: path, modulePath: modulePath)
     }
 }
 
