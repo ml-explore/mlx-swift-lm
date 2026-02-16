@@ -544,7 +544,9 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
                     // Infer bits and group size
                     inferredBits = (v.dim(-1) * 32) / dims
                     inferredGroupSize = dims / scales.dim(-1)
-                    v = dequantized(v, scales: scales, biases: biases, groupSize: inferredGroupSize, bits: inferredBits)
+                    v = dequantized(
+                        v, scales: scales, biases: biases, groupSize: inferredGroupSize,
+                        bits: inferredBits)
                 }
 
                 let numHeads = configuration.attentionHeads
@@ -684,8 +686,10 @@ public struct GLM4MoELiteConfiguration: Codable, Sendable {
         self.qkRopeHeadDim = try container.decode(Int.self, forKey: .qkRopeHeadDim)
         self.qkNopeHeadDim = try container.decode(Int.self, forKey: .qkNopeHeadDim)
         self.vHeadDim = try container.decode(Int.self, forKey: .vHeadDim)
-        self.topkMethod = try container.decodeIfPresent(String.self, forKey: .topkMethod) ?? "noaux_tc"
-        self.scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
+        self.topkMethod =
+            try container.decodeIfPresent(String.self, forKey: .topkMethod) ?? "noaux_tc"
+        self.scoringFunc =
+            try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
         self.normTopkProb = try container.decode(Bool.self, forKey: .normTopkProb)
         self.nGroup = try container.decode(Int.self, forKey: .nGroup)
         self.topkGroup = try container.decode(Int.self, forKey: .topkGroup)
@@ -703,7 +707,8 @@ public struct GLM4MoELiteConfiguration: Codable, Sendable {
         self.attentionDropout =
             try container.decodeIfPresent(Float.self, forKey: .attentionDropout) ?? 0.0
         self.partialRotaryFactor = try container.decode(Float.self, forKey: .partialRotaryFactor)
-        self.tieWordEmbeddings = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
+        self.tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
             ?? false
         self.numNextnPredictLayers =
             try container.decodeIfPresent(Int.self, forKey: .numNextnPredictLayers) ?? 1
