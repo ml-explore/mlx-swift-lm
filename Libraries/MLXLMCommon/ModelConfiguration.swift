@@ -27,13 +27,6 @@ public struct ModelConfiguration: Sendable {
     /// pull the tokenizer from an alternate id
     public let tokenizerId: String?
 
-    /// overrides for TokenizerModel/knownTokenizers -- useful before swift-transformers is updated
-    @available(
-        *, deprecated,
-        message: "No longer used. swift-transformers now handles tokenizer remapping internally."
-    )
-    public let overrideTokenizer: String?
-
     /// A reasonable default prompt for the model
     public var defaultPrompt: String
 
@@ -48,15 +41,13 @@ public struct ModelConfiguration: Sendable {
 
     public init(
         id: String, revision: String = "main",
-        tokenizerId: String? = nil, overrideTokenizer: String? = nil,
+        tokenizerId: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
-        toolCallFormat: ToolCallFormat? = nil,
-        preparePrompt: (@Sendable (String) -> String)? = nil
+        toolCallFormat: ToolCallFormat? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.toolCallFormat = toolCallFormat
@@ -64,7 +55,7 @@ public struct ModelConfiguration: Sendable {
 
     public init(
         directory: URL,
-        tokenizerId: String? = nil, overrideTokenizer: String? = nil,
+        tokenizerId: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         eosTokenIds: Set<Int> = [],
@@ -72,7 +63,6 @@ public struct ModelConfiguration: Sendable {
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
