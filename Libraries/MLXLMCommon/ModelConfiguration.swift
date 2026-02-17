@@ -24,7 +24,7 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
-    /// pull the tokenizer from an alternate id
+    /// Alternate repo ID to use for the tokenizer
     public let tokenizerId: String?
 
     /// A reasonable default prompt for the model
@@ -72,7 +72,7 @@ public struct ModelConfiguration: Sendable {
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {
         switch id {
         case .id(let id, _):
-            // download the model weights and config
+            // Download the model weights and config
             let repo = Hub.Repo(id: id)
             return hub.localRepoLocation(repo)
 

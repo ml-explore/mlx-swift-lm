@@ -2,7 +2,7 @@
 
 ## Overview
 
-`ModelContainer` is the thread-safe wrapper for language models, providing exclusive access to model resources during inference. `ModelConfiguration` describes model identity and settings. Factory classes handle model instantiation from HuggingFace or local directories.
+`ModelContainer` is the thread-safe wrapper for language models, providing exclusive access to model resources during inference. `ModelConfiguration` describes model identity and settings. Factory classes handle model instantiation from Hugging Face or local directories.
 
 ## Quick Reference
 
@@ -124,7 +124,7 @@ for await event in stream {
 ### Creating Configurations
 
 ```swift
-// From HuggingFace model ID
+// From Hugging Face model ID
 let config = ModelConfiguration(
     id: "mlx-community/Llama-3.2-3B-Instruct-4bit",
     defaultPrompt: "Hello",
@@ -227,7 +227,7 @@ Map `model_type` from config.json to model initializers:
 
 ## Loading Flow
 
-1. **Download**: Model weights fetched from HuggingFace (cached locally)
+1. **Download**: Model weights fetched from Hugging Face (cached locally)
 2. **Parse config.json**: Determine `model_type` and configuration
 3. **Create model**: TypeRegistry maps type to initializer
 4. **Load weights**: `.safetensors` files loaded into model

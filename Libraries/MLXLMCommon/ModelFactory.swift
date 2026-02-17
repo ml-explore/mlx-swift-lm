@@ -207,15 +207,15 @@ public func loadModelContainer(
     }
 }
 
-/// Load a model given a huggingface identifier.
+/// Load a model given a Hugging Face identifier.
 ///
-/// This will load and return a ``ModelContext``.  This holds the model and tokenzier without
+/// This will load and return a ``ModelContext``.  This holds the model and tokenizer without
 /// an `actor` providing an isolation context.  Use this call when you control the isolation context
 /// and can hold the ``ModelContext`` directly.
 ///
 /// - Parameters:
 ///   - hub: optional HubApi -- by default uses ``defaultHubApi``
-///   - id: huggingface model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - id: Hugging Face model identifier, e.g "mlx-community/Qwen3-4B-4bit"
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContext``
 public func loadModel(
@@ -229,14 +229,14 @@ public func loadModel(
     }
 }
 
-/// Load a model given a huggingface identifier.
+/// Load a model given a Hugging Face identifier.
 ///
 /// This will load and return a ``ModelContainer``.  This holds a ``ModelContext``
 /// inside an actor providing isolation control for the values.
 ///
 /// - Parameters:
 ///   - hub: optional HubApi -- by default uses ``defaultHubApi``
-///   - id: huggingface model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - id: Hugging Face model identifier, e.g "mlx-community/Qwen3-4B-4bit"
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(

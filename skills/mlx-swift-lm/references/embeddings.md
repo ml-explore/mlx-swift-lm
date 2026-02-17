@@ -248,7 +248,7 @@ print("Similarity: \(similarity)")  // ~0.85
 ```swift
 public struct ModelConfiguration: Sendable {
     public enum Identifier: Sendable {
-        case id(String)          // HuggingFace ID
+        case id(String)          // Hugging Face ID
         case directory(URL)      // Local path
     }
 

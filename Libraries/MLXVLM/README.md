@@ -298,7 +298,7 @@ media as needed. For example it might:
 - modify the prompt by injecting `<image>` tokens that the model expects
 
 In the python implementations, much of this code typically lives in the `transformers`
-package from huggingface -- inspection will be required to determine which code
+package from Hugging Face -- inspection will be required to determine which code
 is called and what it does. You can examine the processors in the `Models` directory:
 they reference the files and functions that they are based on.
 
