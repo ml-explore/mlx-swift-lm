@@ -779,16 +779,20 @@ public class NomicBertModel: Module, EmbeddingModel {
     /// - Returns: A new dictionary with keys renamed to match this Swift class structure.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, item in
-            var key = item.key.replacingOccurrences(
-                of: "emb_ln", with: "embeddings.norm")
-            key = key.replacingOccurrences(of: "bert.", with: "")
-            key = key.replacingOccurrences(
-                of: "cls.predictions.transform.dense.", with: "lm_head.dense.")
-            key = key.replacingOccurrences(
-                of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln.")
-            key = key.replacingOccurrences(
-                of: "cls.predictions.decoder", with: "lm_head.decoder")
-            key = key.replacingOccurrences(of: "pooler.dense.", with: "pooler.")
+            let key = item.key
+                .replacingOccurrences(of: "emb_ln", with: "embeddings.norm")
+                .replacingOccurrences(of: "bert.", with: "")  // Remove namespace prefix
+                // Remap LM Head keys
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.dense.", with: "lm_head.dense."
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln."
+                )
+                .replacingOccurrences(of: "cls.predictions.decoder", with: "lm_head.decoder")
+                // Remap Pooler keys
+                .replacingOccurrences(of: "pooler.dense.", with: "pooler.")
+                
             result[key] = item.value
         }
     }
