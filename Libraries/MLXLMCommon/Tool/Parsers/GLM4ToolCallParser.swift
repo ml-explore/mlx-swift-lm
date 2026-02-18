@@ -59,7 +59,7 @@ public struct GLM4ToolCallParser: ToolCallParser, Sendable {
 
             // GLM4: deserialize if NOT a string type in schema
             if !isStringType(funcName: funcName, argName: key, tools: tools) {
-                arguments[key] = deserialize(value)
+                arguments[key] = deserialize(value) ?? value
             } else {
                 arguments[key] = value
             }

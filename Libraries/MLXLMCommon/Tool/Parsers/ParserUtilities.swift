@@ -4,17 +4,27 @@ import Foundation
 
 // MARK: - Basic Deserialization
 
+func toSendable(_ value: Any) -> (any Sendable)? {
+    switch value {
+    case let dict as [String: Any]:
+        return dict.compactMapValues { toSendable($0) }
+    case let array as [Any]:
+        return array.compactMap { toSendable($0) }
+    case let sendable as any Sendable:
+        return sendable
+    default:
+        return nil
+    }
+}
 /// Deserialize a string value to JSON or return as string.
 ///
 /// Attempts JSON parsing first, falling back to the original string value.
 /// Reference: Python's `ast.literal_eval` / `json.loads` pattern
-func deserialize(_ value: String) -> any Sendable {
-    if let data = value.data(using: .utf8),
-        let json = try? JSONSerialization.jsonObject(with: data)
-    {
-        return json
+func deserialize(_ value: String) -> (any Sendable)? {
+    if let data = value.data(using: .utf8) {
+        return try? toSendable(JSONSerialization.jsonObject(with: data))
     }
-    return value
+    return nil
 }
 
 // MARK: - Schema Lookup Functions
@@ -156,9 +166,7 @@ func convertValueWithTypes(_ value: String, types: [String]) -> any Sendable {
             }
 
         case "object", "array":
-            if let data = value.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: data)
-            {
+            if let json = deserialize(value) {
                 return json
             }
 
@@ -168,13 +176,7 @@ func convertValueWithTypes(_ value: String, types: [String]) -> any Sendable {
     }
 
     // Fallback: try JSON parse, then return as string
-    if let data = value.data(using: .utf8),
-        let json = try? JSONSerialization.jsonObject(with: data)
-    {
-        return json
-    }
-
-    return value
+    return deserialize(value) ?? value
 }
 
 /// Convert parameter value based on schema type.
@@ -218,9 +220,7 @@ func convertParameterValue(
 
     // Object/Array types - JSON decode
     if ["object", "array"].contains(type) || type.hasPrefix("dict") || type.hasPrefix("list") {
-        if let data = value.data(using: .utf8),
-            let json = try? JSONSerialization.jsonObject(with: data)
-        {
+        if let json = deserialize(value) {
             return json
         }
     }
