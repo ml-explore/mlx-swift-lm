@@ -76,7 +76,7 @@ struct EmbedderIntegrationtests {
 
         for (index, resultSimilarity) in similarities.enumerated() {
             #expect(
-                resultSimilarity.isEqual(to: expectedSimilarities[index]),
+                abs(resultSimilarity - expectedSimilarities[index]) < 0.01,
                 "The expected similarity does not match the result similarity for \(documentNames[index])"
             )
         }

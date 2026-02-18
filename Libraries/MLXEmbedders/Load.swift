@@ -108,6 +108,11 @@ func prepareModelDirectory(
     }
 }
 
+/// Default instance of HubApi to use.  This is configured to save downloads into the caches directory.
+public let defaultHubApi: HubApi = {
+    HubApi(downloadBase: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+}()
+
 /// Asynchronously loads the `EmbeddingModel` and its associated `Tokenizer`.
 ///
 /// This is the primary high-level function for initializing an embedding pipeline.
@@ -120,7 +125,7 @@ func prepareModelDirectory(
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
-    hub: HubApi = HubApi(),
+    hub: HubApi = defaultHubApi,
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> (EmbeddingModel, Tokenizer) {
@@ -217,7 +222,7 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
-    hub: HubApi = HubApi(),
+    hub: HubApi = defaultHubApi,
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> ModelContainer {
