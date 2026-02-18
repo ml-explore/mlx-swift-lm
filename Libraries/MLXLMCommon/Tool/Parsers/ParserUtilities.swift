@@ -4,7 +4,7 @@ import Foundation
 
 // MARK: - Basic Deserialization
 
-func toSendable(_ value: Any) -> (any Sendable)? {
+private func toSendable(_ value: Any) -> (any Sendable)? {
     switch value {
     case let dict as [String: Any]:
         return dict.compactMapValues { toSendable($0) }
