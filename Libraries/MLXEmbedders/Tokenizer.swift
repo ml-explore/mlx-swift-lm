@@ -48,7 +48,7 @@ func loadTokenizerConfig(
     let config: LanguageModelConfigurationFromHub
 
     switch configuration.id {
-    case .id(let id):
+    case .id(let id, _):
         do {
             // Attempt to load from the remote Hub or Hub cache
             let loaded = LanguageModelConfigurationFromHub(
