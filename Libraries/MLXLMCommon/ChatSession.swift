@@ -51,9 +51,9 @@ public final class ChatSession {
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
-        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil,
-        additionalContext: [String: any Sendable]? = nil
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
         self.model = model
         self.instructions = instructions
@@ -80,9 +80,9 @@ public final class ChatSession {
         instructions: String? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
-        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil,
-        additionalContext: [String: any Sendable]? = nil
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
@@ -144,9 +144,9 @@ public final class ChatSession {
         history: [Chat.Message],
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
-        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil,
-        additionalContext: [String: any Sendable]? = nil
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
