@@ -910,13 +910,17 @@ public func generateTask(
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context, including the model itself and associated tokenizer.
 ///   - includeStopToken: when true, the terminating EOS/unknown token is yielded before finishing
+///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
+///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
+///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
 /// - Returns: An `AsyncStream` that emits `TokenGeneration` values.
 public func generateTokens(
     input: LMInput,
     cache: [KVCache]? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
-    includeStopToken: Bool = false
+    includeStopToken: Bool = false,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
@@ -925,7 +929,8 @@ public func generateTokens(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
-        includeStopToken: includeStopToken
+        includeStopToken: includeStopToken,
+        wiredMemoryTicket: wiredMemoryTicket
     )
     return stream
 }
@@ -936,12 +941,23 @@ public func generateTokens(
 /// (especially if the consumer terminates the stream early).
 ///
 /// - Returns: An `AsyncStream` that emits `TokenGeneration` values and a `Task`.
+///
+/// - Parameters:
+///   - input: The input for the language model.
+///   - cache: optional ``KVCache``
+///   - parameters: The configuration options for token generation.
+///   - context: The model context, including the model itself and associated tokenizer.
+///   - includeStopToken: when true, the terminating EOS/unknown token is yielded before finishing
+///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
+///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
+///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
 public func generateTokensTask(
     input: LMInput,
     cache: [KVCache]? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
-    includeStopToken: Bool = false
+    includeStopToken: Bool = false,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
@@ -950,7 +966,8 @@ public func generateTokensTask(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
-        includeStopToken: includeStopToken
+        includeStopToken: includeStopToken,
+        wiredMemoryTicket: wiredMemoryTicket
     )
 }
 
@@ -966,19 +983,24 @@ public func generateTokensTask(
 ///   - tokenizer: tokenizer (for EOS id and unknown token id)
 ///   - iterator: token iterator
 ///   - includeStopToken: when true, the terminating EOS/unknown token is yielded before finishing
+///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
+///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
+///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
 /// - Returns: An `AsyncStream` that emits token IDs and a final `.info`, plus a `Task`.
 public func generateTokenTask(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
-    includeStopToken: Bool = false
+    includeStopToken: Bool = false,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer,
         iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
         includeStopToken: includeStopToken,
         handler: RawTokenLoopHandler()
     )

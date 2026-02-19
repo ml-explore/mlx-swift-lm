@@ -11,13 +11,13 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 
 ## API Matrix
 
-| API | Output | Task Handle | Typical Use |
-|-----|--------|-------------|-------------|
-| `generate(input:cache:parameters:context:)` | `AsyncStream<Generation>` | No | Standard decoded streaming |
-| `generateTask(...)` | `AsyncStream<Generation>` | Yes | Early stop + deterministic cleanup |
-| `generateTokens(input:cache:parameters:context:includeStopToken:)` | `AsyncStream<TokenGeneration>` | No | Raw token parsers |
-| `generateTokensTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Raw token parsing with cleanup control |
-| `generateTokenTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Low-level custom iterator pipelines |
+| API | Output | Task Handle | wiredMemoryTicket | Typical Use |
+|-----|--------|-------------|-------------------|-------------|
+| `generate(input:cache:parameters:context:)` | `AsyncStream<Generation>` | No | Yes | Standard decoded streaming |
+| `generateTask(...)` | `AsyncStream<Generation>` | Yes | Yes | Early stop + deterministic cleanup |
+| `generateTokens(input:cache:parameters:context:includeStopToken:)` | `AsyncStream<TokenGeneration>` | No | Yes | Raw token parsers |
+| `generateTokensTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Yes | Raw token parsing with cleanup control |
+| `generateTokenTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Yes | Low-level custom iterator pipelines |
 
 ## Decoded Text/Tool Streaming
 
@@ -97,6 +97,19 @@ for await event in tokenStream {
 }
 
 await tokenTask.value
+```
+
+### With Wired Memory Coordination
+
+```swift
+// With wired memory coordination:
+let ticket = WiredSumPolicy().ticket(size: estimatedBytes, kind: .active)
+let (tokenStream, tokenTask) = try generateTokensTask(
+    input: lmInput,
+    parameters: params,
+    context: context,
+    wiredMemoryTicket: ticket
+)
 ```
 
 ## Stop Reasons

@@ -6,7 +6,7 @@
 
 - Policies: `WiredSumPolicy`, `WiredMaxPolicy`, `WiredFixedPolicy`, `WiredBudgetPolicy`
 - Measurement helpers: `WiredMemoryUtils` and `WiredMemoryMeasurement`
-- Integration point: `wiredMemoryTicket` parameter on generation APIs
+- Integration point: `wiredMemoryTicket` parameter on all generation APIs (text-level and token-level)
 
 Core implementation:
 
