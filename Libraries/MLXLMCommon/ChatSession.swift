@@ -112,9 +112,9 @@ public final class ChatSession {
         history: consuming [Chat.Message],
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
-        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil,
-        additionalContext: [String: any Sendable]? = nil
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
         self.model = model
         self.instructions = instructions
