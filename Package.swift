@@ -27,10 +27,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
-        .package(
-            url: "https://github.com/huggingface/swift-transformers",
-            .upToNextMinor(from: "1.1.9")
-        ),
+        .package(url: "https://github.com/DePasqualeOrg/swift-tokenizers.git", from: "0.1.0"),
+        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.7.0"),
     ],
     targets: [
         .target(
@@ -40,7 +38,8 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -57,7 +56,8 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -73,7 +73,8 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -88,7 +89,8 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
                 .target(name: "MLXLMCommon"),
             ],
             path: "Libraries/MLXEmbedders",
@@ -105,7 +107,8 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
@@ -126,7 +129,8 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",

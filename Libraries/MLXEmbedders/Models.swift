@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 
 /// A registry and configuration provider for embedding models.
 ///
@@ -48,57 +47,30 @@ public struct ModelConfiguration: Sendable {
     /// Use this if the model weights and tokenizer configuration are hosted in different repositories.
     public let tokenizerId: String?
 
-    /// An optional override string for specifying a specific tokenizer implementation.
-    ///
-    /// This is useful for providing compatibility hints to `swift-tokenizers` before
-    /// official support is updated.
-    public let overrideTokenizer: String?
-
     /// Initializes a configuration using a Hub repository ID.
     /// - Parameters:
     ///   - id: The Hugging Face repo ID.
     ///   - revision: The Git revision to use (defaults to "main").
     ///   - tokenizerId: Optional alternate repo for the tokenizer.
-    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
     public init(
         id: String,
         revision: String = "main",
-        tokenizerId: String? = nil,
-        overrideTokenizer: String? = nil
+        tokenizerId: String? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
     }
 
     /// Initializes a configuration using a local directory.
     /// - Parameters:
     ///   - directory: The `URL` of the model on disk.
     ///   - tokenizerId: Optional alternate repo for the tokenizer.
-    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
     public init(
         directory: URL,
-        tokenizerId: String? = nil,
-        overrideTokenizer: String? = nil
+        tokenizerId: String? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
-    }
-
-    /// Resolves the local file system URL where the model is (or will be) stored.
-    ///
-    /// - Parameter hub: The `HubApi` used to resolve Hub paths.
-    /// - Returns: A `URL` pointing to the local directory.
-    public func modelDirectory(hub: HubApi = HubApi()) -> URL {
-        switch id {
-        case .id(let id, _):
-            let repo = Hub.Repo(id: id)
-            return hub.localRepoLocation(repo)
-
-        case .directory(let directory):
-            return directory
-        }
     }
 
     // MARK: - Registry Management

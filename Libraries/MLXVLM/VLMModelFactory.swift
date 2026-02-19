@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import HuggingFace
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -77,7 +77,7 @@ private func create<C: Codable, P>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/load(hub:configuration:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/load(from:configuration:progressHandler:)``.
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
@@ -281,12 +281,14 @@ public final class VLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
+        from hub: HubClient, configuration: ModelConfiguration,
+        useLatest: Bool,
         progressHandler: @Sendable @escaping (Progress) -> Void
     ) async throws -> sending ModelContext {
         // download weights and config
         let modelDirectory = try await downloadModel(
-            hub: hub, configuration: configuration, progressHandler: progressHandler)
+            from: hub, configuration: configuration, useLatest: useLatest,
+            progressHandler: progressHandler)
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -329,11 +331,19 @@ public final class VLMModelFactory: ModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
 
-        // Load tokenizer, processor config, and weights in parallel using async let.
-        // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
-        // parallel scheduling. This may briefly block a cooperative thread pool thread,
-        // but the config file is small and model loading is not a high-concurrency path.
-        async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
+        // Load tokenizer from model directory (or alternate tokenizer repo)
+        let tokenizerDirectory: URL
+        if let tokenizerId = configuration.tokenizerId {
+            tokenizerDirectory = try await downloadModel(
+                from: hub,
+                configuration: ModelConfiguration(id: tokenizerId),
+                progressHandler: { _ in })
+        } else {
+            tokenizerDirectory = modelDirectory
+        }
+
+        // Load tokenizer, processor config, and weights in parallel
+        async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
         try loadWeights(

@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import HuggingFace
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -18,7 +18,7 @@ private func create<C: Codable, M>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/load(hub:configuration:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/load(from:configuration:progressHandler:)``.
 public enum LLMTypeRegistry {
 
     /// Shared instance with default model types.
@@ -106,7 +106,6 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let codeLlama13b4bit = ModelConfiguration(
         id: "mlx-community/CodeLlama-13b-Instruct-hf-4bit-MLX",
-        overrideTokenizer: "PreTrainedTokenizer",
         defaultPrompt: "func sortArray(_ array: [Int]) -> String { <FILL_ME> }"
     )
 
@@ -135,21 +134,18 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let gemma2bQuantized = ModelConfiguration(
         id: "mlx-community/quantized-gemma-2b-it",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "what is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_9b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-9b-it-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_2b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-2b-it-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
@@ -190,7 +186,6 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let qwen205b4bit = ModelConfiguration(
         id: "mlx-community/Qwen1.5-0.5B-Chat-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         defaultPrompt: "why is the sky blue?"
     )
 
@@ -480,12 +475,14 @@ public final class LLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
+        from hub: HubClient, configuration: ModelConfiguration,
+        useLatest: Bool,
         progressHandler: @Sendable @escaping (Progress) -> Void
     ) async throws -> ModelContext {
         // download weights and config
         let modelDirectory = try await downloadModel(
-            hub: hub, configuration: configuration, progressHandler: progressHandler)
+            from: hub, configuration: configuration, useLatest: useLatest,
+            progressHandler: progressHandler)
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -533,8 +530,19 @@ public final class LLMModelFactory: ModelFactory {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
         }
 
-        // Load tokenizer and weights in parallel using async let.
-        async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
+        // Load tokenizer from model directory (or alternate tokenizer repo)
+        let tokenizerDirectory: URL
+        if let tokenizerId = configuration.tokenizerId {
+            tokenizerDirectory = try await downloadModel(
+                from: hub,
+                configuration: ModelConfiguration(id: tokenizerId),
+                progressHandler: { _ in })
+        } else {
+            tokenizerDirectory = modelDirectory
+        }
+
+        // Load tokenizer and weights in parallel
+        async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,

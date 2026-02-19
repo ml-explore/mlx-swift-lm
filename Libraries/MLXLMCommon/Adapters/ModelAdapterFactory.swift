@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Hub
+import HuggingFace
 import MLX
 import MLXNN
 
@@ -68,12 +68,14 @@ public final class ModelAdapterFactory: Sendable {
     /// This method fetches the adapter configuration and weights, decodes the appropriate
     /// fine-tuning format, and initializes a `ModelAdapter` accordingly.
     public func load(
-        hub: HubApi = HubApi(),
+        from hub: HubClient = .default,
         configuration: ModelConfiguration,
+        useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelAdapter {
         let adapterDirectory = try await downloadModel(
-            hub: hub, configuration: configuration, progressHandler: progressHandler
+            from: hub, configuration: configuration, useLatest: useLatest,
+            progressHandler: progressHandler
         )
 
         let configurationURL = adapterDirectory.appending(component: "adapter_config.json")

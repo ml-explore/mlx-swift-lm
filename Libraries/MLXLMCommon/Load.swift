@@ -1,63 +1,84 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import HuggingFace
 import MLX
 import MLXNN
 import Tokenizers
 
-/// Download the model using the `HubApi`.
+public enum ModelLoadError: LocalizedError {
+    case cacheNotConfigured
+
+    public var errorDescription: String? {
+        switch self {
+        case .cacheNotConfigured:
+            return "Hub cache is not configured"
+        }
+    }
+}
+
+/// Download the model from the Hugging Face Hub.
 ///
 /// This will download `*.safetensors` and `*.json` if the ``ModelConfiguration``
 /// represents a Hub id, e.g. `mlx-community/gemma-2-2b-it-4bit`.
 ///
-/// This is typically called via ``ModelFactory/load(hub:configuration:progressHandler:)``
+/// By default, returns cached model files without network calls if the model has been
+/// previously downloaded. Pass `useLatest: true` to check the Hub for updates.
+///
+/// This is typically called via ``ModelFactory/load(from:configuration:progressHandler:)``
 ///
 /// - Parameters:
-///   - hub: HubApi instance
+///   - hub: HubClient instance
 ///   - configuration: the model identifier
+///   - useLatest: when true, always checks the Hub for the latest version
 ///   - progressHandler: callback for progress
 /// - Returns: URL for the directory containing downloaded files
 public func downloadModel(
-    hub: HubApi, configuration: ModelConfiguration,
+    from hub: HubClient, configuration: ModelConfiguration,
+    useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void
 ) async throws -> URL {
-    do {
-        switch configuration.id {
-        case .id(let id, let revision):
-            // download the model weights
-            let repo = Hub.Repo(id: id)
-            let modelFiles = ["*.safetensors", "*.json"]
-            return try await hub.snapshot(
-                from: repo,
+    switch configuration.id {
+    case .id(let id, let revision):
+        guard let cache = hub.cache else {
+            throw ModelLoadError.cacheNotConfigured
+        }
+        let repoID = Repo.ID(stringLiteral: id)
+        let destination = cache.repoDirectory(repo: repoID, kind: .model)
+
+        // Fast path: if this revision has been downloaded before, return the repo
+        // directory without any network calls.
+        if !useLatest,
+            cachedSnapshotDirectory(cache: cache, repo: repoID, revision: revision) != nil
+        {
+            return destination
+        }
+
+        do {
+            return try await hub.downloadSnapshot(
+                of: repoID,
+                to: destination,
                 revision: revision,
-                matching: modelFiles,
+                matching: ["*.safetensors", "*.json"],
                 progressHandler: progressHandler
             )
-        case .directory(let directory):
-            return directory
-        }
-
-    } catch Hub.HubClientError.authorizationRequired {
-        // an authorizationRequired means (typically) that the named repo doesn't exist on
-        // on the server so retry with local only configuration
-        return configuration.modelDirectory(hub: hub)
-
-    } catch {
-        let nserror = error as NSError
-        if nserror.domain == NSURLErrorDomain && nserror.code == NSURLErrorNotConnectedToInternet {
-            // Error Domain=NSURLErrorDomain Code=-1009 "The Internet connection appears to be offline."
-            // fall back to the local directory
-            return configuration.modelDirectory(hub: hub)
-        } else {
+        } catch {
+            // Fall back to local cache if download fails (offline, unauthorized, etc.)
+            if let cached = cachedSnapshotDirectory(
+                cache: cache, repo: repoID, revision: revision)
+            {
+                return cached
+            }
             throw error
         }
+    case .directory(let directory):
+        return directory
     }
 }
 
 /// Load model weights.
 ///
-/// This is typically called via ``ModelFactory/load(hub:configuration:progressHandler:)``.
+/// This is typically called via ``ModelFactory/load(from:configuration:progressHandler:)``.
 /// This function loads all `safetensor` files in the given `modelDirectory`,
 /// calls ``LanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
@@ -107,4 +128,26 @@ public func loadWeights(
     try model.update(parameters: parameters, verify: [.all])
 
     eval(model)
+}
+
+/// Look up a cached snapshot directory for a given repo and revision.
+///
+/// Returns the snapshot directory URL if it exists, nil otherwise.
+public func cachedSnapshotDirectory(
+    cache: HubCache, repo: Repo.ID, revision: String
+) -> URL? {
+    let commitHash: String
+    if revision.count == 40, revision.allSatisfy(\.isHexDigit) {
+        commitHash = revision
+    } else if let resolved = cache.resolveRevision(repo: repo, kind: .model, ref: revision) {
+        commitHash = resolved
+    } else {
+        return nil
+    }
+    let snapshotDir = cache.snapshotsDirectory(repo: repo, kind: .model)
+        .appendingPathComponent(commitHash)
+    if FileManager.default.fileExists(atPath: snapshotDir.path) {
+        return snapshotDir
+    }
+    return nil
 }

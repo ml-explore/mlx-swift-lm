@@ -1,107 +1,32 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import Tokenizers
 
-struct TokenizerError: Error {
-    let message: String
-}
-
-public func loadTokenizer(configuration: ModelConfiguration, hub: HubApi) async throws -> Tokenizer
-{
-    let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
-        configuration: configuration, hub: hub)
-
-    return try PreTrainedTokenizer(
-        tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
-}
-
-public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async throws -> (
-    Config, Config
+@available(
+    *, unavailable, message: "Use AutoTokenizer.from(directory:) from swift-tokenizers instead"
+)
+public func loadTokenizerConfig(configuration: ModelConfiguration, hub: Any) async throws -> (
+    Any, Any
 ) {
-    // from AutoTokenizer.from() -- this lets us override parts of the configuration
-    let config: LanguageModelConfigurationFromHub
-
-    switch configuration.id {
-    case .id(let id, let revision):
-        do {
-            // the load can fail (async when we try to use it)
-            let loaded = LanguageModelConfigurationFromHub(
-                modelName: configuration.tokenizerId ?? id, revision: revision, hubApi: hub)
-            _ = try await loaded.tokenizerConfig
-            config = loaded
-        } catch {
-            let nserror = error as NSError
-            if nserror.domain == NSURLErrorDomain
-                && nserror.code == NSURLErrorNotConnectedToInternet
-            {
-                // Internet connection appears to be offline -- fall back to loading from
-                // the local directory
-                config = LanguageModelConfigurationFromHub(
-                    modelFolder: configuration.modelDirectory(hub: hub), hubApi: hub)
-            } else {
-                throw error
-            }
-        }
-    case .directory(let directory):
-        config = LanguageModelConfigurationFromHub(modelFolder: directory, hubApi: hub)
-    }
-
-    guard var tokenizerConfig = try await config.tokenizerConfig else {
-        throw TokenizerError(message: "missing config")
-    }
-    let tokenizerData = try await config.tokenizerData
-
-    tokenizerConfig = updateTokenizerConfig(tokenizerConfig)
-
-    return (tokenizerConfig, tokenizerData)
+    fatalError()
 }
 
-private func updateTokenizerConfig(_ tokenizerConfig: Config) -> Config {
-    // Workaround: replacement tokenizers for unhandled values in swift-transformers
-    if let tokenizerClass = tokenizerConfig.tokenizerClass?.string(),
-        let replacement = replacementTokenizers[tokenizerClass]
-    {
-        if var dictionary = tokenizerConfig.dictionary() {
-            dictionary["tokenizer_class"] = .init(replacement)
-            return Config(dictionary)
-        }
-    }
-    return tokenizerConfig
-}
-
+@available(
+    *, unavailable,
+    message: "Use AutoTokenizer.register(_:for:) from swift-tokenizers instead"
+)
 public class TokenizerReplacementRegistry: @unchecked Sendable {
-
-    // Note: using NSLock as we have very small (just dictionary get/set)
-    // critical sections and expect no contention. this allows the methods
-    // to remain synchronous.
-    private let lock = NSLock()
-
-    /// overrides for TokenizerModel/knownTokenizers
-    private var replacementTokenizers = [
-        "InternLM2Tokenizer": "PreTrainedTokenizer",
-        "Qwen2Tokenizer": "PreTrainedTokenizer",
-        "Qwen3Tokenizer": "PreTrainedTokenizer",
-        "CohereTokenizer": "PreTrainedTokenizer",
-        "GPTNeoXTokenizer": "PreTrainedTokenizer",
-        "TokenizersBackend": "PreTrainedTokenizer",
-    ]
-
     public subscript(key: String) -> String? {
-        get {
-            lock.withLock {
-                replacementTokenizers[key]
-            }
-        }
-        set {
-            lock.withLock {
-                replacementTokenizers[key] = newValue
-            }
-        }
+        get { fatalError() }
+        set { fatalError() }
     }
 }
 
+@available(
+    *, unavailable,
+    message: "Use AutoTokenizer.register(_:for:) from swift-tokenizers instead"
+)
 public let replacementTokenizers = TokenizerReplacementRegistry()
 
 public protocol StreamingDetokenizer: IteratorProtocol<String> {
