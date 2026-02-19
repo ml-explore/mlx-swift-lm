@@ -94,6 +94,9 @@ let package = Package(
             path: "Libraries/MLXEmbedders",
             exclude: [
                 "README.md"
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .testTarget(

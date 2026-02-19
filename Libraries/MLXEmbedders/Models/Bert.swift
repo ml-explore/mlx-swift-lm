@@ -329,38 +329,33 @@ public class BertModel: Module, EmbeddingModel {
     /// like `attention.output.dense` to `attention.out_proj`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, item in
-            var key = item.key.replacingOccurrences(of: ".layer.", with: ".layers.")
-            key = key.replacingOccurrences(of: ".self.key.", with: ".key_proj.")
-            key = key.replacingOccurrences(of: ".self.query.", with: ".query_proj.")
-            key = key.replacingOccurrences(of: ".self.value.", with: ".value_proj.")
-            key = key.replacingOccurrences(
-                of: ".attention.output.dense.", with: ".attention.out_proj.")
-            key = key.replacingOccurrences(of: ".attention.output.LayerNorm.", with: ".ln1.")
-            key = key.replacingOccurrences(of: ".output.LayerNorm.", with: ".ln2.")
-            key = key.replacingOccurrences(of: ".intermediate.dense.", with: ".linear1.")
-            key = key.replacingOccurrences(of: ".output.dense.", with: ".linear2.")
-            key = key.replacingOccurrences(of: ".LayerNorm.", with: ".norm.")
-            key = key.replacingOccurrences(of: "pooler.dense.", with: "pooler.")
-            key = key.replacingOccurrences(
-                of:
-                    "cls.predictions.transform.dense.",
-                with: "lm_head.dense.")
-            key = key.replacingOccurrences(
-                of:
-                    "cls.predictions.transform.LayerNorm.",
-                with: "lm_head.ln.")
-            key = key.replacingOccurrences(
-                of:
-                    "cls.predictions.decoder",
-                with: "lm_head.decoder")
-            key = key.replacingOccurrences(
-                of: "cls.predictions.transform.norm.weight",
-                with: "lm_head.ln.weight")
-            key = key.replacingOccurrences(
-                of: "cls.predictions.transform.norm.bias",
-                with: "lm_head.ln.bias")
-            key = key.replacingOccurrences(of: "cls.predictions.bias", with: "lm_head.decoder.bias")
-            key = key.replacingOccurrences(of: "bert.", with: "")
+            let key = item.key
+                .replacingOccurrences(of: ".layer.", with: ".layers.")
+                .replacingOccurrences(of: ".self.key.", with: ".key_proj.")
+                .replacingOccurrences(of: ".self.query.", with: ".query_proj.")
+                .replacingOccurrences(of: ".self.value.", with: ".value_proj.")
+                .replacingOccurrences(of: ".attention.output.dense.", with: ".attention.out_proj.")
+                .replacingOccurrences(of: ".attention.output.LayerNorm.", with: ".ln1.")
+                .replacingOccurrences(of: ".output.LayerNorm.", with: ".ln2.")
+                .replacingOccurrences(of: ".intermediate.dense.", with: ".linear1.")
+                .replacingOccurrences(of: ".output.dense.", with: ".linear2.")
+                .replacingOccurrences(of: ".LayerNorm.", with: ".norm.")
+                .replacingOccurrences(of: "pooler.dense.", with: "pooler.")
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.dense.", with: "lm_head.dense."
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.LayerNorm.", with: "lm_head.ln."
+                )
+                .replacingOccurrences(of: "cls.predictions.decoder", with: "lm_head.decoder")
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.norm.weight", with: "lm_head.ln.weight"
+                )
+                .replacingOccurrences(
+                    of: "cls.predictions.transform.norm.bias", with: "lm_head.ln.bias"
+                )
+                .replacingOccurrences(of: "cls.predictions.bias", with: "lm_head.decoder.bias")
+                .replacingOccurrences(of: "bert.", with: "")
 
             result[key] = item.value
         }.filter { key, _ in key != "embeddings.position_ids" }
@@ -386,21 +381,27 @@ public class DistilBertModel: BertModel {
     /// - Returns: A sanitized dictionary compatible with the `Module` property keys.
     public override func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, item in
-            var key = item.key.replacingOccurrences(of: ".layer.", with: ".layers.")
-            key = key.replacingOccurrences(of: "transformer.", with: "encoder.")
-            key = key.replacingOccurrences(of: "embeddings.LayerNorm", with: "embeddings.norm")
-            key = key.replacingOccurrences(of: ".attention.q_lin.", with: ".attention.query_proj.")
-            key = key.replacingOccurrences(of: ".attention.k_lin.", with: ".attention.key_proj.")
-            key = key.replacingOccurrences(of: ".attention.v_lin.", with: ".attention.value_proj.")
-            key = key.replacingOccurrences(of: ".attention.out_lin.", with: ".attention.out_proj.")
-            key = key.replacingOccurrences(of: ".sa_layer_norm.", with: ".ln1.")
-            key = key.replacingOccurrences(of: ".ffn.lin1.", with: ".linear1.")
-            key = key.replacingOccurrences(of: ".ffn.lin2.", with: ".linear2.")
-            key = key.replacingOccurrences(of: ".output_layer_norm.", with: ".ln2.")
-            key = key.replacingOccurrences(of: "vocab_transform", with: "lm_head.dense")
-            key = key.replacingOccurrences(of: "vocab_layer_norm", with: "lm_head.ln")
-            key = key.replacingOccurrences(of: "vocab_projector", with: "lm_head.decoder")
-            key = key.replacingOccurrences(of: "distilbert.", with: "")
+            let key = item.key
+                .replacingOccurrences(of: ".layer.", with: ".layers.")
+                // Architecture-specific remapping
+                .replacingOccurrences(of: "transformer.", with: "encoder.")
+                .replacingOccurrences(of: "embeddings.LayerNorm", with: "embeddings.norm")
+                // Attention mapping
+                .replacingOccurrences(of: ".attention.q_lin.", with: ".attention.query_proj.")
+                .replacingOccurrences(of: ".attention.k_lin.", with: ".attention.key_proj.")
+                .replacingOccurrences(of: ".attention.v_lin.", with: ".attention.value_proj.")
+                .replacingOccurrences(of: ".attention.out_lin.", with: ".attention.out_proj.")
+                // Layer Norm and Feed-Forward mapping
+                .replacingOccurrences(of: ".sa_layer_norm.", with: ".ln1.")
+                .replacingOccurrences(of: ".ffn.lin1.", with: ".linear1.")
+                .replacingOccurrences(of: ".ffn.lin2.", with: ".linear2.")
+                .replacingOccurrences(of: ".output_layer_norm.", with: ".ln2.")
+                // Language Modeling Head mapping
+                .replacingOccurrences(of: "vocab_transform", with: "lm_head.dense")
+                .replacingOccurrences(of: "vocab_layer_norm", with: "lm_head.ln")
+                .replacingOccurrences(of: "vocab_projector", with: "lm_head.decoder")
+                // Clean up model prefix
+                .replacingOccurrences(of: "distilbert.", with: "")
 
             result[key] = item.value
         }.filter { key, _ in
@@ -475,77 +476,33 @@ public struct BertConfiguration: Decodable, Sendable {
 
     /// Custom initializer to bridge different JSON schemas into a unified struct.
     public init(from decoder: Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> =
-            try decoder.container(
-                keyedBy: CodingKeys.self)
-        layerNormEps =
-            try container.decodeIfPresent(
-                Float.self,
-                forKey: CodingKeys.layerNormEps.self)
-            ?? 1e-12
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        // Load common properties
+        layerNormEps = try container.decodeIfPresent(Float.self, forKey: .layerNormEps) ?? 1e-12
         maxTrainedPositions =
-            try container.decodeIfPresent(
-                Int.self,
-                forKey: CodingKeys.maxTrainedPositions
-                    .self) ?? 2048
-        vocabularySize =
-            try container.decodeIfPresent(
-                Int.self,
-                forKey: CodingKeys.vocabularySize.self)
-            ?? 30528
+            try container.decodeIfPresent(Int.self, forKey: .maxTrainedPositions) ?? 2048
+        vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 30528
         maxPositionEmbeddings =
-            try container.decodeIfPresent(
-                Int.self,
-                forKey: CodingKeys.maxPositionEmbeddings
-                    .self) ?? 0
-        modelType = try container.decode(String.self, forKey: CodingKeys.modelType.self)
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 0
+        modelType = try container.decode(String.self, forKey: .modelType)
 
+        // Switch decoding logic based on model type
         if modelType == "distilbert" {
-            let distilBertConfig: KeyedDecodingContainer<DistilBertCodingKeys> =
-                try decoder.container(
-                    keyedBy: DistilBertCodingKeys.self)
-            embedDim =
-                try distilBertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: DistilBertCodingKeys.embedDim.self) ?? 768
-            numHeads =
-                try distilBertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: DistilBertCodingKeys.numHeads.self) ?? 12
-            interDim =
-                try distilBertConfig.decodeIfPresent(
-                    Int.self, forKey: DistilBertCodingKeys.interDim.self)
-                ?? 3072
-            numLayers =
-                try distilBertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: DistilBertCodingKeys.numLayers.self) ?? 12
-            typeVocabularySize = 0
+            let distilBertConfig = try decoder.container(keyedBy: DistilBertCodingKeys.self)
+            embedDim = try distilBertConfig.decodeIfPresent(Int.self, forKey: .embedDim) ?? 768
+            numHeads = try distilBertConfig.decodeIfPresent(Int.self, forKey: .numHeads) ?? 12
+            interDim = try distilBertConfig.decodeIfPresent(Int.self, forKey: .interDim) ?? 3072
+            numLayers = try distilBertConfig.decodeIfPresent(Int.self, forKey: .numLayers) ?? 12
+            typeVocabularySize = 0  // DistilBERT does not use segment embeddings
         } else {
-            let bertConfig: KeyedDecodingContainer<BertCodingKeys> = try decoder.container(
-                keyedBy: BertCodingKeys.self)
-
-            embedDim =
-                try bertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: BertCodingKeys.embedDim.self) ?? 768
-            numHeads =
-                try bertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: BertCodingKeys.numHeads.self) ?? 12
-            interDim =
-                try bertConfig.decodeIfPresent(
-                    Int.self, forKey: BertCodingKeys.interDim.self)
-                ?? 3072
-            numLayers =
-                try bertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: BertCodingKeys.numLayers.self) ?? 12
+            let bertConfig = try decoder.container(keyedBy: BertCodingKeys.self)
+            embedDim = try bertConfig.decodeIfPresent(Int.self, forKey: .embedDim) ?? 768
+            numHeads = try bertConfig.decodeIfPresent(Int.self, forKey: .numHeads) ?? 12
+            interDim = try bertConfig.decodeIfPresent(Int.self, forKey: .interDim) ?? 3072
+            numLayers = try bertConfig.decodeIfPresent(Int.self, forKey: .numLayers) ?? 12
             typeVocabularySize =
-                try bertConfig.decodeIfPresent(
-                    Int.self,
-                    forKey: BertCodingKeys.typeVocabularySize
-                        .self) ?? 2
+                try bertConfig.decodeIfPresent(Int.self, forKey: .typeVocabularySize) ?? 2
         }
     }
 }
