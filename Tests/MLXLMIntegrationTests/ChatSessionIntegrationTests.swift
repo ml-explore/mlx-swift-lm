@@ -132,6 +132,36 @@ public class ChatSessionIntegrationTests: XCTestCase {
         // The model should either produce a tool call or mention the tool/weather
         let hasContent = responseText.count > 0 || !toolCalls.isEmpty
         XCTAssertTrue(hasContent, "Response should contain either text or tool calls")
+
+        let weather = try await session.respond(
+            to: "Foggy with a high in the low 60s, clearing later in the day", role: .tool)
+        XCTAssertTrue(weather.contains("fog"), "Weather should mention fog: \(weather)")
+    }
+
+    func testToolInvocation() async throws {
+        struct EmptyInput: Codable {}
+
+        struct TimeOutput: Codable {
+            let time: String
+        }
+
+        let timeTool = Tool<EmptyInput, TimeOutput>(
+            name: "get_time",
+            description: "Get the current date and time including day of week.",
+            parameters: []
+        ) { _ in
+            TimeOutput(time: "Wed Feb 18 17:50:43 PST 2026")
+        }
+
+        let session = ChatSession(Self.llmContainer, tools: [timeTool.schema]) { toolCall in
+            if toolCall.function.name == timeTool.name {
+                return try await toolCall.execute(with: timeTool).toolResult
+            }
+            return "Unknown tool: \(toolCall.function.name)"
+        }
+
+        let day = try await session.respond(to: "What day of week is it?")
+        XCTAssertTrue(day.contains("Wed"), "Weather should mention Wed: \(day)")
     }
 
     func testPromptRehydration() async throws {
