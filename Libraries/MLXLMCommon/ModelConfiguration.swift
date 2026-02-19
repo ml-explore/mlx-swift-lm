@@ -47,8 +47,7 @@ public struct ModelConfiguration: Sendable {
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
-        toolCallFormat: ToolCallFormat? = nil,
-        preparePrompt: (@Sendable (String) -> String)? = nil
+        toolCallFormat: ToolCallFormat? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
