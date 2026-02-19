@@ -31,6 +31,7 @@ let package = Package(
             url: "https://github.com/huggingface/swift-transformers",
             .upToNextMinor(from: "1.1.6")
         ),
+        .package(url: "https://github.com/reers/ReerCodable.git", from: "1.5.3"),
     ],
     targets: [
         .target(
@@ -41,6 +42,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "ReerCodable", package: "ReerCodable"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -58,6 +60,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "ReerCodable", package: "ReerCodable"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -74,6 +77,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "ReerCodable", package: "ReerCodable"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -90,6 +94,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .target(name: "MLXLMCommon"),
+                .product(name: "ReerCodable", package: "ReerCodable"),
             ],
             path: "Libraries/MLXEmbedders",
             exclude: [

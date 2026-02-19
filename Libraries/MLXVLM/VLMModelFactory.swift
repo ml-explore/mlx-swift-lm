@@ -4,6 +4,7 @@ import Foundation
 import Hub
 import MLX
 import MLXLMCommon
+import ReerCodable
 import Tokenizers
 
 public enum VLMError: LocalizedError, Equatable {
@@ -43,12 +44,9 @@ public enum VLMError: LocalizedError, Equatable {
     }
 }
 
-public struct BaseProcessorConfiguration: Codable, Sendable {
-    public let processorClass: String
-
-    enum CodingKeys: String, CodingKey {
-        case processorClass = "processor_class"
-    }
+@Codable
+public struct BaseProcessorConfiguration: Sendable {
+    @CodingKey("processor_class") public let processorClass: String
 }
 
 /// Creates a function that loads a configuration file and instantiates a model with the proper configuration
