@@ -11,90 +11,6 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-// MARK: - RoPE helpers
-
-class OlmoEDynamicNTKScalingRoPE: Module {
-    let dims: Int
-    let maxPositionEmbeddings: Int
-    let traditional: Bool
-    var base: Float?
-    let scale: Float
-    let ropeType: String
-    let ropeScaling: [String: StringOrNumber]?
-    var freqs: MLXArray?
-
-    init(
-        dims: Int,
-        maxPositionEmbeddings: Int?,
-        traditional: Bool = false,
-        base: Float = 10000,
-        scale: Float = 1.0,
-        ropeType: String = "default",
-        ropeScaling: [String: StringOrNumber]? = nil
-    ) {
-        self.dims = dims
-        self.maxPositionEmbeddings = maxPositionEmbeddings ?? 2048
-        self.traditional = traditional
-        self.base = base
-        self.scale = scale
-        self.ropeType = ropeType
-        self.ropeScaling = ropeScaling
-        super.init()
-        computeFreqs()
-    }
-
-    private func computeFreqs() {
-        if ropeType != "llama3" {
-            freqs = nil
-            return
-        }
-
-        guard let ropeScaling = ropeScaling,
-            case .float(let factor) = ropeScaling["factor"],
-            case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"] ?? .float(1.0),
-            case .float(let highFreqFactor) = ropeScaling["high_freq_factor"] ?? .float(4.0),
-            case .float(let oldContextLen) = ropeScaling["original_max_position_embeddings"]
-                ?? .float(8192),
-            let base
-        else {
-            freqs = nil
-            return
-        }
-
-        let lowFreqWavelen = oldContextLen / lowFreqFactor
-        let highFreqWavelen = oldContextLen / highFreqFactor
-
-        let indices = MLXArray(stride(from: 0, to: dims, by: 2))
-        var frequencies = MLX.pow(base, indices / Float(dims))
-        let wavelens = 2 * Float.pi * frequencies
-
-        frequencies = MLX.where(
-            wavelens .> MLXArray(lowFreqWavelen), frequencies * factor, frequencies)
-        let isMediumFreq = MLX.logicalAnd(
-            wavelens .> MLXArray(highFreqWavelen),
-            wavelens .< MLXArray(lowFreqWavelen)
-        )
-        let smoothFactors =
-            (oldContextLen / wavelens - lowFreqFactor) / (highFreqFactor - lowFreqFactor)
-        let smoothFreqs = frequencies / ((1 - smoothFactors) / factor + smoothFactors)
-
-        freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
-        self.base = nil
-    }
-
-    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        MLXFast.RoPE(
-            x,
-            dimensions: dims,
-            traditional: traditional,
-            base: base,
-            scale: scale,
-            offset: offset,
-            freqs: freqs
-        )
-    }
-}
-
 // MARK: - Attention
 
 class OlmoEAttention: Module {
@@ -112,8 +28,7 @@ class OlmoEAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let ropeDynamic: OlmoEDynamicNTKScalingRoPE?
-    let ropeYarn: YarnRoPE?
+    let rope: OffsetLayer
 
     init(_ args: OlmoEConfiguration) {
         self.args = args
@@ -132,60 +47,11 @@ class OlmoEAttention: Module {
         self._qNorm.wrappedValue = RMSNorm(dimensions: nHeads * headDim, eps: args.rmsNormEps)
         self._kNorm.wrappedValue = RMSNorm(dimensions: nKVHeads * headDim, eps: args.rmsNormEps)
 
-        let ropeType: String = {
-            if let v = args.ropeScaling?["type"] ?? args.ropeScaling?["rope_type"],
-                case .string(let s) = v
-            {
-                return s
-            } else {
-                return "default"
-            }
-        }()
-
-        if ropeType == "yarn" {
-            let factor = args.ropeScaling?["factor"]?.asFloat() ?? 32.0
-            let origMax = args.ropeScaling?["original_max_position_embeddings"]?.asInt() ?? 4096
-            let betaFast = args.ropeScaling?["beta_fast"]?.asFloat() ?? 32.0
-            let betaSlow = args.ropeScaling?["beta_slow"]?.asFloat() ?? 1.0
-            let mscale = args.ropeScaling?["mscale"]?.asFloat() ?? 1.0
-            let mscaleAllDim = args.ropeScaling?["mscale_all_dim"]?.asFloat() ?? 0.0
-            self.ropeYarn = YarnRoPE(
-                dimensions: headDim,
-                traditional: args.ropeTraditional,
-                maxPositionEmbeddings: args.maxPositionEmbeddings ?? 2048,
-                base: args.ropeTheta,
-                scalingFactor: factor,
-                originalMaxPositionEmbeddings: origMax,
-                betaFast: betaFast,
-                betaSlow: betaSlow,
-                mscale: mscale,
-                mscaleAllDim: mscaleAllDim
-            )
-            self.ropeDynamic = nil
-        } else {
-            let ropeScale: Float
-            if ropeType == "linear", let factor = args.ropeScaling?["factor"]?.asFloat() {
-                ropeScale = 1 / factor
-            } else {
-                ropeScale = 1
-            }
-            self.ropeDynamic = OlmoEDynamicNTKScalingRoPE(
-                dims: headDim,
-                maxPositionEmbeddings: args.maxPositionEmbeddings,
-                traditional: args.ropeTraditional,
-                base: args.ropeTheta,
-                scale: ropeScale,
-                ropeType: ropeType,
-                ropeScaling: args.ropeScaling
-            )
-            self.ropeYarn = nil
-        }
-    }
-
-    func applyRoPE(_ x: MLXArray, offset: Int?) -> MLXArray {
-        if let ropeYarn { return ropeYarn(x, offset: offset ?? 0) }
-        if let ropeDynamic { return ropeDynamic(x, offset: offset ?? 0) }
-        return x
+        self.rope = initializeRope(
+            dims: headDim, base: args.ropeTheta,
+            traditional: args.ropeTraditional,
+            scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
     func callAsFunction(
@@ -202,11 +68,11 @@ class OlmoEAttention: Module {
         values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
 
         if let cache {
-            queries = applyRoPE(queries, offset: cache.offset)
-            keys = applyRoPE(keys, offset: cache.offset)
+            queries = rope(queries, offset: cache.offset)
+            keys = rope(keys, offset: cache.offset)
         } else {
-            queries = applyRoPE(queries, offset: nil)
-            keys = applyRoPE(keys, offset: nil)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

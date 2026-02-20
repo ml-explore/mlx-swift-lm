@@ -212,6 +212,7 @@ class Gemma3nAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     @ModuleInfo(key: "v_norm") var vNorm: RMSNoScale
+    // TODO dkoski initialize_rope
     @ModuleInfo var rope: RoPE
 
     init(_ config: Gemma3nTextConfiguration, layerIdx: Int) {

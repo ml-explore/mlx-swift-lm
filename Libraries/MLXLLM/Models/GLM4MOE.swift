@@ -23,6 +23,7 @@ class GLM4MoEAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm?
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
 
+    // TODO dkoski initialize_rope
     let rope: RoPE
 
     init(_ args: GLM4MoEConfiguration) {

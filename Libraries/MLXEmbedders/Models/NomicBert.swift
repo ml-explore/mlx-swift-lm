@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
 
 // MARK: - NomicEmbedding
@@ -186,17 +187,13 @@ func computeBaseFrequency(
         return base
     }
 
-    guard case .float(let factor) = ropeScaling["factor"],
-        case .float(let lowFreqFactor) = ropeScaling["low_freq_factor"]
-            ?? .float(1.0),
-        case .float(let highFreqFactor) = ropeScaling["high_freq_factor"]
-            ?? .float(4.0),
-        case .float(let oldContextLen) = ropeScaling[
-            "original_max_position_embeddings"]
-            ?? .float(8192)
-    else {
+    guard let factor = ropeScaling["factor"]?.asFloat() else {
         return base
     }
+
+    let lowFreqFactor = ropeScaling["low_freq_factor"]?.asFloat() ?? 1.0
+    let highFreqFactor = ropeScaling["high_freq_factor"]?.asFloat() ?? 4.0
+    let oldContextLen = ropeScaling["original_max_position_embeddings"]?.asFloat() ?? 8192
 
     let lowFreqWavelen = oldContextLen / lowFreqFactor
     let highFreqWavelen = oldContextLen / highFreqFactor
