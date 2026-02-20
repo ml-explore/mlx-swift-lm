@@ -108,6 +108,18 @@ public final class ModelContainer: Sendable {
         }
     }
 
+    /// Perform an action on the ``ModelContext`` with additional (non `Sendable`) context values.
+    /// Callers _must_ eval any `MLXArray` before returning as
+    /// `MLXArray` is not `Sendable`.
+    public func perform<V, R: Sendable>(
+        sending values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
+    ) async rethrows -> sending R {
+        let values = SendableBox(values)
+        return try await context.read {
+            try await action($0, values.consume())
+        }
+    }
+
     /// Update the owned `ModelContext`.
     /// - Parameter action: update action
     public func update(_ action: @Sendable (inout ModelContext) -> Void) async {
