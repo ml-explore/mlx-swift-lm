@@ -80,7 +80,7 @@ public enum LLMTypeRegistry {
 
         // Bitnet requires Metal custom kernels and is only available on Apple platforms
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
-        models["bitnet"] = create(BitnetConfiguration.self, BitnetModel.init)
+            models["bitnet"] = create(BitnetConfiguration.self, BitnetModel.init)
         #endif
 
         return models
