@@ -376,6 +376,78 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("AI news"))
     }
 
+    // MARK: - Harmony Format Tests
+
+    @Test("Test Harmony Tool Call Parser")
+    func testHarmonyParserWithEndTag() throws {
+        let parser = HarmonyToolCallParser()
+        let content =
+            "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\",\"unit\":\"celsius\"}<|call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Harmony Tool Call Parser - No Namespace Prefix")
+    func testHarmonyParserNoNamespace() throws {
+        let parser = HarmonyToolCallParser()
+        let content =
+            "<|start|>assistant<|channel|>commentary to=web_search <|constrain|>json<|message|>{\"query\":\"tech news\"}<|call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "web_search")
+        #expect(toolCall.function.arguments["query"] == .string("tech news"))
+    }
+
+    @Test("Test Harmony Format via ToolCallProcessor - Streaming with Analysis Prefix")
+    func testHarmonyFormatProcessorStreaming() throws {
+        let processor = ToolCallProcessor(format: .harmony)
+
+        // Simulate real model output: analysis section then tool call
+        let chunks = [
+            "<|channel|>analysis<|message|>We should call get_weather.<|end|>",
+            "<|start|>assistant<|channel|>commentary to=",
+            "functions.get_weather ",
+            "<|constrain|>json<|message|>",
+            "{\"location\":\"London\"}",
+            "<|call|>",
+        ]
+
+        var textOutput = ""
+        for chunk in chunks {
+            if let text = processor.processChunk(chunk) {
+                textOutput += text
+            }
+        }
+
+        // Analysis text was passed through, tool call content was suppressed
+        #expect(textOutput.contains("We should call get_weather"))
+        #expect(!textOutput.contains("functions.get_weather"))
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("London"))
+    }
+
+    @Test("Test Harmony Format via ToolCallProcessor")
+    func testHarmonyFormatProcessorWithEndTag() throws {
+        let processor = ToolCallProcessor(format: .harmony)
+        let content =
+            "<|start|>assistant<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"swift\"}<|call|>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
     // MARK: - ToolCallFormat Serialization Tests
 
     @Test("Test ToolCallFormat Raw Values for Serialization")
@@ -388,6 +460,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.harmony.rawValue == "harmony")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -417,6 +490,10 @@ struct ToolTests {
         // Gemma models
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
+
+        // Harmony models (gpt_oss prefix)
+        #expect(ToolCallFormat.infer(from: "gpt_oss") == .harmony)
+        #expect(ToolCallFormat.infer(from: "GPT_OSS") == .harmony)
 
         // Unknown models should return nil (use default)
         #expect(ToolCallFormat.infer(from: "llama") == nil)

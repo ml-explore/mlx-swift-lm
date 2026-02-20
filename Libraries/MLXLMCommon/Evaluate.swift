@@ -979,8 +979,7 @@ public func generateTokenTask(
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer,
         iterator: iterator,
-        includeStopToken: includeStopToken,
-        handler: RawTokenLoopHandler()
+        handler: RawTokenLoopHandler(includeStopToken)
     )
 }
 
@@ -990,7 +989,6 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    includeStopToken: Bool = false,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Void, Never>) {
 
@@ -1030,13 +1028,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
 
                 // Check for end-of-sequence tokens
                 if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
-                    if includeStopToken {
+                    // Increase tokenCount only if handler emits end token
+                    if !handler.onStopToken(token, emit: { value in
                         tokenCount += 1
-                        if !handler.onStopToken(token, emit: continuation.yield) {
-                            stopReason = .cancelled
-                            break
-                        }
+                        return continuation.yield(value)
+                    }) {
+                        stopReason = .cancelled
+                        break
                     }
+                    
                     stopReason = .stop
                     break
                 }
@@ -1312,7 +1312,24 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
         _ token: Int,
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) -> Bool {
-        true
+        // Checking whether toolCallProcessor is collecting tool call or not
+        // Then detokenizer for better performance instead of always detokenizing
+        // As EOS token could also tool call endTag as well (e.g. GPT-OSS)
+        if(toolCallProcessor.state == .collectingToolCall) {
+            detokenizer.append(token: token)
+            if let chunk = detokenizer.next() {
+                if chunk == toolCallProcessor.parser.endTag {
+                    // Process chunk through the tool call processor.
+                    let _ = toolCallProcessor.processChunk(chunk)
+                    
+                    // Emit completed tool call if needed
+                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                        let _ = emit(.toolCall(toolCall))
+                    }
+                }
+            }
+        }
+        return true
     }
 
     func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
@@ -1322,6 +1339,11 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
 
 private struct RawTokenLoopHandler: TokenLoopHandler {
     typealias Output = TokenGeneration
+    private var includeStopToken: Bool
+    
+    init(_ includeStopToken: Bool) {
+        self.includeStopToken = includeStopToken
+    }
 
     mutating func onToken(
         _ token: Int,
@@ -1337,8 +1359,10 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
         _ token: Int,
         emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
     ) -> Bool {
-        if case .terminated = emit(.token(token)) {
-            return false
+        if(self.includeStopToken) {
+            if case .terminated = emit(.token(token)) {
+                return false
+            }
         }
         return true
     }
