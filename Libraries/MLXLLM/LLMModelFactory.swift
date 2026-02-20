@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HuggingFace
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -475,14 +474,9 @@ public final class LLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        from hub: HubClient, configuration: ModelConfiguration,
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration
     ) async throws -> ModelContext {
-        // download weights and config
-        let modelDirectory = try await downloadModel(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+        let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -521,28 +515,15 @@ public final class LLMModelFactory: ModelFactory {
             eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
         }
 
-        // Create mutable configuration with loaded EOS token IDs
+        // Build a ModelConfiguration with loaded EOS token IDs and tool call format
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
-
-        // Auto-detect tool call format from model type if not explicitly set
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
         }
 
-        // Load tokenizer from model directory (or alternate tokenizer repo)
-        let tokenizerDirectory: URL
-        if let tokenizerId = configuration.tokenizerId {
-            tokenizerDirectory = try await downloadModel(
-                from: hub,
-                configuration: ModelConfiguration(id: tokenizerId),
-                progressHandler: { _ in })
-        } else {
-            tokenizerDirectory = modelDirectory
-        }
-
         // Load tokenizer and weights in parallel
-        async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
+        async let tokenizerTask = AutoTokenizer.from(directory: configuration.tokenizerDirectory)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
@@ -557,12 +538,20 @@ public final class LLMModelFactory: ModelFactory {
                 DefaultMessageGenerator()
             }
 
+        // Build a ModelConfiguration for the ModelContext
+        let modelConfig = ModelConfiguration(
+            directory: modelDirectory,
+            defaultPrompt: configuration.defaultPrompt,
+            extraEOSTokens: mutableConfiguration.extraEOSTokens,
+            eosTokenIds: mutableConfiguration.eosTokenIds,
+            toolCallFormat: mutableConfiguration.toolCallFormat)
+
         let processor = LLMUserInputProcessor(
-            tokenizer: tokenizer, configuration: mutableConfiguration,
+            tokenizer: tokenizer, configuration: modelConfig,
             messageGenerator: messageGenerator)
 
         return .init(
-            configuration: mutableConfiguration, model: model, processor: processor,
+            configuration: modelConfig, model: model, processor: processor,
             tokenizer: tokenizer)
     }
 

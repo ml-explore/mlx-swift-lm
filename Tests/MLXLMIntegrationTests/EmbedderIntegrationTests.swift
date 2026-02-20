@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXEmbedders
+import MLXEmbeddersHuggingFace
 import Testing
 import Tokenizers
 

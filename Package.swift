@@ -24,6 +24,12 @@ let package = Package(
         .library(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
+        .library(
+            name: "MLXLMHuggingFace",
+            targets: ["MLXLMHuggingFace"]),
+        .library(
+            name: "MLXEmbeddersHuggingFace",
+            targets: ["MLXEmbeddersHuggingFace"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
@@ -39,7 +45,6 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -57,7 +62,6 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -74,7 +78,6 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -90,13 +93,36 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
                 .target(name: "MLXLMCommon"),
             ],
             path: "Libraries/MLXEmbedders",
             exclude: [
                 "README.md"
             ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "MLXLMHuggingFace",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+            ],
+            path: "Libraries/MLXLMHuggingFace",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "MLXEmbeddersHuggingFace",
+            dependencies: [
+                "MLXEmbedders",
+                "MLXLMHuggingFace",
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-tokenizers"),
+            ],
+            path: "Libraries/MLXEmbeddersHuggingFace",
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
@@ -110,6 +136,7 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 "MLXLMCommon",
+                "MLXLMHuggingFace",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
@@ -132,9 +159,11 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-tokenizers"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 "MLXLMCommon",
+                "MLXLMHuggingFace",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "MLXEmbeddersHuggingFace",
             ],
             path: "Tests/MLXLMIntegrationTests",
             exclude: [
@@ -151,6 +180,8 @@ let package = Package(
                 "MLXVLM",
                 "MLXEmbedders",
                 "MLXLMCommon",
+                "MLXLMHuggingFace",
+                "MLXEmbeddersHuggingFace",
             ],
             path: "Tests/Benchmarks",
             swiftSettings: [

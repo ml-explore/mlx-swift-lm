@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HuggingFace
 import MLX
 import MLXLMCommon
 import MLXNN
@@ -65,55 +64,48 @@ public enum EmbedderError: LocalizedError {
     }
 }
 
-/// Download the model from the Hugging Face Hub or resolve a local path.
+/// Resolve model and tokenizer directories from a ``ModelConfiguration``
+/// using a ``Downloader``.
 ///
 /// - Parameters:
-///   - hub: The HubClient instance for managing downloads.
+///   - downloader: The downloader to use for fetching remote resources.
 ///   - configuration: The configuration identifying the model.
+///   - useLatest: When true, always checks the provider for updates.
 ///   - progressHandler: A closure to monitor download progress.
-/// - Returns: A URL pointing to the directory containing model files.
-func prepareModelDirectory(
-    from hub: HubClient,
+/// - Returns: A tuple of (modelDirectory, tokenizerDirectory).
+func resolveDirectories(
+    from downloader: any Downloader,
     configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void
-) async throws -> URL {
+) async throws -> (modelDirectory: URL, tokenizerDirectory: URL) {
+    let modelDirectory: URL
     switch configuration.id {
     case .id(let id, let revision):
-        guard let cache = hub.cache else {
-            throw ModelLoadError.cacheNotConfigured
-        }
-        let repoID = Repo.ID(stringLiteral: id)
-        let destination = cache.repoDirectory(repo: repoID, kind: .model)
-
-        // Fast path: if this revision has been downloaded before, return the repo
-        // directory without any network calls.
-        if !useLatest,
-            cachedSnapshotDirectory(cache: cache, repo: repoID, revision: revision) != nil
-        {
-            return destination
-        }
-
-        do {
-            return try await hub.downloadSnapshot(
-                of: repoID,
-                to: destination,
-                revision: revision,
-                matching: ["*.safetensors", "*.json"],
-                progressHandler: progressHandler
-            )
-        } catch {
-            // Fall back to local cache if download fails (offline, unauthorized, etc.)
-            if let cached = cachedSnapshotDirectory(
-                cache: cache, repo: repoID, revision: revision)
-            {
-                return cached
-            }
-            throw error
-        }
+        modelDirectory = try await downloader.download(
+            id: id, revision: revision,
+            matching: ["*.safetensors", "*.json"],
+            useLatest: useLatest,
+            progressHandler: progressHandler)
     case .directory(let directory):
-        return directory
+        modelDirectory = directory
     }
+
+    let tokenizerDirectory: URL
+    switch configuration.tokenizerSource {
+    case .id(let id):
+        tokenizerDirectory = try await downloader.download(
+            id: id, revision: nil,
+            matching: ["*.json"],
+            useLatest: useLatest,
+            progressHandler: { _ in })
+    case .directory(let directory):
+        tokenizerDirectory = directory
+    case nil:
+        tokenizerDirectory = modelDirectory
+    }
+
+    return (modelDirectory, tokenizerDirectory)
 }
 
 /// Asynchronously loads the `EmbeddingModel` and its associated `Tokenizer`.
@@ -123,31 +115,20 @@ func prepareModelDirectory(
 /// structure is being built synchronously.
 ///
 /// - Parameters:
-///   - hub: The HubClient instance (defaults to `.default`).
+///   - downloader: The ``Downloader`` to use for fetching remote resources.
 ///   - configuration: The model configuration.
+///   - useLatest: When true, always checks the provider for updates.
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
-    from hub: HubClient = .default,
+    from downloader: any Downloader,
     configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> (EmbeddingModel, Tokenizer) {
-    let modelDirectory = try await prepareModelDirectory(
-        from: hub, configuration: configuration, useLatest: useLatest,
+    let (modelDirectory, tokenizerDirectory) = try await resolveDirectories(
+        from: downloader, configuration: configuration, useLatest: useLatest,
         progressHandler: progressHandler)
-
-    // Load tokenizer from model directory (or alternate tokenizer repo)
-    let tokenizerDirectory: URL
-    if let tokenizerId = configuration.tokenizerId {
-        tokenizerDirectory = try await prepareModelDirectory(
-            from: hub,
-            configuration: ModelConfiguration(id: tokenizerId),
-            useLatest: useLatest,
-            progressHandler: { _ in })
-    } else {
-        tokenizerDirectory = modelDirectory
-    }
 
     async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
     let model = try loadSynchronous(modelDirectory: modelDirectory, modelName: configuration.name)
@@ -234,34 +215,58 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 /// or tasks may need to access the embedding model simultaneously.
 ///
 /// - Parameters:
-///   - hub: The HubClient instance.
+///   - downloader: The ``Downloader`` to use for fetching remote resources.
 ///   - configuration: The model configuration.
+///   - useLatest: When true, always checks the provider for updates.
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
-    from hub: HubClient = .default,
+    from downloader: any Downloader,
     configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> ModelContainer {
-    let modelDirectory = try await prepareModelDirectory(
-        from: hub, configuration: configuration, useLatest: useLatest,
+    let (modelDirectory, tokenizerDirectory) = try await resolveDirectories(
+        from: downloader, configuration: configuration, useLatest: useLatest,
         progressHandler: progressHandler)
-
-    // Load tokenizer from model directory (or alternate tokenizer repo)
-    let tokenizerDirectory: URL
-    if let tokenizerId = configuration.tokenizerId {
-        tokenizerDirectory = try await prepareModelDirectory(
-            from: hub,
-            configuration: ModelConfiguration(id: tokenizerId),
-            useLatest: useLatest,
-            progressHandler: { _ in })
-    } else {
-        tokenizerDirectory = modelDirectory
-    }
 
     return try await ModelContainer(
         modelDirectory: modelDirectory,
         tokenizerDirectory: tokenizerDirectory,
         configuration: configuration)
+}
+
+/// Load an embedding model from a local directory.
+///
+/// No downloader is needed — the model and tokenizer are loaded from
+/// the given directory.
+///
+/// - Parameter directory: The local directory containing model files.
+/// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
+public func load(
+    from directory: URL
+) async throws -> (EmbeddingModel, Tokenizer) {
+    let name =
+        directory.deletingLastPathComponent().lastPathComponent + "/"
+        + directory.lastPathComponent
+    async let tokenizerTask = AutoTokenizer.from(directory: directory)
+    let model = try loadSynchronous(modelDirectory: directory, modelName: name)
+    let tokenizer = try await tokenizerTask
+    return (model, tokenizer)
+}
+
+/// Load an embedding model container from a local directory.
+///
+/// No downloader is needed — the model and tokenizer are loaded from
+/// the given directory.
+///
+/// - Parameter directory: The local directory containing model files.
+/// - Returns: A thread-safe `ModelContainer` instance.
+public func loadModelContainer(
+    from directory: URL
+) async throws -> ModelContainer {
+    try await ModelContainer(
+        modelDirectory: directory,
+        tokenizerDirectory: directory,
+        configuration: ModelConfiguration(directory: directory))
 }

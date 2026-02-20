@@ -1,6 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 
 /// A registry and configuration provider for embedding models.
 ///
@@ -42,35 +43,37 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
-    /// An optional alternate Hub ID to use specifically for loading the tokenizer.
+    /// Where to load the tokenizer from when it differs from the model directory.
     ///
-    /// Use this if the model weights and tokenizer configuration are hosted in different repositories.
-    public let tokenizerId: String?
+    /// - `.id`: download from a remote provider (requires a ``Downloader``)
+    /// - `.directory`: load from a local path
+    /// - `nil`: use the same directory as the model
+    public let tokenizerSource: TokenizerSource?
 
     /// Initializes a configuration using a Hub repository ID.
     /// - Parameters:
     ///   - id: The Hugging Face repo ID.
     ///   - revision: The Git revision to use (defaults to "main").
-    ///   - tokenizerId: Optional alternate repo for the tokenizer.
+    ///   - tokenizerSource: Optional alternate source for the tokenizer.
     public init(
         id: String,
         revision: String = "main",
-        tokenizerId: String? = nil
+        tokenizerSource: TokenizerSource? = nil
     ) {
         self.id = .id(id, revision: revision)
-        self.tokenizerId = tokenizerId
+        self.tokenizerSource = tokenizerSource
     }
 
     /// Initializes a configuration using a local directory.
     /// - Parameters:
     ///   - directory: The `URL` of the model on disk.
-    ///   - tokenizerId: Optional alternate repo for the tokenizer.
+    ///   - tokenizerSource: Optional alternate source for the tokenizer.
     public init(
         directory: URL,
-        tokenizerId: String? = nil
+        tokenizerSource: TokenizerSource? = nil
     ) {
         self.id = .directory(directory)
-        self.tokenizerId = tokenizerId
+        self.tokenizerSource = tokenizerSource
     }
 
     // MARK: - Registry Management

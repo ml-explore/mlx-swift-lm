@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HuggingFace
 import Tokenizers
 
 public enum ModelFactoryError: LocalizedError {
@@ -92,16 +91,8 @@ public protocol ModelFactory: Sendable {
     var modelRegistry: AbstractModelRegistry { get }
 
     func _load(
-        from hub: HubClient, configuration: ModelConfiguration,
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration
     ) async throws -> ModelContext
-
-    func _loadContainer(
-        from hub: HubClient, configuration: ModelConfiguration,
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> ModelContainer
 
 }
 
@@ -126,151 +117,202 @@ extension ModelFactory {
 
 }
 
-/// Default HubClient instance for downloading models.
-public let defaultHubClient: HubClient = .default
-
 extension ModelFactory {
 
-    /// Load a model identified by a ``ModelConfiguration`` and produce a ``ModelContext``.
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``ModelContext``.
     ///
-    /// This method returns a ``ModelContext``. See also
-    /// ``loadContainer(from:configuration:progressHandler:)`` for a method that
-    /// returns a ``ModelContainer``.
+    /// This resolves the configuration (downloading remote sources via the downloader)
+    /// and then loads the model from local files.
     ///
     /// ## See Also
-    /// - ``loadModel(from:id:progressHandler:)``
-    /// - ``loadModelContainer(from:id:progressHandler:)``
+    /// - ``loadModel(from:configuration:useLatest:progressHandler:)``
+    /// - ``loadModelContainer(from:configuration:useLatest:progressHandler:)``
     public func load(
-        from hub: HubClient = defaultHubClient, configuration: ModelConfiguration,
+        from downloader: any Downloader, configuration: ModelConfiguration,
         useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> sending ModelContext {
-        try await _load(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return try await _load(configuration: resolved)
     }
 
-    /// Load a model identified by a ``ModelConfiguration`` and produce a ``ModelContainer``.
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``ModelContainer``.
     public func loadContainer(
-        from hub: HubClient = defaultHubClient, configuration: ModelConfiguration,
+        from downloader: any Downloader, configuration: ModelConfiguration,
         useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelContainer {
-        try await _loadContainer(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        let context = try await _load(configuration: resolved)
+        return ModelContainer(context: context)
     }
 
-    public func _loadContainer(
-        from hub: HubClient = defaultHubClient, configuration: ModelConfiguration,
-        useLatest: Bool = false,
-        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    /// Load a model from a local directory, producing a ``ModelContext``.
+    ///
+    /// No downloader is needed — the model and tokenizer are loaded from
+    /// the given directory.
+    public func load(
+        from directory: URL
+    ) async throws -> sending ModelContext {
+        try await _load(configuration: .init(directory: directory))
+    }
+
+    /// Load a model from a local directory, producing a ``ModelContainer``.
+    public func loadContainer(
+        from directory: URL
     ) async throws -> ModelContainer {
-        let context = try await _load(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+        let context = try await _load(configuration: .init(directory: directory))
         return ModelContainer(context: context)
     }
 
 }
 
-/// Load a model given a ``ModelConfiguration``.
+/// Resolve a ``ModelConfiguration`` into a ``ResolvedModelConfiguration`` by
+/// downloading remote sources via a ``Downloader``.
 ///
-/// This will load and return a ``ModelContext``.  This holds the model and tokenzier without
-/// an `actor` providing an isolation context.  Use this call when you control the isolation context
-/// and can hold the ``ModelContext`` directly.
+/// This handles the `.id` vs `.directory` switch for the model source and
+/// resolves ``TokenizerSource`` for the tokenizer.
+public func resolve(
+    configuration: ModelConfiguration,
+    from downloader: any Downloader,
+    useLatest: Bool,
+    progressHandler: @Sendable @escaping (Progress) -> Void
+) async throws -> ResolvedModelConfiguration {
+    let modelDirectory: URL
+    switch configuration.id {
+    case .id(let id, let revision):
+        modelDirectory = try await downloader.download(
+            id: id, revision: revision,
+            matching: ["*.safetensors", "*.json"],
+            useLatest: useLatest,
+            progressHandler: progressHandler)
+    case .directory(let directory):
+        modelDirectory = directory
+    }
+
+    let tokenizerDirectory: URL
+    switch configuration.tokenizerSource {
+    case .id(let id):
+        tokenizerDirectory = try await downloader.download(
+            id: id, revision: nil,
+            matching: ["*.json"],
+            useLatest: useLatest,
+            progressHandler: { _ in })
+    case .directory(let directory):
+        tokenizerDirectory = directory
+    case nil:
+        tokenizerDirectory = modelDirectory
+    }
+
+    return configuration.resolved(
+        modelDirectory: modelDirectory,
+        tokenizerDirectory: tokenizerDirectory)
+}
+
+/// Load a model given a ``ModelConfiguration``, downloading via a ``Downloader``.
+///
+/// Returns a ``ModelContext`` holding the model and tokenizer without
+/// an `actor` providing an isolation context.
 ///
 /// - Parameters:
-///   - hub: optional HubClient -- by default uses ``defaultHubClient``
+///   - downloader: the ``Downloader`` to use for fetching remote resources
 ///   - configuration: a ``ModelConfiguration``
+///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContext``
 public func loadModel(
-    from hub: HubClient = defaultHubClient, configuration: ModelConfiguration,
+    from downloader: any Downloader, configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
     try await load {
         try await $0.load(
-            from: hub, configuration: configuration, useLatest: useLatest,
+            from: downloader, configuration: configuration, useLatest: useLatest,
             progressHandler: progressHandler)
     }
 }
 
-/// Load a model given a ``ModelConfiguration``.
+/// Load a model given a ``ModelConfiguration``, downloading via a ``Downloader``.
 ///
-/// This will load and return a ``ModelContainer``.  This holds a ``ModelContext``
+/// Returns a ``ModelContainer`` holding a ``ModelContext``
 /// inside an actor providing isolation control for the values.
 ///
 /// - Parameters:
-///   - hub: optional HubClient -- by default uses ``defaultHubClient``
+///   - downloader: the ``Downloader`` to use for fetching remote resources
 ///   - configuration: a ``ModelConfiguration``
-///   - useLatest: when true, always checks the Hub for the latest version
+///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(
-    from hub: HubClient = defaultHubClient, configuration: ModelConfiguration,
+    from downloader: any Downloader, configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
     try await load {
         try await $0.loadContainer(
-            from: hub, configuration: configuration, useLatest: useLatest,
+            from: downloader, configuration: configuration, useLatest: useLatest,
             progressHandler: progressHandler)
     }
 }
 
-/// Load a model given a Hugging Face identifier.
+/// Load a model given a model identifier, downloading via a ``Downloader``.
 ///
-/// This will load and return a ``ModelContext``.  This holds the model and tokenzier without
-/// an `actor` providing an isolation context.  Use this call when you control the isolation context
-/// and can hold the ``ModelContext`` directly.
+/// Returns a ``ModelContext`` holding the model and tokenizer without
+/// an `actor` providing an isolation context.
 ///
 /// - Parameters:
-///   - hub: optional HubClient -- by default uses ``defaultHubClient``
-///   - id: Hugging Face model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - id: model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - revision: revision to download (defaults to "main")
+///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContext``
 public func loadModel(
-    from hub: HubClient = defaultHubClient, id: String, revision: String = "main",
+    from downloader: any Downloader, id: String, revision: String = "main",
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
     try await load {
         try await $0.load(
-            from: hub, configuration: .init(id: id, revision: revision),
+            from: downloader, configuration: .init(id: id, revision: revision),
             useLatest: useLatest, progressHandler: progressHandler)
     }
 }
 
-/// Load a model given a Hugging Face identifier.
+/// Load a model given a model identifier, downloading via a ``Downloader``.
 ///
-/// This will load and return a ``ModelContainer``.  This holds a ``ModelContext``
+/// Returns a ``ModelContainer`` holding a ``ModelContext``
 /// inside an actor providing isolation control for the values.
 ///
 /// - Parameters:
-///   - hub: optional HubClient -- by default uses ``defaultHubClient``
-///   - id: Hugging Face model identifier, e.g "mlx-community/Qwen3-4B-4bit"
-///   - useLatest: when true, always checks the Hub for the latest version
+///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - id: model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - revision: revision to download (defaults to "main")
+///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(
-    from hub: HubClient = defaultHubClient, id: String, revision: String = "main",
+    from downloader: any Downloader, id: String, revision: String = "main",
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
     try await load {
         try await $0.loadContainer(
-            from: hub, configuration: .init(id: id, revision: revision),
+            from: downloader, configuration: .init(id: id, revision: revision),
             useLatest: useLatest, progressHandler: progressHandler)
     }
 }
 
-/// Load a model given a directory of configuration and weights.
+/// Load a model from a local directory of configuration and weights.
 ///
-/// This will load and return a ``ModelContext``.  This holds the model and tokenizer without
-/// an `actor` providing an isolation context.  Use this call when you control the isolation context
-/// and can hold the ``ModelContext`` directly.
+/// Returns a ``ModelContext`` holding the model and tokenizer without
+/// an `actor` providing an isolation context.
 ///
 /// - Parameters:
 ///   - directory: directory of configuration and weights
@@ -279,15 +321,13 @@ public func loadModel(
     from directory: URL
 ) async throws -> sending ModelContext {
     try await load {
-        try await $0.load(
-            from: .default, configuration: .init(directory: directory),
-            progressHandler: { _ in })
+        try await $0.load(from: directory)
     }
 }
 
-/// Load a model given a directory of configuration and weights.
+/// Load a model from a local directory of configuration and weights.
 ///
-/// This will load and return a ``ModelContainer``.  This holds a ``ModelContext``
+/// Returns a ``ModelContainer`` holding a ``ModelContext``
 /// inside an actor providing isolation control for the values.
 ///
 /// - Parameters:
@@ -297,9 +337,7 @@ public func loadModelContainer(
     from directory: URL
 ) async throws -> sending ModelContainer {
     try await load {
-        try await $0.loadContainer(
-            from: .default, configuration: .init(directory: directory),
-            progressHandler: { _ in })
+        try await $0.loadContainer(from: directory)
     }
 }
 

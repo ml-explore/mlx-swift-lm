@@ -3,6 +3,7 @@
 import Foundation
 import MLXLLM
 import MLXLMCommon
+import MLXLMHuggingFace
 import MLXVLM
 
 enum IntegrationTestModelIDs {

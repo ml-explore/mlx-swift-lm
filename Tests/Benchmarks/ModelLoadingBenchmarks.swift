@@ -1,9 +1,10 @@
 import Foundation
-import HuggingFace
 import MLX
 import MLXEmbedders
+import MLXEmbeddersHuggingFace
 import MLXLLM
 import MLXLMCommon
+import MLXLMHuggingFace
 import MLXVLM
 import Testing
 
@@ -46,11 +47,10 @@ struct ModelLoadingBenchmarks {
     @Test(.enabled(if: benchmarksEnabled))
     func loadLLM() async throws {
         let modelId = "mlx-community/Qwen3-0.6B-4bit"
-        let hub = HubClient.default
         let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
-        _ = try await LLMModelFactory.shared.load(from: hub, configuration: config) { _ in }
+        _ = try await LLMModelFactory.shared.load(configuration: config) { _ in }
         Memory.clearCache()
 
         // Benchmark multiple runs
@@ -61,7 +61,6 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await LLMModelFactory.shared.load(
-                from: hub,
                 configuration: config
             ) { _ in }
 
@@ -81,11 +80,10 @@ struct ModelLoadingBenchmarks {
     @Test(.enabled(if: benchmarksEnabled))
     func loadVLM() async throws {
         let modelId = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
-        let hub = HubClient.default
         let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
-        _ = try await VLMModelFactory.shared.load(from: hub, configuration: config) { _ in }
+        _ = try await VLMModelFactory.shared.load(configuration: config) { _ in }
         Memory.clearCache()
 
         // Benchmark multiple runs
@@ -96,7 +94,6 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await VLMModelFactory.shared.load(
-                from: hub,
                 configuration: config
             ) { _ in }
 
@@ -116,11 +113,10 @@ struct ModelLoadingBenchmarks {
     @Test(.enabled(if: benchmarksEnabled))
     func loadEmbedding() async throws {
         let config = MLXEmbedders.ModelConfiguration.nomic_text_v1_5
-        let hub = HubClient.default
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await loadModelContainer(
-            hub: hub, configuration: config
+            configuration: config
         ) { _ in }
         Memory.clearCache()
 
@@ -132,7 +128,6 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await loadModelContainer(
-                hub: hub,
                 configuration: config
             ) { _ in }
 

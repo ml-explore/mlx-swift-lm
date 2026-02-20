@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HuggingFace
 import MLX
 import MLXLMCommon
 import Tokenizers
@@ -281,14 +280,9 @@ public final class VLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        from hub: HubClient, configuration: ModelConfiguration,
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration
     ) async throws -> sending ModelContext {
-        // download weights and config
-        let modelDirectory = try await downloadModel(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+        let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -327,23 +321,11 @@ public final class VLMModelFactory: ModelFactory {
             eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
         }
 
-        // Create mutable configuration with loaded EOS token IDs
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
 
-        // Load tokenizer from model directory (or alternate tokenizer repo)
-        let tokenizerDirectory: URL
-        if let tokenizerId = configuration.tokenizerId {
-            tokenizerDirectory = try await downloadModel(
-                from: hub,
-                configuration: ModelConfiguration(id: tokenizerId),
-                progressHandler: { _ in })
-        } else {
-            tokenizerDirectory = modelDirectory
-        }
-
         // Load tokenizer, processor config, and weights in parallel
-        async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
+        async let tokenizerTask = AutoTokenizer.from(directory: configuration.tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
         try loadWeights(
@@ -377,8 +359,16 @@ public final class VLMModelFactory: ModelFactory {
             configuration: processorConfigData,
             processorType: processorType, tokenizer: tokenizer)
 
+        // Build a ModelConfiguration for the ModelContext
+        let modelConfig = ModelConfiguration(
+            directory: modelDirectory,
+            defaultPrompt: configuration.defaultPrompt,
+            extraEOSTokens: mutableConfiguration.extraEOSTokens,
+            eosTokenIds: mutableConfiguration.eosTokenIds,
+            toolCallFormat: mutableConfiguration.toolCallFormat)
+
         return .init(
-            configuration: mutableConfiguration, model: model, processor: processor,
+            configuration: modelConfig, model: model, processor: processor,
             tokenizer: tokenizer)
     }
 

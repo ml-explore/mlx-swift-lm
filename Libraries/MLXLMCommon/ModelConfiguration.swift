@@ -23,8 +23,12 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
-    /// pull the tokenizer from an alternate id
-    public let tokenizerId: String?
+    /// Where to load the tokenizer from when it differs from the model directory.
+    ///
+    /// - `.id`: download from a remote provider (requires a ``Downloader``)
+    /// - `.directory`: load from a local path
+    /// - `nil`: use the same directory as the model
+    public let tokenizerSource: TokenizerSource?
 
     /// A reasonable default prompt for the model
     public var defaultPrompt: String
@@ -40,13 +44,13 @@ public struct ModelConfiguration: Sendable {
 
     public init(
         id: String, revision: String = "main",
-        tokenizerId: String? = nil,
+        tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         toolCallFormat: ToolCallFormat? = nil
     ) {
         self.id = .id(id, revision: revision)
-        self.tokenizerId = tokenizerId
+        self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.toolCallFormat = toolCallFormat
@@ -54,18 +58,36 @@ public struct ModelConfiguration: Sendable {
 
     public init(
         directory: URL,
-        tokenizerId: String? = nil,
+        tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil
     ) {
         self.id = .directory(directory)
-        self.tokenizerId = tokenizerId
+        self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+    }
+
+    /// Maps this configuration's behavioral properties into a
+    /// ``ResolvedModelConfiguration`` with the given directories.
+    ///
+    /// This is a pure data mapping with no I/O. The directories should
+    /// already be resolved (downloaded or local) before calling this method.
+    public func resolved(
+        modelDirectory: URL, tokenizerDirectory: URL
+    ) -> ResolvedModelConfiguration {
+        ResolvedModelConfiguration(
+            modelDirectory: modelDirectory,
+            tokenizerDirectory: tokenizerDirectory,
+            name: name,
+            defaultPrompt: defaultPrompt,
+            extraEOSTokens: extraEOSTokens,
+            eosTokenIds: eosTokenIds,
+            toolCallFormat: toolCallFormat)
     }
 
 }

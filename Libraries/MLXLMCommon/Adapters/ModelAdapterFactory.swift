@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import HuggingFace
 import MLX
 import MLXNN
 
@@ -34,7 +33,7 @@ private struct ModelAdapterBaseConfiguration: Decodable {
     }
 }
 
-/// A factory responsible for loading and creating model adapters from hub configurations.
+/// A factory responsible for loading and creating model adapters from configurations.
 public final class ModelAdapterFactory: Sendable {
 
     /// Shared instance of the adapter factory.
@@ -63,20 +62,27 @@ public final class ModelAdapterFactory: Sendable {
         self.registry = registry
     }
 
-    /// Loads a model adapter from the hub using the provided model configuration.
+    /// Loads a model adapter using a ``Downloader`` and the provided model configuration.
     ///
     /// This method fetches the adapter configuration and weights, decodes the appropriate
     /// fine-tuning format, and initializes a `ModelAdapter` accordingly.
     public func load(
-        from hub: HubClient = .default,
+        from downloader: any Downloader,
         configuration: ModelConfiguration,
         useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelAdapter {
-        let adapterDirectory = try await downloadModel(
-            from: hub, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler
-        )
+        let adapterDirectory: URL
+        switch configuration.id {
+        case .id(let id, let revision):
+            adapterDirectory = try await downloader.download(
+                id: id, revision: revision,
+                matching: ["*.safetensors", "*.json"],
+                useLatest: useLatest,
+                progressHandler: progressHandler)
+        case .directory(let directory):
+            adapterDirectory = directory
+        }
 
         let configurationURL = adapterDirectory.appending(component: "adapter_config.json")
         let configurationData = try Data(contentsOf: configurationURL)
