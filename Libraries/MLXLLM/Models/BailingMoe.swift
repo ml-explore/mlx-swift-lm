@@ -89,7 +89,7 @@ class BailingMoeAttention: Module {
     @ModuleInfo(key: "query_layernorm") var qNorm: RMSNorm?
     @ModuleInfo(key: "key_layernorm") var kNorm: RMSNorm?
 
-    let rope: RoPE
+    let rope: OffsetLayer
 
     init(_ args: BailingMoeConfiguration) {
         self.args = args
@@ -114,9 +114,11 @@ class BailingMoeAttention: Module {
             _kNorm.wrappedValue = nil
         }
 
-        self.rope = RoPE(
-            dimensions: ropeDim, traditional: false, base: args.ropeTheta,
-            scale: 1.0)
+        self.rope = initializeRope(
+            dims: ropeDim, base: args.ropeTheta,
+            traditional: false, scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: nil
+        )
     }
 
     func callAsFunction(
@@ -147,8 +149,8 @@ class BailingMoeAttention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

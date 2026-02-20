@@ -19,7 +19,7 @@ class MiMoAttention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: RoPE
+    let rope: OffsetLayer
 
     public init(_ args: MiMoConfiguration) {
         self.args = args
@@ -36,22 +36,11 @@ class MiMoAttention: Module {
         _wv.wrappedValue = Linear(dim, kvHeads * headDim, bias: true)
         _wo.wrappedValue = Linear(heads * headDim, dim, bias: false)
 
-        let ropeScale: Float
-        if let ropeScaling = args.ropeScaling, ropeScaling["type"] == .string("linear"),
-            let factor = ropeScaling["factor"]
-        {
-            if let v = factor.asFloat() {
-                ropeScale = 1 / v
-            } else {
-                fatalError("ropeScaling.factor must be a float")
-            }
-        } else {
-            ropeScale = 1
-        }
-
-        self.rope = RoPE(
-            dimensions: headDim, traditional: args.ropeTraditional, base: args.ropeTheta,
-            scale: ropeScale)
+        self.rope = initializeRope(
+            dims: headDim, base: args.ropeTheta,
+            traditional: args.ropeTraditional, scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: nil
+        )
     }
 
     public func callAsFunction(
@@ -72,8 +61,8 @@ class MiMoAttention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

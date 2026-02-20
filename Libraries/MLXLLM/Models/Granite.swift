@@ -21,6 +21,7 @@ class GraniteAttention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
+    // TODO dkoski initialize_rope
     let rope: RoPE
 
     public init(_ args: GraniteConfiguration) {

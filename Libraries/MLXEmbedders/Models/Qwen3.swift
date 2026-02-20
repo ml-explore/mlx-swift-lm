@@ -31,7 +31,7 @@ private class Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     /// Rotary Positional Embedding logic
-    let rope: RoPE
+    let rope: OffsetLayer
 
     /// Initializes the Attention module.
     /// - Parameter args: Configuration object containing `hiddenSize`, `attentionHeads`, `headDim`, etc.
@@ -56,28 +56,10 @@ private class Attention: Module {
         _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
-        // Handle Rotary Embedding Scaling (Linear scaling logic)
-        var ropeScale: Float = 1
-        if let ropeScaling = args.ropeScaling,
-            let typeValue = ropeScaling["type"],
-            case .string(let type) = typeValue, type == "linear",
-            let factorValue = ropeScaling["factor"]
-        {
-            switch factorValue {
-            case .float(let v):
-                ropeScale = 1 / v
-            case .string(let s) where Float(s) != nil:
-                ropeScale = 1 / Float(s)!
-            default:
-                break
-            }
-        }
-
-        self.rope = RoPE(
-            dimensions: headDim,
-            traditional: false,
-            base: args.ropeTheta,
-            scale: ropeScale
+        self.rope = initializeRope(
+            dims: headDim, base: args.ropeTheta,
+            traditional: false, scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: nil
         )
     }
 
@@ -111,8 +93,8 @@ private class Attention: Module {
             keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         // 4. Efficient Scaled Dot-Product Attention

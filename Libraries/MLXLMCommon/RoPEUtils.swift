@@ -13,7 +13,7 @@ public class Llama3RoPE: Module, OffsetLayer {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
-    let freqs: MLXArray
+    let _freqs: MLXArray
 
     init(
         dims: Int,
@@ -57,7 +57,7 @@ public class Llama3RoPE: Module, OffsetLayer {
             (oldContextLen / wavelens - lowFreqFactor) / (highFreqFactor - lowFreqFactor)
         let smoothFreqs = frequencies / ((1 - smoothFactors) / factor + smoothFactors)
 
-        self.freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
+        self._freqs = MLX.where(isMediumFreq, smoothFreqs, frequencies)
         super.init()
     }
 
@@ -69,7 +69,7 @@ public class Llama3RoPE: Module, OffsetLayer {
             base: nil,
             scale: 1.0,
             offset: offset,
-            freqs: freqs
+            freqs: _freqs
         )
     }
 }
@@ -182,6 +182,8 @@ public class YarnRoPE: Module, OffsetLayer {
     }
 }
 
+private let yarnTypes: Set = ["yarn", "deepseek_yarn", "telechat3-yarn"]
+
 public func initializeRope(
     dims: Int,
     base: Float,
@@ -215,7 +217,7 @@ public func initializeRope(
             base: base,
             scalingConfig: scalingConfig
         )
-    } else if ropeType == "yarn" {
+    } else if yarnTypes.contains(ropeType) {
         let factor = scalingConfig?["factor"]?.asFloat() ?? 32.0
         let origMax = scalingConfig?["original_max_position_embeddings"]?.asInt() ?? 4096
         let betaFast = scalingConfig?["beta_fast"]?.asFloat() ?? 32.0

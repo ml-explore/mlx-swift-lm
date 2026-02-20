@@ -84,72 +84,6 @@ private func yarnFindCorrectionRange(
     return (max(low, 0), min(high, dim - 1))
 }
 
-private func yarnGetMScale(scale: Float = 1, mscale: Float = 1) -> Float {
-    return scale <= 1 ? 1.0 : 0.1 * mscale * log(scale) + 1.0
-}
-
-private func yarnLinearRampMask(minVal: Float, maxVal: Float, dim: Int) -> MLXArray {
-    let updatedMaxVal = minVal == maxVal ? maxVal + 0.001 : maxVal
-    let linearFunc = (MLXArray(0 ..< dim) - minVal) / (updatedMaxVal - minVal)
-    return clip(linearFunc, min: 0, max: 1)
-}
-
-class DeepseekV3YarnRotaryEmbedding: Module {
-    var mscale: Float
-    let dim: Int
-    let maxPositionEmbeddings: Int
-    let base: Float
-    let scalingFactor: Float
-    let originalMaxPositionEmbeddings: Int
-    let betaFast: Float
-    let betaSlow: Float
-    private var _freqs: MLXArray
-
-    init(
-        dim: Int,
-        maxPositionEmbeddings: Int = 2048,
-        base: Float = 10000,
-        scalingFactor: Float = 1.0,
-        originalMaxPositionEmbeddings: Int = 4096,
-        betaFast: Float = 32,
-        betaSlow: Float = 1,
-        mscale: Float = 1,
-        mscaleAllDim: Float = 0
-    ) {
-        self.mscale =
-            yarnGetMScale(scale: scalingFactor, mscale: mscale)
-            / yarnGetMScale(scale: scalingFactor, mscale: mscaleAllDim)
-        self.dim = dim
-        self.maxPositionEmbeddings = maxPositionEmbeddings
-        self.base = base
-        self.scalingFactor = scalingFactor
-        self.originalMaxPositionEmbeddings = originalMaxPositionEmbeddings
-        self.betaFast = betaFast
-        self.betaSlow = betaSlow
-        let freqExtra = base ** (MLXArray(stride(from: 0, to: dim, by: 2)) / dim)
-        let freqInter = scalingFactor * base ** (MLXArray(stride(from: 0, to: dim, by: 2)) / dim)
-        let (low, high) = yarnFindCorrectionRange(
-            lowRot: betaFast, highRot: betaSlow, dim: Float(dim), base: base,
-            maxPositionEmbeddings: Float(originalMaxPositionEmbeddings))
-
-        let freqMask = 1.0 - yarnLinearRampMask(minVal: low, maxVal: high, dim: dim / 2)
-
-        self._freqs = (freqInter * freqExtra) / (freqInter * freqMask + freqExtra * (1 - freqMask))
-    }
-
-    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        MLXFast.RoPE(
-            self.mscale != 1.0 ? self.mscale * x : x,
-            dimensions: x.shape.last ?? 0,
-            traditional: true,
-            base: nil,
-            scale: 1.0,
-            offset: offset,
-            freqs: self._freqs
-        )
-    }
-}
-
 private func clippedSilu(_ x: MLXArray) -> MLXArray {
     clip(x * sigmoid(x), min: -100, max: 100)
 }
@@ -168,7 +102,7 @@ class DeepseekV3Attention: Module {
     var qHeadDim: Int
     var scale: Float
 
-    let rope: DeepseekV3YarnRotaryEmbedding
+    let rope: OffsetLayer
     @ModuleInfo(key: "q_proj") var qProj: Linear?
     @ModuleInfo(key: "q_a_proj") var qAProj: Linear?
     @ModuleInfo(key: "q_a_layernorm") var qALayerNorm: RMSNorm?
@@ -219,33 +153,9 @@ class DeepseekV3Attention: Module {
         self._oProj.wrappedValue = Linear(
             numHeads * vHeadDim, hiddenSize, bias: config.attentionBias)
 
-        guard let ropeScaling = config.ropeScaling,
-            case .float(let scalingFactor) = ropeScaling["factor"],
-            case .int(let originalMaxPositionEmbeddings) = ropeScaling[
-                "original_max_position_embeddings"]
-                ?? .int(4096),
-            case .float(let betaFast) = ropeScaling["beta_fast"] ?? .float(32),
-            case .float(let betaSlow) = ropeScaling["beta_slow"] ?? .float(1),
-            case .float(var mscale) = ropeScaling["mscale"] ?? .float(1),
-            case .float(let mscaleAllDim) = ropeScaling["mscale_all_dim"] ?? .float(0)
-        else {
-            self.rope = DeepseekV3YarnRotaryEmbedding(dim: qkRopeHeadDim, base: ropeTheta)
-            return
-        }
-        if mscaleAllDim != 0 {
-            mscale = yarnGetMScale(scale: scalingFactor, mscale: mscaleAllDim)
-            self.scale = self.scale * mscale * mscale
-        }
-
-        self.rope = DeepseekV3YarnRotaryEmbedding(
-            dim: qkRopeHeadDim, maxPositionEmbeddings: maxPositionEmbeddings,
-            base: ropeTheta,
-            scalingFactor: scalingFactor,
-            originalMaxPositionEmbeddings: originalMaxPositionEmbeddings,
-            betaFast: betaFast,
-            betaSlow: betaSlow,
-            mscale: mscale,
-            mscaleAllDim: mscaleAllDim)
+        self.rope = initializeRope(
+            dims: qkRopeHeadDim, base: ropeTheta, traditional: true,
+            scalingConfig: config.ropeScaling, maxPositionEmbeddings: maxPositionEmbeddings)
     }
 
     func callAsFunction(
@@ -282,8 +192,8 @@ class DeepseekV3Attention: Module {
             (keys, values) = cache.update(
                 keys: concatenated([kNope, kPe], axis: -1), values: values)
         } else {
-            qPe = self.rope(qPe)
-            kPe = self.rope(kPe)
+            qPe = self.rope(qPe, offset: 0)
+            kPe = self.rope(kPe, offset: 0)
             kPe = repeated(kPe, count: numHeads, axis: 1)
             keys = concatenated([kNope, kPe], axis: -1)
         }
