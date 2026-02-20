@@ -34,7 +34,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
         .package(url: "https://github.com/DePasqualeOrg/swift-tokenizers.git", from: "0.1.0"),
-        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.7.0"),
+        .package(
+            url: "https://github.com/DePasqualeOrg/swift-huggingface.git", branch: "optimizations"),
     ],
     targets: [
         .target(
