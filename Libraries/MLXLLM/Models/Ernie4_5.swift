@@ -71,6 +71,7 @@ class Ernie45Attention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
+    // TODO dkoski initialize_rope
     let rope: RoPE
 
     public init(_ args: Ernie45Configuration) {

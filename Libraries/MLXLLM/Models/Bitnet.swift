@@ -276,6 +276,7 @@ class BitnetAttention: Module {
 
     @ModuleInfo(key: "attn_sub_norm") var attnSubNorm: RMSNorm
 
+    // TODO dkoski initialize_rope
     let rope: RoPE
 
     init(_ args: BitnetConfiguration) {
