@@ -66,6 +66,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// OpenAI Harmony format with channel-based tool dispatch.
+    /// Example: `<|start|>assistant<|channel|>commentary to=functions.name <|constrain|>json<|message|>{...}<|call|>`
+    case harmony
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -87,6 +91,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .harmony:
+            return HarmonyToolCallParser()
         }
     }
 
@@ -108,6 +114,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
         if type.hasPrefix("glm4") {
             return .glm4
+        }
+
+        if type.hasPrefix("gpt_oss") {
+            return .harmony
         }
 
         // Gemma
