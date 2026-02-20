@@ -6,6 +6,8 @@ import MLXLMCommon
 import MLXNN
 import Tokenizers
 
+// port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_vl
+
 // MARK: - Common Utilities for Qwen 2 VL and Qwen 2.5 VL
 
 private func debug(_ message: @autoclosure () -> String) {

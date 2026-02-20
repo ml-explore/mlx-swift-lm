@@ -5,6 +5,8 @@
 //  Created by Sachin Desai on 2024/4/27.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/openelm.py
+
 import Foundation
 import MLX
 import MLXLMCommon

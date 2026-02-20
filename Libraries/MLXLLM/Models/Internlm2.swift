@@ -1,5 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
+// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm2.py
+
 import Foundation
 import MLX
 import MLXLMCommon

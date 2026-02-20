@@ -5,7 +5,7 @@
 //  Created by Max Kupriianov on 28.06.2025.
 //
 
-// Based on https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma3n.py
+// Based on https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma3n.py
 
 import Foundation
 import MLX

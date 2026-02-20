@@ -5,6 +5,8 @@
 //  Created by John Mai on 2025/7/12.
 //
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/lfm2.py
+
 import Foundation
 import MLX
 import MLXLMCommon

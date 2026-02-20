@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-// Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/phimoe.py
+// Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/phimoe.py
 
 public struct PhiMoEConfiguration: Codable, Sendable {
     var modelType: String = "phimoe"
