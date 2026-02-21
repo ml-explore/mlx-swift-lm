@@ -145,6 +145,7 @@ let package = Package(
             dependencies: [
                 "MLXLLM",
                 "MLXVLM",
+                "MLXEmbedders",
                 "MLXLMCommon",
             ],
             path: "Tests/Benchmarks",

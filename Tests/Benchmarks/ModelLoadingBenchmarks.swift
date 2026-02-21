@@ -1,6 +1,7 @@
 import Foundation
 import Hub
 import MLX
+import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
@@ -46,7 +47,7 @@ struct ModelLoadingBenchmarks {
     func loadLLM() async throws {
         let modelId = "mlx-community/Qwen3-0.6B-4bit"
         let hub = HubApi()
-        let config = ModelConfiguration(id: modelId)
+        let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await LLMModelFactory.shared.load(hub: hub, configuration: config) { _ in }
@@ -81,7 +82,7 @@ struct ModelLoadingBenchmarks {
     func loadVLM() async throws {
         let modelId = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
         let hub = HubApi()
-        let config = ModelConfiguration(id: modelId)
+        let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await VLMModelFactory.shared.load(hub: hub, configuration: config) { _ in }
@@ -108,5 +109,41 @@ struct ModelLoadingBenchmarks {
         }
 
         BenchmarkStats(times: times).printSummary(label: "VLM load")
+    }
+
+    /// Benchmark embedding model loading
+    /// Tests: parallel tokenizer/weights, single config.json read
+    @Test(.enabled(if: benchmarksEnabled))
+    func loadEmbedding() async throws {
+        let config = MLXEmbedders.ModelConfiguration.nomic_text_v1_5
+        let hub = HubApi()
+
+        // Warm-up run: ensure model is downloaded and caches are primed
+        _ = try await loadModelContainer(
+            hub: hub, configuration: config
+        ) { _ in }
+        Memory.clearCache()
+
+        // Benchmark multiple runs
+        let runs = 7
+        var times: [Double] = []
+
+        for i in 1 ... runs {
+            let start = CFAbsoluteTimeGetCurrent()
+
+            _ = try await loadModelContainer(
+                hub: hub,
+                configuration: config
+            ) { _ in }
+
+            let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            times.append(elapsed)
+            print("Embedding load run \(i): \(String(format: "%.0f", elapsed))ms")
+
+            // Clear GPU cache to ensure independent measurements
+            Memory.clearCache()
+        }
+
+        BenchmarkStats(times: times).printSummary(label: "Embedding load")
     }
 }
