@@ -26,10 +26,10 @@ let package = Package(
             targets: ["MLXEmbedders"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
+        .package(url: "https://github.com/Joannis/mlx-swift.git", branch: "jo/linux-cuda"),
         .package(
-            url: "https://github.com/huggingface/swift-transformers",
-            .upToNextMinor(from: "1.1.6")
+            url: "https://github.com/Joannis/swift-transformers",
+            branch: "jo/localized-comments"
         ),
     ],
     targets: [
@@ -38,6 +38,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
@@ -55,6 +56,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
@@ -87,6 +89,7 @@ let package = Package(
             name: "MLXEmbedders",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .target(name: "MLXLMCommon"),

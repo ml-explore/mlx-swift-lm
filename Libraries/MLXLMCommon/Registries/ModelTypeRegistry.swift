@@ -10,15 +10,15 @@ public actor ModelTypeRegistry {
     }
 
     /// Creates a registry with given creators.
-    public init(creators: [String: (Data) throws -> any LanguageModel]) {
+    public init(creators: [String: @Sendable (Data) throws -> any LanguageModel]) {
         self.creators = creators
     }
 
-    private var creators: [String: (Data) throws -> any LanguageModel]
+    private var creators: [String: @Sendable (Data) throws -> any LanguageModel]
 
     /// Add a new model to the type registry.
     public func registerModelType(
-        _ type: String, creator: @escaping (Data) throws -> any LanguageModel
+        _ type: String, creator: @escaping @Sendable (Data) throws -> any LanguageModel
     ) {
         creators[type] = creator
     }

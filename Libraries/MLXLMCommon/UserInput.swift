@@ -1,10 +1,14 @@
 // Copyright © 2024 Apple Inc.
 
-@preconcurrency import AVFoundation
-import CoreImage
 import Foundation
 import MLX
 import Tokenizers
+
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+    @preconcurrency import AVFoundation
+    import CoreImage
+    import CoreGraphics
+#endif
 
 public typealias Message = [String: any Sendable]
 
@@ -40,111 +44,141 @@ public struct UserInput {
         }
     }
 
-    public struct VideoFrame {
-        public let frame: CIImage
-        public let timeStamp: CMTime
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        public struct VideoFrame {
+            public let frame: CIImage
+            public let timeStamp: CMTime
 
-        public init(frame: CIImage, timeStamp: CMTime) {
-            self.frame = frame
-            self.timeStamp = timeStamp
-        }
-    }
-
-    /// Representation of a video resource.
-    public enum Video {
-        case avAsset(AVAsset)
-        case url(URL)
-        /// Useful for decoded frames held in memory
-        case frames([VideoFrame])
-
-        @available(
-            *, deprecated,
-            message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
-        )
-        public func asAVAsset() -> AVAsset {
-            switch self {
-            case .avAsset(let asset):
-                return asset
-            case .url(let url):
-                return AVAsset(url: url)
-            case .frames:
-                fatalError(
-                    "calling asAVAsset() on Video Input with VideoFames provided is unsupported and deprecated - please use MediaProcessing.asProcessedSequence() instead"
-                )
+            public init(frame: CIImage, timeStamp: CMTime) {
+                self.frame = frame
+                self.timeStamp = timeStamp
             }
         }
+    #endif
+
+    /// Representation of a video resource.
+    public enum Video: Sendable {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            case avAsset(AVAsset)
+            case frames([VideoFrame])
+        #endif
+        case url(URL)
+
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            @available(
+                *, deprecated,
+                message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
+            )
+            public func asAVAsset() -> AVAsset {
+                switch self {
+                case .avAsset(let asset):
+                    return asset
+                case .url(let url):
+                    return AVAsset(url: url)
+                case .frames:
+                    fatalError(
+                        "calling asAVAsset() on Video Input with VideoFames provided is unsupported and deprecated - please use MediaProcessing.asProcessedSequence() instead"
+                    )
+                }
+            }
+        #endif
     }
 
     /// Representation of an image resource.
-    public enum Image {
-        case ciImage(CIImage)
+    public enum Image: Sendable {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            case ciImage(CIImage)
+        #endif
         case url(URL)
         case array(MLXArray)
 
-        public func asCIImage() throws -> CIImage {
-            switch self {
-            case .ciImage(let image):
-                return image
-
-            case .url(let url):
-                if let image = CIImage(contentsOf: url) {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            public func asCIImage() throws -> CIImage {
+                switch self {
+                case .ciImage(let image):
                     return image
+
+                case .url(let url):
+                    if let image = CIImage(contentsOf: url) {
+                        return image
+                    }
+                    throw UserInputError.unableToLoad(url)
+
+                case .array(let array):
+                    guard array.ndim == 3 else {
+                        throw UserInputError.arrayError(
+                            "array must have 3 dimensions: \(array.ndim)")
+                    }
+
+                    var array = array
+
+                    // convert to 0 .. 255
+                    if array.max().item(Float.self) <= 1.0 {
+                        array = array * 255
+                    }
+
+                    // planar -> pixels
+                    switch array.dim(0) {
+                    case 3, 4:
+                        // channels first (planar)
+                        array = array.transposed(1, 2, 0)
+                    default:
+                        break
+                    }
+
+                    // 4 components per pixel
+                    switch array.dim(-1) {
+                    case 3:
+                        // pad to 4 bytes per pixel
+                        array = padded(array, widths: [0, 0, [0, 1]], value: MLXArray(255))
+                    case 4:
+                        // good
+                        break
+                    default:
+                        throw UserInputError.arrayError(
+                            "channel dimension must be last and 3/4: \(array.shape)")
+                    }
+
+                    let arrayData = array.asData()
+                    let (H, W, _) = array.shape3
+                    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+
+                    return CIImage(
+                        bitmapData: arrayData.data, bytesPerRow: W * 4,
+                        size: .init(width: W, height: H),
+                        format: .RGBA8, colorSpace: cs)
                 }
-                throw UserInputError.unableToLoad(url)
-
-            case .array(let array):
-                guard array.ndim == 3 else {
-                    throw UserInputError.arrayError("array must have 3 dimensions: \(array.ndim)")
-                }
-
-                var array = array
-
-                // convert to 0 .. 255
-                if array.max().item(Float.self) <= 1.0 {
-                    array = array * 255
-                }
-
-                // planar -> pixels
-                switch array.dim(0) {
-                case 3, 4:
-                    // channels first (planar)
-                    array = array.transposed(1, 2, 0)
-                default:
-                    break
-                }
-
-                // 4 components per pixel
-                switch array.dim(-1) {
-                case 3:
-                    // pad to 4 bytes per pixel
-                    array = padded(array, widths: [0, 0, [0, 1]], value: MLXArray(255))
-                case 4:
-                    // good
-                    break
-                default:
-                    throw UserInputError.arrayError(
-                        "channel dimension must be last and 3/4: \(array.shape)")
-                }
-
-                let arrayData = array.asData()
-                let (H, W, _) = array.shape3
-                let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-
-                return CIImage(
-                    bitmapData: arrayData.data, bytesPerRow: W * 4,
-                    size: .init(width: W, height: H),
-                    format: .RGBA8, colorSpace: cs)
             }
-        }
+        #endif
     }
 
     /// Representation of processing to apply to media.
     public struct Processing: Sendable {
-        public var resize: CGSize?
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            public var resize: CGSize?
+            public var resizeWidth: Int? { resize.map { Int($0.width) } }
+            public var resizeHeight: Int? { resize.map { Int($0.height) } }
 
-        public init(resize: CGSize? = nil) {
-            self.resize = resize
-        }
+            public init(resize: CGSize? = nil) {
+                self.resize = resize
+            }
+
+            public init(resizeWidth: Int? = nil, resizeHeight: Int? = nil) {
+                if let width = resizeWidth, let height = resizeHeight {
+                    self.resize = CGSize(width: width, height: height)
+                } else {
+                    self.resize = nil
+                }
+            }
+        #else
+            public var resizeWidth: Int?
+            public var resizeHeight: Int?
+
+            public init(resizeWidth: Int? = nil, resizeHeight: Int? = nil) {
+                self.resizeWidth = resizeWidth
+                self.resizeHeight = resizeHeight
+            }
+        #endif
     }
 
     /// The prompt to evaluate.
@@ -346,11 +380,11 @@ internal enum UserInputError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notImplemented:
-            return String(localized: "This functionality is not implemented.")
+            return "This functionality is not implemented."
         case .unableToLoad(let url):
-            return String(localized: "Unable to load image from URL: \(url.path).")
+            return "Unable to load image from URL: \(url.path)."
         case .arrayError(let message):
-            return String(localized: "Error processing image array: \(message).")
+            return "Error processing image array: \(message)."
         }
     }
 }
