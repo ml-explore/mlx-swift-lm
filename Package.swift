@@ -26,7 +26,7 @@ let package = Package(
             targets: ["MLXEmbedders"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/Joannis/mlx-swift.git", branch: "jo/mlxfast-linux"),
+        .package(url: "https://github.com/Joannis/mlx-swift.git", branch: "jo/linux-cuda"),
         .package(
             url: "https://github.com/Joannis/swift-transformers",
             branch: "jo/localized-comments"
