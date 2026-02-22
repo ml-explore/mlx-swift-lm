@@ -4,7 +4,7 @@ import Foundation
 
 public actor ModelTypeRegistry<T> {
 
-    private var creators: [String: (Data) throws -> T]
+    private var creators: [String: @Sendable (Data) throws -> T]
 
     /// Creates an empty registry.
     public init() {
@@ -12,13 +12,13 @@ public actor ModelTypeRegistry<T> {
     }
 
     /// Creates a registry with given creators.
-    public init(creators: [String: (Data) throws -> T]) {
+    public init(creators: [String: @Sendable (Data) throws -> T]) {
         self.creators = creators
     }
 
     /// Add a new model to the type registry.
     public func registerModelType(
-        _ type: String, creator: @escaping (Data) throws -> T
+        _ type: String, creator: @escaping @Sendable (Data) throws -> T
     ) {
         creators[type] = creator
     }
