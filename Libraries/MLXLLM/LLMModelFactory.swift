@@ -8,8 +8,8 @@ import Tokenizers
 
 /// Creates a function that decodes configuration data and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
-    _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
-) -> (Data) throws -> M {
+    _ configurationType: C.Type, _ modelInit: @escaping @Sendable (C) -> M
+) -> @Sendable (Data) throws -> M {
     { data in
         let configuration = try JSONDecoder().decode(C.self, from: data)
         return modelInit(configuration)

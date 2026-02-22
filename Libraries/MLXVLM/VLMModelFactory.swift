@@ -53,8 +53,8 @@ public struct BaseProcessorConfiguration: Codable, Sendable {
 
 /// Creates a function that loads a configuration file and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
-    _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
-) -> (Data) throws -> M {
+    _ configurationType: C.Type, _ modelInit: @escaping @Sendable (C) -> M
+) -> @Sendable (Data) throws -> M {
     { data in
         let configuration = try JSONDecoder().decode(C.self, from: data)
         return modelInit(configuration)
@@ -64,11 +64,11 @@ private func create<C: Codable, M>(
 private func create<C: Codable, P>(
     _ configurationType: C.Type,
     _ processorInit:
-        @escaping (
+        @escaping @Sendable (
             C,
             any Tokenizer
         ) -> P
-) -> (Data, any Tokenizer) throws -> P {
+) -> @Sendable (Data, any Tokenizer) throws -> P {
     { data, tokenizer in
         let configuration = try JSONDecoder().decode(C.self, from: data)
         return processorInit(configuration, tokenizer)
