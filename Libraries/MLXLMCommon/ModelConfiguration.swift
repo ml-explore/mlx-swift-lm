@@ -45,7 +45,7 @@ public struct ModelConfiguration: Sendable {
     public init(
         id: String, revision: String = "main",
         tokenizerSource: TokenizerSource? = nil,
-        defaultPrompt: String = "hello",
+        defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
         toolCallFormat: ToolCallFormat? = nil
     ) {
@@ -59,7 +59,7 @@ public struct ModelConfiguration: Sendable {
     public init(
         directory: URL,
         tokenizerSource: TokenizerSource? = nil,
-        defaultPrompt: String = "hello",
+        defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil
