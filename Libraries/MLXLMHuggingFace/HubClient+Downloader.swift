@@ -27,23 +27,27 @@ extension HubClient: Downloader {
         }
         let revision = revision ?? "main"
 
-        // When useLatest is false, return cached files without a network call
-        // if available. Uses cached repo info to verify all matching files are
-        // present, avoiding the incomplete snapshot problem.
-        // If nothing is cached, fall through to download.
+        // resolveCachedSnapshot resolves refs locally and verifies file presence
+        // on disk, avoiding a network round-trip (100-200ms). The cached ref
+        // may not reflect the latest remote version, so we only use it when freshness isn't
+        // needed. If nothing is cached, fall through to download.
         if !useLatest {
-            if let cached = cachedSnapshotPath(
+            if let cached = resolveCachedSnapshot(
                 repo: repoID, revision: revision, matching: patterns
             ) {
                 return cached
             }
         }
 
+        // downloadSnapshot always checks the network for branch names,
+        // ensuring useLatest = true gets the latest commit.
         return try await downloadSnapshot(
             of: repoID,
             revision: revision,
             matching: patterns,
-            progressHandler: progressHandler
+            progressHandler: { @MainActor progress in
+                progressHandler(progress)
+            }
         )
     }
 }
