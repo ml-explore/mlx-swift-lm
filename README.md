@@ -5,7 +5,7 @@ language models (LLMs) and vision language models (VLMs) in [MLX Swift](https://
 
 Some key features include:
 
-- Integration with the Hugging Face Hub to easily use thousands of LLMs with a single command.
+- Provider-agnostic model loading via the `Downloader` protocol, with optional Hugging Face integration.
 - Low-rank (LoRA) and full model fine-tuning with support for quantized models.
 - Many model architectures for both LLMs and VLMs.
 
@@ -15,7 +15,8 @@ the [MLX Swift Examples](https://github.com/ml-explore/mlx-swift-examples).
 # Using MLX Swift LM
 
 The MLXLLM, MLXVLM, MLXLMCommon, and MLXEmbedders libraries are available
-as Swift Packages.
+as Swift Packages. Optional Hugging Face convenience modules are also available:
+`MLXLMHuggingFace` and `MLXEmbeddersHuggingFace`.
 
 Add the following dependency to your Package.swift:
 
@@ -49,10 +50,73 @@ See also [MLXLMCommon](Libraries/MLXLMCommon). You can get started with a wide
 variety of open weights LLMs and VLMs using this simplified API:
 
 ```swift
+import MLXLLM
+import MLXLMHuggingFace
+
 let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
 let session = ChatSession(model)
 print(try await session.respond(to: "What are two things to see in San Francisco?"))
 print(try await session.respond(to: "How about a great place to eat?"))
+```
+
+More loading scenarios:
+
+Use convenience overloads (default `HubClient.default`):
+
+```swift
+import MLXLLM
+import MLXLMHuggingFace
+
+let container = try await loadModelContainer(id: "mlx-community/Qwen3-4B-4bit")
+```
+
+Load from a local directory:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+
+let modelDirectory = URL(filePath: "/path/to/model")
+let container = try await loadModelContainer(from: modelDirectory)
+```
+
+Use a custom Hugging Face client:
+
+```swift
+import HuggingFace
+import MLXLLM
+import MLXLMHuggingFace
+
+let hub = HubClient(token: "hf_...")
+let container = try await loadModelContainer(
+    from: hub,
+    id: "mlx-community/Qwen3-4B-4bit"
+)
+```
+
+Use a custom downloader:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+
+struct S3Downloader: Downloader {
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        // Download files and return a local directory URL.
+        return URL(filePath: "/tmp/model")
+    }
+}
+
+let container = try await loadModelContainer(
+    from: S3Downloader(),
+    id: "my-bucket/my-model"
+)
 ```
 
 Or use the underlying API to control every aspect of the evaluation.

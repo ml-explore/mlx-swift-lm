@@ -12,11 +12,14 @@
 Using LLMs and VLMs from MLXLMCommon is as easy as:
 
 ```swift
+import MLXVLM
+import MLXLMHuggingFace
+
 let model = try await loadModel(id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit")
 let session = ChatSession(model)
 
 let answer1 = try await session.respond(
-    to: "what kind of creature is in the picture?"
+    to: "what kind of creature is in the picture?",
     image: .url(URL(fileURLWithPath: "support/test.jpg"))
 )
 print(answer1)
@@ -39,9 +42,9 @@ This is a port of several models from:
 
 - https://github.com/Blaizzy/mlx-vlm
 
-using the Hugging Face swift transformers package to provide tokenization:
+using Swift Tokenizers to provide tokenization:
 
-- https://github.com/huggingface/swift-transformers
+- https://github.com/DePasqualeOrg/swift-tokenizers
 
 The [VLMModelFactory.swift](VLMModelFactory.swift) provides minor overrides and customization --
 if you require overrides for the tokenizer or prompt customizations they can be

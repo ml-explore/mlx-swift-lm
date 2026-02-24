@@ -9,16 +9,79 @@
 
 # Quick Start
 
-Using LLMs and VLMs from MLXLMCommon is as easy as:
+Using LLMs and VLMs is as easy as:
 
 ```swift
+import MLXLLM
+import MLXLMHuggingFace
+
 let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
 let session = ChatSession(model)
-print(try await session.respond(to: "What are two things to see in San Francisco?")
-print(try await session.respond(to: "How about a great place to eat?")
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
-For more information see 
+## More Loading Scenarios
+
+Use convenience overloads (default `HubClient.default`):
+
+```swift
+import MLXLLM
+import MLXLMHuggingFace
+
+let container = try await loadModelContainer(id: "mlx-community/Qwen3-4B-4bit")
+```
+
+Load from a local directory:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+
+let modelDirectory = URL(filePath: "/path/to/model")
+let container = try await loadModelContainer(from: modelDirectory)
+```
+
+Use a custom Hugging Face client:
+
+```swift
+import HuggingFace
+import MLXLLM
+import MLXLMHuggingFace
+
+let hub = HubClient(token: "hf_...")
+let container = try await loadModelContainer(
+    from: hub,
+    id: "mlx-community/Qwen3-4B-4bit"
+)
+```
+
+Use a custom downloader:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+
+struct S3Downloader: Downloader {
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        // Download files and return a local directory URL.
+        return URL(filePath: "/tmp/model")
+    }
+}
+
+let container = try await loadModelContainer(
+    from: S3Downloader(),
+    id: "my-bucket/my-model"
+)
+```
+
+For more information see
 [Evaluation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/evaluation)
 or [Using Models](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/using-model)
 for more advanced API.
@@ -38,13 +101,25 @@ of language models, from LLMs to VLMs:
 A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`:
 
 ```swift
+import HuggingFace
+import MLXLMCommon
+import MLXLMHuggingFace
+
 // e.g. VLMModelFactory.shared
 let modelFactory: ModelFactory
 
 // e.g. VLMRegistry.paligemma3bMix4488bit
 let modelConfiguration: ModelConfiguration
 
+// Uses HubClient.default via MLXLMHuggingFace convenience overload.
 let container = try await modelFactory.loadContainer(configuration: modelConfiguration)
+
+// Custom Hub client (token, endpoint, etc.).
+let customHub = HubClient(token: "hf_...")
+let privateContainer = try await modelFactory.loadContainer(
+    from: customHub,
+    configuration: modelConfiguration
+)
 ```
 
 The `container` provides an isolation context (an `actor`) to run inference in the model.
@@ -62,10 +137,9 @@ The flow inside the `ModelFactory` goes like this:
 public class VLMModelFactory: ModelFactory {
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration
     ) async throws -> ModelContext {
-        // download the weight and config using HubApi
+        // modelDirectory and tokenizerDirectory are already resolved
         // load the base configuration
         // using the typeRegistry create a model (random weights)
         // load the weights, apply quantization as needed, update the model
