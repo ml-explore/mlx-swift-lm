@@ -47,7 +47,11 @@ public protocol Downloader: Sendable {
 /// same directory as the model.
 public enum TokenizerSource: Sendable, Equatable {
     /// A provider-specific repository identifier for downloading tokenizer files.
-    case id(String)
+    /// - Parameters:
+    ///   - id: The repository identifier (e.g. `"org/tokenizer-name"`).
+    ///   - revision: Optional revision (branch, tag, commit hash). When `nil`,
+    ///     the ``Downloader`` decides the default (typically `"main"`).
+    case id(String, revision: String? = nil)
     /// A local directory containing tokenizer files.
     case directory(URL)
 }

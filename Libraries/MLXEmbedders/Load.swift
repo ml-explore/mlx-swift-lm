@@ -93,9 +93,9 @@ func resolveDirectories(
 
     let tokenizerDirectory: URL
     switch configuration.tokenizerSource {
-    case .id(let id):
+    case .id(let id, let revision):
         tokenizerDirectory = try await downloader.download(
-            id: id, revision: nil,
+            id: id, revision: revision,
             matching: ["*.json"],
             useLatest: useLatest,
             progressHandler: { _ in })
