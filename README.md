@@ -83,7 +83,6 @@ let container = try await loadModelContainer(from: modelDirectory)
 Use a custom Hugging Face client:
 
 ```swift
-import HuggingFace
 import MLXLLM
 import MLXLMHuggingFace
 

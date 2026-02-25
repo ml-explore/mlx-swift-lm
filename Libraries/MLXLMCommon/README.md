@@ -45,7 +45,6 @@ let container = try await loadModelContainer(from: modelDirectory)
 Use a custom Hugging Face client:
 
 ```swift
-import HuggingFace
 import MLXLLM
 import MLXLMHuggingFace
 
@@ -101,7 +100,6 @@ of language models, from LLMs to VLMs:
 A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`:
 
 ```swift
-import HuggingFace
 import MLXLMCommon
 import MLXLMHuggingFace
 
