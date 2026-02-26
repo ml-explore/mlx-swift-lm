@@ -1227,7 +1227,7 @@ public func savePromptCache(
 /// - Returns: The prompt cache and the metadata
 public func loadPromptCache(
     url: URL
-) throws -> ([KVCache], [String: String]?) {
+) throws -> ([KVCache], [String: String]) {
     let (arrays, metadata) = try loadArraysAndMetadata(url: url)
 
     // Unflatten arrays using tree_unflatten compatible logic
