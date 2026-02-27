@@ -19,7 +19,7 @@ class MiMoAttention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     public init(_ args: MiMoConfiguration) {
         self.args = args

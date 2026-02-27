@@ -264,7 +264,7 @@ class FalconH1Attention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     init(_ args: FalconH1Configuration) {
         self.hiddenSize = args.hiddenSize

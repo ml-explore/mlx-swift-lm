@@ -31,7 +31,7 @@ private class Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     /// Rotary Positional Embedding logic
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     /// Initializes the Attention module.
     /// - Parameter args: Configuration object containing `hiddenSize`, `attentionHeads`, `headDim`, etc.

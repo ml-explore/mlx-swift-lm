@@ -102,7 +102,7 @@ class DeepseekV3Attention: Module {
     var qHeadDim: Int
     var scale: Float
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
     @ModuleInfo(key: "q_proj") var qProj: Linear?
     @ModuleInfo(key: "q_a_proj") var qAProj: Linear?
     @ModuleInfo(key: "q_a_layernorm") var qALayerNorm: RMSNorm?

@@ -71,7 +71,7 @@ class Ernie45Attention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     public init(_ args: Ernie45Configuration) {
         let dim = args.hiddenSize

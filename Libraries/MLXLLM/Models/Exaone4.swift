@@ -26,7 +26,7 @@ class Exaone4Attention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let rope: OffsetLayer?
+    let rope: RoPELayer?
 
     public init(_ args: Exaone4Configuration, isLocal: Bool?) {
         self.args = args

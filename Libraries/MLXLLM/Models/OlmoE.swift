@@ -28,7 +28,7 @@ class OlmoEAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     init(_ args: OlmoEConfiguration) {
         self.args = args

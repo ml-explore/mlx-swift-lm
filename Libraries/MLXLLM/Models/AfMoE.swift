@@ -143,7 +143,7 @@ class AfMoEAttention: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
 
     // RoPE is only used for local (sliding window) attention
-    let rope: OffsetLayer?
+    let rope: RoPELayer?
 
     init(_ args: AfMoEConfiguration, isLocalAttention: Bool = false) {
         self.hiddenSize = args.hiddenSize

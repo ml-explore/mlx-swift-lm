@@ -89,7 +89,7 @@ class BailingMoeAttention: Module {
     @ModuleInfo(key: "query_layernorm") var qNorm: RMSNorm?
     @ModuleInfo(key: "key_layernorm") var kNorm: RMSNorm?
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     init(_ args: BailingMoeConfiguration) {
         self.args = args

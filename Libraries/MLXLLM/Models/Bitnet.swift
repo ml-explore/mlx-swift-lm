@@ -276,7 +276,7 @@ class BitnetAttention: Module {
 
     @ModuleInfo(key: "attn_sub_norm") var attnSubNorm: RMSNorm
 
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     init(_ args: BitnetConfiguration) {
         self.args = args

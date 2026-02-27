@@ -29,7 +29,7 @@ class Olmo2Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     // rope can be either dynamic scaling or yarn depending on config
-    let rope: OffsetLayer
+    let rope: RoPELayer
 
     init(_ args: Olmo2Configuration) {
         self.args = args
