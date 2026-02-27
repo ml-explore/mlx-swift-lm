@@ -9,7 +9,7 @@ import Foundation
 import MLX
 import MLXNN
 
-public class Llama3RoPE: Module, OffsetLayer {
+public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dims: Int
     let maxPositionEmbeddings: Int
     let traditional: Bool
@@ -72,9 +72,22 @@ public class Llama3RoPE: Module, OffsetLayer {
             freqs: _freqs
         )
     }
+
+    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        MLXFast.RoPE(
+            x,
+            dimensions: dims,
+            traditional: traditional,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: _freqs
+        )
+    }
+
 }
 
-public class YarnRoPE: Module, OffsetLayer {
+public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let traditional: Bool
     let maxPositionEmbeddings: Int
@@ -180,9 +193,28 @@ public class YarnRoPE: Module, OffsetLayer {
             freqs: self._freqs
         )
     }
+
+    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        if _mscale != 1.0 {
+            x[.ellipsis, 0 ..< dimensions] = _mscale * x[.ellipsis, 0 ..< dimensions]
+        }
+
+        return MLXFast.RoPE(
+            x,
+            dimensions: dimensions,
+            traditional: traditional,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: self._freqs
+        )
+    }
+
 }
 
 private let yarnTypes: Set = ["yarn", "deepseek_yarn", "telechat3-yarn"]
+
+public typealias RoPELayer = OffsetLayer & ArrayOffsetLayer
 
 public func initializeRope(
     dims: Int,
@@ -190,7 +222,7 @@ public func initializeRope(
     traditional: Bool,
     scalingConfig: [String: StringOrNumber]?,
     maxPositionEmbeddings: Int?
-) -> OffsetLayer {
+) -> RoPELayer {
     let ropeType: String = {
         if let config = scalingConfig,
             let typeValue = config["type"] ?? config["rope_type"],

@@ -4,13 +4,11 @@ import MLXNN
 
 /// Su Scaled Rotary Position Embedding.
 /// Switches between short and long factors based on sequence length.
-public class SuScaledRoPE: Module, OffsetLayer {
+public class SuScaledRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let originalMaxPositionEmbeddings: Int
-    let _shortFreqs: MLXArray
-    let _longFreqs: MLXArray
-    let _shortScale: Float
-    let _longScale: Float
+    let _freqs: MLXArray
+    let _scale: Float
 
     public init(
         dimensions: Int,
@@ -27,45 +25,46 @@ public class SuScaledRoPE: Module, OffsetLayer {
         self.dimensions = dimensions
         self.originalMaxPositionEmbeddings = originalMaxPositionEmbeddings
 
-        let exponent =
-            MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32) / Float(dimensions)
-        let freqs = MLX.pow(MLXArray(base), exponent)
-        self._shortFreqs = MLXArray(shortFactor).asType(.float32) * freqs
-        self._longFreqs = MLXArray(longFactor).asType(.float32) * freqs
+        let freqs = pow(base, (arange(0, dimensions, step: 2, dtype: .float32) / dimensions))
+        self._freqs = MLXArray(longFactor) * freqs
 
         func defaultScale(_ factor: Float) -> Float {
             sqrt(1 + log(factor) / log(Float(originalMaxPositionEmbeddings)))
         }
 
         let factor = Float(maxPositionEmbeddings) / Float(originalMaxPositionEmbeddings)
-        self._shortScale = shortMScale ?? (factor <= 1.0 ? 1.0 : defaultScale(factor))
-        self._longScale = longMScale ?? (factor <= 1.0 ? 1.0 : defaultScale(factor))
+        self._scale = longMScale ?? factor < 1 ? 1 : defaultScale(factor)
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        let seqLen = offset + x.dim(-2)
-        let freqs: MLXArray
-        let scale: Float
-        if seqLen > originalMaxPositionEmbeddings {
-            freqs = _longFreqs
-            scale = _longScale
-        } else {
-            freqs = _shortFreqs
-            scale = _shortScale
-        }
-
-        // Apply scaling only to the dimensions that will be rotated
-        let scaledX = x
-        scaledX[.ellipsis, 0 ..< dimensions] = scale * scaledX[.ellipsis, 0 ..< dimensions]
-
+        // "copy" of x as we are going to write through it and don't want to update
+        // through the reference
+        // https://github.com/ml-explore/mlx-swift/issues/364
+        // let x = x[.ellipsis]
+        let x = x[0..., .ellipsis]
+        x[.ellipsis, 0 ..< dimensions] *= _scale
         return MLXFast.RoPE(
-            scaledX,
+            x,
             dimensions: dimensions,
             traditional: false,
             base: nil,
             scale: 1.0,
             offset: offset,
-            freqs: freqs
+            freqs: _freqs
+        )
+    }
+
+    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        let x = x[0..., .ellipsis]
+        x[.ellipsis, 0 ..< dimensions] *= _scale
+        return MLXFast.RoPE(
+            x,
+            dimensions: dimensions,
+            traditional: false,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: _freqs
         )
     }
 }
