@@ -71,8 +71,7 @@ class Ernie45Attention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
-    // TODO dkoski initialize_rope
-    let rope: RoPE
+    let rope: OffsetLayer
 
     public init(_ args: Ernie45Configuration) {
         let dim = args.hiddenSize
@@ -86,11 +85,10 @@ class Ernie45Attention: Module {
         self._vProj.wrappedValue = Linear(dim, nKVHeads * headDim, bias: args.useBias)
         self._oProj.wrappedValue = Linear(nHeads * headDim, dim, bias: args.useBias)
 
-        self.rope = RoPE(
-            dimensions: headDim,
-            traditional: true,
-            base: args.ropeTheta
-        )
+        self.rope = initializeRope(
+            dims: headDim, base: args.ropeTheta,
+            traditional: true, scalingConfig: nil,
+            maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
     public func callAsFunction(
@@ -110,8 +108,8 @@ class Ernie45Attention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

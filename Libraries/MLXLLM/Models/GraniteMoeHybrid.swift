@@ -197,8 +197,7 @@ class GraniteMoeHybridAttention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    // TODO dkoski initialize_rope
-    let rope: RoPE?
+    let rope: OffsetLayer?
 
     init(_ args: GraniteMoeHybridConfiguration) {
         self.args = args
@@ -219,12 +218,10 @@ class GraniteMoeHybridAttention: Module {
         if args.positionEmbeddingType == "nope" {
             self.rope = nil
         } else {
-            self.rope = RoPE(
-                dimensions: headDim,
-                traditional: false,
-                base: args.ropeTheta,
-                scale: 1
-            )
+            self.rope = initializeRope(
+                dims: headDim, base: args.ropeTheta,
+                traditional: false, scalingConfig: nil,
+                maxPositionEmbeddings: args.maxPositionEmbeddings)
         }
 
         super.init()
@@ -252,8 +249,8 @@ class GraniteMoeHybridAttention: Module {
                 queries = rope(queries, offset: cache.offset)
                 keys = rope(keys, offset: cache.offset)
             } else {
-                queries = rope(queries)
-                keys = rope(keys)
+                queries = rope(queries, offset: 0)
+                keys = rope(keys, offset: 0)
             }
         }
 
