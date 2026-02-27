@@ -168,10 +168,10 @@ for await generation in stream {
 
 Use these depending on your control needs:
 
-- `generate(input:..., context:...) -> AsyncStream<Generation>`: decoded text + tool calls.
-- `generateTask(...) -> (AsyncStream<Generation>, Task<Void, Never>)`: same output, plus task handle for deterministic cleanup when consumers stop early.
-- `generateTokens(...) -> AsyncStream<TokenGeneration>`: raw token IDs.
-- `generateTokensTask(...) -> (AsyncStream<TokenGeneration>, Task<Void, Never>)`: raw tokens + task handle.
+- `generate(input:..., context:..., wiredMemoryTicket:) -> AsyncStream<Generation>`: decoded text + tool calls.
+- `generateTask(..., wiredMemoryTicket:) -> (AsyncStream<Generation>, Task<Void, Never>)`: same output, plus task handle for deterministic cleanup when consumers stop early.
+- `generateTokens(..., wiredMemoryTicket:) -> AsyncStream<TokenGeneration>`: raw token IDs.
+- `generateTokensTask(..., wiredMemoryTicket:) -> (AsyncStream<TokenGeneration>, Task<Void, Never>)`: raw tokens + task handle.
 - `GenerateStopReason`: `.stop`, `.length`, `.cancelled` in final `.info`.
 
 See [references/generation.md](references/generation.md) for full patterns.
