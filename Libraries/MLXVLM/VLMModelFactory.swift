@@ -51,12 +51,14 @@ public struct BaseProcessorConfiguration: Codable, Sendable {
     }
 }
 
+private func JSON5Decoder() -> JSONDecoder { let d = JSONDecoder(); d.allowsJSON5 = true; return d }
+
 /// Creates a function that loads a configuration file and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
     _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
 ) -> (Data) throws -> M {
     { data in
-        let configuration = try JSONDecoder().decode(C.self, from: data)
+        let configuration = try JSON5Decoder().decode(C.self, from: data)
         return modelInit(configuration)
     }
 }
@@ -70,7 +72,7 @@ private func create<C: Codable, P>(
         ) -> P
 ) -> (Data, any Tokenizer) throws -> P {
     { data, tokenizer in
-        let configuration = try JSONDecoder().decode(C.self, from: data)
+        let configuration = try JSON5Decoder().decode(C.self, from: data)
         return processorInit(configuration, tokenizer)
     }
 }
@@ -287,7 +289,7 @@ public final class VLMModelFactory: ModelFactory {
         }
         let baseConfig: BaseConfiguration
         do {
-            baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+            baseConfig = try JSON5Decoder().decode(BaseConfiguration.self, from: configData)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -306,7 +308,7 @@ public final class VLMModelFactory: ModelFactory {
         var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         if let generationData = try? Data(contentsOf: generationConfigURL),
-            let generationConfig = try? JSONDecoder().decode(
+            let generationConfig = try? JSON5Decoder().decode(
                 GenerationConfigFile.self, from: generationData),
             let genEosIds = generationConfig.eosTokenIds?.values
         {
@@ -382,7 +384,7 @@ private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
         : processorConfigURL
     do {
         let data = try Data(contentsOf: url)
-        let config = try JSONDecoder().decode(BaseProcessorConfiguration.self, from: data)
+        let config = try JSON5Decoder().decode(BaseProcessorConfiguration.self, from: data)
         return (data, config)
     } catch {
         throw ProcessorConfigError(filename: url.lastPathComponent, underlying: error)
