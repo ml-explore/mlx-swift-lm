@@ -3,6 +3,7 @@
 import Foundation
 @preconcurrency import Hub
 import MLX
+import MLXLMCommon
 import MLXNN
 import Tokenizers
 
@@ -159,7 +160,7 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 
     let baseConfig: BaseConfiguration
     do {
-        baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+        baseConfig = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configData)
     } catch let error as DecodingError {
         throw EmbedderError.configurationDecodingError(
             configurationURL.lastPathComponent, modelName, error)

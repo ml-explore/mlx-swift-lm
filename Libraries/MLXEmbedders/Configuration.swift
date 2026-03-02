@@ -1,6 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 
 public enum StringOrNumber: Codable, Equatable, Sendable {
     case string(String)
@@ -35,27 +36,28 @@ private class ModelTypeRegistry: @unchecked Sendable {
 
     private var creators: [String: @Sendable (Data) throws -> EmbeddingModel] = [
         "bert": { data in
-            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(BertConfiguration.self, from: data)
             return BertModel(configuration)
         },
         "roberta": { data in
-            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(BertConfiguration.self, from: data)
             return BertModel(configuration)
         },
         "xlm-roberta": { data in
-            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(BertConfiguration.self, from: data)
             return BertModel(configuration)
         },
         "distilbert": { data in
-            let configuration = try JSONDecoder().decode(BertConfiguration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(BertConfiguration.self, from: data)
             return BertModel(configuration)
         },
         "nomic_bert": { data in
-            let configuration = try JSONDecoder().decode(NomicBertConfiguration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(
+                NomicBertConfiguration.self, from: data)
             return NomicBertModel(configuration, pooler: false)
         },
         "qwen3": { data in
-            let configuration = try JSONDecoder().decode(Qwen3Configuration.self, from: data)
+            let configuration = try JSONDecoder.json5().decode(Qwen3Configuration.self, from: data)
             return Qwen3Model(configuration)
         },
     ]

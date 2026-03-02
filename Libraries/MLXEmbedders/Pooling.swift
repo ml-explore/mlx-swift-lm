@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
 
 /// Configuration for the `Pooling` layer, typically loaded from a JSON file.
@@ -44,7 +45,7 @@ public struct PoolingConfiguration: Codable {
 func loadPooling(modelDirectory: URL) -> Pooling {
     let configurationURL = modelDirectory.appending(components: "1_Pooling", "config.json")
     guard
-        let poolingConfig = try? JSONDecoder().decode(
+        let poolingConfig = try? JSONDecoder.json5().decode(
             PoolingConfiguration.self, from: Data(contentsOf: configurationURL))
     else {
         return Pooling(strategy: .none)

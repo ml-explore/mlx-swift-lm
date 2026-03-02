@@ -6,18 +6,12 @@ import MLX
 import MLXLMCommon
 import Tokenizers
 
-private func JSON5Decoder() -> JSONDecoder {
-    let d = JSONDecoder()
-    d.allowsJSON5 = true
-    return d
-}
-
 /// Creates a function that decodes configuration data and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
     _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
 ) -> (Data) throws -> M {
     { data in
-        let configuration = try JSON5Decoder().decode(C.self, from: data)
+        let configuration = try JSONDecoder.json5().decode(C.self, from: data)
         return modelInit(configuration)
     }
 }
@@ -507,7 +501,7 @@ public final class LLMModelFactory: ModelFactory {
         }
         let baseConfig: BaseConfiguration
         do {
-            baseConfig = try JSON5Decoder().decode(BaseConfiguration.self, from: configData)
+            baseConfig = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configData)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -526,7 +520,7 @@ public final class LLMModelFactory: ModelFactory {
         var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         if let generationData = try? Data(contentsOf: generationConfigURL),
-            let generationConfig = try? JSON5Decoder().decode(
+            let generationConfig = try? JSONDecoder.json5().decode(
                 GenerationConfigFile.self, from: generationData),
             let genEosIds = generationConfig.eosTokenIds?.values
         {
