@@ -71,8 +71,8 @@ struct EmbedderIntegrationtests {
         let expectedSimilarities: [Float] = [
             0.6854175,  // Elephants
             0.6644787,  // Horses
-            0.63326025,
-        ]  // Polar Bears
+            0.63326025,  // Polar Bears
+        ]
 
         for (index, resultSimilarity) in similarities.enumerated() {
             #expect(
