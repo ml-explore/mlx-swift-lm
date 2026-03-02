@@ -136,13 +136,9 @@ open class BaseKVCache: KVCache {
     }
 
     open var metaState: [String] {
-        get {
-            // Python base class returns empty string, but we return empty array for Swift compatibility
-            // This is handled in the save/load functions
-            []
-        }
+        get { [""] }
         set {
-            if !newValue.isEmpty {
+            guard newValue.count == 1 && newValue[0].isEmpty else {
                 fatalError("This cache has no meta_state but a meta_state was set.")
             }
         }
@@ -386,15 +382,6 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             self.keys = newValue[0]
             self.values = newValue[1]
             self.offset = self.keys!.dim(2)
-        }
-    }
-
-    public override var metaState: [String] {
-        get { [] }
-        set {
-            if !newValue.isEmpty {
-                fatalError("KVCacheSimple should not have metaState.")
-            }
         }
     }
 
@@ -1183,16 +1170,18 @@ public func savePromptCache(
     // Use Python-compatible class names for cross-platform compatibility
     let cacheClasses = cache.map { cache -> String in
         switch cache {
+        case is ChunkedKVCache:
+            return "ChunkedKVCache"  // Must precede KVCacheSimple because of inheritance
         case is KVCacheSimple:
             return "KVCache"  // Python uses "KVCache" for the basic cache
         case is RotatingKVCache:
             return "RotatingKVCache"
         case is QuantizedKVCache:
             return "QuantizedKVCache"
-        case is ChunkedKVCache:
-            return "ChunkedKVCache"
         case is MambaCache:
-            return "MambaCache"
+            return "MambaCache"  // Must precede ArraysCache because of inheritance
+        case is ArraysCache:
+            return "ArraysCache"
         case is CacheList:
             return "CacheList"
         default:
@@ -1238,7 +1227,7 @@ public func savePromptCache(
 /// - Returns: The prompt cache and the metadata
 public func loadPromptCache(
     url: URL
-) throws -> ([KVCache], [String: String]?) {
+) throws -> ([KVCache], [String: String]) {
     let (arrays, metadata) = try loadArraysAndMetadata(url: url)
 
     // Unflatten arrays using tree_unflatten compatible logic
@@ -1293,6 +1282,10 @@ public func loadPromptCache(
             cache = ChunkedKVCache()
         case "MambaCache":
             cache = MambaCache()
+        case "ArraysCache":
+            // Size doesn't matter here as it's only needed to initialize the `cache` container inside
+            // The container will be set as a `state` with correct size before returning a cache
+            cache = ArraysCache(size: 0)
         case "CacheList":
             // Note: CacheList requires special handling as it contains sub-caches
             // For now, create an empty CacheList - this may not work correctly

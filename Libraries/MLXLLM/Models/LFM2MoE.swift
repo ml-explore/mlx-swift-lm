@@ -34,6 +34,7 @@ public struct LFM2MoEConfiguration: Codable, Sendable {
 
     private let _fullAttnIdxs: [Int]?
     private let layerTypes: [String]?
+    private let ropeParameters: [String: StringOrNumber]?
 
     public var fullAttnIdxs: [Int] {
         if let explicit = _fullAttnIdxs {
@@ -66,6 +67,7 @@ public struct LFM2MoEConfiguration: Codable, Sendable {
         case convBias = "conv_bias"
         case convLCache = "conv_L_cache"
         case ropeTheta = "rope_theta"
+        case ropeParameters = "rope_parameters"
         case _fullAttnIdxs = "full_attn_idxs"
         case layerTypes = "layer_types"
     }
@@ -90,7 +92,11 @@ public struct LFM2MoEConfiguration: Codable, Sendable {
         self.normEps = try container.decode(Float.self, forKey: .normEps)
         self.convBias = try container.decode(Bool.self, forKey: .convBias)
         self.convLCache = try container.decode(Int.self, forKey: .convLCache)
-        self.ropeTheta = try container.decode(Float.self, forKey: .ropeTheta)
+        self.ropeParameters = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeParameters)
+
+        let ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1000000.0
+        self.ropeTheta = ropeParameters?["rope_theta"]?.asFloat() ?? ropeTheta
         self._fullAttnIdxs = try container.decodeIfPresent([Int].self, forKey: ._fullAttnIdxs)
         self.layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes)
     }

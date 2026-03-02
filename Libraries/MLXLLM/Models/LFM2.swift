@@ -30,6 +30,7 @@ public struct LFM2Configuration: Codable, Sendable {
     let blockAutoAdjustFFDim: Bool
     private let _fullAttnIdxs: [Int]?
     private let layerTypes: [String]?
+    private let ropeParameters: [String: StringOrNumber]?
     var fullAttnIdxs: [Int] {
         if let fullAttnIdxs = _fullAttnIdxs {
             return fullAttnIdxs
@@ -65,6 +66,7 @@ public struct LFM2Configuration: Codable, Sendable {
         case _fullAttnIdxs = "full_attn_idxs"
         case layerTypes = "layer_types"
         case ropeTheta = "rope_theta"
+        case ropeParameters = "rope_parameters"
     }
 
     public init(from decoder: Decoder) throws {
@@ -92,7 +94,11 @@ public struct LFM2Configuration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .blockAutoAdjustFFDim) ?? true
         self._fullAttnIdxs = try container.decodeIfPresent([Int].self, forKey: ._fullAttnIdxs)
         self.layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes)
-        self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1000000.0
+        self.ropeParameters = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeParameters)
+
+        let ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1000000.0
+        self.ropeTheta = ropeParameters?["rope_theta"]?.asFloat() ?? ropeTheta
     }
 }
 
