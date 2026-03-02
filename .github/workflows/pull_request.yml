@@ -84,9 +84,6 @@ jobs:
 
       - name: Build (Xcode, macOS)
         shell: sh
-        env:
-          # workaround for CI failure
-          DEVELOPER_DIR: /Applications/Xcode-latest.app
         run: |
           xcodebuild -version
           xcrun --show-sdk-build-version
@@ -96,9 +93,6 @@ jobs:
 
       - name: Run Tests (Xcode, macOS)
         shell: sh
-        env:
-          # workaround for CI failure
-          DEVELOPER_DIR: /Applications/Xcode-latest.app
         run: |
           xcrun xctest ~/Library/Developer/Xcode/DerivedData/mlx-swift-lm-*/Build/Products/Debug/MLXLMTests.xctest
 
