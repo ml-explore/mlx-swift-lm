@@ -203,7 +203,8 @@ public class ToolCallIntegrationTests: XCTestCase {
         input: UserInput,
         maxTokens: Int
     ) async throws -> (text: String, toolCalls: [ToolCall]) {
-        let result = try await container.perform(sending: input) { (context: ModelContext, input) in
+        let result = try await container.perform(nonSendable: input) {
+            (context: ModelContext, input) in
             let lmInput = try await context.processor.prepare(input: input)
             let parameters = GenerateParameters(maxTokens: maxTokens)
 

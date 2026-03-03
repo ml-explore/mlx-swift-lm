@@ -112,7 +112,7 @@ public final class ModelContainer: Sendable {
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<V, R: Sendable>(
-        sending values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
+        nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
     ) async rethrows -> sending R {
         let values = SendableBox(values)
         return try await context.read {

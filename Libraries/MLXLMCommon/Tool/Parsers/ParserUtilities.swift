@@ -4,25 +4,26 @@ import Foundation
 
 // MARK: - Basic Deserialization
 
-private func toSendable(_ value: Any) -> (any Sendable)? {
+private func asSendable(_ value: Any) -> (any Sendable)? {
     switch value {
     case let dict as [String: Any]:
-        return dict.compactMapValues { toSendable($0) }
+        return dict.compactMapValues { asSendable($0) }
     case let array as [Any]:
-        return array.compactMap { toSendable($0) }
+        return array.compactMap { asSendable($0) }
     case let sendable as any Sendable:
         return sendable
     default:
         return nil
     }
 }
+
 /// Deserialize a string value to JSON or return as string.
 ///
 /// Attempts JSON parsing first, falling back to the original string value.
 /// Reference: Python's `ast.literal_eval` / `json.loads` pattern
-func deserialize(_ value: String) -> (any Sendable)? {
+func tryParseJSON(_ value: String) -> (any Sendable)? {
     if let data = value.data(using: .utf8) {
-        return try? toSendable(JSONSerialization.jsonObject(with: data))
+        return try? asSendable(JSONSerialization.jsonObject(with: data))
     }
     return nil
 }
@@ -166,7 +167,7 @@ func convertValueWithTypes(_ value: String, types: [String]) -> any Sendable {
             }
 
         case "object", "array":
-            if let json = deserialize(value) {
+            if let json = tryParseJSON(value) {
                 return json
             }
 
@@ -176,7 +177,7 @@ func convertValueWithTypes(_ value: String, types: [String]) -> any Sendable {
     }
 
     // Fallback: try JSON parse, then return as string
-    return deserialize(value) ?? value
+    return tryParseJSON(value) ?? value
 }
 
 /// Convert parameter value based on schema type.
@@ -215,12 +216,13 @@ func convertParameterValue(
 
     // Boolean types
     if ["boolean", "bool", "binary"].contains(type) {
-        return value.lowercased() == "true"
+        return ["true", "1", "yes", "on"].contains(
+            value.lowercased().trimmingCharacters(in: .whitespaces))
     }
 
     // Object/Array types - JSON decode
     if ["object", "array"].contains(type) || type.hasPrefix("dict") || type.hasPrefix("list") {
-        if let json = deserialize(value) {
+        if let json = tryParseJSON(value) {
             return json
         }
     }

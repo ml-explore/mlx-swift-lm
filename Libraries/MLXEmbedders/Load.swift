@@ -109,11 +109,6 @@ func prepareModelDirectory(
     }
 }
 
-/// Default instance of HubApi to use.  This is configured to save downloads into the caches directory.
-public let defaultHubApi: HubApi = {
-    HubApi(downloadBase: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
-}()
-
 /// Asynchronously loads the `EmbeddingModel` and its associated `Tokenizer`.
 ///
 /// This is the primary high-level function for initializing an embedding pipeline.
