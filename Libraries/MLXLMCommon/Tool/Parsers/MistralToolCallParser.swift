@@ -27,9 +27,10 @@ public struct MistralToolCallParser: ToolCallParser, Sendable {
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
         var text = content
 
-        // Strip [TOOL_CALLS] prefix if present
-        if let range = text.range(of: "[TOOL_CALLS]") {
-            text = String(text[range.upperBound...])
+        // Strip [TOOL_CALLS] only when it is a true prefix.
+        // ToolCallProcessor.flush() already splits on this token.
+        if text.hasPrefix("[TOOL_CALLS]") {
+            text = String(text.dropFirst("[TOOL_CALLS]".count))
         }
 
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)

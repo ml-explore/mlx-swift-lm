@@ -488,6 +488,17 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
+    @Test("Test Mistral Tool Call Parser - Preserves [TOOL_CALLS] in Arguments")
+    func testMistralParserPreservesStartTagInArguments() throws {
+        let parser = MistralToolCallParser()
+        let content = "get_note[ARGS]{\"text\": \"literal [TOOL_CALLS] marker\"}"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_note")
+        #expect(toolCall.function.arguments["text"] == .string("literal [TOOL_CALLS] marker"))
+    }
+
     @Test("Test Mistral Format via ToolCallProcessor")
     func testMistralFormatProcessor() throws {
         let processor = ToolCallProcessor(format: .mistral)
