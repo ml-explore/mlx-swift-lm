@@ -1348,9 +1348,16 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) {
         toolCallProcessor.flush()
-        while let toolCall = toolCallProcessor.toolCalls.first {
-            toolCallProcessor.toolCalls.removeFirst()
-            _ = emit(.toolCall(toolCall))
+
+        guard !toolCallProcessor.toolCalls.isEmpty else { return }
+
+        let pendingToolCalls = toolCallProcessor.toolCalls
+        toolCallProcessor.toolCalls.removeAll(keepingCapacity: true)
+
+        for toolCall in pendingToolCalls {
+            if case .terminated = emit(.toolCall(toolCall)) {
+                break
+            }
         }
     }
 
