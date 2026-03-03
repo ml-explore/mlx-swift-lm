@@ -1080,6 +1080,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
             }
 
+            handler.onGenerationEnd(emit: continuation.yield)
+
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
 
@@ -1292,6 +1294,11 @@ private protocol TokenLoopHandler: Sendable {
         emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
     ) -> Bool
 
+    /// Called after the token loop finishes, before the info event.
+    mutating func onGenerationEnd(
+        emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
+    )
+
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
@@ -1337,6 +1344,16 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
         true
     }
 
+    mutating func onGenerationEnd(
+        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
+    ) {
+        toolCallProcessor.flush()
+        while let toolCall = toolCallProcessor.toolCalls.first {
+            toolCallProcessor.toolCalls.removeFirst()
+            _ = emit(.toolCall(toolCall))
+        }
+    }
+
     func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
         .info(info)
     }
@@ -1364,6 +1381,10 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
         }
         return true
     }
+
+    mutating func onGenerationEnd(
+        emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
+    ) {}
 
     func infoEvent(_ info: GenerateCompletionInfo) -> TokenGeneration {
         .info(info)

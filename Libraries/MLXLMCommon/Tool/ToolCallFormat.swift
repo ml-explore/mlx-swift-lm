@@ -66,6 +66,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// Mistral V11+ format with [TOOL_CALLS] and [ARGS] delimiters.
+    /// Example: `[TOOL_CALLS]get_weather [ARGS]{"location": "Tokyo"}`
+    case mistral
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -87,6 +91,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .mistral:
+            return MistralToolCallParser()
         }
     }
 
@@ -113,6 +119,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         // Gemma
         if type == "gemma" {
             return .gemma
+        }
+
+        // Mistral3 family (mistral3, mistral3_text, etc.)
+        if type.hasPrefix("mistral3") {
+            return .mistral
         }
 
         return nil

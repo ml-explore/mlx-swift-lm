@@ -422,6 +422,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.mistral.rawValue == "mistral")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -452,10 +453,115 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
 
+        // Mistral3 models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
+        #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
+        #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
+
         // Unknown models should return nil (use default JSON format)
         #expect(ToolCallFormat.infer(from: "llama") == nil)
         #expect(ToolCallFormat.infer(from: "qwen2") == nil)
         #expect(ToolCallFormat.infer(from: "mistral") == nil)
-        #expect(ToolCallFormat.infer(from: "mistral3") == nil)
+    }
+
+    // MARK: - Mistral Format Tests
+
+    @Test("Test Mistral Tool Call Parser")
+    func testMistralParser() throws {
+        let parser = MistralToolCallParser()
+        let content = "[TOOL_CALLS]get_weather [ARGS]{\"location\": \"Paris\"}"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+    }
+
+    @Test("Test Mistral Tool Call Parser - With Call ID")
+    func testMistralParserWithCallId() throws {
+        let parser = MistralToolCallParser()
+        let content = "[TOOL_CALLS]get_weather[CALL_ID]abc123xyz[ARGS]{\"location\": \"Paris\"}"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+    }
+
+    @Test("Test Mistral Format via ToolCallProcessor")
+    func testMistralFormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .mistral)
+        let chunks: [String] = [
+            "[TOOL", "_CALLS]", "get_weather", " [ARGS]",
+            "{\"location\":", " \"Tokyo\"}",
+        ]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+
+        // End tag (</s>) never arrives in text, so tool call stays buffered until flush
+        #expect(processor.toolCalls.count == 0)
+
+        processor.flush()
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+    }
+
+    @Test("Test Mistral Format Processor Flush")
+    func testMistralFormatProcessorFlush() throws {
+        let processor = ToolCallProcessor(format: .mistral)
+        let content = "[TOOL_CALLS]get_weather [ARGS]{\"location\": \"Berlin\"}"
+
+        _ = processor.processChunk(content)
+
+        // Before flush, no tool calls extracted (end tag never arrives)
+        #expect(processor.toolCalls.count == 0)
+
+        // Flush extracts the buffered tool call
+        processor.flush()
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Berlin"))
+    }
+
+    @Test("Test Mistral Format Processor Multiple Tool Calls")
+    func testMistralFormatProcessorMultipleToolCalls() throws {
+        let processor = ToolCallProcessor(format: .mistral)
+        let chunks: [String] = [
+            "[TOOL_CALLS]get_weather[ARGS]",
+            "{\"location\": \"Paris\"}",
+            "[TOOL_CALLS]get_time",
+            "[ARGS]{\"timezone\": \"UTC\"}",
+        ]
+
+        for chunk in chunks {
+            let result = processor.processChunk(chunk)
+            // All chunks should be buffered (nil) after the start tag
+            if chunk == chunks.first {
+                #expect(result == nil)
+            }
+        }
+
+        // No tool calls before flush
+        #expect(processor.toolCalls.count == 0)
+
+        processor.flush()
+
+        // Both tool calls should be extracted
+        #expect(processor.toolCalls.count == 2)
+
+        let first = try #require(processor.toolCalls.first)
+        #expect(first.function.name == "get_weather")
+        #expect(first.function.arguments["location"] == .string("Paris"))
+
+        let second = processor.toolCalls[1]
+        #expect(second.function.name == "get_time")
+        #expect(second.function.arguments["timezone"] == .string("UTC"))
     }
 }

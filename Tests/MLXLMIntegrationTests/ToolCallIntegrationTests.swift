@@ -213,17 +213,15 @@ public class ToolCallIntegrationTests: XCTestCase {
 
     // MARK: - Mistral3 Tests
 
-    func testMistral3ToolCallFormatDefaultsToJSON() async throws {
+    func testMistral3ToolCallFormatAutoDetection() async throws {
         guard let container = Self.mistral3Container else {
             throw XCTSkip("Mistral3 model not available")
         }
 
         let config = await container.configuration
-        // Mistral3 uses the default JSON tool call format (infer returns nil)
-        let format = config.toolCallFormat ?? .json
         XCTAssertEqual(
-            format, .json,
-            "Mistral3 model should use default .json tool call format"
+            config.toolCallFormat, .mistral,
+            "Mistral3 model should auto-detect .mistral tool call format"
         )
     }
 
@@ -261,6 +259,69 @@ public class ToolCallIntegrationTests: XCTestCase {
                     "Expected location to contain 'Tokyo', got: \(location)"
                 )
             }
+        }
+    }
+
+    func testMistral3MultipleToolCallGeneration() async throws {
+        guard let container = Self.mistral3Container else {
+            throw XCTSkip("Mistral3 model not available")
+        }
+
+        let multiToolSchema: [[String: any Sendable]] =
+            Self.weatherToolSchema + [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "get_time",
+                        "description": "Get the current time in a given timezone",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "timezone": [
+                                    "type": "string",
+                                    "description":
+                                        "The timezone, e.g. America/New_York, Asia/Tokyo",
+                                ] as [String: any Sendable]
+                            ] as [String: any Sendable],
+                            "required": ["timezone"],
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ]
+            ]
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user(
+                    "What's the weather in Tokyo and what time is it there?"
+                ),
+            ],
+            tools: multiToolSchema
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 150
+        )
+
+        print("Mistral3 Output: \(result)")
+        print("Mistral3 Calls: \(toolCalls)")
+
+        // Verify all returned tool calls have valid names from our schema
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            XCTAssertTrue(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        // If the model made multiple calls, verify we got more than one
+        if toolCalls.count > 1 {
+            print("Successfully parsed \(toolCalls.count) tool calls from Mistral3")
         }
     }
 
