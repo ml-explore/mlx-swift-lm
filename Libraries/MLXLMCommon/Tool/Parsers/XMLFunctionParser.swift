@@ -11,10 +11,10 @@ public struct XMLFunctionParser: ToolCallParser, Sendable {
     public init() {}
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Pattern: <function=(.*?)</function>
+        // Pattern: <function=(content)</function> — [\s\S] matches newlines
         guard
             let funcMatch = content.range(
-                of: #"<function=(.*?)</function>"#, options: .regularExpression)
+                of: #"<function=([\s\S]*?)</function>"#, options: .regularExpression)
         else { return nil }
 
         let funcContent = String(content[funcMatch])

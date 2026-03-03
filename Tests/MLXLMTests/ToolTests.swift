@@ -250,6 +250,40 @@ struct ToolTests {
         #expect(toolCall.function.arguments["enabled"] == .bool(true))
     }
 
+    @Test("Test XML Function Parser - Multiline Content (Qwen3.5 style)")
+    func testXMLFunctionParserMultiline() throws {
+        let parser = XMLFunctionParser()
+        // Qwen3.5 models generate newlines between the XML tags
+        let content = """
+            <tool_call>
+            <function=get_current_datetime>
+            </function>
+            </tool_call>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_current_datetime")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test XML Function Parser - Multiline Parameters")
+    func testXMLFunctionParserMultilineParams() throws {
+        let parser = XMLFunctionParser()
+        let content = """
+            <function=get_weather>
+            <parameter=location>
+            Tokyo
+            </parameter>
+            </function>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+    }
+
     // MARK: - GLM4 Format Tests
 
     @Test("Test GLM4 Tool Call Parser")
