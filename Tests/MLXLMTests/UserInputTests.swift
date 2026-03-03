@@ -95,6 +95,96 @@ public class UserInputTests: XCTestCase {
         assertEqual(expected, messages)
     }
 
+    // MARK: - Mistral3 Message Generator Tests
+
+    public func testMistral3ConversionText() {
+        let chat: [Chat.Message] = [
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
+        ]
+
+        let messages = Mistral3MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "system",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "You are a useful agent.",
+                    ]
+                ],
+            ],
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Tell me a story.",
+                    ]
+                ],
+            ],
+        ]
+
+        assertEqual(expected, messages)
+    }
+
+    public func testMistral3ConversionWithImage() {
+        let chat: [Chat.Message] = [
+            .user(
+                "What is this?",
+                images: [
+                    .url(
+                        URL(
+                            string: "https://opensource.apple.com/images/projects/mlx.f5c59d8b.png")!
+                    )
+                ])
+        ]
+
+        let messages = Mistral3MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "image"
+                    ],
+                    [
+                        "type": "text",
+                        "text": "What is this?",
+                    ],
+                ],
+            ]
+        ]
+
+        assertEqual(expected, messages)
+    }
+
+    public func testMistral3ConversionToolRole() {
+        let chat: [Chat.Message] = [
+            .tool("The weather is sunny, 14°C.")
+        ]
+
+        let messages = Mistral3MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "tool",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "The weather is sunny, 14°C.",
+                    ]
+                ],
+            ]
+        ]
+
+        assertEqual(expected, messages)
+    }
+
+    // MARK: - Qwen2 Message Generator Tests
+
     public func testQwen2ConversionImage() {
         let chat: [Chat.Message] = [
             .system("You are a useful agent."),

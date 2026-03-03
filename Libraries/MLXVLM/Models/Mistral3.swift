@@ -1016,7 +1016,11 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
 
         if input.images.isEmpty {
             // No image - just apply chat template
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: input.tools,
+                additionalContext: input.additionalContext
+            )
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -1029,7 +1033,11 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         let patchSize = config.imageProcessor.patchSize
 
         // Apply chat template to get tokenized prompt with image placeholder
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        var promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages,
+            tools: input.tools,
+            additionalContext: input.additionalContext
+        )
 
         // Decode to find and replace image placeholder token
         let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)

@@ -452,9 +452,10 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
 
-        // Unknown models should return nil (use default)
+        // Unknown models should return nil (use default JSON format)
         #expect(ToolCallFormat.infer(from: "llama") == nil)
         #expect(ToolCallFormat.infer(from: "qwen2") == nil)
         #expect(ToolCallFormat.infer(from: "mistral") == nil)
+        #expect(ToolCallFormat.infer(from: "mistral3") == nil)
     }
 }
