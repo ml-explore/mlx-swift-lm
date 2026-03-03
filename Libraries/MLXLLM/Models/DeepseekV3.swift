@@ -153,6 +153,17 @@ class DeepseekV3Attention: Module {
         self._oProj.wrappedValue = Linear(
             numHeads * vHeadDim, hiddenSize, bias: config.attentionBias)
 
+        if let ropeScaling = config.ropeScaling {
+            let mScaleAllDim = ropeScaling["mscale_all_dim"]?.asFloat() ?? 0.0
+            if mScaleAllDim != 0 {
+                let scalingFactor = ropeScaling["factor"]?.asFloat() ?? 1.0
+                if scalingFactor > 1 {
+                    let s = 0.1 * mScaleAllDim * log(scalingFactor) + 1.0
+                    self.scale = self.scale * s * s
+                }
+            }
+        }
+
         self.rope = initializeRope(
             dims: qkRopeHeadDim, base: ropeTheta, traditional: true,
             scalingConfig: config.ropeScaling, maxPositionEmbeddings: maxPositionEmbeddings)

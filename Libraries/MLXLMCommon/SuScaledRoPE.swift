@@ -2,8 +2,9 @@ import Foundation
 import MLX
 import MLXNN
 
+// port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py
+
 /// Su Scaled Rotary Position Embedding.
-/// Switches between short and long factors based on sequence length.
 public class SuScaledRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let originalMaxPositionEmbeddings: Int
@@ -20,6 +21,9 @@ public class SuScaledRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         shortMScale: Float? = nil,
         longMScale: Float? = nil
     ) {
+        // Note: per python source shortFactor and shortMScale are unused.
+        // https://github.com/ml-explore/mlx-lm/pull/707
+
         precondition(dimensions % 2 == 0, "Dimensions must be even")
 
         self.dimensions = dimensions
@@ -33,14 +37,13 @@ public class SuScaledRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         }
 
         let factor = Float(maxPositionEmbeddings) / Float(originalMaxPositionEmbeddings)
-        self._scale = longMScale ?? factor < 1 ? 1 : defaultScale(factor)
+        self._scale = longMScale ?? (factor < 1 ? 1 : defaultScale(factor))
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         // "copy" of x as we are going to write through it and don't want to update
         // through the reference
         // https://github.com/ml-explore/mlx-swift/issues/364
-        // let x = x[.ellipsis]
         let x = x[0..., .ellipsis]
         x[.ellipsis, 0 ..< dimensions] *= _scale
         return MLXFast.RoPE(

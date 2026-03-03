@@ -90,14 +90,6 @@ public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
 public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let traditional: Bool
-    let maxPositionEmbeddings: Int
-    let base: Float
-    let scalingFactor: Float
-    let originalMaxPositionEmbeddings: Int
-    let betaFast: Float
-    let betaSlow: Float
-    let mscale: Float
-    let mscaleAllDim: Float
 
     private let _mscale: Float
     private let _freqs: MLXArray
@@ -118,14 +110,6 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
 
         self.dimensions = dimensions
         self.traditional = traditional
-        self.maxPositionEmbeddings = maxPositionEmbeddings
-        self.base = base
-        self.scalingFactor = scalingFactor
-        self.originalMaxPositionEmbeddings = originalMaxPositionEmbeddings
-        self.betaFast = betaFast
-        self.betaSlow = betaSlow
-        self.mscale = mscale
-        self.mscaleAllDim = mscaleAllDim
 
         func yarnFindCorrectionDim(numRotations: Float) -> Float {
             return Float(dimensions)
@@ -179,8 +163,13 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+        // "copy" of x as we are going to write through it and don't want to update
+        // through the reference
+        // https://github.com/ml-explore/mlx-swift/issues/364
+        var x = x
         if _mscale != 1.0 {
-            x[.ellipsis, 0 ..< dimensions] = _mscale * x[.ellipsis, 0 ..< dimensions]
+            x = x[0..., .ellipsis]
+            x[.ellipsis, 0 ..< dimensions] *= _mscale
         }
 
         return MLXFast.RoPE(
@@ -195,8 +184,10 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     }
 
     public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        var x = x
         if _mscale != 1.0 {
-            x[.ellipsis, 0 ..< dimensions] = _mscale * x[.ellipsis, 0 ..< dimensions]
+            x = x[0..., .ellipsis]
+            x[.ellipsis, 0 ..< dimensions] *= _mscale
         }
 
         return MLXFast.RoPE(
