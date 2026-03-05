@@ -31,7 +31,7 @@ public enum WiredMemoryUtils {
     ///
     /// This does not attempt to generate semantically meaningful text; it only ensures
     /// a valid token sequence of the requested length for memory sizing purposes.
-    private static func makeTokenIDs(
+    private static func makeTokenIds(
         count: Int,
         tokenizer: Tokenizer,
         seedText: String = " hello"
@@ -74,8 +74,8 @@ public enum WiredMemoryUtils {
         tokenizer: Tokenizer,
         seedText: String = " hello"
     ) -> LMInput {
-        let tokenIDs = makeTokenIDs(count: count, tokenizer: tokenizer, seedText: seedText)
-        return LMInput(tokens: MLXArray(tokenIDs))
+        let tokenIds = makeTokenIds(count: count, tokenizer: tokenizer, seedText: seedText)
+        return LMInput(tokens: MLXArray(tokenIds))
     }
 
     /// Run a prefill-only pass to populate caches for the given input.

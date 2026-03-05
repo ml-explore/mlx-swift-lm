@@ -188,6 +188,11 @@ public final class ModelContainer: Sendable {
         return tokenizer.decode(tokenIds: tokenIds)
     }
 
+    @available(*, deprecated, renamed: "decode(tokenIds:)")
+    public func decode(tokens: [Int]) async -> String {
+        await decode(tokenIds: tokens)
+    }
+
     /// Encode a string to token IDs.
     ///
     /// - Parameter text: Text to encode
