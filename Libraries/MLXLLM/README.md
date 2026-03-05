@@ -13,9 +13,8 @@ This is a port of several models from:
 
 - https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/
 
-using Swift Tokenizers to provide tokenization:
-
-- https://github.com/DePasqualeOrg/swift-tokenizers
+Tokenization is provided via the `TokenizerLoader` protocol – see the main
+[README](../../README.md) for available integration packages.
 
 The [LLMModelFactory.swift](LLMModelFactory.swift) provides minor overrides and customization --
 if you require overrides for the tokenizer or prompt customizations they can be
@@ -75,8 +74,12 @@ Using LLMs and VLMs from MLXLMCommon is as easy as:
 ```swift
 import MLXLLM
 import MLXLMHuggingFace
+import MLXLMTokenizers
 
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
 print(try await session.respond(to: "What are two things to see in San Francisco?"))
 print(try await session.respond(to: "How about a great place to eat?"))

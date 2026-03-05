@@ -14,8 +14,12 @@ Using LLMs and VLMs from MLXLMCommon is as easy as:
 ```swift
 import MLXVLM
 import MLXLMHuggingFace
+import MLXLMTokenizers
 
-let model = try await loadModel(id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+)
 let session = ChatSession(model)
 
 let answer1 = try await session.respond(
@@ -42,9 +46,8 @@ This is a port of several models from:
 
 - https://github.com/Blaizzy/mlx-vlm
 
-using Swift Tokenizers to provide tokenization:
-
-- https://github.com/DePasqualeOrg/swift-tokenizers
+Tokenization is provided via the `TokenizerLoader` protocol – see the main
+[README](../../README.md) for available integration packages.
 
 The [VLMModelFactory.swift](VLMModelFactory.swift) provides minor overrides and customization --
 if you require overrides for the tokenizer or prompt customizations they can be
