@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 /// Creates a function that decodes configuration data and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
@@ -475,7 +474,8 @@ public final class LLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        configuration: ResolvedModelConfiguration
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -524,7 +524,8 @@ public final class LLMModelFactory: ModelFactory {
         }
 
         // Load tokenizer and weights in parallel
-        async let tokenizerTask = AutoTokenizer.from(directory: configuration.tokenizerDirectory)
+        async let tokenizerTask = tokenizerLoader.load(
+            from: configuration.tokenizerDirectory)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,

@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Load model weights.
 ///

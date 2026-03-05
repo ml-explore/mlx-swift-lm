@@ -6,7 +6,6 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
-import Tokenizers
 import XCTest
 
 /// See also ChatSessionIntegrationTests

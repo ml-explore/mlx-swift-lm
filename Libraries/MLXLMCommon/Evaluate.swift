@@ -2,7 +2,6 @@
 
 import Foundation
 import MLX
-import Tokenizers
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
@@ -946,7 +945,7 @@ public func generate(
 
     return GenerateResult(
         inputText: input.text, tokens: result.generatedTokens,
-        output: context.tokenizer.decode(tokens: result.generatedTokens),
+        output: context.tokenizer.decode(tokenIds: result.generatedTokens),
         promptTime: result.promptTime + result.promptPrefillTime,
         generateTime: result.generateTime
     )

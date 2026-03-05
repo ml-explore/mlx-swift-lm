@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Result of a wired memory measurement pass.
 public struct WiredMemoryMeasurement: Sendable {

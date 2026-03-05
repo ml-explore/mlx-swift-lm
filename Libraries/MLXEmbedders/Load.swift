@@ -4,7 +4,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 /// Errors encountered during the model loading and initialization process.
 ///
@@ -122,6 +121,7 @@ func resolveDirectories(
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
     from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
     configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
@@ -130,7 +130,7 @@ public func load(
         from: downloader, configuration: configuration, useLatest: useLatest,
         progressHandler: progressHandler)
 
-    async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
+    async let tokenizerTask = tokenizerLoader.load(from: tokenizerDirectory)
     let model = try loadSynchronous(modelDirectory: modelDirectory, modelName: configuration.name)
     let tokenizer = try await tokenizerTask
 
@@ -222,6 +222,7 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
     from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
     configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
@@ -233,7 +234,8 @@ public func loadModelContainer(
     return try await ModelContainer(
         modelDirectory: modelDirectory,
         tokenizerDirectory: tokenizerDirectory,
-        configuration: configuration)
+        configuration: configuration,
+        tokenizerLoader: tokenizerLoader)
 }
 
 /// Load an embedding model from a local directory.
@@ -244,12 +246,13 @@ public func loadModelContainer(
 /// - Parameter directory: The local directory containing model files.
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
-    from directory: URL
+    from directory: URL,
+    using tokenizerLoader: any TokenizerLoader
 ) async throws -> (EmbeddingModel, Tokenizer) {
     let name =
         directory.deletingLastPathComponent().lastPathComponent + "/"
         + directory.lastPathComponent
-    async let tokenizerTask = AutoTokenizer.from(directory: directory)
+    async let tokenizerTask = tokenizerLoader.load(from: directory)
     let model = try loadSynchronous(modelDirectory: directory, modelName: name)
     let tokenizer = try await tokenizerTask
     return (model, tokenizer)
@@ -260,13 +263,17 @@ public func load(
 /// No downloader is needed — the model and tokenizer are loaded from
 /// the given directory.
 ///
-/// - Parameter directory: The local directory containing model files.
+/// - Parameters:
+///   - directory: The local directory containing model files.
+///   - tokenizerLoader: The ``TokenizerLoader`` to use for loading the tokenizer.
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
-    from directory: URL
+    from directory: URL,
+    using tokenizerLoader: any TokenizerLoader
 ) async throws -> ModelContainer {
     try await ModelContainer(
         modelDirectory: directory,
         tokenizerDirectory: directory,
-        configuration: ModelConfiguration(directory: directory))
+        configuration: ModelConfiguration(directory: directory),
+        tokenizerLoader: tokenizerLoader)
 }

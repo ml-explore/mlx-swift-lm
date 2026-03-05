@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 public enum VLMError: LocalizedError, Equatable {
     case imageRequired
@@ -283,7 +282,8 @@ public final class VLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        configuration: ResolvedModelConfiguration
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> sending ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -337,7 +337,8 @@ public final class VLMModelFactory: ModelFactory {
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
-        async let tokenizerTask = AutoTokenizer.from(directory: configuration.tokenizerDirectory)
+        async let tokenizerTask = tokenizerLoader.load(
+            from: configuration.tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
         try loadWeights(

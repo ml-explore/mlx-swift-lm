@@ -12,7 +12,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // MARK: - Configuration
 

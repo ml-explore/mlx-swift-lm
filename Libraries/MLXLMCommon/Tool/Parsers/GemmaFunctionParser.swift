@@ -69,7 +69,13 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
                 ? String(argsStr[argsStr.index(after: commaIdx)...]) : ""
 
             // Try JSON decode, fallback to string
-            arguments[key] = tryParseJSON(value) ?? value
+            if let data = value.data(using: .utf8),
+                let json = deserializeJSON(data)
+            {
+                arguments[key] = json
+            } else {
+                arguments[key] = value
+            }
         }
 
         return ToolCall(function: .init(name: funcName, arguments: arguments))

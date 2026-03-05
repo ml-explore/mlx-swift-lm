@@ -3,8 +3,9 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
-import MLXVLM
+@preconcurrency import MLXLMCommon
+import MLXLMHuggingFace
+import MLXLMTokenizers
 import XCTest
 
 /// Integration tests for tool call format auto-detection and end-to-end parsing.
@@ -69,6 +70,7 @@ public class ToolCallIntegrationTests: XCTestCase {
         Task {
             do {
                 lfm2Container = try await LLMModelFactory.shared.loadContainer(
+                    using: TokenizersLoader(),
                     configuration: .init(id: lfm2ModelId)
                 )
             } catch {
@@ -80,6 +82,7 @@ public class ToolCallIntegrationTests: XCTestCase {
         Task {
             do {
                 glm4Container = try await LLMModelFactory.shared.loadContainer(
+                    using: TokenizersLoader(),
                     configuration: .init(id: glm4ModelId)
                 )
             } catch {
@@ -333,9 +336,10 @@ public class ToolCallIntegrationTests: XCTestCase {
         input: UserInput,
         maxTokens: Int
     ) async throws -> (text: String, toolCalls: [ToolCall]) {
-        let result = try await container.perform(nonSendable: input) {
-            (context: ModelContext, input) in
-            let lmInput = try await context.processor.prepare(input: input)
+        let lmInput = try await container.perform { context in
+            try await context.processor.prepare(input: input)
+        }
+        return try await container.perform { context in
             let parameters = GenerateParameters(maxTokens: maxTokens)
 
             let stream = try generate(
@@ -344,24 +348,21 @@ public class ToolCallIntegrationTests: XCTestCase {
                 context: context
             )
 
-            var collectedText = ""
-            var collectedToolCalls: [ToolCall] = []
-
+            var text = ""
+            var toolCalls: [ToolCall] = []
             for try await generation in stream {
                 switch generation {
-                case .chunk(let text):
-                    collectedText += text
+                case .chunk(let chunk):
+                    text += chunk
                 case .toolCall(let toolCall):
-                    collectedToolCalls.append(toolCall)
+                    toolCalls.append(toolCall)
                 case .info:
                     break
                 }
             }
 
-            return (collectedText, collectedToolCalls)
+            return (text, toolCalls)
         }
-
-        return result
     }
 }
 

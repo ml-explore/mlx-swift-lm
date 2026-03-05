@@ -4,6 +4,7 @@ import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXLMHuggingFace
+import MLXLMTokenizers
 import MLXVLM
 
 enum IntegrationTestModelIDs {
@@ -24,6 +25,7 @@ actor IntegrationTestModels {
 
         let task = Task {
             try await LLMModelFactory.shared.loadContainer(
+                using: TokenizersLoader(),
                 configuration: .init(id: IntegrationTestModelIDs.llmModelId)
             )
         }
@@ -38,6 +40,7 @@ actor IntegrationTestModels {
 
         let task = Task {
             try await VLMModelFactory.shared.loadContainer(
+                using: TokenizersLoader(),
                 configuration: .init(id: IntegrationTestModelIDs.vlmModelId)
             )
         }
