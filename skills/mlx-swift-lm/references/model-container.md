@@ -25,22 +25,28 @@
 ```swift
 // Via factory (recommended)
 let container = try await LLMModelFactory.shared.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
-// With custom hub
-let hub = HubApi(hfToken: "your_token")
+// With custom hub (from MLXLMHuggingFace)
+let hub = HubClient(token: "hf_...")
 let container = try await LLMModelFactory.shared.loadContainer(
-    hub: hub,
+    from: hub,
+    using: TokenizersLoader(),
     configuration: .init(id: "private/model")
 )
 
 // With progress tracking
 let container = try await LLMModelFactory.shared.loadContainer(
-    configuration: config
-) { progress in
-    print("Downloaded: \(progress.fractionCompleted)")
-}
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    configuration: config,
+    progressHandler: { progress in
+        print("Downloaded: \(progress.fractionCompleted)")
+    }
+)
 ```
 
 ### Using ModelContainer
@@ -173,6 +179,8 @@ let factory = LLMModelFactory.shared
 
 // Load container
 let container = try await factory.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: LLMRegistry.llama3_2_3B_4bit
 )
 
@@ -189,6 +197,8 @@ let customFactory = LLMModelFactory(
 let factory = VLMModelFactory.shared
 
 let container = try await factory.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: VLMRegistry.qwen2VL2BInstruct4Bit
 )
 ```

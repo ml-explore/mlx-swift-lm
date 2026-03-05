@@ -16,7 +16,10 @@ See <doc:evaluation>.
 Using LLMs and VLMs is as easy as this:
 
 ```swift
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
 print(try await session.respond(to: "What are two things to see in San Francisco?")
 print(try await session.respond(to: "How about a great place to eat?")

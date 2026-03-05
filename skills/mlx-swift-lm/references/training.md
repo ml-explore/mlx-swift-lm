@@ -50,6 +50,8 @@ import MLXLMCommon
 
 // Load base model
 let container = try await LLMModelFactory.shared.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: .init(id: "mlx-community/Llama-3.2-3B-Instruct-4bit")
 )
 
@@ -345,6 +347,8 @@ import MLXOptimizers
 func trainAdapter() async throws {
     // Load model
     let container = try await LLMModelFactory.shared.loadContainer(
+        from: HubClient.default,
+        using: TokenizersLoader(),
         configuration: .init(id: "mlx-community/Llama-3.2-1B-Instruct-4bit")
     )
 

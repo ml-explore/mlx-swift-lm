@@ -14,8 +14,13 @@ Using LLMs and VLMs is as easy as:
 ```swift
 import MLXLLM
 import MLXLMHuggingFace
+import MLXLMTokenizers
 
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+let model = try await loadModel(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
 print(try await session.respond(to: "What are two things to see in San Francisco?"))
 print(try await session.respond(to: "How about a great place to eat?"))
@@ -23,23 +28,17 @@ print(try await session.respond(to: "How about a great place to eat?"))
 
 ## More Loading Scenarios
 
-Use convenience overloads (default `HubClient.default`):
-
-```swift
-import MLXLLM
-import MLXLMHuggingFace
-
-let container = try await loadModelContainer(id: "mlx-community/Qwen3-4B-4bit")
-```
-
 Load from a local directory:
 
 ```swift
 import MLXLLM
-import MLXLMCommon
+import MLXLMTokenizers
 
 let modelDirectory = URL(filePath: "/path/to/model")
-let container = try await loadModelContainer(from: modelDirectory)
+let container = try await loadModelContainer(
+    from: modelDirectory,
+    using: TokenizersLoader()
+)
 ```
 
 Use a custom Hugging Face client:
@@ -47,10 +46,12 @@ Use a custom Hugging Face client:
 ```swift
 import MLXLLM
 import MLXLMHuggingFace
+import MLXLMTokenizers
 
 let hub = HubClient(token: "hf_...")
 let container = try await loadModelContainer(
     from: hub,
+    using: TokenizersLoader(),
     id: "mlx-community/Qwen3-4B-4bit"
 )
 ```
@@ -60,6 +61,7 @@ Use a custom downloader:
 ```swift
 import MLXLLM
 import MLXLMCommon
+import MLXLMTokenizers
 
 struct S3Downloader: Downloader {
     func download(
@@ -76,6 +78,7 @@ struct S3Downloader: Downloader {
 
 let container = try await loadModelContainer(
     from: S3Downloader(),
+    using: TokenizersLoader(),
     id: "my-bucket/my-model"
 )
 ```
@@ -102,6 +105,7 @@ A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`
 ```swift
 import MLXLMCommon
 import MLXLMHuggingFace
+import MLXLMTokenizers
 
 // e.g. VLMModelFactory.shared
 let modelFactory: ModelFactory
@@ -109,13 +113,17 @@ let modelFactory: ModelFactory
 // e.g. VLMRegistry.paligemma3bMix4488bit
 let modelConfiguration: ModelConfiguration
 
-// Uses HubClient.default via MLXLMHuggingFace convenience overload.
-let container = try await modelFactory.loadContainer(configuration: modelConfiguration)
+let container = try await modelFactory.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    configuration: modelConfiguration
+)
 
 // Custom Hub client (token, endpoint, etc.).
 let customHub = HubClient(token: "hf_...")
 let privateContainer = try await modelFactory.loadContainer(
     from: customHub,
+    using: TokenizersLoader(),
     configuration: modelConfiguration
 )
 ```
@@ -135,14 +143,15 @@ The flow inside the `ModelFactory` goes like this:
 public class VLMModelFactory: ModelFactory {
 
     public func _load(
-        configuration: ResolvedModelConfiguration
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
         // modelDirectory and tokenizerDirectory are already resolved
         // load the base configuration
         // using the typeRegistry create a model (random weights)
         // load the weights, apply quantization as needed, update the model
             // calls model.sanitize() for weight preparation
-        // load the tokenizer
+        // load the tokenizer via tokenizerLoader.load(from: directory)
         // (vlm) load the processor configuration, create the processor
     }
 }

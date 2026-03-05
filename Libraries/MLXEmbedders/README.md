@@ -7,8 +7,12 @@ This directory contains ports of popular Encoders / Embedding Models.
 ```swift
 import MLXEmbedders
 import MLXEmbeddersHuggingFace
+import MLXLMTokenizers
 
-let modelContainer = try await loadModelContainer(configuration: .nomic_text_v1_5)
+let modelContainer = try await loadModelContainer(
+    using: TokenizersLoader(),
+    configuration: .nomic_text_v1_5
+)
 let searchInputs = [
     "search_query: Animals in Tropical Climates.",
     "search_document: Elephants",
@@ -50,9 +54,13 @@ Load from a local directory:
 
 ```swift
 import MLXEmbedders
+import MLXLMTokenizers
 
 let modelDirectory = URL(filePath: "/path/to/embedder")
-let modelContainer = try await loadModelContainer(from: modelDirectory)
+let modelContainer = try await loadModelContainer(
+    from: modelDirectory,
+    using: TokenizersLoader()
+)
 ```
 
 Use a custom Hugging Face client:
@@ -60,10 +68,12 @@ Use a custom Hugging Face client:
 ```swift
 import MLXEmbedders
 import MLXEmbeddersHuggingFace
+import MLXLMTokenizers
 
 let hub = HubClient(token: "hf_...")
 let modelContainer = try await loadModelContainer(
     from: hub,
+    using: TokenizersLoader(),
     configuration: .nomic_text_v1_5
 )
 ```
@@ -73,6 +83,7 @@ Use a custom downloader:
 ```swift
 import MLXEmbedders
 import MLXLMCommon
+import MLXLMTokenizers
 
 struct S3Downloader: Downloader {
     func download(
@@ -89,6 +100,7 @@ struct S3Downloader: Downloader {
 
 let modelContainer = try await loadModelContainer(
     from: S3Downloader(),
+    using: TokenizersLoader(),
     configuration: .init(id: "my-bucket/my-embedder")
 )
 ```
