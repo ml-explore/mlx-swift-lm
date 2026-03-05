@@ -126,8 +126,8 @@ if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
 // Enable with: MLX_SWIFT_INTEGRATION_TESTS=1 swift build --build-tests
 if Context.environment["MLX_SWIFT_INTEGRATION_TESTS"] == "1" {
     package.dependencies += [
-        .package(path: "../../swift-tokenizers-mlx"),
-        .package(path: "../../swift-huggingface-mlx"),
+        .package(url: "https://github.com/DePasqualeOrg/swift-tokenizers-mlx.git", branch: "main"),  // TODO: Review before merging PR #118
+        .package(url: "https://github.com/DePasqualeOrg/swift-huggingface-mlx.git", branch: "main"),  // TODO: Review before merging PR #118
     ]
 
     package.targets += [
