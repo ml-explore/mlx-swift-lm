@@ -43,7 +43,7 @@ public actor ModelContainer {
         self.pooler = pooler
     }
 
-    /// build the model and tokenizer without passing non-sendable data over isolation barriers
+    /// Build the model and tokenizer without passing non-sendable data over isolation barriers
     public init(
         modelDirectory: URL,
         tokenizerDirectory: URL,
