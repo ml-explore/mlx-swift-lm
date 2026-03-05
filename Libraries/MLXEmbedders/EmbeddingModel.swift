@@ -2,8 +2,8 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 /// Container for models that guarantees single threaded access.
 ///
@@ -47,10 +47,11 @@ public actor ModelContainer {
     public init(
         modelDirectory: URL,
         tokenizerDirectory: URL,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws {
         // Load tokenizer and model in parallel
-        async let tokenizerTask = AutoTokenizer.from(directory: tokenizerDirectory)
+        async let tokenizerTask = tokenizerLoader.load(from: tokenizerDirectory)
 
         self.model = try loadSynchronous(
             modelDirectory: modelDirectory, modelName: configuration.name)

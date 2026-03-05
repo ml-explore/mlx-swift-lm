@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Container for models that guarantees single threaded access.
 ///
@@ -182,11 +181,11 @@ public final class ModelContainer: Sendable {
 
     /// Decode token IDs to a string.
     ///
-    /// - Parameter tokens: Array of token IDs
+    /// - Parameter tokenIds: Array of token IDs
     /// - Returns: Decoded string
-    public func decode(tokens: [Int]) async -> String {
+    public func decode(tokenIds: [Int]) async -> String {
         let tokenizer = await self.tokenizer
-        return tokenizer.decode(tokens: tokens)
+        return tokenizer.decode(tokenIds: tokenIds)
     }
 
     /// Encode a string to token IDs.

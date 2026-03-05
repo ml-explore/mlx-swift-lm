@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Time/Height/Width struct to represent information about input images.
 public struct THW: Sendable {

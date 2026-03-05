@@ -5,6 +5,7 @@ import MLXEmbeddersHuggingFace
 import MLXLLM
 import MLXLMCommon
 import MLXLMHuggingFace
+import MLXLMTokenizers
 import MLXVLM
 import Testing
 
@@ -50,7 +51,9 @@ struct ModelLoadingBenchmarks {
         let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
-        _ = try await LLMModelFactory.shared.load(configuration: config) { _ in }
+        _ = try await LLMModelFactory.shared.load(
+            using: TokenizersLoader(), configuration: config
+        ) { _ in }
         Memory.clearCache()
 
         // Benchmark multiple runs
@@ -61,7 +64,7 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await LLMModelFactory.shared.load(
-                configuration: config
+                using: TokenizersLoader(), configuration: config
             ) { _ in }
 
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
@@ -83,7 +86,9 @@ struct ModelLoadingBenchmarks {
         let config = MLXLMCommon.ModelConfiguration(id: modelId)
 
         // Warm-up run: ensure model is downloaded and caches are primed
-        _ = try await VLMModelFactory.shared.load(configuration: config) { _ in }
+        _ = try await VLMModelFactory.shared.load(
+            using: TokenizersLoader(), configuration: config
+        ) { _ in }
         Memory.clearCache()
 
         // Benchmark multiple runs
@@ -94,7 +99,7 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await VLMModelFactory.shared.load(
-                configuration: config
+                using: TokenizersLoader(), configuration: config
             ) { _ in }
 
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
@@ -116,7 +121,7 @@ struct ModelLoadingBenchmarks {
 
         // Warm-up run: ensure model is downloaded and caches are primed
         _ = try await loadModelContainer(
-            configuration: config
+            using: TokenizersLoader(), configuration: config
         ) { _ in }
         Memory.clearCache()
 
@@ -128,7 +133,7 @@ struct ModelLoadingBenchmarks {
             let start = CFAbsoluteTimeGetCurrent()
 
             _ = try await loadModelContainer(
-                configuration: config
+                using: TokenizersLoader(), configuration: config
             ) { _ in }
 
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000

@@ -3,7 +3,6 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 public enum VLMError: LocalizedError, Equatable {
     case imageRequired
@@ -280,7 +279,8 @@ public final class VLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        configuration: ResolvedModelConfiguration
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> sending ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -325,7 +325,8 @@ public final class VLMModelFactory: ModelFactory {
         mutableConfiguration.eosTokenIds = eosTokenIds
 
         // Load tokenizer, processor config, and weights in parallel
-        async let tokenizerTask = AutoTokenizer.from(directory: configuration.tokenizerDirectory)
+        async let tokenizerTask = tokenizerLoader.load(
+            from: configuration.tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
         try loadWeights(

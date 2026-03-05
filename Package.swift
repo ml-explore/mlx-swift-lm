@@ -1,4 +1,4 @@
-// swift-tools-version: 5.12
+// swift-tools-version: 6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -24,19 +24,9 @@ let package = Package(
         .library(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
-        .library(
-            name: "MLXLMHuggingFace",
-            targets: ["MLXLMHuggingFace"]),
-        .library(
-            name: "MLXEmbeddersHuggingFace",
-            targets: ["MLXEmbeddersHuggingFace"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
-        .package(url: "https://github.com/DePasqualeOrg/swift-tokenizers.git", from: "0.1.0"),
-        .package(
-            url: "https://github.com/DePasqualeOrg/swift-huggingface.git",
-            branch: "improve-cache-hit-performance"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6"))
     ],
     targets: [
         .target(
@@ -46,7 +36,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -63,7 +52,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -79,7 +67,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -94,7 +81,6 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
                 .target(name: "MLXLMCommon"),
             ],
             path: "Libraries/MLXEmbedders",
@@ -105,40 +91,13 @@ let package = Package(
                 .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
-        .target(
-            name: "MLXLMHuggingFace",
-            dependencies: [
-                "MLXLMCommon",
-                .product(name: "HuggingFace", package: "swift-huggingface"),
-            ],
-            path: "Libraries/MLXLMHuggingFace",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
-        ),
-        .target(
-            name: "MLXEmbeddersHuggingFace",
-            dependencies: [
-                "MLXEmbedders",
-                "MLXLMHuggingFace",
-                .product(name: "HuggingFace", package: "swift-huggingface"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
-            ],
-            path: "Libraries/MLXEmbeddersHuggingFace",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
-        ),
         .testTarget(
             name: "MLXLMTests",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
                 "MLXLMCommon",
-                "MLXLMHuggingFace",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
@@ -152,20 +111,39 @@ let package = Package(
                 .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
+    ]
+)
+
+if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
+    || Context.environment["SPI_GENERATE_DOCS"] == "1"
+{
+    package.dependencies.append(
+        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.3.0")
+    )
+}
+
+// Integration tests and benchmarks require external tokenizer and downloader packages.
+// Enable with: MLX_SWIFT_INTEGRATION_TESTS=1 swift build --build-tests
+if Context.environment["MLX_SWIFT_INTEGRATION_TESTS"] == "1" {
+    package.dependencies += [
+        .package(path: "../../swift-tokenizers-mlx"),
+        .package(path: "../../swift-huggingface-mlx"),
+    ]
+
+    package.targets += [
         .testTarget(
             name: "MLXLMIntegrationTests",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-tokenizers"),
-                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
+                .product(name: "MLXLMHuggingFace", package: "swift-huggingface-mlx"),
+                .product(name: "MLXEmbeddersHuggingFace", package: "swift-huggingface-mlx"),
                 "MLXLMCommon",
-                "MLXLMHuggingFace",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
-                "MLXEmbeddersHuggingFace",
             ],
             path: "Tests/MLXLMIntegrationTests",
             exclude: [
@@ -182,8 +160,9 @@ let package = Package(
                 "MLXVLM",
                 "MLXEmbedders",
                 "MLXLMCommon",
-                "MLXLMHuggingFace",
-                "MLXEmbeddersHuggingFace",
+                .product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
+                .product(name: "MLXLMHuggingFace", package: "swift-huggingface-mlx"),
+                .product(name: "MLXEmbeddersHuggingFace", package: "swift-huggingface-mlx"),
             ],
             path: "Tests/Benchmarks",
             swiftSettings: [
@@ -191,13 +170,4 @@ let package = Package(
             ]
         ),
     ]
-)
-
-if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
-    || Context.environment["SPI_GENERATE_DOCS"] == "1"
-{
-    // docc builder
-    package.dependencies.append(
-        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.3.0")
-    )
 }

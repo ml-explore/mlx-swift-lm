@@ -4,13 +4,15 @@ import Foundation
 import MLX
 import MLXEmbedders
 import MLXEmbeddersHuggingFace
+import MLXLMCommon
+import MLXLMTokenizers
 import Testing
-import Tokenizers
 
 struct EmbedderIntegrationtests {
 
     private func readeMeExampleResult() async throws -> ([String], [[Float]]) {
-        let modelContainer = try await loadModelContainer(configuration: .nomic_text_v1_5)
+        let modelContainer = try await loadModelContainer(
+            using: TokenizersLoader(), configuration: .nomic_text_v1_5)
         let searchInputs = [
             "search_query: Animals in Tropical Climates.",
             "search_document: Elephants",

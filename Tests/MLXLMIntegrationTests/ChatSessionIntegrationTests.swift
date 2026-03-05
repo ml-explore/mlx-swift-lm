@@ -8,7 +8,6 @@ import MLXLMCommon
 import MLXNN
 import MLXOptimizers
 import MLXVLM
-import Tokenizers
 import XCTest
 
 /// Tests for the streamlined API using real models

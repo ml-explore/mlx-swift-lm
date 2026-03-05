@@ -7,7 +7,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 private enum Qwen3VLError: Error {
     case featureTokenMismatch(expected: Int, actual: Int)

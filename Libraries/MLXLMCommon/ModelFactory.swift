@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Tokenizers
 
 public enum ModelFactoryError: LocalizedError {
     case unsupportedModelType(String)
@@ -91,7 +90,8 @@ public protocol ModelFactory: Sendable {
     var modelRegistry: AbstractModelRegistry { get }
 
     func _load(
-        configuration: ResolvedModelConfiguration
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext
 
 }
@@ -129,27 +129,31 @@ extension ModelFactory {
     /// - ``loadModel(from:configuration:useLatest:progressHandler:)``
     /// - ``loadModelContainer(from:configuration:useLatest:progressHandler:)``
     public func load(
-        from downloader: any Downloader, configuration: ModelConfiguration,
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
         useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> sending ModelContext {
         let resolved = try await resolve(
             configuration: configuration, from: downloader,
             useLatest: useLatest, progressHandler: progressHandler)
-        return try await _load(configuration: resolved)
+        return try await _load(configuration: resolved, tokenizerLoader: tokenizerLoader)
     }
 
     /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
     /// producing a ``ModelContainer``.
     public func loadContainer(
-        from downloader: any Downloader, configuration: ModelConfiguration,
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
         useLatest: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelContainer {
         let resolved = try await resolve(
             configuration: configuration, from: downloader,
             useLatest: useLatest, progressHandler: progressHandler)
-        let context = try await _load(configuration: resolved)
+        let context = try await _load(configuration: resolved, tokenizerLoader: tokenizerLoader)
         return ModelContainer(context: context)
     }
 
@@ -158,16 +162,20 @@ extension ModelFactory {
     /// No downloader is needed — the model and tokenizer are loaded from
     /// the given directory.
     public func load(
-        from directory: URL
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader
     ) async throws -> sending ModelContext {
-        try await _load(configuration: .init(directory: directory))
+        try await _load(
+            configuration: .init(directory: directory), tokenizerLoader: tokenizerLoader)
     }
 
     /// Load a model from a local directory, producing a ``ModelContainer``.
     public func loadContainer(
-        from directory: URL
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContainer {
-        let context = try await _load(configuration: .init(directory: directory))
+        let context = try await _load(
+            configuration: .init(directory: directory), tokenizerLoader: tokenizerLoader)
         return ModelContainer(context: context)
     }
 
@@ -222,19 +230,22 @@ public func resolve(
 ///
 /// - Parameters:
 ///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 ///   - configuration: a ``ModelConfiguration``
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContext``
 public func loadModel(
-    from downloader: any Downloader, configuration: ModelConfiguration,
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
     try await load {
         try await $0.load(
-            from: downloader, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+            from: downloader, using: tokenizerLoader, configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
     }
 }
 
@@ -245,19 +256,22 @@ public func loadModel(
 ///
 /// - Parameters:
 ///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 ///   - configuration: a ``ModelConfiguration``
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(
-    from downloader: any Downloader, configuration: ModelConfiguration,
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    configuration: ModelConfiguration,
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
     try await load {
         try await $0.loadContainer(
-            from: downloader, configuration: configuration, useLatest: useLatest,
-            progressHandler: progressHandler)
+            from: downloader, using: tokenizerLoader, configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
     }
 }
 
@@ -268,19 +282,24 @@ public func loadModelContainer(
 ///
 /// - Parameters:
 ///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 ///   - id: model identifier, e.g "mlx-community/Qwen3-4B-4bit"
 ///   - revision: revision to download (defaults to "main")
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContext``
 public func loadModel(
-    from downloader: any Downloader, id: String, revision: String = "main",
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    id: String,
+    revision: String = "main",
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
     try await load {
         try await $0.load(
-            from: downloader, configuration: .init(id: id, revision: revision),
+            from: downloader, using: tokenizerLoader,
+            configuration: .init(id: id, revision: revision),
             useLatest: useLatest, progressHandler: progressHandler)
     }
 }
@@ -292,19 +311,24 @@ public func loadModel(
 ///
 /// - Parameters:
 ///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 ///   - id: model identifier, e.g "mlx-community/Qwen3-4B-4bit"
 ///   - revision: revision to download (defaults to "main")
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(
-    from downloader: any Downloader, id: String, revision: String = "main",
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    id: String,
+    revision: String = "main",
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
     try await load {
         try await $0.loadContainer(
-            from: downloader, configuration: .init(id: id, revision: revision),
+            from: downloader, using: tokenizerLoader,
+            configuration: .init(id: id, revision: revision),
             useLatest: useLatest, progressHandler: progressHandler)
     }
 }
@@ -316,12 +340,14 @@ public func loadModelContainer(
 ///
 /// - Parameters:
 ///   - directory: directory of configuration and weights
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 /// - Returns: a ``ModelContext``
 public func loadModel(
-    from directory: URL
+    from directory: URL,
+    using tokenizerLoader: any TokenizerLoader
 ) async throws -> sending ModelContext {
     try await load {
-        try await $0.load(from: directory)
+        try await $0.load(from: directory, using: tokenizerLoader)
     }
 }
 
@@ -332,12 +358,14 @@ public func loadModel(
 ///
 /// - Parameters:
 ///   - directory: directory of configuration and weights
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 /// - Returns: a ``ModelContainer``
 public func loadModelContainer(
-    from directory: URL
+    from directory: URL,
+    using tokenizerLoader: any TokenizerLoader
 ) async throws -> sending ModelContainer {
     try await load {
-        try await $0.loadContainer(from: directory)
+        try await $0.loadContainer(from: directory, using: tokenizerLoader)
     }
 }
 
