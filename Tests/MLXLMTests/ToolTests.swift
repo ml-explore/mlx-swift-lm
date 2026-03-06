@@ -284,6 +284,63 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
     }
 
+    // MARK: - Qwen3.5 Format Tests (XML Function with tool_call wrapper)
+
+    @Test("Test Qwen3.5 XML Function Parser - With tool_call Tags")
+    func testQwen35Parser() throws {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content = """
+            <tool_call>
+            <function=get_weather>
+            <parameter=location>
+            San Francisco
+            </parameter>
+            <parameter=unit>
+            celsius
+            </parameter>
+            </function>
+            </tool_call>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("San Francisco"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Qwen3.5 Format via ToolCallProcessor")
+    func testQwen35FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .qwen35)
+        let chunks: [String] = [
+            "<tool", "_call>", "\n<function=get_weather>\n",
+            "<parameter=location>\nTokyo\n</parameter>",
+            "\n</function>\n</tool_call>",
+        ]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+    }
+
+    @Test("Test Qwen3.5 Format - No Arguments")
+    func testQwen35FormatNoArgs() throws {
+        let processor = ToolCallProcessor(format: .qwen35)
+        let content = "<tool_call>\n<function=get_current_datetime>\n</function>\n</tool_call>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_current_datetime")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
     // MARK: - GLM4 Format Tests
 
     @Test("Test GLM4 Tool Call Parser")
@@ -422,6 +479,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.qwen35.rawValue == "qwen3_5")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -451,6 +509,11 @@ struct ToolTests {
         // Gemma models
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
+
+        // Qwen3.5 models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "qwen3_5") == .qwen35)
+        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .qwen35)
+        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .qwen35)
 
         // Unknown models should return nil (use default)
         #expect(ToolCallFormat.infer(from: "llama") == nil)
