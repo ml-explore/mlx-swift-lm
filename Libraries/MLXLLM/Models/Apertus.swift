@@ -321,7 +321,7 @@ private class ApertusModelInner: Module {
     ) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let mask = createAttentionMask(h: inputs, cache: cache)
+        let mask = createAttentionMask(h: inputs, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

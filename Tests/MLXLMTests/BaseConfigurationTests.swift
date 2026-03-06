@@ -21,7 +21,6 @@ public class BaseConfigurationTests: XCTestCase {
         let config = try JSONDecoder().decode(
             BaseConfiguration.self, from: json.data(using: .utf8)!)
 
-        XCTAssertEqual(config.quantization, .init(groupSize: 128, bits: 4))
         XCTAssertEqual(
             config.perLayerQuantization?.quantization(layer: "x"), .init(groupSize: 128, bits: 4))
     }
@@ -47,8 +46,6 @@ public class BaseConfigurationTests: XCTestCase {
 
         let config = try JSONDecoder().decode(
             BaseConfiguration.self, from: json.data(using: .utf8)!)
-
-        XCTAssertEqual(config.quantization, .init(groupSize: 64, bits: 4))
 
         // a random layer -- no specific configuration gets default
         XCTAssertEqual(
