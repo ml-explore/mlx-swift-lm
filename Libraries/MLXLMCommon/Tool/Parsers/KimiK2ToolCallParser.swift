@@ -53,7 +53,7 @@ public struct KimiK2ToolCallParser: ToolCallParser, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Deserialize the JSON arguments
-        guard let arguments = deserialize(argsStr) as? [String: any Sendable] else {
+        guard let arguments = tryParseJSON(argsStr) as? [String: any Sendable] else {
             return nil
         }
 
