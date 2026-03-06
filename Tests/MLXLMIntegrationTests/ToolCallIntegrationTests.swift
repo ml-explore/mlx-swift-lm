@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import XCTest
 
 /// Integration tests for tool call format auto-detection and end-to-end parsing.
@@ -21,11 +22,13 @@ public class ToolCallIntegrationTests: XCTestCase {
 
     static let lfm2ModelId = "mlx-community/LFM2-2.6B-Exp-4bit"
     static let glm4ModelId = "mlx-community/GLM-4-9B-0414-4bit"
+    static let mistral3ModelId = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
 
     // MARK: - Shared State
 
     nonisolated(unsafe) static var lfm2Container: ModelContainer?
     nonisolated(unsafe) static var glm4Container: ModelContainer?
+    nonisolated(unsafe) static var mistral3Container: ModelContainer?
 
     // MARK: - Tool Schema
 
@@ -61,6 +64,7 @@ public class ToolCallIntegrationTests: XCTestCase {
 
         let lfm2Expectation = XCTestExpectation(description: "Load LFM2")
         let glm4Expectation = XCTestExpectation(description: "Load GLM4")
+        let mistral3Expectation = XCTestExpectation(description: "Load Mistral3")
 
         Task {
             do {
@@ -84,7 +88,19 @@ public class ToolCallIntegrationTests: XCTestCase {
             glm4Expectation.fulfill()
         }
 
-        _ = XCTWaiter.wait(for: [lfm2Expectation, glm4Expectation], timeout: 600)
+        Task {
+            do {
+                mistral3Container = try await VLMModelFactory.shared.loadContainer(
+                    configuration: .init(id: mistral3ModelId)
+                )
+            } catch {
+                print("Failed to load Mistral3: \(error)")
+            }
+            mistral3Expectation.fulfill()
+        }
+
+        _ = XCTWaiter.wait(
+            for: [lfm2Expectation, glm4Expectation, mistral3Expectation], timeout: 600)
     }
 
     // MARK: - LFM2 Tests
@@ -192,6 +208,120 @@ public class ToolCallIntegrationTests: XCTestCase {
                     "Expected location to contain 'Paris', got: \(location)"
                 )
             }
+        }
+    }
+
+    // MARK: - Mistral3 Tests
+
+    func testMistral3ToolCallFormatAutoDetection() async throws {
+        guard let container = Self.mistral3Container else {
+            throw XCTSkip("Mistral3 model not available")
+        }
+
+        let config = await container.configuration
+        XCTAssertEqual(
+            config.toolCallFormat, .mistral,
+            "Mistral3 model should auto-detect .mistral tool call format"
+        )
+    }
+
+    func testMistral3EndToEndToolCallGeneration() async throws {
+        guard let container = Self.mistral3Container else {
+            throw XCTSkip("Mistral3 model not available")
+        }
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: Self.weatherToolSchema
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 100
+        )
+
+        print("Mistral3 Output: \(result)")
+        print("Mistral3 Tool Calls: \(toolCalls)")
+
+        // Verify we got a tool call (model may or may not call the tool)
+        if !toolCalls.isEmpty {
+            let toolCall = toolCalls.first!
+            XCTAssertEqual(toolCall.function.name, "get_weather")
+            if let location = toolCall.function.arguments["location"]?.asString {
+                XCTAssertTrue(
+                    location.lowercased().contains("tokyo"),
+                    "Expected location to contain 'Tokyo', got: \(location)"
+                )
+            }
+        }
+    }
+
+    func testMistral3MultipleToolCallGeneration() async throws {
+        guard let container = Self.mistral3Container else {
+            throw XCTSkip("Mistral3 model not available")
+        }
+
+        let multiToolSchema: [[String: any Sendable]] =
+            Self.weatherToolSchema + [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "get_time",
+                        "description": "Get the current time in a given timezone",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "timezone": [
+                                    "type": "string",
+                                    "description":
+                                        "The timezone, e.g. America/New_York, Asia/Tokyo",
+                                ] as [String: any Sendable]
+                            ] as [String: any Sendable],
+                            "required": ["timezone"],
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ]
+            ]
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user(
+                    "What's the weather in Tokyo and what time is it there?"
+                ),
+            ],
+            tools: multiToolSchema
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 150
+        )
+
+        print("Mistral3 Output: \(result)")
+        print("Mistral3 Calls: \(toolCalls)")
+
+        // Verify all returned tool calls have valid names from our schema
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            XCTAssertTrue(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        // If the model made multiple calls, verify we got more than one
+        if toolCalls.count > 1 {
+            print("Successfully parsed \(toolCalls.count) tool calls from Mistral3")
         }
     }
 

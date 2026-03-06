@@ -67,6 +67,46 @@ public class ToolCallProcessor {
 
     // MARK: - Public Methods
 
+    /// Flush any buffered content, attempting to parse it as tool call(s).
+    ///
+    /// Call this when generation ends (e.g., on EOS token) to handle formats
+    /// whose end tag is never delivered as text (e.g., Mistral where `</s>`
+    /// is intercepted at the token ID level).
+    ///
+    /// For formats with end tags that appear in the text stream, the buffer
+    /// will already be empty at generation end, making this a no-op.
+    public func flush() {
+        guard state == .collectingToolCall || state == .potentialToolCall else { return }
+        guard !toolCallBuffer.isEmpty else {
+            state = .normal
+            return
+        }
+
+        if let startTag = parser.startTag {
+            // Split buffer into individual tool call segments to handle
+            // multiple tool calls (e.g., Mistral V13):
+            // "[TOOL_CALLS]fn1[ARGS]{...}[TOOL_CALLS]fn2[ARGS]{...}"
+            // → ["fn1[ARGS]{...}", "fn2[ARGS]{...}"]
+            let segments =
+                toolCallBuffer
+                .components(separatedBy: startTag)
+                .filter { !$0.isEmpty }
+
+            for segment in segments {
+                if let toolCall = parser.parse(content: segment, tools: tools) {
+                    toolCalls.append(toolCall)
+                }
+            }
+        } else {
+            if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
+                toolCalls.append(toolCall)
+            }
+        }
+
+        toolCallBuffer = ""
+        state = .normal
+    }
+
     /// Process a generated text chunk and extract any tool call content.
     /// - Parameter chunk: The text chunk to process
     /// - Returns: Regular text that should be displayed (non-tool call content), or `nil` if buffering
