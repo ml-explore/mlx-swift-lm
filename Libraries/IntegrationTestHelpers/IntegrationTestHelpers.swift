@@ -154,7 +154,7 @@ public actor IntegrationTestModels {
 
 // MARK: - ChatSession Tests
 
-private let generateParameters = GenerateParameters(maxTokens: 200)
+private let generateParameters = GenerateParameters(maxTokens: 200, temperature: 0)
 
 public enum ChatSessionTests {
 
@@ -249,6 +249,54 @@ public enum ChatSessionTests {
         try check(
             !responseText.isEmpty || !toolCalls.isEmpty,
             "Expected either text or tool calls, got neither (generated \(info?.generationTokenCount ?? 0) tokens, stop reason: \(String(describing: info?.stopReason)))"
+        )
+
+        // If we got tool calls, feed back a tool result and verify the model responds
+        if !toolCalls.isEmpty {
+            let followUp = try await streamAndCollect(
+                session.streamResponse(
+                    to: "Foggy with a high in the low 60s, clearing later in the day",
+                    role: .tool, images: [], videos: []),
+                label: "Tool result")
+            try check(
+                !followUp.isEmpty,
+                "Expected a response after providing tool result, got empty string"
+            )
+        }
+    }
+
+    public static func toolInvocation(container: LMModelContainer) async throws {
+        struct EmptyInput: Codable {}
+
+        struct TimeOutput: Codable {
+            let time: String
+        }
+
+        let timeTool = Tool<EmptyInput, TimeOutput>(
+            name: "get_time",
+            description: "Get the current date and time including day of week.",
+            parameters: []
+        ) { _ in
+            TimeOutput(time: "Wed Feb 18 17:50:43 PST 2026")
+        }
+
+        let session = ChatSession(
+            container, generateParameters: generateParameters,
+            tools: [timeTool.schema]
+        ) { toolCall in
+            if toolCall.function.name == timeTool.name {
+                return try await toolCall.execute(with: timeTool).toolResult
+            }
+            return "Unknown tool: \(toolCall.function.name)"
+        }
+
+        let result = try await streamAndCollect(
+            session.streamResponse(
+                to: "What day of week is it?"), label: "Tool invocation")
+
+        try check(
+            result.lowercased().contains("wed") || result.lowercased().contains("wednesday"),
+            "Expected 'Wed' or 'Wednesday' in response, got: \(result)"
         )
     }
 
