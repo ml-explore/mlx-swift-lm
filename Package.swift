@@ -24,6 +24,12 @@ let package = Package(
         .library(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
+        .library(
+            name: "BenchmarkHelpers",
+            targets: ["BenchmarkHelpers"]),
+        .library(
+            name: "IntegrationTestHelpers",
+            targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6"))
@@ -41,9 +47,6 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
         ),
         .target(
             name: "MLXVLM",
@@ -57,9 +60,6 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
         ),
         .target(
             name: "MLXLMCommon",
@@ -72,9 +72,6 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
         ),
         .target(
             name: "MLXEmbedders",
@@ -87,9 +84,29 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+        ),
+        .target(
+            name: "BenchmarkHelpers",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+                "MLXEmbedders",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/BenchmarkHelpers",
+        ),
+        .target(
+            name: "IntegrationTestHelpers",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+                "MLXEmbedders",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/IntegrationTestHelpers",
+            exclude: ["README.md"],
         ),
         .testTarget(
             name: "MLXLMTests",
@@ -107,9 +124,6 @@ let package = Package(
                 "README.md"
             ],
             resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
         ),
     ]
 )
@@ -120,54 +134,4 @@ if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
     package.dependencies.append(
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.3.0")
     )
-}
-
-// Integration tests and benchmarks require external tokenizer and downloader packages.
-// Enable with: MLX_SWIFT_INTEGRATION_TESTS=1 swift build --build-tests
-if Context.environment["MLX_SWIFT_INTEGRATION_TESTS"] == "1" {
-    package.dependencies += [
-        .package(url: "https://github.com/DePasqualeOrg/swift-tokenizers-mlx.git", branch: "main"),  // TODO: Review before merging PR #118
-        .package(url: "https://github.com/DePasqualeOrg/swift-huggingface-mlx.git", branch: "main"),  // TODO: Review before merging PR #118
-    ]
-
-    package.targets += [
-        .testTarget(
-            name: "MLXLMIntegrationTests",
-            dependencies: [
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
-                .product(name: "MLXLMHuggingFace", package: "swift-huggingface-mlx"),
-                .product(name: "MLXEmbeddersHuggingFace", package: "swift-huggingface-mlx"),
-                "MLXLMCommon",
-                "MLXLLM",
-                "MLXVLM",
-                "MLXEmbedders",
-            ],
-            path: "Tests/MLXLMIntegrationTests",
-            exclude: [
-                "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
-        ),
-        .testTarget(
-            name: "Benchmarks",
-            dependencies: [
-                "MLXLLM",
-                "MLXVLM",
-                "MLXEmbedders",
-                "MLXLMCommon",
-                .product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
-                .product(name: "MLXLMHuggingFace", package: "swift-huggingface-mlx"),
-                .product(name: "MLXEmbeddersHuggingFace", package: "swift-huggingface-mlx"),
-            ],
-            path: "Tests/Benchmarks",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
-        ),
-    ]
 }
