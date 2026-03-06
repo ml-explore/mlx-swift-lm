@@ -1,4 +1,4 @@
-// Copyright © 2025 Apple Inc.
+// Copyright © 2026 Apple Inc.
 
 import Foundation
 import MLX
@@ -400,10 +400,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         self.config = config
         self._backbone.wrappedValue = Gemma3ModelBackbone(config)
         
-        self._dense.wrappedValue = [
-            Linear(config.hiddenSize, config.intermediateSize, bias: false),
-            Linear(config.intermediateSize, config.hiddenSize, bias: false),
-        ]
+        self._dense.wrappedValue = []
         super.init()
     }
 
@@ -427,12 +424,12 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         let hiddenStates = backbone(inp)
 
         // mean pooling: average all non-padding tokens
-        let notPadding = inp .!= 0
+        let notPadding = (attentionMask ?? (inp .!= 0))
         let sum = (hiddenStates * notPadding[.ellipsis, .newAxis]).sum(axis: 1)
         let nonMasked = notPadding.sum(axis: -1, keepDims: true)
         var out = sum / nonMasked
 
-        // pass through projection head
+        // pass through projection head (if present)
         for layer in self.dense {
             if let linear = layer as? Linear {
                 out = linear(out)
@@ -442,9 +439,9 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         }
 
         // normalize: L2 normalization for cosine similarity compatibility
-        out = out.asType(.float32)
-        let norm = maximum(norm(out, ord: 2.0, axis: -1, keepDims: true), MLXArray(1e-6))
-        let pooledOutput = out / norm
+        let pooledOutput = out
+            .asType(.float32)
+            .l2Normalized(eps: 1e-6)
 
         return EmbeddingModelOutput(hiddenStates: hiddenStates, pooledOutput: pooledOutput)
     }
@@ -461,6 +458,14 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         if let lm = unflattened["language_model"] {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
+        
+        // Initialize projection head if weights are present
+        if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
+            self._dense.wrappedValue = [
+                Linear(config.hiddenSize, config.intermediateSize, bias: false),
+                Linear(config.intermediateSize, config.hiddenSize, bias: false),
+            ]
+        }
 
         // Truncate vocab if weights were trained with extra padding tokens
         let expectedVocab = config.vocabularySize
@@ -468,6 +473,10 @@ public class EmbeddingGemma: Module, EmbeddingModel {
             processedWeights["model.embed_tokens.weight"] = embedWeight[0 ..< expectedVocab]
         }
 
-        return processedWeights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
+        // Filter out unused keys for embedding
+        return processedWeights.filter { (key, _) in
+            !key.contains("self_attn.rotary_emb.inv_freq") &&
+            !key.contains("lm_head")
+        }
     }
 }
