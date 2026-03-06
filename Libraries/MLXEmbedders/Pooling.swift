@@ -164,7 +164,7 @@ public class Pooling: Module {
         }
 
         if normalize {
-            pooled = pooled / norm(pooled, axis: -1, keepDims: true)
+            pooled = pooled.l2Normalized()
         }
 
         return pooled
