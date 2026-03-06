@@ -46,7 +46,7 @@ let package = Package(
             path: "Libraries/MLXLLM",
             exclude: [
                 "README.md"
-            ],
+            ]
         ),
         .target(
             name: "MLXVLM",
@@ -59,7 +59,7 @@ let package = Package(
             path: "Libraries/MLXVLM",
             exclude: [
                 "README.md"
-            ],
+            ]
         ),
         .target(
             name: "MLXLMCommon",
@@ -71,7 +71,7 @@ let package = Package(
             path: "Libraries/MLXLMCommon",
             exclude: [
                 "README.md"
-            ],
+            ]
         ),
         .target(
             name: "MLXEmbedders",
@@ -83,7 +83,7 @@ let package = Package(
             path: "Libraries/MLXEmbedders",
             exclude: [
                 "README.md"
-            ],
+            ]
         ),
         .target(
             name: "BenchmarkHelpers",
@@ -94,7 +94,7 @@ let package = Package(
                 "MLXEmbedders",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "Libraries/BenchmarkHelpers",
+            path: "Libraries/BenchmarkHelpers"
         ),
         .target(
             name: "IntegrationTestHelpers",
@@ -106,7 +106,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Libraries/IntegrationTestHelpers",
-            exclude: ["README.md"],
+            exclude: ["README.md"]
         ),
         .testTarget(
             name: "MLXLMTests",
@@ -123,7 +123,7 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")],
+            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
         ),
     ]
 )
