@@ -64,6 +64,14 @@ private class ModelTypeRegistry: @unchecked Sendable {
             let configuration = try JSONDecoder.json5().decode(Gemma3Configuration.self, from: data)
             return EmbeddingGemma(configuration)
         },
+        "gemma3_text": { data in
+            let configuration = try JSONDecoder.json5().decode(Gemma3Configuration.self, from: data)
+            return EmbeddingGemma(configuration)
+        },
+        "gemma3n": { data in
+            let configuration = try JSONDecoder.json5().decode(Gemma3Configuration.self, from: data)
+            return EmbeddingGemma(configuration)
+        },
     ]
 
     public func registerModelType(
