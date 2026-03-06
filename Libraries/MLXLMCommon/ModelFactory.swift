@@ -197,7 +197,7 @@ public func resolve(
     case .id(let id, let revision):
         modelDirectory = try await downloader.download(
             id: id, revision: revision,
-            matching: ["*.safetensors", "*.json"],
+            matching: ["*.safetensors", "*.json", "*.jinja"],
             useLatest: useLatest,
             progressHandler: progressHandler)
     case .directory(let directory):
@@ -209,7 +209,7 @@ public func resolve(
     case .id(let id, let revision):
         tokenizerDirectory = try await downloader.download(
             id: id, revision: revision,
-            matching: ["*.json"],
+            matching: ["*.json", "*.jinja"],
             useLatest: useLatest,
             progressHandler: { _ in })
     case .directory(let directory):
