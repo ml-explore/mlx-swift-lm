@@ -9,11 +9,18 @@ import Tokenizers
 struct TestTokenizer: Tokenizer {
 
     let length = 8
+    let maxLength = 50
 
-    var vocabulary: [Int: String]
+    /// a token outside the range that the model will generate, see vocabularySize
+    let _eosTokenId = 101
+    let _unknownTokenId = 102
+
+    let vocabularySize: Int
+    let vocabulary: [Int: String]
 
     init(vocabularySize: Int = 100) {
         let letters = "abcdefghijklmnopqrstuvwxyz"
+        self.vocabularySize = vocabularySize
         self.vocabulary = Dictionary(
             uniqueKeysWithValues: (0 ..< vocabularySize)
                 .map { t in
@@ -33,8 +40,8 @@ struct TestTokenizer: Tokenizer {
     }
 
     func encode(text: String) -> [Int] {
-        (0 ..< length).map { _ in
-            Int.random(in: 0 ..< 100)
+        (0 ..< length).enumerated().map { (index, _) in
+            Int.random(in: 1 ..< vocabularySize)
         }
     }
 
@@ -44,18 +51,18 @@ struct TestTokenizer: Tokenizer {
 
     func decode(tokens: [Int], skipSpecialTokens: Bool) -> String {
         var tokens = tokens
-        if tokens.count > 50 {
-            tokens.append(19)
+        if tokens.count > maxLength {
+            tokens.append(_eosTokenId)
         }
         return tokens.map { convertIdToToken($0) ?? "" }.joined(separator: " ")
     }
 
     func convertTokenToId(_ token: String) -> Int? {
-        Int.random(in: 0 ..< 100)
+        Int.random(in: 1 ..< vocabularySize)
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        if id == 19 {
+        if id == eosTokenId {
             return "EOS"
         }
         return vocabulary[id]
@@ -67,11 +74,11 @@ struct TestTokenizer: Tokenizer {
 
     var eosToken: String? = nil
 
-    var eosTokenId: Int? = 0
+    var eosTokenId: Int? { _eosTokenId }
 
     var unknownToken: String? = nil
 
-    var unknownTokenId: Int? = 0
+    var unknownTokenId: Int? { _unknownTokenId }
 
     func applyChatTemplate(messages: [Tokenizers.Message]) throws -> [Int] {
         encode(text: "")
