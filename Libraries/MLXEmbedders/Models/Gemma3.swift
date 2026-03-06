@@ -2,8 +2,8 @@
 
 import Foundation
 import MLX
-import MLXNN
 import MLXLMCommon
+import MLXNN
 
 // Based on https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma3_text.py
 
@@ -16,52 +16,52 @@ import MLXLMCommon
 public struct Gemma3Configuration: Codable, Sendable {
     /// The architecture identifier (e.g., "gemma3").
     public let modelType: String
-    
+
     /// The size of the hidden embeddings.
     public let hiddenSize: Int
-    
+
     /// The number of hidden layers in the transformer.
     public let hiddenLayers: Int
-    
+
     /// The dimensionality of the intermediate (feed-forward) layer.
     public let intermediateSize: Int
-    
+
     /// The number of attention heads.
     public let attentionHeads: Int
-    
+
     /// The dimensionality of each attention head.
     public let headDim: Int
-    
+
     /// The epsilon value for RMSNorm layers.
     public let rmsNormEps: Float
-    
+
     /// The size of the vocabulary.
     public let vocabularySize: Int
-    
+
     /// The number of key-value heads for Grouped Query Attention.
     public let kvHeads: Int
-    
+
     /// The base frequency for Rotary Positional Embeddings (RoPE) in global layers.
     public let ropeTheta: Float
-    
+
     /// The base frequency for RoPE in sliding window layers.
     public let ropeLocalBaseFreq: Float
-    
+
     /// Whether to use traditional RoPE (interleaved) or standard ordering.
     public let ropeTraditional: Bool
-    
+
     /// The scalar value used to scale queries before attention.
     public let queryPreAttnScalar: Float
-    
+
     /// The size of the sliding window for attention.
     public let slidingWindow: Int
-    
+
     /// The pattern determining which layers use sliding window vs. global attention.
     public let slidingWindowPattern: Int
-    
+
     /// The maximum sequence length supported by the model.
     public let maxPositionEmbeddings: Int
-    
+
     /// Optional scaling configuration for RoPE.
     public let ropeScaling: [String: StringOrNumber]?
 
@@ -106,20 +106,27 @@ public struct Gemma3Configuration: Codable, Sendable {
         modelType = try container.decode(String.self, forKey: .modelType)
         hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 1152
         hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 26
-        intermediateSize = try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 6912
+        intermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 6912
         attentionHeads = try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 4
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 256
         rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1.0e-6
         vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 262144
         kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 1
         ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1_000_000.0
-        ropeLocalBaseFreq = try container.decodeIfPresent(Float.self, forKey: .ropeLocalBaseFreq) ?? 10_000.0
-        ropeTraditional = try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
-        queryPreAttnScalar = try container.decodeIfPresent(Float.self, forKey: .queryPreAttnScalar) ?? 256
+        ropeLocalBaseFreq =
+            try container.decodeIfPresent(Float.self, forKey: .ropeLocalBaseFreq) ?? 10_000.0
+        ropeTraditional =
+            try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
+        queryPreAttnScalar =
+            try container.decodeIfPresent(Float.self, forKey: .queryPreAttnScalar) ?? 256
         slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
-        slidingWindowPattern = try container.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 6
-        maxPositionEmbeddings = try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
-        ropeScaling = try container.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeScaling)
+        slidingWindowPattern =
+            try container.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 6
+        maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
+        ropeScaling = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeScaling)
     }
 }
 
@@ -229,7 +236,7 @@ private class Attention: Module {
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
-        
+
         return outputProj(output)
     }
 }
@@ -271,7 +278,7 @@ private class MLP: Module {
 ///
 /// Each block consists of an attention layer and an MLP layer, with pre- and post-normalization
 /// and residual connections.
-fileprivate class TransformerBlock: Module {
+private class TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Attention
     @ModuleInfo var mlp: MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
@@ -288,10 +295,14 @@ fileprivate class TransformerBlock: Module {
         self._selfAttention.wrappedValue = Attention(config, layerIdx: layerIdx)
         self.mlp = MLP(dimensions: config.hiddenSize, hiddenDimensions: config.intermediateSize)
 
-        self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._preFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._preFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._postFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         super.init()
     }
@@ -346,7 +357,8 @@ public class Gemma3ModelBackbone: Module {
             TransformerBlock(config, layerIdx: layerIdx)
         }
 
-        self._norm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._norm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         super.init()
     }
@@ -389,7 +401,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
 
     /// The model configuration.
     public let config: Gemma3Configuration
-    
+
     /// The size of the vocabulary.
     public var vocabularySize: Int { config.vocabularySize }
 
@@ -399,7 +411,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
     public init(_ config: Gemma3Configuration) {
         self.config = config
         self._backbone.wrappedValue = Gemma3ModelBackbone(config)
-        
+
         self._dense.wrappedValue = []
         super.init()
     }
@@ -439,7 +451,8 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         }
 
         // normalize: L2 normalization for cosine similarity compatibility
-        let pooledOutput = out
+        let pooledOutput =
+            out
             .asType(.float32)
             .l2Normalized(eps: 1e-6)
 
@@ -458,7 +471,7 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         if let lm = unflattened["language_model"] {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
-        
+
         // Initialize projection head if weights are present
         if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
             self._dense.wrappedValue = [
@@ -469,14 +482,15 @@ public class EmbeddingGemma: Module, EmbeddingModel {
 
         // Truncate vocab if weights were trained with extra padding tokens
         let expectedVocab = config.vocabularySize
-        if let embedWeight = processedWeights["model.embed_tokens.weight"], embedWeight.dim(0) > expectedVocab {
+        if let embedWeight = processedWeights["model.embed_tokens.weight"],
+            embedWeight.dim(0) > expectedVocab
+        {
             processedWeights["model.embed_tokens.weight"] = embedWeight[0 ..< expectedVocab]
         }
 
         // Filter out unused keys for embedding
         return processedWeights.filter { (key, _) in
-            !key.contains("self_attn.rotary_emb.inv_freq") &&
-            !key.contains("lm_head")
+            !key.contains("self_attn.rotary_emb.inv_freq") && !key.contains("lm_head")
         }
     }
 }

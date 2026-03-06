@@ -8,7 +8,6 @@ extension MLXArray {
         return MLXArray(Array(0 ..< size))
     }
 
-    
     /// Returns a new array normalized by its L2 norm along the specified axis.
     ///
     /// The L2 normalization of an array $x$ is calculated as:
@@ -29,7 +28,7 @@ extension MLXArray {
         // 'self' represents the current MLXArray instance.
         // We compute the norm along the specified axis.
         let norm = MLXLinalg.norm(self, ord: 2, axis: axis, keepDims: true)
-        
+
         // We use MLX.maximum to clamp the divisor.
         // This is more stable than adding eps to the norm.
         return self / MLX.maximum(norm, MLXArray(eps))

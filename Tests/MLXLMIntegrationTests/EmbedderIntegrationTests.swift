@@ -3,8 +3,8 @@
 import Foundation
 @preconcurrency import MLX
 import MLXEmbedders
-import MLXVLM
 import MLXLMCommon
+import MLXVLM
 import Testing
 import Tokenizers
 
@@ -83,7 +83,7 @@ struct EmbedderIntegrationtests {
             )
         }
     }
-    
+
     @Test("Gemma 3 Embedder integration")
     func testGemma3Embedder() async throws {
         // Gemma 3 1B model
@@ -92,7 +92,7 @@ struct EmbedderIntegrationtests {
 
         let inputs = [
             "The Coca-Cola Company is a soft drink company based in Atlanta, Georgia, USA.",
-            "In the United States, PepsiCo Inc. is a leading soft drink company."
+            "In the United States, PepsiCo Inc. is a leading soft drink company.",
         ]
 
         let resultEmbeddings = await modelContainer.perform {
@@ -113,14 +113,15 @@ struct EmbedderIntegrationtests {
                                 repeating: tokenizer.eosTokenId ?? 0,
                                 count: maxLength - elem.count))
                 })
-            
+
             // Mask out padding tokens
             let mask = (padded .!= (tokenizer.eosTokenId ?? 0))
             let tokenTypes = MLXArray.zeros(like: padded)
-            
+
             // Generate embeddings. EmbeddingGemma returns a pooledOutput by default.
-            let modelOutput = model(padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask)
-            
+            let modelOutput = model(
+                padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask)
+
             // Pooling strategy .cls (the default if no pooling config exists)
             // will pick up the pooledOutput from the EmbeddingGemma model.
             let result = pooling(
@@ -135,12 +136,12 @@ struct EmbedderIntegrationtests {
         for embedding in resultEmbeddings {
             // Gemma 3 1B hidden size is 1152
             #expect(embedding.count == 1152, "Gemma 3 1B embedding size should be 1152")
-            
+
             // Verify normalization (L2 norm should be ~1.0)
             let l2Norm = sqrt(embedding.map { $0 * $0 }.reduce(0, +))
             #expect(abs(l2Norm - 1.0) < 0.05, "Embeddings should be approximately L2-normalized")
         }
-        
+
         // Basic semantic check: similarity between related sentences should be positive
         let similarity = zip(resultEmbeddings[0], resultEmbeddings[1]).map(*).reduce(0, +)
         //print("similarity: \(similarity)")
