@@ -587,6 +587,9 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             if layer.isLinear {
                 return MambaCache()
             }
+            if let maxKVSize = parameters?.maxKVSize {
+                return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+            }
             return KVCacheSimple()
         }
     }
