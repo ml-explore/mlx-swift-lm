@@ -16,6 +16,14 @@ func sigmoidMultiply(_ x: MLXArray, _ gate: MLXArray) -> MLXArray {
     x * sigmoid(gate)
 }
 
+// Match upstream Qwen 3.5 numerics by doing the SiLU gate in float32.
+func preciseSiLUMultiply(_ hiddenStates: MLXArray, gate: MLXArray, normalized: MLXArray) -> MLXArray
+{
+    let gated = silu(gate.asType(.float32))
+    let normalized = normalized.asType(.float32)
+    return (gated * normalized).asType(hiddenStates.dtype)
+}
+
 // MARK: - Model Components
 
 final class Qwen3NextRMSNormGated: Module {
@@ -29,11 +37,11 @@ final class Qwen3NextRMSNormGated: Module {
     }
 
     func callAsFunction(_ hiddenStates: MLXArray, gate: MLXArray? = nil) -> MLXArray {
-        var x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
+        let x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
         if let gate {
-            x = x * silu(gate)
+            return preciseSiLUMultiply(hiddenStates, gate: gate, normalized: x)
         }
-        return x
+        return x.asType(hiddenStates.dtype)
     }
 }
 
