@@ -78,6 +78,15 @@ public struct GenerateParameters: Sendable {
     /// top p sampling
     public var topP: Float
 
+    /// min p sampling
+    public var minP: Float
+
+    /// minimum number of tokens preserved by min p sampling
+    public var minTokensToKeep: Int
+
+    /// top k sampling
+    public var topK: Int
+
     /// penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -92,6 +101,9 @@ public struct GenerateParameters: Sendable {
         quantizedKVStart: Int = 0,
         temperature: Float = 0.6,
         topP: Float = 1.0,
+        minP: Float = 0.0,
+        minTokensToKeep: Int = 1,
+        topK: Int = 0,
         repetitionPenalty: Float? = nil,
         repetitionContextSize: Int = 20,
         prefillStepSize: Int = 512
@@ -103,6 +115,9 @@ public struct GenerateParameters: Sendable {
         self.quantizedKVStart = quantizedKVStart
         self.temperature = temperature
         self.topP = topP
+        self.minP = minP
+        self.minTokensToKeep = minTokensToKeep
+        self.topK = topK
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
         self.prefillStepSize = prefillStepSize
@@ -111,10 +126,14 @@ public struct GenerateParameters: Sendable {
     public func sampler() -> LogitSampler {
         if temperature == 0 {
             return ArgMaxSampler()
-        } else if topP > 0 && topP < 1 {
-            return TopPSampler(temperature: temperature, topP: topP)
         } else {
-            return CategoricalSampler(temperature: temperature)
+            return CategoricalSampler(
+                temperature: temperature,
+                topP: topP,
+                minP: minP,
+                minTokensToKeep: minTokensToKeep,
+                topK: topK
+            )
         }
     }
 
@@ -128,6 +147,67 @@ public struct GenerateParameters: Sendable {
     }
 }
 
+func normalizedLogProbabilities(_ logits: MLXArray) -> MLXArray {
+    let logits = logits.dtype == .float32 ? logits : logits.asType(.float32)
+    return logits - logSumExp(logits, axis: -1, keepDims: true)
+}
+
+func applyTopP(_ logProbabilities: MLXArray, topP: Float) -> MLXArray {
+    guard topP > 0, topP < 1 else {
+        return logProbabilities
+    }
+
+    let probabilities = exp(logProbabilities)
+    let sortedIndices = argSort(logProbabilities, axis: -1)
+    let sortedProbabilities = takeAlong(probabilities, sortedIndices, axis: -1)
+    let cumulativeProbabilities = cumsum(sortedProbabilities, axis: -1)
+    let inverseIndices = argSort(sortedIndices, axis: -1)
+    let reorderedCumulativeProbabilities = takeAlong(
+        cumulativeProbabilities, inverseIndices, axis: -1)
+    let negativeInfinity = MLXArray(-Float.infinity, dtype: logProbabilities.dtype)
+
+    return MLX.where(
+        reorderedCumulativeProbabilities .> (1 - topP), logProbabilities, negativeInfinity)
+}
+
+func applyMinP(_ logProbabilities: MLXArray, minP: Float, minTokensToKeep: Int = 1) -> MLXArray {
+    guard minP != 0 else {
+        return logProbabilities
+    }
+
+    precondition((0 ... 1).contains(minP), "`minP` must be in the [0, 1] interval.")
+    precondition(minTokensToKeep > 0, "`minTokensToKeep` must be a positive integer.")
+
+    let sortedIndices = argSort(-logProbabilities, axis: -1)
+    let sortedLogProbabilities = takeAlong(logProbabilities, sortedIndices, axis: -1)
+    let topLogProbabilities = sortedLogProbabilities[.ellipsis, ..<1]
+    let scaledMinP =
+        topLogProbabilities + log(MLXArray(minP, dtype: sortedLogProbabilities.dtype))
+    let protectedCount = min(minTokensToKeep, sortedLogProbabilities.dim(-1))
+    let protectedMask =
+        arange(sortedLogProbabilities.dim(-1), dtype: .int32)[.newAxis, .ellipsis]
+        .< protectedCount
+    let tokensToRemove = MLX.where(
+        protectedMask, MLXArray(false), sortedLogProbabilities .< scaledMinP)
+    let negativeInfinity = MLXArray(-Float.infinity, dtype: logProbabilities.dtype)
+    let filteredLogProbabilities = MLX.where(
+        tokensToRemove, negativeInfinity, sortedLogProbabilities)
+    let inverseIndices = argSort(sortedIndices, axis: -1)
+
+    return takeAlong(filteredLogProbabilities, inverseIndices, axis: -1)
+}
+
+func applyTopK(_ logProbabilities: MLXArray, topK: Int) -> MLXArray {
+    let vocabularySize = logProbabilities.dim(-1)
+    guard topK > 0, topK < vocabularySize else {
+        return logProbabilities
+    }
+
+    let maskedIndices = argPartition(-logProbabilities, kth: topK - 1, axis: -1)[.ellipsis, topK...]
+    let negativeInfinity = MLXArray(-Float.infinity, dtype: logProbabilities.dtype)
+    return putAlong(logProbabilities, maskedIndices, values: negativeInfinity, axis: -1)
+}
+
 /// Sampler that uses `argMax` (most likely) to sample the logits.
 public struct ArgMaxSampler: LogitSampler {
     public init() {}
@@ -139,53 +219,68 @@ public struct ArgMaxSampler: LogitSampler {
 
 /// Sampler that uses `topP` and `temperature` to sample the logits.
 public struct TopPSampler: LogitSampler {
-    let temp: MLXArray
-    let topP: MLXArray
-    let randomState: MLXRandom.RandomState
+    let sampler: CategoricalSampler
 
     public init(temperature: Float, topP: Float) {
-        self.temp = MLXArray(temperature)
-        self.topP = MLXArray(topP)
-        self.randomState = MLXRandom.RandomState()
+        self.sampler = CategoricalSampler(temperature: temperature, topP: topP)
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
-        var logits = logits
-        if logits.dtype == .bfloat16 {
-            logits = logits.asType(.float32)
-        }
-
-        return withRandomState(randomState) {
-            let probs = softmax(logits / temp, axis: -1)
-            let sortedIndices = argSort(probs, axis: -1)
-
-            // probs shape is [B,V] and after take it will be [1, B, V], so we squeeze it back to [B, V]
-            let sortedProbs = take(probs, sortedIndices, axis: -1).squeezed(axis: 0)
-
-            let cumulativeProbs = cumsum(sortedProbs, axis: -1)
-
-            let topProbs = MLX.where(
-                cumulativeProbs .> (1 - topP), sortedProbs, zeros(like: sortedProbs))
-
-            let sortedToken = categorical(log(topProbs))
-            return sortedIndices.squeezed(axis: 0)[sortedToken]
-        }
+        sampler.sample(logits: logits)
     }
 }
 
 /// Sampler that uses `temperature` to sample the logits.
 public struct CategoricalSampler: LogitSampler {
     let temp: MLXArray
+    let topP: Float
+    let minP: Float
+    let minTokensToKeep: Int
+    let topK: Int
     let randomState: MLXRandom.RandomState
 
-    public init(temperature: Float) {
+    init(
+        temperature: Float,
+        topP: Float = 1.0,
+        minP: Float = 0.0,
+        minTokensToKeep: Int = 1,
+        topK: Int = 0,
+        randomState: MLXRandom.RandomState
+    ) {
         self.temp = MLXArray(temperature)
-        self.randomState = MLXRandom.RandomState()
+        self.topP = topP
+        self.minP = minP
+        self.minTokensToKeep = minTokensToKeep
+        self.topK = topK
+        self.randomState = randomState
+    }
+
+    public init(
+        temperature: Float,
+        topP: Float = 1.0,
+        minP: Float = 0.0,
+        minTokensToKeep: Int = 1,
+        topK: Int = 0
+    ) {
+        self.init(
+            temperature: temperature,
+            topP: topP,
+            minP: minP,
+            minTokensToKeep: minTokensToKeep,
+            topK: topK,
+            randomState: MLXRandom.RandomState()
+        )
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
+        var logProbabilities = normalizedLogProbabilities(logits)
+        logProbabilities = applyTopP(logProbabilities, topP: topP)
+        logProbabilities = applyMinP(
+            logProbabilities, minP: minP, minTokensToKeep: minTokensToKeep)
+        logProbabilities = applyTopK(logProbabilities, topK: topK)
+
         return withRandomState(randomState) {
-            categorical(logits * (1 / temp))
+            categorical(logProbabilities * (1 / temp))
         }
     }
 }
