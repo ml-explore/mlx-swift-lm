@@ -83,9 +83,11 @@ final class Qwen35VLMTests: XCTestCase {
         let hfCorrectConvKey = "model.language_model.model.layers.1.linear_attn.conv1d.weight"
         let convertedCorrectConvKey = "language_model.model.layers.1.linear_attn.conv1d.weight"
 
-        let keyDim = config.textConfiguration.linearNumKeyHeads
+        let keyDim =
+            config.textConfiguration.linearNumKeyHeads
             * config.textConfiguration.linearKeyHeadDim
-        let valueDim = config.textConfiguration.linearNumValueHeads
+        let valueDim =
+            config.textConfiguration.linearNumValueHeads
             * config.textConfiguration.linearValueHeadDim
         let convDim = (keyDim * 2) + valueDim
         let kernelSize = config.textConfiguration.linearConvKernelDim
