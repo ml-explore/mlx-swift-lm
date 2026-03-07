@@ -2,12 +2,15 @@
 
 import Foundation
 import MLX
-@testable import MLXLLM
 import XCTest
+
+@testable import MLXLLM
 
 final class Qwen35Tests: XCTestCase {
 
-    private func makeConfiguration(modelType: String, numExperts: Int = 0, numExpertsPerTok: Int = 0)
+    private func makeConfiguration(
+        modelType: String, numExperts: Int = 0, numExpertsPerTok: Int = 0
+    )
         throws -> Qwen35Configuration
     {
         let json = """

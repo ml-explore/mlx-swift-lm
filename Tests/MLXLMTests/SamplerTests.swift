@@ -1,8 +1,9 @@
 // Copyright © 2026 Apple Inc.
 
 import MLX
-@testable import MLXLMCommon
 import XCTest
+
+@testable import MLXLMCommon
 
 final class SamplerTests: XCTestCase {
 

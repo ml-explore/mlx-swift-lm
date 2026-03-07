@@ -184,7 +184,8 @@ func applyMinP(_ logProbabilities: MLXArray, minP: Float, minTokensToKeep: Int =
     let scaledMinP =
         topLogProbabilities + log(MLXArray(minP, dtype: sortedLogProbabilities.dtype))
     let protectedCount = min(minTokensToKeep, sortedLogProbabilities.dim(-1))
-    let protectedMask = arange(sortedLogProbabilities.dim(-1), dtype: .int32)[.newAxis, .ellipsis]
+    let protectedMask =
+        arange(sortedLogProbabilities.dim(-1), dtype: .int32)[.newAxis, .ellipsis]
         .< protectedCount
     let tokensToRemove = MLX.where(
         protectedMask, MLXArray(false), sortedLogProbabilities .< scaledMinP)
