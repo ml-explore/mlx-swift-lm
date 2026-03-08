@@ -4,7 +4,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma.py
 

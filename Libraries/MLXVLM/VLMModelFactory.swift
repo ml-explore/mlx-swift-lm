@@ -1,10 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 public enum VLMError: LocalizedError, Equatable {
     case imageRequired
@@ -77,7 +75,7 @@ private func create<C: Codable, P>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/load(hub:configuration:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/load(from:configuration:progressHandler:)``.
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
@@ -281,12 +279,10 @@ public final class VLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> sending ModelContext {
-        // download weights and config
-        let modelDirectory = try await downloadModel(
-            hub: hub, configuration: configuration, progressHandler: progressHandler)
+        let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -325,15 +321,12 @@ public final class VLMModelFactory: ModelFactory {
             eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
         }
 
-        // Create mutable configuration with loaded EOS token IDs
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
 
-        // Load tokenizer, processor config, and weights in parallel using async let.
-        // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
-        // parallel scheduling. This may briefly block a cooperative thread pool thread,
-        // but the config file is small and model loading is not a high-concurrency path.
-        async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
+        // Load tokenizer, processor config, and weights in parallel
+        async let tokenizerTask = tokenizerLoader.load(
+            from: configuration.tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
         try loadWeights(
@@ -367,8 +360,21 @@ public final class VLMModelFactory: ModelFactory {
             configuration: processorConfigData,
             processorType: processorType, tokenizer: tokenizer)
 
+        // Build a ModelConfiguration for the ModelContext
+        let tokenizerSource: TokenizerSource? =
+            configuration.tokenizerDirectory == modelDirectory
+            ? nil
+            : .directory(configuration.tokenizerDirectory)
+        let modelConfig = ModelConfiguration(
+            directory: modelDirectory,
+            tokenizerSource: tokenizerSource,
+            defaultPrompt: configuration.defaultPrompt,
+            extraEOSTokens: mutableConfiguration.extraEOSTokens,
+            eosTokenIds: mutableConfiguration.eosTokenIds,
+            toolCallFormat: mutableConfiguration.toolCallFormat)
+
         return .init(
-            configuration: mutableConfiguration, model: model, processor: processor,
+            configuration: modelConfig, model: model, processor: processor,
             tokenizer: tokenizer)
     }
 

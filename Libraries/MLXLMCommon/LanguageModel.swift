@@ -1,10 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Time/Height/Width struct to represent information about input images.
 public struct THW: Sendable {

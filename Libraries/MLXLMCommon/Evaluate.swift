@@ -2,7 +2,6 @@
 
 import Foundation
 import MLX
-import Tokenizers
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
@@ -33,13 +32,13 @@ public protocol LogitSampler {
 /// See also: ``LogitSampler``
 public protocol LogitProcessor: Sendable {
 
-    /// called before token generation starts with the text tokens of the prompt
+    /// Called before token generation starts with the text tokens of the prompt
     mutating func prompt(_ prompt: MLXArray)
 
-    /// called to visit and possibly modify the logits
+    /// Called to visit and possibly modify the logits
     func process(logits: MLXArray) -> MLXArray
 
-    /// called to provide the sampled token
+    /// Called to provide the sampled token
     mutating func didSample(token: MLXArray)
 }
 
@@ -72,16 +71,16 @@ public struct GenerateParameters: Sendable {
     /// Step to begin using a quantized KV cache when kvBits is non-nil (default: 0)
     public var quantizedKVStart: Int
 
-    /// sampling temperature
+    /// Sampling temperature
     public var temperature: Float
 
-    /// top p sampling
+    /// Top-p sampling
     public var topP: Float
 
-    /// penalty factor for repeating tokens
+    /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
-    /// number of tokens to consider for repetition penalty
+    /// Number of tokens to consider for repetition penalty
     public var repetitionContextSize: Int
 
     public init(
@@ -192,16 +191,16 @@ public struct CategoricalSampler: LogitSampler {
 
 /// Processor that implements a `repetitionPenalty`
 public struct RepetitionContext: LogitProcessor {
-    /// tokens in the repetition context sliding window
-    var tokens = [Int]()
+    /// Token IDs in the repetition context sliding window
+    var tokenIds = [Int]()
 
-    /// current write index into the tokens circular array
+    /// Current write index into the circular array
     var index = 0
 
-    /// penalty factor for repeating tokens
+    /// Penalty factor for repeating tokens
     let repetitionPenalty: Float
 
-    /// number of tokens to consider for repetition penalty
+    /// Number of tokens to consider for repetition penalty
     let repetitionContextSize: Int
 
     public init(repetitionPenalty: Float, repetitionContextSize: Int) {
@@ -212,15 +211,15 @@ public struct RepetitionContext: LogitProcessor {
 
     mutating public func prompt(_ prompt: MLXArray) {
         if prompt.shape[0] <= repetitionContextSize {
-            self.tokens = prompt.asArray(Int.self)
+            self.tokenIds = prompt.asArray(Int.self)
         } else {
-            self.tokens = prompt[(-repetitionContextSize)...].asArray(Int.self)
+            self.tokenIds = prompt[(-repetitionContextSize)...].asArray(Int.self)
         }
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        if tokens.count > 0 {
-            let indices = MLXArray(tokens.map { UInt32($0) })
+        if tokenIds.count > 0 {
+            let indices = MLXArray(tokenIds.map { UInt32($0) })
             var selectedLogits = logits[0..., indices]
 
             selectedLogits = MLX.where(
@@ -235,11 +234,11 @@ public struct RepetitionContext: LogitProcessor {
     }
 
     mutating public func didSample(token: MLXArray) {
-        if tokens.count >= repetitionContextSize {
-            tokens[index] = token.item(Int.self)
+        if tokenIds.count >= repetitionContextSize {
+            tokenIds[index] = token.item(Int.self)
             index = (index + 1) % repetitionContextSize
         } else {
-            tokens.append(token.item(Int.self))
+            tokenIds.append(token.item(Int.self))
         }
     }
 }
@@ -459,45 +458,61 @@ public struct GenerateResult {
     ///
     /// - Parameters:
     ///   - inputText: The input text used for generation.
-    ///   - tokens: The array of tokens generated.
+    ///   - tokenIds: The array of generated token IDs.
     ///   - output: The generated output string.
     ///   - promptTime: The time taken to prompt the input.
     ///   - generateTime: The time taken to generate the output.
     public init(
-        inputText: LMInput.Text, tokens: [Int], output: String, promptTime: TimeInterval,
+        inputText: LMInput.Text, tokenIds: [Int], output: String, promptTime: TimeInterval,
         generateTime: TimeInterval
     ) {
         self.inputText = inputText
-        self.tokens = tokens
+        self.tokenIds = tokenIds
         self.output = output
         self.promptTime = promptTime
         self.generateTime = generateTime
     }
 
+    @available(*, deprecated, renamed: "init(inputText:tokenIds:output:promptTime:generateTime:)")
+    public init(
+        inputText: LMInput.Text, tokens: [Int], output: String, promptTime: TimeInterval,
+        generateTime: TimeInterval
+    ) {
+        self.init(
+            inputText: inputText, tokenIds: tokens, output: output, promptTime: promptTime,
+            generateTime: generateTime)
+    }
+
     /// input (prompt, images, etc.)
     public let inputText: LMInput.Text
 
-    @available(*, deprecated, message: "use inputText")
-    public var promptTokens: [Int] {
+    /// The token IDs of the input prompt.
+    public var promptTokenIds: [Int] {
         inputText.tokens.asArray(Int.self)
     }
 
-    /// output tokens
-    public let tokens: [Int]
+    @available(*, deprecated, renamed: "promptTokenIds")
+    public var promptTokens: [Int] { promptTokenIds }
 
-    /// output text
+    /// Generated token IDs
+    public let tokenIds: [Int]
+
+    @available(*, deprecated, renamed: "tokenIds")
+    public var tokens: [Int] { tokenIds }
+
+    /// Output text
     public let output: String
 
     /// The number of tokens included in the input prompt.
     public var promptTokenCount: Int { inputText.tokens.size }
 
     /// The number of tokens generated by the language model.
-    public var generationTokenCount: Int { tokens.count }
+    public var generationTokenCount: Int { tokenIds.count }
 
-    /// time to process the prompt / generate the first token
+    /// Time to process the prompt (generate the first token)
     public let promptTime: TimeInterval
 
-    /// time to generate the remaining tokens
+    /// Time to generate the remaining tokens
     public let generateTime: TimeInterval
 
     /// The number of tokens processed per second during the prompt phase.
@@ -507,7 +522,7 @@ public struct GenerateResult {
 
     /// The number of tokens generated per second during the generation phase.
     public var tokensPerSecond: Double {
-        Double(tokens.count) / generateTime
+        Double(tokenIds.count) / generateTime
     }
 
     public func summary() -> String {
@@ -520,53 +535,53 @@ public struct GenerateResult {
 
 /// Action from token visitor callback in deprecated callback-based generate functions.
 public enum GenerateDisposition: Sendable {
-    /// keep producing tokens until an EOS token is produced
+    /// Keep producing tokens until an EOS token is produced
     case more
 
-    /// stop producing tokens, e.g. a token limit has been hit
+    /// Stop producing tokens, e.g. a token limit has been hit
     case stop
 }
 
 private struct SynchronousGenerationLoopResult {
-    let generatedTokens: [Int]
+    let generatedTokenIds: [Int]
     let promptTime: TimeInterval
     let generateTime: TimeInterval
     let promptPrefillTime: TimeInterval
     let stopReason: GenerateStopReason
 }
 
-private func buildStopTokenIDs(
+private func buildStopTokenIds(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer
 ) -> Set<Int> {
     // Build complete EOS token set from all sources.
-    var stopTokenIDs = modelConfiguration.eosTokenIds
+    var stopTokenIds = modelConfiguration.eosTokenIds
     if let tokenizerEOS = tokenizer.eosTokenId {
-        stopTokenIDs.insert(tokenizerEOS)
+        stopTokenIds.insert(tokenizerEOS)
     }
     for token in modelConfiguration.extraEOSTokens {
         if let id = tokenizer.convertTokenToId(token) {
-            stopTokenIDs.insert(id)
+            stopTokenIds.insert(id)
         }
     }
-    return stopTokenIDs
+    return stopTokenIds
 }
 
 private func runSynchronousGenerationLoop(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: TokenIterator,
-    didGenerate: (_ token: Int, _ generatedTokens: [Int]) -> GenerateDisposition
+    didGenerate: (_ token: Int, _ generatedTokenIds: [Int]) -> GenerateDisposition
 ) -> SynchronousGenerationLoopResult {
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
-    let stopTokenIDs = buildStopTokenIDs(
+    let stopTokenIds = buildStopTokenIds(
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer
     )
 
-    var generatedTokens = [Int]()
+    var generatedTokenIds = [Int]()
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
@@ -579,14 +594,14 @@ private func runSynchronousGenerationLoop(
         }
 
         // Check for end-of-sequence tokens.
-        if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+        if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
             stopReason = .stop
             break
         }
 
-        generatedTokens.append(token)
+        generatedTokenIds.append(token)
 
-        if didGenerate(token, generatedTokens) == .stop {
+        if didGenerate(token, generatedTokenIds) == .stop {
             stopReason = .cancelled
             break
         }
@@ -611,7 +626,7 @@ private func runSynchronousGenerationLoop(
     Stream().synchronize()
 
     return SynchronousGenerationLoopResult(
-        generatedTokens: generatedTokens,
+        generatedTokenIds: generatedTokenIds,
         promptTime: promptTime,
         generateTime: generateTime,
         promptPrefillTime: iterator.promptPrefillTime,
@@ -713,8 +728,8 @@ public func generate(
     }
 
     return GenerateResult(
-        inputText: input.text, tokens: result.generatedTokens,
-        output: context.tokenizer.decode(tokens: result.generatedTokens),
+        inputText: input.text, tokenIds: result.generatedTokenIds,
+        output: context.tokenizer.decode(tokenIds: result.generatedTokenIds),
         promptTime: result.promptTime + result.promptPrefillTime,
         generateTime: result.generateTime
     )
@@ -776,7 +791,7 @@ public func generate(
 
     return GenerateCompletionInfo(
         promptTokenCount: input.text.tokens.size,
-        generationTokenCount: result.generatedTokens.count,
+        generationTokenCount: result.generatedTokenIds.count,
         promptTime: result.promptTime + result.promptPrefillTime,
         generationTime: result.generateTime,
         stopReason: result.stopReason
@@ -1032,7 +1047,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             var tokenCount = 0
             var stopReason: GenerateStopReason?
 
-            let stopTokenIDs = buildStopTokenIDs(
+            let stopTokenIds = buildStopTokenIds(
                 modelConfiguration: modelConfiguration,
                 tokenizer: tokenizer
             )
@@ -1051,7 +1066,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
 
                 // Check for end-of-sequence tokens
-                if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+                if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if includeStopToken {
                         tokenCount += 1
                         if !handler.onStopToken(token, emit: continuation.yield) {

@@ -48,30 +48,42 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 ### Using Pre-registered Configuration
 
 ```swift
-import Embedders
+import MLXEmbedders
 
 let config = ModelConfiguration.bge_small
-let container = try await loadModelContainer(configuration: config)
+let container = try await loadModelContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    configuration: config
+)
 ```
 
 ### Using Custom Model ID
 
 ```swift
 let config = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
-let container = try await loadModelContainer(configuration: config)
+let container = try await loadModelContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    configuration: config
+)
 ```
 
 ### From Local Directory
 
 ```swift
-let config = ModelConfiguration(directory: localModelURL)
-let container = try await loadModelContainer(configuration: config)
+let container = try await loadModelContainer(
+    from: localModelURL,
+    using: TokenizersLoader()
+)
 ```
 
 ### With Progress Tracking
 
 ```swift
 let container = try await loadModelContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: config
 ) { progress in
     print("Download progress: \(progress.fractionCompleted)")

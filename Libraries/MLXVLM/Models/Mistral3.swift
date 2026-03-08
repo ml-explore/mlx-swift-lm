@@ -3,7 +3,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/mistral3
 // Note: Mistral3 reuses the vision model from Pixtral
@@ -1019,7 +1018,7 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
 
         // Decode to find and replace image placeholder token
-        let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+        let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
         // Process image to get dimensions
         let preprocessResult = try preprocessImage(

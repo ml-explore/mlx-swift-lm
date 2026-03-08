@@ -2,7 +2,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/apertus.py
 
@@ -322,7 +321,7 @@ private class ApertusModelInner: Module {
     ) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let mask = createAttentionMask(h: inputs, cache: cache)
+        let mask = createAttentionMask(h: inputs, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

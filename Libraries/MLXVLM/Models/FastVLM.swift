@@ -9,11 +9,9 @@
 
 import CoreImage
 import Foundation
-import Hub
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // MARK: - Configuration
 
@@ -1001,7 +999,7 @@ public struct FastVLMProcessor: UserInputProcessor {
 
         // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
         let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
-        let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+        let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
         // Find <image> and replace with token id -200
         let pieces = decoded.split(separator: imageToken)

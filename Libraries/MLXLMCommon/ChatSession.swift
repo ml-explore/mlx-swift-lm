@@ -3,7 +3,6 @@
 import CoreGraphics
 import Foundation
 import MLX
-import Tokenizers
 
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///

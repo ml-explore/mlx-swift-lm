@@ -128,7 +128,11 @@ public final class ModelContainer: Sendable {
 
 ```swift
 // Multiple tasks can call perform() safely
-let container = try await loadModelContainer()
+let container = try await loadModelContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 
 Task {
     await container.perform { context in

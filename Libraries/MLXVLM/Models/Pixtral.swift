@@ -3,7 +3,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/pixtral
 
