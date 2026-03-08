@@ -116,6 +116,20 @@ public final class ModelContainer: Sendable {
 
     // MARK: - Thread-safe convenience methods
 
+    /// The resolved local model directory for the loaded container.
+    public var modelDirectory: URL {
+        get async throws {
+            try (await configuration).modelDirectory
+        }
+    }
+
+    /// The resolved local tokenizer directory for the loaded container.
+    public var tokenizerDirectory: URL {
+        get async throws {
+            try (await configuration).tokenizerDirectory
+        }
+    }
+
     /// Prepare user input for generation.
     ///
     /// This method safely prepares input within the actor's isolation,

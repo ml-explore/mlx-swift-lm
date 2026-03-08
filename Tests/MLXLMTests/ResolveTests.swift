@@ -154,4 +154,47 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
         #expect(resolved.modelDirectory == localDir)
         #expect(resolved.tokenizerDirectory != localDir)
     }
+
+    @Test func localConfigurationExposesResolvedDirectories() throws {
+        let modelDir = URL(filePath: "/local/org/model")
+        let tokenizerDir = URL(filePath: "/local/org/tokenizer")
+        let config = ModelConfiguration(
+            directory: modelDir,
+            tokenizerSource: .directory(tokenizerDir))
+
+        #expect(try config.modelDirectory == modelDir)
+        #expect(try config.tokenizerDirectory == tokenizerDir)
+    }
+
+    @Test func tokenizerDirectoryFallsBackToModelDirectory() throws {
+        let modelDir = URL(filePath: "/local/org/model")
+        let config = ModelConfiguration(directory: modelDir)
+
+        #expect(try config.modelDirectory == modelDir)
+        #expect(try config.tokenizerDirectory == modelDir)
+    }
+
+    @Test func unresolvedRemoteConfigurationThrowsForDirectories() {
+        let config = ModelConfiguration(
+            id: "org/model",
+            tokenizerSource: .id("org/tokenizer"))
+
+        do {
+            _ = try config.modelDirectory
+            Issue.record("Expected modelDirectory to throw for unresolved remote config")
+        } catch let error as ModelConfiguration.DirectoryError {
+            #expect(error == .unresolvedModelDirectory("org/model"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try config.tokenizerDirectory
+            Issue.record("Expected tokenizerDirectory to throw for unresolved remote tokenizer")
+        } catch let error as ModelConfiguration.DirectoryError {
+            #expect(error == .unresolvedTokenizerDirectory("org/tokenizer"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
 }

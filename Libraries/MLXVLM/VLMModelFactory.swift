@@ -361,8 +361,13 @@ public final class VLMModelFactory: ModelFactory {
             processorType: processorType, tokenizer: tokenizer)
 
         // Build a ModelConfiguration for the ModelContext
+        let tokenizerSource: TokenizerSource? =
+            configuration.tokenizerDirectory == modelDirectory
+            ? nil
+            : .directory(configuration.tokenizerDirectory)
         let modelConfig = ModelConfiguration(
             directory: modelDirectory,
+            tokenizerSource: tokenizerSource,
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             eosTokenIds: mutableConfiguration.eosTokenIds,

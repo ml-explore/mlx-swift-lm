@@ -7,6 +7,20 @@ import Foundation
 /// See e.g. `MLXLM.ModelRegistry` for an example of use.
 public struct ModelConfiguration: Sendable {
 
+    public enum DirectoryError: LocalizedError, Equatable {
+        case unresolvedModelDirectory(String)
+        case unresolvedTokenizerDirectory(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unresolvedModelDirectory(let id):
+                return "Model configuration '\(id)' has not been resolved to a local directory."
+            case .unresolvedTokenizerDirectory(let id):
+                return "Tokenizer source '\(id)' has not been resolved to a local directory."
+            }
+        }
+    }
+
     public enum Identifier: Sendable {
         case id(String, revision: String = "main")
         case directory(URL)
@@ -20,6 +34,41 @@ public struct ModelConfiguration: Sendable {
             id
         case .directory(let url):
             url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
+        }
+    }
+
+    /// The resolved local directory containing model files.
+    ///
+    /// - Throws: ``DirectoryError/unresolvedModelDirectory(_:)`` if this configuration still
+    ///   identifies a remote model by ID rather than a local directory.
+    package var modelDirectory: URL {
+        get throws {
+            switch id {
+            case .directory(let directory):
+                return directory
+            case .id(let id, _):
+                throw DirectoryError.unresolvedModelDirectory(id)
+            }
+        }
+    }
+
+    /// The resolved local directory containing tokenizer files.
+    ///
+    /// If ``tokenizerSource`` is `nil`, this falls back to ``modelDirectory``.
+    ///
+    /// - Throws: ``DirectoryError/unresolvedTokenizerDirectory(_:)`` if the tokenizer still
+    ///   points to a remote source by ID, or ``DirectoryError/unresolvedModelDirectory(_:)``
+    ///   if no separate tokenizer source is set and the model itself is unresolved.
+    package var tokenizerDirectory: URL {
+        get throws {
+            switch tokenizerSource {
+            case .directory(let directory):
+                return directory
+            case .id(let id, _):
+                throw DirectoryError.unresolvedTokenizerDirectory(id)
+            case nil:
+                return try modelDirectory
+            }
         }
     }
 

@@ -540,8 +540,13 @@ public final class LLMModelFactory: ModelFactory {
             }
 
         // Build a ModelConfiguration for the ModelContext
+        let tokenizerSource: TokenizerSource? =
+            configuration.tokenizerDirectory == modelDirectory
+            ? nil
+            : .directory(configuration.tokenizerDirectory)
         let modelConfig = ModelConfiguration(
             directory: modelDirectory,
+            tokenizerSource: tokenizerSource,
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             eosTokenIds: mutableConfiguration.eosTokenIds,
