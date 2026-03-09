@@ -21,7 +21,7 @@ public protocol Downloader: Sendable {
     ///   - revision: Optional revision (branch, tag, commit hash, version number).
     ///     Providers without versioning receive `nil`.
     ///   - patterns: Glob patterns to filter which files to download
-    ///     (e.g. `["*.safetensors", "*.json"]`)
+    ///     (e.g. `["*.safetensors", "*.json", "*.jinja"]`)
     ///   - useLatest: When `true`, check the provider for updates even if a cached
     ///     version exists. When `false`, return the cached version if available.
     ///   - progressHandler: Callback for download progress

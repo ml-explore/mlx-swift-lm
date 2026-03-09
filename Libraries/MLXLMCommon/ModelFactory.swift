@@ -2,6 +2,10 @@
 
 import Foundation
 
+/// File patterns required to resolve a tokenizer without downloading model weights.
+package let tokenizerDownloadPatterns = ["*.json", "*.jinja"]
+package let modelDownloadPatterns = ["*.safetensors"] + tokenizerDownloadPatterns
+
 public enum ModelFactoryError: LocalizedError {
     case unsupportedModelType(String)
     case unsupportedProcessorType(String)
@@ -197,7 +201,7 @@ public func resolve(
     case .id(let id, let revision):
         modelDirectory = try await downloader.download(
             id: id, revision: revision,
-            matching: ["*.safetensors", "*.json", "*.jinja"],
+            matching: modelDownloadPatterns,
             useLatest: useLatest,
             progressHandler: progressHandler)
     case .directory(let directory):
@@ -209,7 +213,7 @@ public func resolve(
     case .id(let id, let revision):
         tokenizerDirectory = try await downloader.download(
             id: id, revision: revision,
-            matching: ["*.json", "*.jinja"],
+            matching: tokenizerDownloadPatterns,
             useLatest: useLatest,
             progressHandler: { _ in })
     case .directory(let directory):

@@ -196,8 +196,6 @@ public func loadDecodingBenchmarkText(
     )
 }
 
-private let tokenizerDownloadPatterns = ["*.json", "*.jinja"]
-
 private func resolveTokenizerDirectory(
     from downloader: any Downloader,
     configuration: MLXLMCommon.ModelConfiguration,
@@ -444,7 +442,7 @@ public func benchmarkDownloadCacheHit(
     modelId: String = "mlx-community/Qwen3-0.6B-4bit",
     runs: Int = BenchmarkDefaults.downloadRuns
 ) async throws -> BenchmarkStats {
-    let patterns = ["*.safetensors", "*.json", "*.jinja"]
+    let patterns = modelDownloadPatterns
 
     // Warm-up: ensure the model is cached
     _ = try await downloader.download(

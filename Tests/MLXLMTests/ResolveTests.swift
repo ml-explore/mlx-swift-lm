@@ -67,6 +67,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
         #expect(downloader.calls.value.count == 1)
         #expect(downloader.calls.value[0].id == "org/model")
         #expect(downloader.calls.value[0].revision == "abc123")
+        #expect(downloader.calls.value[0].patterns.contains("*.jinja"))
 
         // No separate tokenizer download, so both point to the model directory.
         #expect(resolved.modelDirectory == resolved.tokenizerDirectory)
@@ -91,6 +92,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
         // Tokenizer download uses nil revision (provider default).
         #expect(downloader.calls.value[1].id == "org/tokenizer")
         #expect(downloader.calls.value[1].revision == nil)
+        #expect(downloader.calls.value[1].patterns.contains("*.jinja"))
 
         // Model and tokenizer come from different repos, so directories differ.
         #expect(resolved.modelDirectory != resolved.tokenizerDirectory)
@@ -113,6 +115,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
 
         #expect(downloader.calls.value[1].id == "org/tokenizer")
         #expect(downloader.calls.value[1].revision == "tok-v2")
+        #expect(downloader.calls.value[1].patterns.contains("*.jinja"))
 
         // Model and tokenizer come from different repos, so directories differ.
         #expect(resolved.modelDirectory != resolved.tokenizerDirectory)
@@ -150,6 +153,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
         #expect(downloader.calls.value.count == 1)
         #expect(downloader.calls.value[0].id == "org/tokenizer")
         #expect(downloader.calls.value[0].revision == "v3")
+        #expect(downloader.calls.value[0].patterns.contains("*.jinja"))
 
         #expect(resolved.modelDirectory == localDir)
         #expect(resolved.tokenizerDirectory != localDir)
