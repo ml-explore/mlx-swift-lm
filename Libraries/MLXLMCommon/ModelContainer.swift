@@ -215,6 +215,7 @@ public final class ModelContainer: Sendable {
     ///
     /// - Parameter messages: Array of message dictionaries with "role" and "content" keys
     /// - Returns: Array of token IDs
+    @available(*, deprecated, message: "Use applyChatTemplate directly on tokenizer")
     public func applyChatTemplate(messages: [[String: String]]) async throws -> [Int] {
         let tokenizer = await self.tokenizer
         return try tokenizer.applyChatTemplate(messages: messages)

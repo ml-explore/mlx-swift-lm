@@ -1067,7 +1067,9 @@ public struct Gemma3Processor: UserInputProcessor {
         // Use structured content message generator for Gemma3's chat template
         let messages = Qwen2VLMessageGenerator().generate(from: input)
 
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        var promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages, tools: input.tools,
+            additionalContext: input.additionalContext)
 
         // Process images if any
         var processedImage: LMInput.ProcessedImage?

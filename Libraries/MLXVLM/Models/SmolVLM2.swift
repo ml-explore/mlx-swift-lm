@@ -225,7 +225,9 @@ public struct SmolVLMProcessor: UserInputProcessor {
 
         if input.images.isEmpty && input.videos.isEmpty {
             // No image scenario
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools,
+                additionalContext: input.additionalContext)
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -236,7 +238,9 @@ public struct SmolVLMProcessor: UserInputProcessor {
             }
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools,
+                additionalContext: input.additionalContext)
             let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
             let image = try input.images[0].asCIImage().toSRGB()
