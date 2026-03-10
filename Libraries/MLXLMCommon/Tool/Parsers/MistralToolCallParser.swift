@@ -15,12 +15,12 @@ import Foundation
 /// - `[TOOL_CALLS]get_weather[ARGS]{"location": "Tokyo"}`
 /// - `[TOOL_CALLS]fn1[ARGS]{...}[TOOL_CALLS]fn2[ARGS]{...}` (multiple calls)
 ///
-/// The end tag is `</s>` (EOS token). Since stop tokens are intercepted at the
-/// token ID level before detokenization, the EOS text never reaches the processor
-/// — tool calls are extracted via `ToolCallProcessor.flush()` at generation end.
+/// Mistral does not use an end tag — tool calls end at EOS. Since stop tokens
+/// are intercepted at the token ID level before detokenization, tool calls are
+/// extracted via `ToolCallProcessor.processEOS()` at generation end.
 public struct MistralToolCallParser: ToolCallParser, Sendable {
     public let startTag: String? = "[TOOL_CALLS]"
-    public let endTag: String? = "</s>"
+    public let endTag: String? = nil
 
     public init() {}
 
@@ -33,11 +33,6 @@ public struct MistralToolCallParser: ToolCallParser, Sendable {
             text = String(text.dropFirst(start.count))
             text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        if let end = endTag, text.hasSuffix(end) {
-            text = String(text.dropLast(end.count))
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
         // Split on [ARGS] to get function name and arguments
         guard let argsRange = text.range(of: "[ARGS]") else {
             return nil

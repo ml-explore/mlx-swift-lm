@@ -488,28 +488,6 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
-    @Test("Test Mistral Tool Call Parser - With End Tag")
-    func testMistralParserWithEndTag() throws {
-        let parser = MistralToolCallParser()
-        let content = "[TOOL_CALLS]get_weather[ARGS]{\"location\": \"Paris\"}</s>"
-
-        let toolCall = try #require(parser.parse(content: content, tools: nil))
-
-        #expect(toolCall.function.name == "get_weather")
-        #expect(toolCall.function.arguments["location"] == .string("Paris"))
-    }
-
-    @Test("Test Mistral Tool Call Parser - With Trailing End Tag Only")
-    func testMistralParserWithTrailingEndTagOnly() throws {
-        let parser = MistralToolCallParser()
-        let content = "get_weather[ARGS]{\"location\": \"Paris\"}</s>"
-
-        let toolCall = try #require(parser.parse(content: content, tools: nil))
-
-        #expect(toolCall.function.name == "get_weather")
-        #expect(toolCall.function.arguments["location"] == .string("Paris"))
-    }
-
     @Test("Test Mistral Tool Call Parser - Preserves [TOOL_CALLS] in Arguments")
     func testMistralParserPreservesStartTagInArguments() throws {
         let parser = MistralToolCallParser()
@@ -544,10 +522,10 @@ struct ToolTests {
             _ = processor.processChunk(chunk)
         }
 
-        // End tag (</s>) never arrives in text, so tool call stays buffered until flush
+        // End tag never arrives in text, so tool call stays buffered until processEOS
         #expect(processor.toolCalls.count == 0)
 
-        processor.flush()
+        processor.processEOS()
 
         #expect(processor.toolCalls.count == 1)
         let toolCall = try #require(processor.toolCalls.first)
@@ -555,18 +533,18 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
     }
 
-    @Test("Test Mistral Format Processor Flush")
-    func testMistralFormatProcessorFlush() throws {
+    @Test("Test Mistral Format Processor EOS")
+    func testMistralFormatProcessorEOS() throws {
         let processor = ToolCallProcessor(format: .mistral)
         let content = "[TOOL_CALLS]get_weather [ARGS]{\"location\": \"Berlin\"}"
 
         _ = processor.processChunk(content)
 
-        // Before flush, no tool calls extracted (end tag never arrives)
+        // Before processEOS, no tool calls extracted (end tag never arrives)
         #expect(processor.toolCalls.count == 0)
 
-        // Flush extracts the buffered tool call
-        processor.flush()
+        // processEOS extracts the buffered tool call
+        processor.processEOS()
 
         #expect(processor.toolCalls.count == 1)
         let toolCall = try #require(processor.toolCalls.first)
@@ -592,10 +570,10 @@ struct ToolTests {
             }
         }
 
-        // No tool calls before flush
+        // No tool calls before processEOS
         #expect(processor.toolCalls.count == 0)
 
-        processor.flush()
+        processor.processEOS()
 
         // Both tool calls should be extracted
         #expect(processor.toolCalls.count == 2)
