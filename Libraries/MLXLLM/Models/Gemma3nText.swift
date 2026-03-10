@@ -212,7 +212,7 @@ class Gemma3nAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     @ModuleInfo(key: "v_norm") var vNorm: RMSNoScale
-    @ModuleInfo var rope: RoPE
+    @ModuleInfo var rope: OffsetLayer
 
     init(_ config: Gemma3nTextConfiguration, layerIdx: Int) {
         let layerTypes =

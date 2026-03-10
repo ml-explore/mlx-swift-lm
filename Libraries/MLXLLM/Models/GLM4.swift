@@ -21,7 +21,7 @@ class GLM4Attention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    let rope: RoPE
+    let rope: RoPELayer
 
     public init(_ args: GLM4Configuration) {
         self.args = args
@@ -35,9 +35,11 @@ class GLM4Attention: Module {
         _wv.wrappedValue = Linear(args.hiddenSize, args.kvHeads * headDim, bias: args.attentionBias)
         _wo.wrappedValue = Linear(args.attentionHeads * headDim, args.hiddenSize, bias: false)
 
-        self.rope = RoPE(
-            dimensions: Int(Float(headDim) * args.partialRotaryFactor),
-            traditional: args.ropeTraditional, base: args.ropeTheta)
+        self.rope = initializeRope(
+            dims: Int(Float(headDim) * args.partialRotaryFactor),
+            base: args.ropeTheta,
+            traditional: args.ropeTraditional, scalingConfig: nil,
+            maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
     public func callAsFunction(
@@ -57,8 +59,8 @@ class GLM4Attention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

@@ -23,7 +23,7 @@ class GLM4MoEAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm?
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
 
-    let rope: RoPE
+    let rope: RoPELayer
 
     init(_ args: GLM4MoEConfiguration) {
         self.args = args
@@ -42,11 +42,11 @@ class GLM4MoEAttention: Module {
             _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         }
 
-        self.rope = RoPE(
-            dimensions: Int(Float(headDim) * args.partialRotaryFactor),
-            traditional: false,
-            base: args.ropeTheta
-        )
+        self.rope = initializeRope(
+            dims: Int(Float(headDim) * args.partialRotaryFactor),
+            base: args.ropeTheta,
+            traditional: false, scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
     func callAsFunction(
@@ -74,8 +74,8 @@ class GLM4MoEAttention: Module {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         let output = attentionWithCacheUpdate(

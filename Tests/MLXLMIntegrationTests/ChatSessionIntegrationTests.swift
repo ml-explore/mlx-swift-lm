@@ -24,13 +24,21 @@ public class ChatSessionIntegrationTests: XCTestCase {
         let vlmExpectation = XCTestExpectation(description: "Load VLM")
 
         Task {
-            llmContainer = try await IntegrationTestModels.shared.llmContainer()
-            llmExpectation.fulfill()
+            do {
+                llmContainer = try await IntegrationTestModels.shared.llmContainer()
+                llmExpectation.fulfill()
+            } catch {
+                fatalError("Unable to load llm: \(error)")
+            }
         }
 
         Task {
-            vlmContainer = try await IntegrationTestModels.shared.vlmContainer()
-            vlmExpectation.fulfill()
+            do {
+                vlmContainer = try await IntegrationTestModels.shared.vlmContainer()
+                vlmExpectation.fulfill()
+            } catch {
+                fatalError("Unable to load vlm: \(error)")
+            }
         }
 
         _ = XCTWaiter.wait(for: [llmExpectation, vlmExpectation], timeout: 300)

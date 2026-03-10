@@ -748,7 +748,11 @@ public struct LFM2VLProcessor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen2VLMessageGenerator().generate(from: input)
 
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        var promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages,
+            tools: input.tools,
+            additionalContext: input.additionalContext
+        )
 
         // Text-only input
         if input.images.isEmpty {
@@ -987,7 +991,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         var spatialShapes: MLXArray? = nil
         var pixelAttentionMask: MLXArray? = nil
 
-        if let pixels = pixelValues, let frames = input.image?.frames, !frames.isEmpty {
+        if pixelValues != nil, let frames = input.image?.frames, !frames.isEmpty {
             // Extract spatial shapes from frames (THW format where t=1 for images)
 
             // Convert frames to spatial shapes array [numImages, 2]
@@ -996,7 +1000,6 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
 
             // Create attention mask based on actual feature lengths per image
             var maskArrays = [MLXArray]()
-            let maxPatches = pixels.dim(1)
             for frame in frames {
                 let numPatches = frame.h * frame.w
                 let imageMask = MLXArray.ones([numPatches]).asType(.int32)

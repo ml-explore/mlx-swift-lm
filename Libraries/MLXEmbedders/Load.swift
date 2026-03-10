@@ -121,7 +121,7 @@ func prepareModelDirectory(
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
-    hub: HubApi = HubApi(),
+    hub: HubApi = defaultHubApi,
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> (EmbeddingModel, Tokenizer) {
@@ -218,7 +218,7 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 ///   - progressHandler: A closure for tracking download progress.
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
-    hub: HubApi = HubApi(),
+    hub: HubApi = defaultHubApi,
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> ModelContainer {

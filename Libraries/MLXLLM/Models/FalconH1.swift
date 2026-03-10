@@ -264,7 +264,7 @@ class FalconH1Attention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
-    let rope: RoPE
+    let rope: RoPELayer
 
     init(_ args: FalconH1Configuration) {
         self.hiddenSize = args.hiddenSize
@@ -278,19 +278,17 @@ class FalconH1Attention: Module {
         _vProj.wrappedValue = Linear(hiddenSize, numKVHeads * headDim, bias: args.attentionBias)
         _oProj.wrappedValue = Linear(numHeads * headDim, hiddenSize, bias: args.attentionBias)
 
-        let ropeScale: Float =
+        let scalingConfig: [String: StringOrNumber]? =
             if let ropeScaling = args.ropeScaling {
-                1 / ropeScaling
+                ["type": .string("linear"), "factor": .float(ropeScaling)]
             } else {
-                1
+                nil
             }
 
-        self.rope = RoPE(
-            dimensions: headDim,
-            traditional: args.ropeTraditional,
-            base: args.ropeTheta,
-            scale: ropeScale
-        )
+        self.rope = initializeRope(
+            dims: headDim, base: args.ropeTheta,
+            traditional: args.ropeTraditional, scalingConfig: scalingConfig,
+            maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
@@ -309,8 +307,8 @@ class FalconH1Attention: Module {
             keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
         } else {
-            queries = rope(queries)
-            keys = rope(keys)
+            queries = rope(queries, offset: 0)
+            keys = rope(keys, offset: 0)
         }
 
         var output = MLXFast.scaledDotProductAttention(
