@@ -1,7 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-@preconcurrency import MLX
+import MLX
 import MLXEmbedders
 import MLXLMCommon
 import MLXVLM
