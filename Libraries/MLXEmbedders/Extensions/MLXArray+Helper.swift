@@ -4,15 +4,7 @@ import MLX
 
 extension MLXArray {
 
-    public static func arange(_ size: Int) -> MLXArray {
-        return MLXArray(Array(0 ..< size))
-    }
-
     /// Returns a new array normalized by its L2 norm along the specified axis.
-    ///
-    /// The L2 normalization of an array $x$ is calculated as:
-    ///
-    /// $$x_{norm} = \frac{x}{\max(\|x\|_2, \epsilon)}$$
     ///
     /// This operation scales the vectors along `axis` to unit length. If the
     /// norm is smaller than `eps`, it is clamped to `eps` to ensure numerical
