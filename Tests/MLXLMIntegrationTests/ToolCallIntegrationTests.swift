@@ -17,6 +17,7 @@ import XCTest
 /// - LFM2: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/default.py
 /// - GLM4: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/glm47.py
 public class ToolCallIntegrationTests: XCTestCase {
+
     // MARK: - Tool Schema
 
     static let weatherToolSchema: [[String: any Sendable]] = [
@@ -78,6 +79,8 @@ public class ToolCallIntegrationTests: XCTestCase {
 
     private var nemotronContainer: ModelContainer {
         get async throws {
+            try XCTSkipIf(true, "Nemotron model is opt-in only because of its size")
+
             do {
                 return try await IntegrationTestModels.shared.nemotronContainer()
             } catch {
