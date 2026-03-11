@@ -17,21 +17,6 @@ import XCTest
 /// - LFM2: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/default.py
 /// - GLM4: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/glm47.py
 public class ToolCallIntegrationTests: XCTestCase {
-
-    // MARK: - Model IDs
-
-    static let lfm2ModelId = "mlx-community/LFM2-2.6B-Exp-4bit"
-    static let glm4ModelId = "mlx-community/GLM-4-9B-0414-4bit"
-    static let mistral3ModelId = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
-    static let nemotronModelId = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
-
-    // MARK: - Shared State
-
-    nonisolated(unsafe) static var lfm2Container: ModelContainer?
-    nonisolated(unsafe) static var glm4Container: ModelContainer?
-    nonisolated(unsafe) static var mistral3Container: ModelContainer?
-    nonisolated(unsafe) static var nemotronContainer: ModelContainer?
-
     // MARK: - Tool Schema
 
     static let weatherToolSchema: [[String: any Sendable]] = [
@@ -59,49 +44,52 @@ public class ToolCallIntegrationTests: XCTestCase {
         ]
     ]
 
-    // MARK: - Setup
+    // MARK: - Model Loading
 
-    override public class func setUp() {
-        super.setUp()
-
-        let lfm2Expectation = XCTestExpectation(description: "Load LFM2")
-        let glm4Expectation = XCTestExpectation(description: "Load GLM4")
-        let mistral3Expectation = XCTestExpectation(description: "Load Mistral3")
-        let nemotronExpectation = XCTestExpectation(description: "Load Nemotron")
-
-        Task {
-            lfm2Container = await loadModelContainer(modelId: lfm2ModelId)
-            lfm2Expectation.fulfill()
+    private var lfm2Container: ModelContainer {
+        get async throws {
+            do {
+                return try await IntegrationTestModels.shared.lfm2Container()
+            } catch {
+                throw XCTSkip("LFM2 model not available: \(error)")
+            }
         }
+    }
 
-        Task {
-            glm4Container = await loadModelContainer(modelId: glm4ModelId)
-            glm4Expectation.fulfill()
+    private var glm4Container: ModelContainer {
+        get async throws {
+            do {
+                return try await IntegrationTestModels.shared.glm4Container()
+            } catch {
+                throw XCTSkip("GLM4 model not available: \(error)")
+            }
         }
+    }
 
-        Task {
-            mistral3Container = await loadModelContainer(modelId: mistral3ModelId)
-            mistral3Expectation.fulfill()
+    private var mistral3Container: ModelContainer {
+        get async throws {
+            do {
+                return try await IntegrationTestModels.shared.mistral3Container()
+            } catch {
+                throw XCTSkip("Mistral3 model not available: \(error)")
+            }
         }
+    }
 
-        Task {
-            nemotronContainer = await loadModelContainer(modelId: nemotronModelId)
-            nemotronExpectation.fulfill()
+    private var nemotronContainer: ModelContainer {
+        get async throws {
+            do {
+                return try await IntegrationTestModels.shared.nemotronContainer()
+            } catch {
+                throw XCTSkip("Nemotron model not available: \(error)")
+            }
         }
-
-        _ = XCTWaiter.wait(
-            for: [lfm2Expectation, glm4Expectation, mistral3Expectation, nemotronExpectation],
-            timeout: 600)
     }
 
     // MARK: - LFM2 Tests
 
     func testLFM2ToolCallFormatAutoDetection() async throws {
-        guard let container = Self.lfm2Container else {
-            throw XCTSkip("LFM2 model not available")
-        }
-
-        let config = await container.configuration
+        let config = try await lfm2Container.configuration
         XCTAssertEqual(
             config.toolCallFormat, .lfm2,
             "LFM2 model should auto-detect .lfm2 tool call format"
@@ -109,9 +97,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testLFM2EndToEndToolCallGeneration() async throws {
-        guard let container = Self.lfm2Container else {
-            throw XCTSkip("LFM2 model not available")
-        }
+        let container = try await lfm2Container
 
         // Create input with tool schema
         let input = UserInput(
@@ -151,11 +137,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     // MARK: - GLM4 Tests
 
     func testGLM4ToolCallFormatAutoDetection() async throws {
-        guard let container = Self.glm4Container else {
-            throw XCTSkip("GLM4 model not available")
-        }
-
-        let config = await container.configuration
+        let config = try await glm4Container.configuration
         XCTAssertEqual(
             config.toolCallFormat, .glm4,
             "GLM4 model should auto-detect .glm4 tool call format"
@@ -163,9 +145,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testGLM4EndToEndToolCallGeneration() async throws {
-        guard let container = Self.glm4Container else {
-            throw XCTSkip("GLM4 model not available")
-        }
+        let container = try await glm4Container
 
         // Create input with tool schema
         let input = UserInput(
@@ -205,11 +185,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     // MARK: - Mistral3 Tests
 
     func testMistral3ToolCallFormatAutoDetection() async throws {
-        guard let container = Self.mistral3Container else {
-            throw XCTSkip("Mistral3 model not available")
-        }
-
-        let config = await container.configuration
+        let config = try await mistral3Container.configuration
         XCTAssertEqual(
             config.toolCallFormat, .mistral,
             "Mistral3 model should auto-detect .mistral tool call format"
@@ -217,9 +193,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testMistral3EndToEndToolCallGeneration() async throws {
-        guard let container = Self.mistral3Container else {
-            throw XCTSkip("Mistral3 model not available")
-        }
+        let container = try await mistral3Container
 
         let input = UserInput(
             chat: [
@@ -254,9 +228,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testMistral3MultipleToolCallGeneration() async throws {
-        guard let container = Self.mistral3Container else {
-            throw XCTSkip("Mistral3 model not available")
-        }
+        let container = try await mistral3Container
 
         let multiToolSchema: [[String: any Sendable]] =
             Self.weatherToolSchema + [
@@ -319,11 +291,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     // MARK: - Nemotron Tests
 
     func testNemotronToolCallFormatAutoDetection() async throws {
-        guard let container = Self.nemotronContainer else {
-            throw XCTSkip("Nemotron model not available")
-        }
-
-        let config = await container.configuration
+        let config = try await nemotronContainer.configuration
         XCTAssertEqual(
             config.toolCallFormat, .xmlFunction,
             "Nemotron model should auto-detect .xmlFunction tool call format"
@@ -331,9 +299,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testNemotronEndToEndToolCallGeneration() async throws {
-        guard let container = Self.nemotronContainer else {
-            throw XCTSkip("Nemotron model not available")
-        }
+        let container = try await nemotronContainer
 
         let input = UserInput(
             chat: [
@@ -368,9 +334,7 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     func testNemotronMultipleToolCallGeneration() async throws {
-        guard let container = Self.nemotronContainer else {
-            throw XCTSkip("Nemotron model not available")
-        }
+        let container = try await nemotronContainer
 
         let multiToolSchema: [[String: any Sendable]] =
             Self.weatherToolSchema + [
@@ -429,17 +393,6 @@ public class ToolCallIntegrationTests: XCTestCase {
     }
 
     // MARK: - Helper Methods
-
-    private static func loadModelContainer(modelId: String) async -> ModelContainer? {
-        do {
-            return try await LLMModelFactory.shared.loadContainer(
-                configuration: .init(id: modelId)
-            )
-        } catch {
-            print("Failed to load model \(modelId): \(error)")
-            return nil
-        }
-    }
 
     /// Generate text and collect any tool calls
     private func generateWithTools(
