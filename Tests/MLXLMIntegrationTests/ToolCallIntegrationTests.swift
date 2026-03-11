@@ -380,7 +380,8 @@ public class ToolCallIntegrationTests: XCTestCase {
                     "What's the weather in Tokyo and what time is it there?"
                 ),
             ],
-            tools: multiToolSchema
+            tools: multiToolSchema,
+            additionalContext: ["enable_thinking": false]
         )
 
         let (result, toolCalls) = try await generateWithTools(
