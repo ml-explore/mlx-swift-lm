@@ -89,6 +89,16 @@ public class ToolCallIntegrationTests: XCTestCase {
         }
     }
 
+    private var qwen35Container: ModelContainer {
+        get async throws {
+            do {
+                return try await IntegrationTestModels.shared.qwen35Container()
+            } catch {
+                throw XCTSkip("Qwen3.5 model not available: \(error)")
+            }
+        }
+    }
+
     // MARK: - LFM2 Tests
 
     func testLFM2ToolCallFormatAutoDetection() async throws {
@@ -392,6 +402,110 @@ public class ToolCallIntegrationTests: XCTestCase {
 
         if toolCalls.count > 1 {
             print("Successfully parsed \(toolCalls.count) tool calls from Nemotron")
+        }
+    }
+
+    // MARK: - Qwen3.5 Tests
+
+    func testQwen35ToolCallFormatAutoDetection() async throws {
+        let config = try await qwen35Container.configuration
+        XCTAssertEqual(
+            config.toolCallFormat, .xmlFunction,
+            "Qwen3.5 model should auto-detect .xmlFunction tool call format"
+        )
+    }
+
+    func testQwen35EndToEndToolCallGeneration() async throws {
+        let container = try await qwen35Container
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: Self.weatherToolSchema
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 150
+        )
+
+        print("Qwen3.5 Output: \(result)")
+        print("Qwen3.5 Tool Calls: \(toolCalls)")
+
+        if !toolCalls.isEmpty {
+            let toolCall = toolCalls.first!
+            XCTAssertEqual(toolCall.function.name, "get_weather")
+            if let location = toolCall.function.arguments["location"]?.asString {
+                XCTAssertTrue(
+                    location.lowercased().contains("tokyo"),
+                    "Expected location to contain 'Tokyo', got: \(location)"
+                )
+            }
+        }
+    }
+
+    func testQwen35MultipleToolCallGeneration() async throws {
+        let container = try await qwen35Container
+
+        let multiToolSchema: [[String: any Sendable]] =
+            Self.weatherToolSchema + [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "get_time",
+                        "description": "Get the current time in a given timezone",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "timezone": [
+                                    "type": "string",
+                                    "description":
+                                        "The timezone, e.g. America/New_York, Asia/Tokyo",
+                                ] as [String: any Sendable]
+                            ] as [String: any Sendable],
+                            "required": ["timezone"],
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ]
+            ]
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user(
+                    "What's the weather in Tokyo and what time is it there?"
+                ),
+            ],
+            tools: multiToolSchema,
+            additionalContext: ["enable_thinking": true]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 300
+        )
+
+        print("Qwen3.5 Output: \(result)")
+        print("Qwen3.5 Calls: \(toolCalls)")
+
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            XCTAssertTrue(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        if toolCalls.count > 1 {
+            print("Successfully parsed \(toolCalls.count) tool calls from Qwen3.5")
         }
     }
 

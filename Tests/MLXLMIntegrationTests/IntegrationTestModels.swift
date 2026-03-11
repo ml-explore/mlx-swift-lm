@@ -13,6 +13,7 @@ enum IntegrationTestModelIDs {
     static let glm4ModelId = "mlx-community/GLM-4-9B-0414-4bit"
     static let mistral3ModelId = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
     static let nemotronModelId = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
+    static let qwen35ModelId = "mlx-community/Qwen3.5-2B-4bit"
 }
 
 actor IntegrationTestModels {
@@ -27,6 +28,7 @@ actor IntegrationTestModels {
     private var glm4Task: Task<ModelContainer, Error>?
     private var mistral3Task: Task<ModelContainer, Error>?
     private var nemotronTask: Task<ModelContainer, Error>?
+    private var qwen35Task: Task<ModelContainer, Error>?
 
     func llmContainer() async throws -> ModelContainer {
         if let task = llmTask {
@@ -109,6 +111,20 @@ actor IntegrationTestModels {
             )
         }
         nemotronTask = task
+        return try await task.value
+    }
+
+    func qwen35Container() async throws -> ModelContainer {
+        if let task = qwen35Task {
+            return try await task.value
+        }
+
+        let task = Task {
+            try await LLMModelFactory.shared.loadContainer(
+                configuration: .init(id: IntegrationTestModelIDs.qwen35ModelId)
+            )
+        }
+        qwen35Task = task
         return try await task.value
     }
 }
