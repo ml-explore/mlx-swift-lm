@@ -23,12 +23,14 @@ public class ToolCallIntegrationTests: XCTestCase {
     static let lfm2ModelId = "mlx-community/LFM2-2.6B-Exp-4bit"
     static let glm4ModelId = "mlx-community/GLM-4-9B-0414-4bit"
     static let mistral3ModelId = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
+    static let nemotronModelId = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
 
     // MARK: - Shared State
 
     nonisolated(unsafe) static var lfm2Container: ModelContainer?
     nonisolated(unsafe) static var glm4Container: ModelContainer?
     nonisolated(unsafe) static var mistral3Container: ModelContainer?
+    nonisolated(unsafe) static var nemotronContainer: ModelContainer?
 
     // MARK: - Tool Schema
 
@@ -65,42 +67,31 @@ public class ToolCallIntegrationTests: XCTestCase {
         let lfm2Expectation = XCTestExpectation(description: "Load LFM2")
         let glm4Expectation = XCTestExpectation(description: "Load GLM4")
         let mistral3Expectation = XCTestExpectation(description: "Load Mistral3")
+        let nemotronExpectation = XCTestExpectation(description: "Load Nemotron")
 
         Task {
-            do {
-                lfm2Container = try await LLMModelFactory.shared.loadContainer(
-                    configuration: .init(id: lfm2ModelId)
-                )
-            } catch {
-                print("Failed to load LFM2: \(error)")
-            }
+            lfm2Container = await loadModelContainer(modelId: lfm2ModelId)
             lfm2Expectation.fulfill()
         }
 
         Task {
-            do {
-                glm4Container = try await LLMModelFactory.shared.loadContainer(
-                    configuration: .init(id: glm4ModelId)
-                )
-            } catch {
-                print("Failed to load GLM4: \(error)")
-            }
+            glm4Container = await loadModelContainer(modelId: glm4ModelId)
             glm4Expectation.fulfill()
         }
 
         Task {
-            do {
-                mistral3Container = try await VLMModelFactory.shared.loadContainer(
-                    configuration: .init(id: mistral3ModelId)
-                )
-            } catch {
-                print("Failed to load Mistral3: \(error)")
-            }
+            mistral3Container = await loadModelContainer(modelId: mistral3ModelId)
             mistral3Expectation.fulfill()
         }
 
+        Task {
+            nemotronContainer = await loadModelContainer(modelId: nemotronModelId)
+            nemotronExpectation.fulfill()
+        }
+
         _ = XCTWaiter.wait(
-            for: [lfm2Expectation, glm4Expectation, mistral3Expectation], timeout: 600)
+            for: [lfm2Expectation, glm4Expectation, mistral3Expectation, nemotronExpectation],
+            timeout: 600)
     }
 
     // MARK: - LFM2 Tests
@@ -325,7 +316,130 @@ public class ToolCallIntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: - Nemotron Tests
+
+    func testNemotronToolCallFormatAutoDetection() async throws {
+        guard let container = Self.nemotronContainer else {
+            throw XCTSkip("Nemotron model not available")
+        }
+
+        let config = await container.configuration
+        XCTAssertEqual(
+            config.toolCallFormat, .xmlFunction,
+            "Nemotron model should auto-detect .xmlFunction tool call format"
+        )
+    }
+
+    func testNemotronEndToEndToolCallGeneration() async throws {
+        guard let container = Self.nemotronContainer else {
+            throw XCTSkip("Nemotron model not available")
+        }
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: Self.weatherToolSchema,
+            additionalContext: ["enable_thinking": false]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 150
+        )
+
+        print("Nemotron Output: \(result)")
+        print("Nemotron Tool Calls: \(toolCalls)")
+
+        if !toolCalls.isEmpty {
+            let toolCall = toolCalls.first!
+            XCTAssertEqual(toolCall.function.name, "get_weather")
+            if let location = toolCall.function.arguments["location"]?.asString {
+                XCTAssertTrue(
+                    location.lowercased().contains("tokyo"),
+                    "Expected location to contain 'Tokyo', got: \(location)"
+                )
+            }
+        }
+    }
+
+    func testNemotronMultipleToolCallGeneration() async throws {
+        guard let container = Self.nemotronContainer else {
+            throw XCTSkip("Nemotron model not available")
+        }
+
+        let multiToolSchema: [[String: any Sendable]] =
+            Self.weatherToolSchema + [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "get_time",
+                        "description": "Get the current time in a given timezone",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "timezone": [
+                                    "type": "string",
+                                    "description":
+                                        "The timezone, e.g. America/New_York, Asia/Tokyo",
+                                ] as [String: any Sendable]
+                            ] as [String: any Sendable],
+                            "required": ["timezone"],
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ]
+            ]
+
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user(
+                    "What's the weather in Tokyo and what time is it there?"
+                ),
+            ],
+            tools: multiToolSchema
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            input: input,
+            maxTokens: 600
+        )
+
+        print("Nemotron Output: \(result)")
+        print("Nemotron Calls: \(toolCalls)")
+
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            XCTAssertTrue(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        if toolCalls.count > 1 {
+            print("Successfully parsed \(toolCalls.count) tool calls from Nemotron")
+        }
+    }
+
     // MARK: - Helper Methods
+
+    private static func loadModelContainer(modelId: String) async -> ModelContainer? {
+        do {
+            return try await LLMModelFactory.shared.loadContainer(
+                configuration: .init(id: modelId)
+            )
+        } catch {
+            print("Failed to load model \(modelId): \(error)")
+            return nil
+        }
+    }
 
     /// Generate text and collect any tool calls
     private func generateWithTools(
