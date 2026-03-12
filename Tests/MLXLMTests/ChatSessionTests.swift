@@ -15,8 +15,8 @@ public class ChatSessionTests: XCTestCase {
     private func model() -> ModelContext {
         let config = Gemma3TextConfiguration(
             modelType: "text",
-            hiddenSize: 64, hiddenLayers: 8, intermediateSize: 128, attentionHeads: 8,
-            headDim: 256,
+            hiddenSize: 64, hiddenLayers: 8, intermediateSize: 64, attentionHeads: 4,
+            headDim: 64,
             rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 4,
             ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000,
             ropeTraditional: false, queryPreAttnScalar: 256,
@@ -39,11 +39,13 @@ public class ChatSessionTests: XCTestCase {
             tokenizer: processor.tokenizer)
     }
 
+    private let generationParameters = GenerateParameters(maxTokens: 50)
+
     private let targetLength = 1
 
     func testChatSessionSync() async throws {
         let model = model()
-        let session = ChatSession(model)
+        let session = ChatSession(model, generateParameters: generationParameters)
 
         let result1 = try await session.respond(to: "hello")
         XCTAssertGreaterThan(result1.count, targetLength, result1)
@@ -53,7 +55,7 @@ public class ChatSessionTests: XCTestCase {
 
     func testChatSessionAsync() async throws {
         let model = model()
-        let session = ChatSession(model)
+        let session = ChatSession(model, generateParameters: generationParameters)
 
         var result1 = ""
         for try await part in session.streamResponse(to: "hello") {
@@ -71,7 +73,7 @@ public class ChatSessionTests: XCTestCase {
     func testChatSessionAsyncInterrupt() async throws {
         // interrupt the streamResponse and continue with another request
         let model = model()
-        let session = ChatSession(model)
+        let session = ChatSession(model, generateParameters: generationParameters)
 
         for _ in 0 ..< 10 {
             var result1 = ""
@@ -119,7 +121,9 @@ public class ChatSessionTests: XCTestCase {
                 ] as [String: any Sendable],
             ] as ToolSpec
         ]
-        let session = ChatSession(model, tools: tools)
+        let session = ChatSession(
+            model, generateParameters: generationParameters, tools: tools
+        )
 
         let result = try await session.respond(to: "What is the weather in SF?")
         XCTAssertGreaterThan(result.count, targetLength, result)
@@ -144,7 +148,9 @@ public class ChatSessionTests: XCTestCase {
                 ] as [String: any Sendable],
             ] as ToolSpec
         ]
-        let session = ChatSession(model, tools: tools)
+        let session = ChatSession(
+            model, generateParameters: generationParameters, tools: tools
+        )
 
         var result = ""
         for try await part in session.streamResponse(to: "hello") {
@@ -209,7 +215,8 @@ public class ChatSessionTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        // try another message, wait for full completion
+        // try another message, wait for full completion (but cap the length)
+        model.session.generateParameters = self.generationParameters
         model.respond("message2")
         while model.isBusy {
             try await Task.sleep(for: .milliseconds(10))

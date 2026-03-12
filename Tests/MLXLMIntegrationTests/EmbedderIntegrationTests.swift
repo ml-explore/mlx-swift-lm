@@ -51,13 +51,7 @@ struct EmbedderIntegrationtests {
 
     @Test("MLXEmbedders README.md example")
     func testReadMeExample() async throws {
-        guard let (searchInputs, resultEmbeddings) = try? await readeMeExampleResult() else {
-            throw NSError(
-                domain: "EmbedderIntegrationtests",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to get example results"]
-            )
-        }
+        let (searchInputs, resultEmbeddings) = try await readeMeExampleResult()
 
         // Compute similarities
         let searchQueryEmbedding = resultEmbeddings[0]
