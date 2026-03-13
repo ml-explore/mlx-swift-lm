@@ -94,6 +94,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `[TOOL_CALLS]get_weather [ARGS]{"location": "Tokyo"}`
     case mistral
 
+    /// Llama 3 inline JSON format.
+    /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
+    case llama3
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -117,6 +121,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return MiniMaxM2ToolCallParser()
         case .mistral:
             return MistralToolCallParser()
+        case .llama3:
+            return Llama3ToolCallParser()
         }
     }
 
@@ -125,10 +131,34 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// This method maps known model types to their corresponding tool call formats,
     /// enabling automatic format detection when loading models.
     ///
-    /// - Parameter modelType: The `model_type` value from config.json
+    /// - Parameters:
+    ///   - modelType: The `model_type` value from config.json
+    ///   - configData: The raw config.json data for inspecting secondary signals (e.g. `rope_scaling` for Llama 3)
     /// - Returns: The appropriate `ToolCallFormat`, or `nil` to use the default format
-    public static func infer(from modelType: String) -> ToolCallFormat? {
+    public static func infer(from modelType: String, configData: Data? = nil) -> ToolCallFormat? {
         let type = modelType.lowercased()
+
+        // Llama family (need secondary signal for Llama 3 vs 1/2)
+        if type == "llama" {
+            guard let data = configData,
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+
+            // Secondary signal 1: vocab_size >= 128000 (Llama 3 uses 128256, Llama 2 uses 32000)
+            if let vocabSize = json["vocab_size"] as? Int, vocabSize >= 128000 {
+                return .llama3
+            }
+
+            // Secondary signal 2: rope_scaling with rope_type == "llama3"
+            if let ropeScaling = json["rope_scaling"] as? [String: Any],
+                let ropeType = ropeScaling["rope_type"] as? String,
+                ropeType == "llama3"
+            {
+                return .llama3
+            }
+
+            return nil
+        }
 
         // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
         if type.hasPrefix("lfm2") {

@@ -29,27 +29,53 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
 
         // Pattern: [function_name(args...)] or function_name(args...)
         // Also handle multiple calls: [func1(args), func2(args)]
-        let pattern = #"\[?(\w+)\((.*?)\)\]?"#
+        let regex = #/(?s)\[?(\w+)\((.*?)\)\]?/#
 
-        guard
-            let regex = try? NSRegularExpression(
-                pattern: pattern, options: [.dotMatchesLineSeparators]),
-            let match = regex.firstMatch(
-                in: text, options: [], range: NSRange(text.startIndex..., in: text))
-        else { return nil }
+        guard let match = try? regex.firstMatch(in: text) else { return nil }
 
-        // Extract function name
-        guard let nameRange = Range(match.range(at: 1), in: text) else { return nil }
-        let funcName = String(text[nameRange])
-
-        // Extract arguments string
-        guard let argsRange = Range(match.range(at: 2), in: text) else { return nil }
-        let argsString = String(text[argsRange])
+        let funcName = String(match.1)
+        let argsString = String(match.2)
 
         // Parse arguments
         let arguments = parseArguments(argsString, funcName: funcName, tools: tools)
 
         return ToolCall(function: .init(name: funcName, arguments: arguments))
+    }
+
+    public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        if let startTag {
+            return
+                toolCallBuffer
+                .components(separatedBy: startTag)
+                .filter { !$0.isEmpty }
+                .flatMap { parseMultiple(content: $0, tools: tools) }
+        } else {
+            return parseMultiple(content: toolCallBuffer, tools: tools)
+        }
+    }
+
+    private func parseMultiple(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        var text = content
+
+        if let end = endTag, let endRange = text.range(of: end) {
+            text = String(text[..<endRange.lowerBound])
+        }
+
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let regex = #/(?s)(\w+)\((.*?)\)/#
+        let matches = text.matches(of: regex)
+
+        var results: [ToolCall] = []
+        for match in matches {
+            let funcName = String(match.1)
+            let argsString = String(match.2)
+            let arguments = parseArguments(argsString, funcName: funcName, tools: tools)
+
+            results.append(ToolCall(function: .init(name: funcName, arguments: arguments)))
+        }
+
+        return results
     }
 
     /// Parse Pythonic keyword arguments: arg1='value1', arg2="value2", arg3=123
@@ -62,22 +88,12 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
 
         // Pattern for key=value pairs, handling quoted strings with possible commas inside
         // This handles: key='value', key="value", key=123, key=True, key=None
-        let argPattern = #"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^,\)]+)"#
-
-        guard let regex = try? NSRegularExpression(pattern: argPattern, options: []) else {
-            return arguments
-        }
-
-        let matches = regex.matches(
-            in: argsString, options: [], range: NSRange(argsString.startIndex..., in: argsString))
+        let argRegex = #/(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^,\)]+)/#
+        let matches = argsString.matches(of: argRegex)
 
         for match in matches {
-            guard let keyRange = Range(match.range(at: 1), in: argsString),
-                let valueRange = Range(match.range(at: 2), in: argsString)
-            else { continue }
-
-            let key = String(argsString[keyRange])
-            var value = String(argsString[valueRange]).trimmingCharacters(in: .whitespaces)
+            let key = String(match.1)
+            var value = String(match.2).trimmingCharacters(in: .whitespaces)
 
             // Remove surrounding quotes if present
             if (value.hasPrefix("'") && value.hasSuffix("'"))
