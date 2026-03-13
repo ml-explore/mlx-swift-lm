@@ -65,8 +65,12 @@ MLXEmbedders    - Embedding models and pooling utilities
 ```swift
 import MLXLLM
 import MLXLMCommon
+import MLXLMHuggingFace  // from swift-huggingface-mlx
+import MLXLMTokenizers   // from swift-tokenizers-mlx
 
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
@@ -85,8 +89,12 @@ for try await chunk in session.streamResponse(to: "Explain structured concurrenc
 ```swift
 import MLXVLM
 import MLXLMCommon
+import MLXLMHuggingFace  // from swift-huggingface-mlx
+import MLXLMTokenizers   // from swift-tokenizers-mlx
 
 let modelContainer = try await VLMModelFactory.shared.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: .init(id: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 )
 
@@ -103,9 +111,13 @@ let response = try await session.respond(
 ### Embeddings
 
 ```swift
-import Embedders
+import MLXEmbedders
+import MLXEmbeddersHuggingFace  // from swift-huggingface-mlx
+import MLXLMTokenizers          // from swift-tokenizers-mlx
 
 let container = try await loadModelContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
     configuration: ModelConfiguration(id: "mlx-community/bge-small-en-v1.5-mlx")
 )
 

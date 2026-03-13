@@ -5,7 +5,10 @@ The simplified LLM/VLM API allows you to load a model and evaluate prompts with 
 For example, this loads a model and asks a question and a follow-on question:
 
 ```swift
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
 print(try await session.respond(to: "What are two things to see in San Francisco?")
 print(try await session.respond(to: "How about a great place to eat?")
@@ -26,7 +29,10 @@ users want to see the text as it is generated -- you can do this with
 a stream:
 
 ```swift
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
 
 for try await item in session.streamResponse(to: "Why is the sky blue?") {
@@ -41,7 +47,10 @@ This same API supports VLMs as well.  Simply present the image or video
 to the ``ChatSession``:
 
 ```swift
-let model = try await loadModel(id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit")
+let model = try await loadModel(
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+)
 let session = ChatSession(model)
 
 let answer1 = try await session.respond(

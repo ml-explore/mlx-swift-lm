@@ -1,7 +1,8 @@
 // Copyright © 2025 Apple Inc.
 
 import Foundation
-import Tokenizers
+
+public typealias ToolSpec = [String: any Sendable]
 
 /// Protocol defining the requirements for a tool.
 public protocol ToolProtocol: Sendable {

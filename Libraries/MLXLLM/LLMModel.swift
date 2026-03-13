@@ -2,7 +2,6 @@
 
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 /// Marker protocol for LLMModels
 public protocol LLMModel: LanguageModel, LoRAModel {

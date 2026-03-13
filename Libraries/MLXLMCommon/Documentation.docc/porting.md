@@ -595,8 +595,14 @@ Now we can load the model using `llm-tool` or the `LLMEval` example application,
 ```swift
 let modelConfiguration = ModelConfiguration(id: "mlx-community/quantized-gemma-2b-it")
 
-// This will download the weights from Hugging Face Hub and load the model
-let container = try await MLXModelFactory.shared.loadContainer(configuration: modelConfiguration)
+// e.g. TokenizersLoader() from MLXLMTokenizers
+let tokenizerLoader: any TokenizerLoader
+
+// This will download the weights and load the model
+let container = try await MLXModelFactory.shared.loadContainer(
+    using: tokenizerLoader,
+    configuration: modelConfiguration
+)
 
 // Prepare the prompt and parameters used to generate the response
 let generateParameters = GenerateParameters()
