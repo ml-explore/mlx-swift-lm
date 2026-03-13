@@ -11,6 +11,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import Tokenizers
 
 // MARK: - Configuration
 
@@ -49,7 +50,7 @@ public struct GPTOSSConfiguration: Codable, Sendable {
         case layerTypes = "layer_types"
     }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: Swift.Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.modelType = try container.decode(String.self, forKey: .modelType)
         self.hiddenLayers = try container.decode(Int.self, forKey: .hiddenLayers)
@@ -97,6 +98,123 @@ private let compiledSwiglu: @Sendable (MLXArray, MLXArray) -> MLXArray = compile
     shapeless: true
 ) { xLinear, xGlu in
     swiglu(xLinear, xGlu)
+}
+
+/// GPT-OSS specific history serializer.
+struct GPTOSSMessageGenerator: MessageGenerator {
+    func generate(messages: [Chat.Message]) -> [Message] {
+        messages.map { message in
+            guard message.role == .assistant else {
+                return defaultMessage(for: message)
+            }
+
+            guard let toolCalls = parseStoredToolCalls(from: message.content) else {
+                return defaultMessage(for: message)
+            }
+
+            return [
+                "role": "assistant",
+                "tool_calls": toolCalls,
+            ]
+        }
+    }
+
+    func generate(message: Chat.Message) -> Message {
+        defaultMessage(for: message)
+    }
+
+    private func defaultMessage(for message: Chat.Message) -> Message {
+        [
+            "role": message.role.rawValue,
+            "content": message.content,
+        ]
+    }
+
+    private func parseStoredToolCalls(from content: String) -> [[String: any Sendable]]? {
+        let lines =
+            content
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return nil }
+
+        var toolCalls: [[String: any Sendable]] = []
+        for line in lines {
+            guard
+                let data = line.data(using: .utf8),
+                let raw = try? JSONSerialization.jsonObject(with: data),
+                let dict = raw as? [String: Any],
+                let rawName = dict["name"] as? String,
+                let argumentsRaw = dict["arguments"],
+                let arguments = normalizedSendableJSON(from: argumentsRaw)
+            else {
+                return nil
+            }
+
+            let toolName = normalizeToolName(rawName)
+            guard !toolName.isEmpty else { return nil }
+
+            let function: [String: any Sendable] = [
+                "name": toolName,
+                "arguments": arguments,
+            ]
+            let toolCall: [String: any Sendable] = [
+                "type": "function",
+                "function": function,
+            ]
+            toolCalls.append(toolCall)
+        }
+
+        return toolCalls.isEmpty ? nil : toolCalls
+    }
+
+    private func normalizeToolName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("functions.") {
+            return String(trimmed.dropFirst("functions.".count))
+        }
+        return trimmed
+    }
+
+    private func normalizedSendableJSON(from any: Any) -> (any Sendable)? {
+        if let dict = any as? [String: Any] {
+            var output: [String: any Sendable] = [:]
+            for (key, value) in dict {
+                guard let normalized = normalizedSendableJSON(from: value) else { return nil }
+                output[key] = normalized
+            }
+            return output
+        }
+
+        if let array = any as? [Any] {
+            var output: [any Sendable] = []
+            output.reserveCapacity(array.count)
+            for value in array {
+                guard let normalized = normalizedSendableJSON(from: value) else { return nil }
+                output.append(normalized)
+            }
+            return output
+        }
+
+        if let string = any as? String { return string }
+        if let bool = any as? Bool { return bool }
+        if let int = any as? Int { return int }
+        if let double = any as? Double { return double }
+
+        if let number = any as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue
+            }
+            let doubleValue = number.doubleValue
+            if floor(doubleValue) == doubleValue {
+                return number.intValue
+            }
+            return doubleValue
+        }
+
+        return nil
+    }
 }
 
 class SwiGLUSwitchGLU: Module {
@@ -524,6 +642,10 @@ public class GPTOSSModel: Module, LLMModel, KVCacheDimensionProvider {
         }
 
         return finalWeights
+    }
+
+    public func messageGenerator(tokenizer: any Tokenizer) -> any MessageGenerator {
+        GPTOSSMessageGenerator()
     }
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
