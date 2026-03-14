@@ -18,7 +18,7 @@ import MLXNN
 /// [2, 6, 8, 9]
 /// ```
 /// With `leftPadding = [1, 3, 0]`.
-public class BatchKVCache: BaseKVCache {
+public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
 
     /// Per-sequence left-padding amounts as an MLXArray of shape `[B]`.
     public internal(set) var leftPadding: MLXArray
@@ -174,6 +174,16 @@ public class BatchKVCache: BaseKVCache {
     /// Whether the cache is empty (no keys/values stored).
     public var isEmpty: Bool {
         keys == nil
+    }
+
+    // MARK: - BatchPositionedKVCache Conformance
+
+    /// Per-sequence position offsets as an MLXArray of shape `[B]`.
+    ///
+    /// This is an alias for `batchOffsets`, providing the per-sequence position
+    /// offsets needed for batch-aware RoPE application via `applyRotaryPosition()`.
+    public var batchOffset: MLXArray {
+        batchOffsets
     }
 
     // MARK: - Batch Operations
@@ -375,6 +385,32 @@ public class BatchKVCache: BaseKVCache {
     public func toSingle() -> KVCacheSimple {
         precondition(batchSize == 1, "toSingle() requires batch size of 1")
         return extract(idx: 0)
+    }
+
+    // MARK: - Mask Creation
+
+    /// Create an attention mask for this batch cache.
+    ///
+    /// Unlike non-batch caches which return `.none` for `n=1`, batch caches
+    /// MUST always produce a mask that excludes left-padded positions. This
+    /// ensures that during single-token decode steps, padded positions are
+    /// still correctly masked out.
+    ///
+    /// - Parameters:
+    ///   - n: The sequence length for the new tokens
+    ///   - windowSize: Optional sliding window size
+    ///   - returnArray: Force return of array mask instead of symbolic
+    /// - Returns: Attention mask mode for scaled dot product attention
+    public override func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        // Batch caches always need an explicit mask to handle left-padding,
+        // even for n=1 decode steps.
+        return .array(
+            createCausalMask(
+                n: n, offset: _idx - n, windowSize: windowSize, leftPadding: leftPadding
+            )
+        )
     }
 
     public var debugDescription: String {

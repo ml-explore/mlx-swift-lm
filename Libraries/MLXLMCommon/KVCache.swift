@@ -178,7 +178,8 @@ public func createCausalMask(
     n: Int,
     offset: Int,
     windowSize: Int? = nil,
-    lengths: MLXArray? = nil
+    lengths: MLXArray? = nil,
+    leftPadding: MLXArray? = nil
 ) -> MLXArray {
     var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
     var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
@@ -193,6 +194,15 @@ public func createCausalMask(
     if var lengths {
         lengths = lengths[0..., .newAxis, .newAxis, .newAxis]
         mask = mask & (rinds .< lengths)
+    }
+
+    // Mask out left-padded positions per sequence.
+    // leftPadding shape: [B], rinds shape: [1, S_total]
+    // We need: rinds >= leftPadding[b] for each batch element b.
+    if let leftPadding {
+        // leftPadding: [B] -> [B, 1, 1, 1] for broadcasting with mask [B?, 1, n, S_total]
+        let lp = leftPadding[0..., .newAxis, .newAxis, .newAxis]
+        mask = mask & (rinds .>= lp)
     }
 
     return mask
