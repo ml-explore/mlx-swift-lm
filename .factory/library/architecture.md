@@ -37,6 +37,9 @@ A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, c
 ### Left-Padding Strategy
 Variable-length sequences are left-padded with zeros. `BatchKVCache` tracks per-sequence `leftPadding` and adjusts attention masks accordingly. This matches the Python mlx-lm approach.
 
+### Rotating cache keep semantics
+The repo's existing max-KV path preserves a fixed prefix when it creates `RotatingKVCache(maxSize: maxKVSize, keep: 4)` in `Libraries/MLXLMCommon/LanguageModel.swift`. Any batch rotating-cache implementation needs to preserve and round-trip nonzero `keep` values instead of assuming the default `keep = 0`.
+
 ## Existing Infrastructure Used
 
 - RoPE with MLXArray offsets: All RoPE implementations already support `callAsFunction(_ x: MLXArray, offset: MLXArray)` via `ArrayOffsetLayer` protocol

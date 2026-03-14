@@ -1,0 +1,103 @@
+{
+  "milestone": "batch-kv-cache",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "swift test --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "swift-format lint --configuration \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.swift-format\" --recursive \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Libraries\" \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests\"",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 1,
+    "failed": 4,
+    "failedFeatures": [
+      "batch-kv-cache-core",
+      "batch-masking-and-positioned-cache",
+      "batch-rotating-kv-cache",
+      "fix-batch-tests-metal-guard"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "batch-kv-cache-core",
+      "severity": "blocking",
+      "description": "`BatchKVCache.state` cannot round-trip valid empty/fresh caches because the getter drops `batchOffsets` and `leftPadding` when keys/values are nil, while the setter only accepts four arrays."
+    },
+    {
+      "featureId": "batch-masking-and-positioned-cache",
+      "severity": "blocking",
+      "description": "`BatchKVCache.makeMask()` uses `_idx - n`, but the repository calls `makeMask(n:)` before cache update; this yields incorrect offsets on real prefill/decode paths and breaks the masking contract."
+    },
+    {
+      "featureId": "batch-rotating-kv-cache",
+      "severity": "blocking",
+      "description": "`BatchRotatingKVCache` omits the required cached-prompt prefill path (`prepare` / `finalize`) and does not maintain the right-padding state needed for that flow."
+    },
+    {
+      "featureId": "batch-rotating-kv-cache",
+      "severity": "blocking",
+      "description": "`BatchRotatingKVCache` does not preserve nonzero `RotatingKVCache.keep` values, so round-tripping valid rotating caches can lose the fixed-prefix semantics used by the existing `maxKVSize` path."
+    },
+    {
+      "featureId": "fix-batch-tests-metal-guard",
+      "severity": "blocking",
+      "description": "The feature resolved the metallib crash, but it left the requested Sendable warning cleanup unfinished in `Tests/MLXLMTests/KVCacheTests.swift` by keeping `creator: (() -> any KVCache)` without `@Sendable`."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Documented the reusable `MLXMetalGuard` helper pattern for skipping MLX-dependent tests when the SPM metallib is unavailable.",
+      "sourceFeature": "fix-batch-tests-metal-guard"
+    },
+    {
+      "target": "library",
+      "description": "Documented that the existing rotating-cache path uses `RotatingKVCache(maxSize: maxKVSize, keep: 4)` and batch rotating-cache work must preserve nonzero `keep` semantics.",
+      "sourceFeature": "batch-rotating-kv-cache"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update `swift-batching-worker` so its TDD procedure explicitly accounts for the repo's MLX/SPM metallib limitation: allow a documented deviation when meaningful red-phase runtime assertions are impossible, and require workers to record that deviation instead of reporting `followedProcedure: true`.",
+      "evidence": "Both `batch-kv-cache-core` and `batch-masking-and-positioned-cache` reviews flagged that the skill requires a red/green loop even though `.factory/library/environment.md` documents that MLX-dependent `swift test` assertions are not reliably observable in this environment; the second review also found a transcript/handoff mismatch where code edits preceded test creation while the handoff still claimed the procedure was followed.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Extend `swift-batching-worker` guidance for rotating-cache features to call out required `prepare` / `finalize` cached-prefill handling and preservation of nonzero `RotatingKVCache.keep` values.",
+      "evidence": "The `batch-rotating-kv-cache` review found both omissions, and the reviewer noted the current skill text does not mention these rotating-cache-specific requirements even though the repo's standard `maxKVSize` path depends on `keep: 4`.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify whether formatting tasks are expected to be formatter-clean (`pre-commit` / `swift-format format`) or warning-free under `swift-format lint`, especially for the repo's established uppercase tensor-dimension identifiers.",
+      "evidence": "The `fix-batch-lint-formatting` review passed the formatter-only fix, but the review also recorded that `swift-format lint` still emits `AlwaysUseLowerCamelCase` warnings for established ML tensor-dimension names across both library and test files, which creates ambiguity for future hygiene tasks.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "The second TDD-process observation from `batch-masking-and-positioned-cache`.",
+      "reason": "duplicate of the broader skill-guidance issue already captured in suggestedGuidanceUpdates."
+    },
+    {
+      "observation": "The suggestion that `swift-batching-worker` is over-scoped for formatting-only fixes.",
+      "reason": "ambiguous orchestration preference; it does not establish a concrete factual repo update or clearly actionable guidance change."
+    }
+  ],
+  "previousRound": null
+}

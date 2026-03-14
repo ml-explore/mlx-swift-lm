@@ -39,3 +39,9 @@ Workarounds:
 - `swift test` still validates compilation and non-MLX test logic
 - Workers should write tests that verify as much as possible through structure
 - The `swift test` exit code 0 is the acceptance criterion
+
+### Reusable test guard pattern
+
+- `Tests/MLXLMTests/MLXMetalGuard.swift` provides `MLXMetalGuard.isAvailable` and `skipIfMetalUnavailable()` for XCTest-based suites.
+- Swift Testing suites can gate Metal-dependent cases with `.enabled(if: MLXMetalGuard.isAvailable)`.
+- Reuse this helper instead of open-coding metallib checks in new MLX-dependent tests.

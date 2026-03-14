@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-batch-lint-formatting",
+  "reviewedAt": "2026-03-14T03:06:24Z",
+  "commitId": "f1689e971fee2b5dbcda7af17e8dd174f8dd11b3",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The commit is a formatting-only change that reorders imports in the three batch test files and wraps one long line in `BatchKVCache.swift`. The diff stays within the requested scope, touches only formatting, and matches the feature's expected behavior of making the batch files formatter-clean without introducing semantic changes.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The repo has an undocumented ML-specific naming convention (`B/H/S/D/Dk/Dv` for tensor dimensions) that conflicts with both AGENTS naming guidance and `swift-format lint`'s `AlwaysUseLowerCamelCase` output. That mismatch caused review-time ambiguity about whether formatter-clean files are also expected to be lint-clean.",
+      "evidence": "AGENTS.md:30 says to use Swift naming conventions; `.pre-commit-config.yaml` runs `swift-format format --in-place` rather than `lint`; `Libraries/MLXLMCommon/Batching/BatchKVCache.swift:85,319-324` and `Tests/MLXLMTests/BatchKVCacheTests.swift:18` still use uppercase tensor-dimension identifiers; the handoff explicitly notes that `swift-format lint` still reports `AlwaysUseLowerCamelCase`."
+    },
+    {
+      "area": "skills",
+      "observation": "`swift-batching-worker` is over-scoped for formatting-only fixes. Its TDD/implementation workflow does not match repo-hygiene tasks, which the worker also called out in handoff feedback.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md:39` starts with 'Write Tests First (TDD — Red Phase)'; the handoff for this feature says 'The swift-batching-worker skill is primarily designed for implementation features. For formatting-only tasks, a simpler lint/format-focused procedure would be more efficient.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. I reviewed the feature metadata, worker transcript skeleton, handoff, and commit `f1689e9`. The change is limited to formatter output fixes in the expected batch files and resolves the formatting-only scrutiny issue without introducing behavioral changes."
+}
