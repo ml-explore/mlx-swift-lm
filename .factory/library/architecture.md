@@ -61,6 +61,9 @@ The repo's existing max-KV path preserves a fixed prefix when it creates `Rotati
 ### Rotating Cache Cached-Prompt Prefill
 Batch rotating-cache cached-prefill uses a `prepare(... rightPadding:)` / `finalize()` lifecycle. During mixed-length cached prompt prefill, sequences temporarily switch to right-padding so concatenation and trimming operate on aligned suffixes, then `finalize()` rolls the data back into the normal left-padded layout used for decode.
 
+### BatchKVCache Cached-Prompt Prefill
+Plain `BatchKVCache` now uses the same `prepare(rightPadding:)` / `finalize()` lifecycle for mixed-depth cached-prefill. `processPartialCacheHits()` right-pads uncached suffix tokens, prefills the full aligned suffix, then `finalize()` rolls pad-derived KV entries back into left padding and updates offsets before decode. The first decode sample still trims/replays the last real prompt token after finalize so batching resumes from a clean left-padded layout.
+
 ### Rotating Cache Overflow Extraction
 During active sliding-window decode, `BatchRotatingKVCache` can drive per-sequence `leftPadding` below zero as wrapped tokens replace old window positions. Extraction must clamp that value back to `max(0, leftPadding)` before slicing, otherwise overflowed batch caches can slice from a negative start and drop the preserved `[keep-prefix | window]` contents during merge → overflow → extract round-trips.
 
