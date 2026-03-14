@@ -1,5 +1,7 @@
 commands:
   build: swift build
+  format: swift-format format --in-place --configuration .swift-format --recursive .
+  lint: swift-format lint --configuration .swift-format --recursive Libraries Tests
   test: swift test --filter MLXLMTests
   test-all: swift test
   typecheck: swift build

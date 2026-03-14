@@ -1,0 +1,33 @@
+{
+  "featureId": "fix-rotating-cache-prepare-keep",
+  "reviewedAt": "2026-03-14T03:35:58Z",
+  "commitId": "ff17a17",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The rerun adds the previously missing cached-prompt prefill hooks (`prepare`/`finalize`) and now round-trips `keep` metadata through merge/extract/fromSingle/toSingle. However, the active sliding-window implementation still does not preserve nonzero `RotatingKVCache.keep` semantics once the batch cache trims or wraps, so the original blocking issue is not fully resolved.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchRotatingKVCache.swift",
+        "line": 355,
+        "severity": "blocking",
+        "description": "`BatchRotatingKVCache` still drops protected-prefix semantics during normal sliding-window operation. Its trim helper removes from the absolute front (`array[..., trimSize..., ...]`) instead of preserving the first `keep` tokens, unlike `RotatingKVCache.trim` in `Libraries/MLXLMCommon/KVCache.swift:459-468`. And when the batch buffer fills, `updateInPlace` still resets `_idx` to `0` (`BatchRotatingKVCache.swift:316-319`) instead of rotating back to `keep` like `RotatingKVCache.updateInPlace` does in `Libraries/MLXLMCommon/KVCache.swift:553-555`. So although `keep` is now serialized and round-tripped, a batched rotating cache can still overwrite/trim the protected prefix after overflow, which means the original blocking issue about preserving nonzero `RotatingKVCache.keep` semantics remains unsatisfied."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker skill still lacks rotating-cache-specific guidance for cached-prompt `prepare`/`finalize` handling and `keep` preservation, even though the worker handoff explicitly identified that omission as the reason these requirements were missed earlier.",
+      "evidence": ".factory/skills/swift-batching-worker/SKILL.md:74-86 only documents generic BatchKVCache/BatchPositionedKVCache notes and has no rotating-cache-specific requirements; the worker handoff calls this out directly at /Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T03-30-38-990Z__fix-rotating-cache-prepare-keep__048d4250-0f68-4a78-9ace-4d05e5cfa8d6.json:118-119."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Shared architecture notes still do not record the rotating-cache cached-prompt prefill pattern (`prepare`/`finalize` plus temporary right-padding state), so future workers could miss this requirement again even after this fix attempt.",
+      "evidence": ".factory/library/architecture.md:20-41 documents batching file locations, left-padding, and rotating-cache `keep` semantics, but contains no mention of `prepare`, `finalize`, right-padding, or cached-prompt prefill; the reviewed handoff and `Libraries/MLXLMCommon/Batching/BatchRotatingKVCache.swift:445-477` introduce that behavior as a required part of the feature."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/batch-kv-cache/scrutiny/reviews/batch-rotating-kv-cache.json",
+  "summary": "Reviewed the fix feature handoff, transcript skeleton, prior failed review, shared-state artifacts, and commit `ff17a17`. The new `prepare`/`finalize` path closes one prior gap, but the batch rotating cache still fails to honor nonzero `keep` during trim/rotation, so this rerun does not fully resolve the original blocking issues."
+}

@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-batch-cache-state-mask-sendable",
+  "reviewedAt": "2026-03-14T03:35:40Z",
+  "commitId": "3544cf1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix commit cleanly addresses all three prior blocking findings. `BatchKVCache.state` now preserves `batchOffsets` and `leftPadding` for empty caches and restores both 2-array empty states and 4-array populated states, `BatchKVCache.makeMask()` now uses the pre-update `_idx` offset that matches the repo's real mask-before-update call path, and `KVCacheTests.swift` now uses `@Sendable` closure types in both the argument list and test parameter. The added tests directly cover fresh-cache round trips, `filter([])` empty-state round trips, pre-update decode masking, and left-padding behavior, and I did not find a remaining gap in the touched scope.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The mission library documents batch offsets and left-padding, but it still does not record the subtle mask-timing contract that model code builds attention masks before calling `cache.update()`. This fix had to rediscover that behavior from source in order to correct `BatchKVCache.makeMask`.",
+      "evidence": "`Libraries/MLXLMCommon/KVCache.swift:208-215` routes `makeAttentionMask` through `cache.makeMask(...)` using the cache's current offset, while `Libraries/MLXLMCommon/Batching/BatchKVCache.swift:420-431` now documents the same pre-update assumption. `.factory/library/architecture.md:34-40` discusses batch position and left-padding but not the pre-update mask call order, and the worker transcript for session `16906ab6-bded-4165-9a36-792c437ee031` shows the worker explicitly tracing that call sequence before making the fix."
+    },
+    {
+      "area": "services",
+      "observation": "The repo-level shared command list still omits the formatter command even though this fix feature's contract explicitly requires `swift-format` verification on modified files.",
+      "evidence": "The feature definition at `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/features.json` requires `swift-format produces no changes on modified files` and lists `swift-format format --in-place on modified files` in verification steps, but `.factory/services.yaml:1-5` only records `build`, `test`, `test-all`, and `typecheck` commands."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/batch-kv-cache/scrutiny/reviews/batch-kv-cache-core.json; .factory/validation/batch-kv-cache/scrutiny/reviews/batch-masking-and-positioned-cache.json; .factory/validation/batch-kv-cache/scrutiny/reviews/fix-batch-tests-metal-guard.json",
+  "summary": "Pass. I reviewed the feature metadata, the three prior failed review reports, the worker transcript skeleton, the handoff, and commit `3544cf1`. The rerun fix resolves the empty-state serialization bug, the pre-update masking offset bug, and the outstanding `@Sendable` warning cleanup without introducing a new blocking issue in the touched code."
+}

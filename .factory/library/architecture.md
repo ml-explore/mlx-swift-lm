@@ -37,8 +37,14 @@ A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, c
 ### Left-Padding Strategy
 Variable-length sequences are left-padded with zeros. `BatchKVCache` tracks per-sequence `leftPadding` and adjusts attention masks accordingly. This matches the Python mlx-lm approach.
 
+### Mask Before Cache Update
+Attention-mask creation uses the cache's pre-update position. `makeAttentionMask` / `createAttentionMask` call `cache.makeMask(...)` before the layer appends the current keys and values, so batch cache masking must use the current `_idx` / offset rather than subtracting `n` as if the cache had already been updated.
+
 ### Rotating cache keep semantics
 The repo's existing max-KV path preserves a fixed prefix when it creates `RotatingKVCache(maxSize: maxKVSize, keep: 4)` in `Libraries/MLXLMCommon/LanguageModel.swift`. Any batch rotating-cache implementation needs to preserve and round-trip nonzero `keep` values instead of assuming the default `keep = 0`.
+
+### Rotating Cache Cached-Prompt Prefill
+Batch rotating-cache cached-prefill uses a `prepare(... rightPadding:)` / `finalize()` lifecycle. During mixed-length cached prompt prefill, sequences temporarily switch to right-padding so concatenation and trimming operate on aligned suffixes, then `finalize()` rolls the data back into the normal left-padded layout used for decode.
 
 ## Existing Infrastructure Used
 
