@@ -14,7 +14,10 @@ import XCTest
 ///
 /// Produces tokens deterministically: next token = (input_token + 1) % vocabSize.
 /// Uses KVCacheSimple by default (batch-compatible).
-private class IntegrationMockModel: Module, LanguageModel, KVCacheDimensionProvider {
+private class IntegrationMockModel: Module, LanguageModel, KVCacheDimensionProvider,
+    @unchecked
+    Sendable
+{
     let vocabSize: Int
     let numLayers: Int
     var kvHeads: [Int] { Array(repeating: 4, count: numLayers) }

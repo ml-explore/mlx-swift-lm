@@ -14,7 +14,10 @@ import XCTest
 ///
 /// Produces tokens deterministically: next token = (input_token + 1) % vocabSize.
 /// Uses KVCacheSimple by default (batch-compatible).
-private class SchedulerMockModel: Module, LanguageModel, KVCacheDimensionProvider {
+private class SchedulerMockModel: Module, LanguageModel, KVCacheDimensionProvider,
+    @unchecked
+    Sendable
+{
     let vocabSize: Int
     let numLayers: Int
     var kvHeads: [Int] { Array(repeating: 4, count: numLayers) }
@@ -57,7 +60,7 @@ private class SchedulerMockModel: Module, LanguageModel, KVCacheDimensionProvide
 }
 
 /// Mock model that creates MambaCache (batch-incompatible).
-private class SSMMockModel: Module, LanguageModel {
+private class SSMMockModel: Module, LanguageModel, @unchecked Sendable {
     let vocabSize: Int = 32
 
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
@@ -925,5 +928,172 @@ class InferenceSchedulerTests: XCTestCase {
         XCTAssertNotNil(received, "Should receive the live state")
         XCTAssertEqual(received?.tokenCount, 7, "Should receive the live token count")
         XCTAssertEqual(received?.maxTokens, 100, "Should receive the live maxTokens")
+    }
+
+    // MARK: - Regression: maxTokens not overrun on upgrade at final allowed token
+
+    /// Verifies that when the first request has exhausted its maxTokens budget
+    /// at the point of upgrade, the first request finishes immediately without
+    /// producing extra tokens. This is a regression test for the off-by-one
+    /// where `max(firstMaxTokens, 1)` clamped a zero remaining budget to 1.
+    func testMaxTokensNotOverrunOnUpgradeAtFinalToken() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        // Use a tokenizer with non-zero EOS to avoid early stop.
+        // The default TestTokenizer has eosTokenId = 0, unknownTokenId = 0.
+        // Our mock model produces (input+1)%32, starting from token 10:
+        // 11, 12, 13, ... — none of which are 0 within maxTokens = 3.
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        let maxTokens = 3
+        let input1 = LMInput(tokens: MLXArray([Int32(10)]))
+        let params1 = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Consume all tokens from the first request before triggering upgrade.
+        // This ensures the iterator has advanced to tokenCount == maxTokens.
+        var firstChunks = [String]()
+        var firstInfo: GenerateCompletionInfo?
+        var stream1Finished = false
+
+        // We'll collect from stream1 in a task so we can also submit the
+        // second request. We consume a few tokens, then trigger upgrade.
+        let collectTask = Task { () -> ([String], GenerateCompletionInfo?) in
+            var chunks = [String]()
+            var info: GenerateCompletionInfo?
+            for await gen in stream1 {
+                switch gen {
+                case .chunk(let text):
+                    chunks.append(text)
+                case .info(let i):
+                    info = i
+                case .toolCall:
+                    break
+                }
+            }
+            return (chunks, info)
+        }
+
+        // Give the first request time to run to completion or near completion
+        try await Task.sleep(nanoseconds: 200_000_000)  // 200ms
+
+        // Now submit the second request — this triggers upgrade.
+        // If the first request already finished, the upgrade falls back
+        // gracefully (live state is nil → starts a new single request).
+        let input2 = LMInput(tokens: MLXArray([Int32(20)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Collect results from both streams
+        let (chunks1, info1) = await collectTask.value
+        firstChunks = chunks1
+        firstInfo = info1
+
+        var secondChunks = [String]()
+        for await gen in stream2 {
+            if let chunk = gen.chunk {
+                secondChunks.append(chunk)
+            }
+        }
+
+        // The first request must have produced at most maxTokens tokens.
+        // With the old bug (max(0, 1) clamping), it could produce maxTokens + 1.
+        XCTAssertLessThanOrEqual(
+            firstChunks.count, maxTokens,
+            "First request must not exceed maxTokens (\(maxTokens)) — got \(firstChunks.count) chunks"
+        )
+
+        // If we got completion info, verify the token count is within budget
+        if let info = firstInfo {
+            XCTAssertLessThanOrEqual(
+                info.generationTokenCount, maxTokens,
+                "GenerateCompletionInfo token count must not exceed maxTokens"
+            )
+        }
+    }
+
+    /// Verifies that the first request produces exactly maxTokens tokens total
+    /// even when upgrade occurs mid-generation. Tokens produced on the single
+    /// path plus tokens produced on the batch path must sum to at most maxTokens.
+    func testFirstRequestProducesExactlyMaxTokensAcrossUpgrade() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        let maxTokens = 10
+        let input1 = LMInput(tokens: MLXArray([Int32(10)]))
+        let params1 = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Consume a few tokens to advance the iterator, then trigger upgrade
+        var firstTokenCount = 0
+
+        let collectTask = Task { () -> Int in
+            var count = 0
+            for await gen in stream1 {
+                if gen.chunk != nil {
+                    count += 1
+                }
+            }
+            return count
+        }
+
+        // Small delay to let a few tokens be generated
+        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+
+        // Trigger upgrade with second request
+        let input2 = LMInput(tokens: MLXArray([Int32(20)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        firstTokenCount = await collectTask.value
+
+        // Consume second stream
+        for await _ in stream2 {}
+
+        // The total tokens for the first request (across single + batch) must
+        // not exceed maxTokens.
+        XCTAssertLessThanOrEqual(
+            firstTokenCount, maxTokens,
+            "Total first-request tokens across upgrade must not exceed maxTokens (\(maxTokens)), got \(firstTokenCount)"
+        )
     }
 }

@@ -671,6 +671,33 @@ public actor InferenceScheduler {
         let firstSampler = liveState.sampler
         let firstProcessor = liveState.processor
 
+        // If the first request has exhausted its token budget, finish it
+        // immediately and start the second request as a fresh single request.
+        // This avoids reinserting a zero-budget entry into the batch engine
+        // which would overrun maxTokens by 1.
+        if firstMaxTokens <= 0 {
+            let firstContinuation = existingSingle.continuation
+            let info = GenerateCompletionInfo(
+                promptTokenCount: 0,
+                generationTokenCount: liveState.tokenCount,
+                promptTime: 0,
+                generationTime: 0,
+                stopReason: .length
+            )
+            _ = firstContinuation.yield(.info(info))
+            firstContinuation.finish()
+
+            state = .idle
+            return try startSingleRequest(
+                input: newInput,
+                parameters: newParameters,
+                model: model,
+                cache: cache,
+                tokenizer: tokenizer,
+                configuration: configuration
+            )
+        }
+
         // Allocate a UID for the first request inside the batch.
         let firstUID = batchIterator.allocateUID()
 
@@ -680,7 +707,7 @@ public actor InferenceScheduler {
             cache: batchCaches,
             samplers: [firstSampler],
             processors: [firstProcessor],
-            maxTokens: [max(firstMaxTokens, 1)],
+            maxTokens: [firstMaxTokens],
             numTokens: [0],
             tokens: [MLXArray]([MLXArray([Int32]())])
         )
