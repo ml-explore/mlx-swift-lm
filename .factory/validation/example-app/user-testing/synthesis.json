@@ -1,91 +1,47 @@
 {
   "milestone": "example-app",
-  "round": 1,
+  "round": 2,
   "status": "fail",
   "assertionsSummary": {
     "total": 20,
-    "passed": 6,
+    "passed": 19,
     "failed": 0,
-    "blocked": 14
+    "blocked": 1
   },
   "passedAssertions": [
+    "VAL-CROSS-001",
+    "VAL-CROSS-002",
+    "VAL-CROSS-003",
+    "VAL-CROSS-004",
     "VAL-CROSS-005",
+    "VAL-CROSS-006",
+    "VAL-CROSS-007",
+    "VAL-CROSS-008",
     "VAL-EXAMPLE-001",
     "VAL-EXAMPLE-002",
     "VAL-MODEL-001",
     "VAL-MODEL-005",
-    "VAL-MODEL-006"
+    "VAL-MODEL-006",
+    "VAL-SCHED-004",
+    "VAL-SCHED-005",
+    "VAL-SCHED-006",
+    "VAL-SCHED-011",
+    "VAL-SCHED-016",
+    "VAL-SCHED-018"
   ],
   "failedAssertions": [],
   "blockedAssertions": [
     {
-      "id": "VAL-CROSS-001",
-      "blockedBy": "`BatchingIntegrationTests.testSingleRequestFlowUnchanged` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-002",
-      "blockedBy": "`BatchingIntegrationTests.testEndToEndBatchFlow` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-003",
-      "blockedBy": "`BatchingIntegrationTests.testSingleToBatchUpgradeFlow` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-004",
-      "blockedBy": "`BatchingIntegrationTests.testFallbackFlowForIncompatibleRequests` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-006",
-      "blockedBy": "`BatchingIntegrationTests.testVariableSequenceLengthsInBatch` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-007",
-      "blockedBy": "`BatchingIntegrationTests.testPromptCacheIntegrationWithBatchGeneration` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
-      "id": "VAL-CROSS-008",
-      "blockedBy": "`BatchingIntegrationTests.testToolCallEmittedOnCorrectStream` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion."
-    },
-    {
       "id": "VAL-EXAMPLE-003",
-      "blockedBy": "A fresh xcodebuild run was blocked by host disk exhaustion, and the already-present absolute local model directories inspected under `/Users/ronaldmannak/Documents/huggingface/models/mlx-community` were not usable for offline generation: no MLX weight files were present in the inspected directories and direct batch runtime attempts failed immediately with missing-weight-key errors before any concurrent generation could be observed."
-    },
-    {
-      "id": "VAL-SCHED-004",
-      "blockedBy": "`InferenceSchedulerTests.testUpgradeUsesLiveTokenIteratorState` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
-    },
-    {
-      "id": "VAL-SCHED-005",
-      "blockedBy": "`InferenceSchedulerTests.testUpgradeUsesLiveTokenIteratorState` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
-    },
-    {
-      "id": "VAL-SCHED-006",
-      "blockedBy": "`ModelContainerIntegrationTests.testPaddingAndMaskingCorrectInBatchedMode` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
-    },
-    {
-      "id": "VAL-SCHED-011",
-      "blockedBy": "`InferenceSchedulerTests.testEachRequestGetsIndependentStream` and `ModelContainerIntegrationTests.testEachRequestGetsIndependentStream` were skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
-    },
-    {
-      "id": "VAL-SCHED-016",
-      "blockedBy": "`InferenceSchedulerTests.testThirdRequestJoinsExistingBatch` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
-    },
-    {
-      "id": "VAL-SCHED-018",
-      "blockedBy": "`ModelContainerIntegrationTests.testMultipleChatSessionsSharingModelContainerTriggerBatching` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run."
+      "blockedBy": "No usable already-present local generative MLX model was available under the no-download constraint. /Users/ronaldmannak/Documents/huggingface/models only contained .safetensors weights for embedding models, the inspected mlx-community text-generation directories only had config/tokenizer files with no local MLX weights, and direct llm-tool batch attempts failed immediately with missing-weight-key errors before batched generation could occur."
     }
   ],
   "appliedUpdates": [
     {
       "target": "user-testing.md",
-      "description": "Added example-app concurrency guidance and a dedicated llm-tool-cli flow-validator section for the examples repo user surface.",
-      "source": "setup"
-    },
-    {
-      "target": "user-testing.md",
-      "description": "Documented retrying swift build/swift test with a validator-owned TMPDIR when the default temp area hits errno=28 / No space left on device.",
+      "description": "Documented that the current local Hugging Face model inventory only contains embedding-model weight files, so offline llm-tool batch runtime validation remains blocked until a usable local generative MLX model is staged.",
       "source": "flow-report"
     }
   ],
-  "previousRound": null
+  "previousRound": ".factory/validation/example-app/user-testing/synthesis.round1.json"
 }

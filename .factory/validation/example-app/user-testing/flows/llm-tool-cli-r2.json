@@ -1,0 +1,85 @@
+{
+  "groupId": "llm-tool-cli-r2",
+  "surface": "llm-tool-cli",
+  "testedAt": "2026-03-14T14:43:32Z",
+  "assertionsTested": [
+    "VAL-EXAMPLE-003"
+  ],
+  "toolsUsed": [
+    "Read",
+    "LS",
+    "Glob",
+    "Execute",
+    "/usr/bin/script"
+  ],
+  "isolation": {
+    "milestone": "example-app",
+    "examplesRepoRoot": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-examples",
+    "mainRepoRoot": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm",
+    "cachedBinary": "/Users/ronaldmannak/Library/Developer/Xcode/DerivedData/mlx-swift-examples-frolwamkzhtfohbnyobypmajdhfx/Build/Products/Release/llm-tool",
+    "localModelsRoot": "/Users/ronaldmannak/Documents/huggingface/models",
+    "evidenceDir": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2",
+    "flowReport": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/validation/example-app/user-testing/flows/llm-tool-cli-r2.json"
+  },
+  "assertions": [
+    {
+      "id": "VAL-EXAMPLE-003",
+      "status": "blocked",
+      "reason": "No already-present usable local generative MLX model was available under the no-download constraint. A search of /Users/ronaldmannak/Documents/huggingface/models found only two .safetensors files, both in embedding model directories, while the inspected mlx-community generative candidate directories contained config/tokenizer files but no local MLX weight files. Direct llm-tool batch attempts with two prompts failed immediately during model loading with missing-weight-key errors before any batched generation could occur.",
+      "evidenceFiles": [
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/offline-model-investigation.json",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-ministral.txt",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-qwen25.txt"
+      ]
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "Glob search under /Users/ronaldmannak/Documents/huggingface/models for **/*.safetensors, **/*.safetensors.index.json, **/*.bin, and **/*.npz plus LS inspection of mlx-community candidate directories.",
+      "exitCode": 0,
+      "notableObservations": [
+        "Only .safetensors files found under the models root were /Users/ronaldmannak/Documents/huggingface/models/nomic-ai/nomic-embed-text-v1.5/model.safetensors and /Users/ronaldmannak/Documents/huggingface/models/TaylorAI/bge-micro-v2/model.safetensors.",
+        "Inspected generative mlx-community directories contained config/tokenizer assets but no local MLX weight files."
+      ]
+    },
+    {
+      "command": "script -qe \"/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-ministral.txt\" \"/Users/ronaldmannak/Library/Developer/Xcode/DerivedData/mlx-swift-examples-frolwamkzhtfohbnyobypmajdhfx/Build/Products/Release/llm-tool\" batch --model \"/Users/ronaldmannak/Documents/huggingface/models/mlx-community/Ministral-3-3B-Instruct-2512-4bit\" --prompt \"Hello from prompt one\" --prompt \"Hello from prompt two\" --batch-size 2 --max-tokens 1",
+      "exitCode": 1,
+      "notableObservations": [
+        "Immediate load failure: Key model.layers.0.post_attention_layernorm.weight not found in Mistral3TextModel.Mistral3TextModelInner.Mistral3TextTransformerBlock.RMSNorm."
+      ]
+    },
+    {
+      "command": "script -qe \"/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-qwen25.txt\" \"/Users/ronaldmannak/Library/Developer/Xcode/DerivedData/mlx-swift-examples-frolwamkzhtfohbnyobypmajdhfx/Build/Products/Release/llm-tool\" batch --model \"/Users/ronaldmannak/Documents/huggingface/models/mlx-community/Qwen2.5-7B-Instruct-4bit\" --prompt \"Hello from prompt one\" --prompt \"Hello from prompt two\" --batch-size 2 --max-tokens 1",
+      "exitCode": 1,
+      "notableObservations": [
+        "Immediate load failure: Key lm_head.weight not found in Qwen2Model.Linear."
+      ]
+    }
+  ],
+  "blockers": [
+    {
+      "description": "No usable already-present offline generative MLX model directory was available for llm-tool batch validation, and the mission forbids model downloads.",
+      "affectedAssertions": [
+        "VAL-EXAMPLE-003"
+      ],
+      "quickFixAttempted": "Enumerated local model files, inspected mlx-community candidate directories, and attempted direct runtime loads against two local text-model directories using the cached llm-tool binary."
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The tuistory CLI executable was not available in PATH for terminal capture.",
+      "resolved": true,
+      "resolution": "Captured pseudo-terminal transcripts with /usr/bin/script in the assigned evidence directory instead.",
+      "affectedAssertions": [
+        "VAL-EXAMPLE-003"
+      ]
+    }
+  ],
+  "evidenceFiles": [
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/offline-model-investigation.json",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-ministral.txt",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/llm-tool-cli-r2/batch-runtime-attempt-qwen25.txt"
+  ],
+  "summary": "Tested 1 assertion: 0 passed, 0 failed, 1 blocked. VAL-EXAMPLE-003 is blocked because no usable already-present local generative MLX model was available under the mission's no-download constraint."
+}
