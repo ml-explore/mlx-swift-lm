@@ -122,7 +122,11 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
 
     public override var state: [MLXArray] {
         get {
-            guard let keys = self.keys, let values = self.values else { return [] }
+            // Always include batchOffsets and leftPadding, even when keys/values are nil
+            // (e.g. fresh cache or cache emptied by filter(batchIndices: [])).
+            guard let keys = self.keys, let values = self.values else {
+                return [batchOffsets, leftPadding]
+            }
             let k: MLXArray
             let v: MLXArray
             if _idx < keys.dim(2) {
@@ -135,16 +139,26 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
             return [k, v, batchOffsets, leftPadding]
         }
         set {
-            guard newValue.count == 4 else {
+            switch newValue.count {
+            case 2:
+                // Empty cache: only batchOffsets and leftPadding
+                self.keys = nil
+                self.values = nil
+                self.batchOffsets = newValue[0]
+                self.leftPadding = newValue[1]
+                self._idx = 0
+            case 4:
+                // Populated cache: keys, values, batchOffsets, leftPadding
+                self.keys = newValue[0]
+                self.values = newValue[1]
+                self.batchOffsets = newValue[2]
+                self.leftPadding = newValue[3]
+                self._idx = self.keys!.dim(2)
+            default:
                 fatalError(
-                    "BatchKVCache state must have exactly 4 arrays (keys, values, offset, leftPadding)"
+                    "BatchKVCache state must have 2 arrays (empty) or 4 arrays (keys, values, offset, leftPadding)"
                 )
             }
-            self.keys = newValue[0]
-            self.values = newValue[1]
-            self.batchOffsets = newValue[2]
-            self.leftPadding = newValue[3]
-            self._idx = self.keys!.dim(2)
         }
     }
 
@@ -408,9 +422,13 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
         // Batch caches always need an explicit mask to handle left-padding,
         // even for n=1 decode steps.
+        //
+        // Models call makeMask BEFORE cache.update(), so _idx is the
+        // pre-update offset (matching how BaseKVCache.makeMask uses
+        // self.offset which is the pre-update value).
         return .array(
             createCausalMask(
-                n: n, offset: _idx - n, windowSize: windowSize, leftPadding: leftPadding
+                n: n, offset: _idx, windowSize: windowSize, leftPadding: leftPadding
             )
         )
     }

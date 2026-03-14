@@ -591,4 +591,164 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(trimmed, 2)
         XCTAssertEqual(cache._idx, 3)
     }
+
+    // MARK: - State round-trip for fresh (empty) cache
+
+    func testStateRoundTripFreshCache() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchKVCache(leftPadding: [2, 5, 0])
+
+        // Fresh cache — keys/values are nil
+        XCTAssertNil(cache.keys)
+        XCTAssertNil(cache.values)
+
+        let savedState = cache.state
+        let savedMeta = cache.metaState
+
+        // State should contain batchOffsets + leftPadding (2 arrays)
+        XCTAssertEqual(savedState.count, 2)
+
+        // Round-trip into a new cache
+        let restored = BatchKVCache(leftPadding: [0])
+        restored.state = savedState
+        restored.metaState = savedMeta
+
+        // Verify round-trip preserves offsets and padding
+        XCTAssertNil(restored.keys)
+        XCTAssertNil(restored.values)
+        XCTAssertEqual(restored._idx, 0)
+        XCTAssertEqual(restored.batchOffsets.shape, [3])
+        XCTAssertEqual(restored.leftPadding.shape, [3])
+        XCTAssertEqual(restored.batchOffsets[0].item(Int32.self), -2)
+        XCTAssertEqual(restored.batchOffsets[1].item(Int32.self), -5)
+        XCTAssertEqual(restored.batchOffsets[2].item(Int32.self), 0)
+        XCTAssertEqual(restored.leftPadding[0].item(Int32.self), 2)
+        XCTAssertEqual(restored.leftPadding[1].item(Int32.self), 5)
+        XCTAssertEqual(restored.leftPadding[2].item(Int32.self), 0)
+    }
+
+    // MARK: - State round-trip for cache emptied by filter([])
+
+    func testStateRoundTripFilteredEmptyCache() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchKVCache(leftPadding: [1, 2, 0])
+        let H = 2
+        let S = 3
+        let D = 4
+
+        let (keys, values) = makeKV(batchSize: 3, heads: H, seqLen: S, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+
+        // Empty the cache via filter
+        cache.filter(batchIndices: [])
+
+        XCTAssertNil(cache.keys)
+        XCTAssertNil(cache.values)
+        XCTAssertEqual(cache._idx, 0)
+
+        let savedState = cache.state
+        let savedMeta = cache.metaState
+
+        // State should contain batchOffsets + leftPadding (2 arrays, both empty)
+        XCTAssertEqual(savedState.count, 2)
+
+        // Round-trip into a new cache
+        let restored = BatchKVCache(leftPadding: [99])
+        restored.state = savedState
+        restored.metaState = savedMeta
+
+        // Verify round-trip preserves empty state
+        XCTAssertNil(restored.keys)
+        XCTAssertNil(restored.values)
+        XCTAssertEqual(restored._idx, 0)
+        XCTAssertEqual(restored.batchOffsets.dim(0), 0)
+        XCTAssertEqual(restored.leftPadding.dim(0), 0)
+    }
+
+    // MARK: - makeMask uses pre-update offset (real call order)
+
+    func testMakeMaskBeforeUpdate() throws {
+        try skipIfMetalUnavailable()
+
+        // Simulate the real model call order: makeMask THEN update.
+        // After prefill of S=4, _idx=4. Then for a decode step with n=1,
+        // makeMask should produce a mask spanning columns 0..<(4+1)=5
+        // (the 4 cached tokens plus the 1 new token).
+        let cache = BatchKVCache(leftPadding: [1, 0])
+        let B = 2
+        let H = 2
+        let S = 4
+        let D = 4
+
+        // Prefill
+        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: S, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+        XCTAssertEqual(cache._idx, S)
+
+        // Now simulate a decode step: makeMask is called BEFORE update
+        let n = 1
+        let mask = cache.makeMask(n: n, windowSize: nil, returnArray: false)
+
+        // The mask should cover offset=_idx=4 columns of history + n=1 new token = 5 columns total.
+        // createCausalMask(n:1, offset:4) produces shape [1, 5].
+        switch mask {
+        case .array(let arr):
+            // Row dimension = n = 1, column dimension = _idx + n = 5
+            XCTAssertEqual(arr.dim(arr.ndim - 1), S + n)  // 5 columns
+            XCTAssertEqual(arr.dim(arr.ndim - 2), n)  // 1 row
+        default:
+            XCTFail("Expected .array mask from batch cache")
+        }
+
+        // Now update (after makeMask, as models do)
+        let (k2, v2) = makeKV(batchSize: B, heads: H, seqLen: n, headDim: D, value: 2.0)
+        _ = cache.update(keys: k2, values: v2)
+        XCTAssertEqual(cache._idx, S + n)
+    }
+
+    // MARK: - makeMask masks left-padding in decode step
+
+    func testMakeMaskLeftPaddingDecode() throws {
+        try skipIfMetalUnavailable()
+
+        // Sequence 0 has leftPadding=2, sequence 1 has leftPadding=0.
+        // After prefill of S=4 tokens, _idx=4. Decode step n=1.
+        // For sequence 0, columns 0 and 1 (padded) must be False.
+        // For sequence 1, all 5 columns should follow normal causal pattern.
+        let cache = BatchKVCache(leftPadding: [2, 0])
+        let B = 2
+        let H = 2
+        let S = 4
+        let D = 4
+
+        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: S, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+
+        let n = 1
+        let mask = cache.makeMask(n: n, windowSize: nil, returnArray: false)
+
+        switch mask {
+        case .array(let arr):
+            // Shape: [B, 1, n, _idx+n] = [2, 1, 1, 5]
+            XCTAssertEqual(arr.dim(arr.ndim - 1), S + n)  // 5 columns
+
+            // Sequence 0 (leftPadding=2): columns 0,1 should be False
+            let seq0Mask = arr[0]
+            let col0 = seq0Mask[0..., 0..., 0].item(Bool.self)
+            let col1 = seq0Mask[0..., 0..., 1].item(Bool.self)
+            let col2 = seq0Mask[0..., 0..., 2].item(Bool.self)
+            XCTAssertFalse(col0, "Padded column 0 should be masked out")
+            XCTAssertFalse(col1, "Padded column 1 should be masked out")
+            XCTAssertTrue(col2, "Valid column 2 should be unmasked")
+
+            // Sequence 1 (leftPadding=0): all columns through the causal position should be True
+            let seq1Mask = arr[1]
+            let seq1col0 = seq1Mask[0..., 0..., 0].item(Bool.self)
+            XCTAssertTrue(seq1col0, "Sequence 1 column 0 should be unmasked")
+        default:
+            XCTFail("Expected .array mask from batch cache")
+        }
+    }
 }
