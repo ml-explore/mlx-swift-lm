@@ -1,60 +1,19 @@
 {
   "milestone": "batch-kv-cache",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "assertionsSummary": {
-    "total": 25,
-    "passed": 23,
-    "failed": 2,
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
     "blocked": 0
   },
   "passedAssertions": [
-    "VAL-CACHE-001",
-    "VAL-CACHE-002",
-    "VAL-CACHE-003",
-    "VAL-CACHE-004",
-    "VAL-CACHE-005",
-    "VAL-CACHE-006",
-    "VAL-CACHE-007",
-    "VAL-CACHE-008",
-    "VAL-CACHE-009",
-    "VAL-CACHE-010",
-    "VAL-CACHE-012",
-    "VAL-CACHE-013",
-    "VAL-CACHE-014",
-    "VAL-CACHE-015",
-    "VAL-CACHE-016",
-    "VAL-CACHE-017",
-    "VAL-CACHE-018",
-    "VAL-CACHE-019",
-    "VAL-CACHE-021",
-    "VAL-CACHE-022",
-    "VAL-MODEL-002",
-    "VAL-MODEL-003",
-    "VAL-MODEL-004"
+    "VAL-CACHE-011",
+    "VAL-CACHE-020"
   ],
-  "failedAssertions": [
-    {
-      "id": "VAL-CACHE-011",
-      "reason": "Mapped to testBatchKVCacheMakeMaskWithLeftPadding; xcode-validation.log records `XCTAssertEqual failed: (\"10\") is not equal to (\"5\")` at BatchMaskingAndPositionTests.swift:117."
-    },
-    {
-      "id": "VAL-CACHE-020",
-      "reason": "Mapped to testBatchKVCacheMakeMaskN1MasksPadding; xcode-validation.log records `XCTAssertEqual failed: (\"6\") is not equal to (\"5\")` at BatchMaskingAndPositionTests.swift:175."
-    }
-  ],
+  "failedAssertions": [],
   "blockedAssertions": [],
-  "appliedUpdates": [
-    {
-      "target": "user-testing.md",
-      "description": "Added Flow Validator Guidance for swift-test, including isolation and scratch-path rules for validation workers.",
-      "source": "setup"
-    },
-    {
-      "target": "user-testing.md",
-      "description": "Documented xcodebuild macOS package testing as the direct-evidence path for MLX Metal-backed assertions because swift test skips them under SPM.",
-      "source": "flow-report"
-    }
-  ],
-  "previousRound": null
+  "appliedUpdates": [],
+  "previousRound": ".factory/validation/batch-kv-cache/user-testing/synthesis.round1.json"
 }

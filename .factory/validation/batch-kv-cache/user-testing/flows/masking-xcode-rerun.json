@@ -1,0 +1,40 @@
+{
+  "groupId": "masking-xcode-rerun",
+  "surface": "swift-test",
+  "assertions": [
+    {
+      "id": "VAL-CACHE-011",
+      "status": "pass",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:94-96",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/masking-xcode-rerun/xcodebuild-BatchMaskingAndPositionTests.log:17401-17402"
+      ],
+      "reason": "Direct Metal-backed xcodebuild run recorded testBatchKVCacheMakeMaskWithLeftPadding as started and passed, confirming the left-padding causal mask assertion."
+    },
+    {
+      "id": "VAL-CACHE-020",
+      "status": "pass",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:148-150",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/masking-xcode-rerun/xcodebuild-BatchMaskingAndPositionTests.log:17399-17400"
+      ],
+      "reason": "Direct Metal-backed xcodebuild run recorded testBatchKVCacheMakeMaskN1MasksPadding as started and passed, confirming n=1 decode still masks left-padding."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild"
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-masking-xcode-rerun-deriveddata -only-testing:MLXLMTests/BatchMaskingAndPositionTests",
+      "exitCode": 0,
+      "observation": "BatchMaskingAndPositionTests executed 18 tests with 0 failures; both targeted masking tests passed and the run ended with ** TEST SUCCEEDED **."
+    }
+  ],
+  "artifacts": [
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/masking-xcode-rerun/xcodebuild-BatchMaskingAndPositionTests.log"
+  ],
+  "summary": "The rerun no longer reproduces the prior mask-width failures: both VAL-CACHE-011 and VAL-CACHE-020 passed under xcodebuild, so batch makeMask now behaves correctly for left-padded prefill and n=1 decode."
+}
