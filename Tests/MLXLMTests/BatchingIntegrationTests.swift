@@ -110,6 +110,129 @@ private class IncompatibleSSMMockModel: Module, LanguageModel, @unchecked Sendab
     }
 }
 
+/// A mock language model that produces a fixed token sequence encoding a
+/// JSON tool call (`<tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>`).
+///
+/// Token ID mapping (used with `ToolCallTestTokenizer`):
+///   100 → `<tool_call>`
+///   101 → `{"name": "get_weather", "arguments": {"city": "SF"}}`
+///   102 → `</tool_call>`
+///
+/// Prompt starting with 50 → tool call tokens [100, 101, 102, 10, 10, ...].
+/// All other prompts → deterministic (last_token + 1) % vocabSize tokens.
+///
+/// Uses the input token itself to determine the next output: when the input
+/// is a tool-call token (100, 101, 102), the model emits the next one in
+/// the sequence. This avoids needing cache offset tracking.
+private class ToolCallMockModel: Module, LanguageModel, KVCacheDimensionProvider,
+    @unchecked Sendable
+{
+    let vocabSize: Int = 200
+    let numLayers: Int = 1
+    var kvHeads: [Int] { [4] }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let tokens = input.tokens
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+
+        var logitsFlat = [Float]()
+        for b in 0 ..< B {
+            for s in 0 ..< S {
+                let token = tokens[b, s].item(Int32.self)
+                var row = [Float](repeating: -100.0, count: vocabSize)
+
+                // Determine next token based on the current input token.
+                // Prompt token 50 → start tool call sequence with 100.
+                // Tool call chain: 100 → 101, 101 → 102, 102 → 10 (filler).
+                // All others: (token + 1) % vocabSize.
+                let nextToken: Int
+                switch token {
+                case 50: nextToken = 100  // Start tool call
+                case 100: nextToken = 101  // Continue tool call body
+                case 101: nextToken = 102  // End tool call
+                case 102: nextToken = 10  // Filler after tool call
+                default: nextToken = (Int(token) + 1) % vocabSize
+                }
+
+                row[nextToken] = 0.0
+                logitsFlat.append(contentsOf: row)
+            }
+        }
+
+        let logits = MLXArray(logitsFlat, [B, S, vocabSize])
+        return LMOutput(logits: logits)
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+}
+
+/// A tokenizer that maps specific token IDs to tool-call-forming strings.
+/// Token 100 → `<tool_call>`, 101 → JSON body, 102 → `</tool_call>`.
+/// All other tokens map to simple lowercase letters.
+private struct ToolCallTestTokenizer: Tokenizer {
+    var bosToken: String? = nil
+    var bosTokenId: Int? = 0
+    var eosToken: String? = nil
+    var eosTokenId: Int? = 0
+    var unknownToken: String? = nil
+    var unknownTokenId: Int? = 0
+
+    private static let specialTokens: [Int: String] = [
+        100: "<tool_call>",
+        101: "{\"name\": \"get_weather\", \"arguments\": {\"city\": \"SF\"}}",
+        102: "</tool_call>",
+    ]
+
+    func tokenize(text: String) -> [String] {
+        text.split(separator: " ").map { String($0) }
+    }
+
+    func encode(text: String) -> [Int] { [1, 2, 3] }
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { encode(text: text) }
+
+    func decode(tokens: [Int], skipSpecialTokens: Bool) -> String {
+        tokens.map { convertIdToToken($0) ?? "?" }.joined()
+    }
+
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? {
+        Self.specialTokens[id] ?? String(Character(UnicodeScalar(97 + (id % 26))!))
+    }
+
+    func applyChatTemplate(messages: [Tokenizers.Message]) throws -> [Int] { [1, 2] }
+    func applyChatTemplate(messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?) throws
+        -> [Int]
+    { [1, 2] }
+    func applyChatTemplate(
+        messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [1, 2] }
+    func applyChatTemplate(
+        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument
+    ) throws -> [Int] { [1, 2] }
+    func applyChatTemplate(messages: [Tokenizers.Message], chatTemplate: String) throws -> [Int] {
+        [1, 2]
+    }
+    func applyChatTemplate(
+        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
+        addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?
+    ) throws -> [Int] { [1, 2] }
+    func applyChatTemplate(
+        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
+        addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [1, 2] }
+}
+
 /// A simple mock input processor for ModelContainer-based tests.
 private struct IntegrationMockInputProcessor: UserInputProcessor {
     let tokenizer: Tokenizer
@@ -193,8 +316,6 @@ class BatchingIntegrationTests: XCTestCase {
         try skipIfMetalUnavailable()
 
         let model = IntegrationTestMockModel()
-        let tokenizer = TestTokenizer()
-        let config = ModelConfiguration(id: "test-model")
 
         // Use the single-request TokenIterator path directly (no scheduler)
         let input = LMInput(tokens: MLXArray([Int32(10), Int32(20), Int32(30)]))
@@ -217,11 +338,11 @@ class BatchingIntegrationTests: XCTestCase {
 
         // Mock model: next token = (input + 1) % vocabSize
         // From last prompt token 30: produces 31, then 32, 33, 34, 35
-        // (EOS token is 0 for TestTokenizer, so none of these trigger stop)
-        for token in tokens {
-            XCTAssertGreaterThanOrEqual(token, 0, "Token should be non-negative")
-            XCTAssertLessThan(token, model.vocabSize, "Token should be within vocabulary")
-        }
+        let expectedTokens = [31, 32, 33, 34, 35]
+        XCTAssertEqual(
+            tokens, expectedTokens,
+            "Deterministic mock should produce predictable sequence: "
+                + "expected \(expectedTokens), got \(tokens)")
     }
 
     /// Single request through ModelContainer (without scheduler) produces output
@@ -372,7 +493,7 @@ class BatchingIntegrationTests: XCTestCase {
     }
 
     /// Multiple requests through BatchTokenIterator directly produce correct
-    /// independent outputs.
+    /// independent outputs with deterministic per-request token sequences.
     func testBatchTokenIteratorMultipleRequests() throws {
         try skipIfMetalUnavailable()
 
@@ -409,24 +530,43 @@ class BatchingIntegrationTests: XCTestCase {
         for uid in uids {
             XCTAssertEqual(
                 tokensPerUID[uid]?.count, 4,
-                "Request \(uid) should produce 4 tokens")
+                "Request \(uid) should produce exactly 4 tokens")
             XCTAssertEqual(
                 finishReasons[uid], .length,
                 "Request \(uid) should finish with .length")
         }
 
-        // Verify independence: different prompts should produce different token sequences
+        // Verify deterministic per-request outputs.
+        // Mock model: next token = (last_prompt_token + 1) % vocabSize,
+        // then each subsequent token = (prev + 1) % vocabSize.
+        // Prompt [1,2,3]: last=3 → 4,5,6,7
+        // Prompt [10,20]: last=20 → 21,22,23,24
+        // Prompt [5,6,7,8]: last=8 → 9,10,11,12
+        let expected0 = [4, 5, 6, 7]
+        let expected1 = [21, 22, 23, 24]
+        let expected2 = [9, 10, 11, 12]
+
         let seq0 = tokensPerUID[uids[0]] ?? []
         let seq1 = tokensPerUID[uids[1]] ?? []
         let seq2 = tokensPerUID[uids[2]] ?? []
-        XCTAssertNotEqual(seq0, seq1, "Different prompts should produce different outputs")
-        XCTAssertNotEqual(seq1, seq2, "Different prompts should produce different outputs")
+
+        XCTAssertEqual(
+            seq0, expected0,
+            "Prompt [1,2,3] should produce \(expected0), got \(seq0)")
+        XCTAssertEqual(
+            seq1, expected1,
+            "Prompt [10,20] should produce \(expected1), got \(seq1)")
+        XCTAssertEqual(
+            seq2, expected2,
+            "Prompt [5,6,7,8] should produce \(expected2), got \(seq2)")
     }
 
     // MARK: - VAL-CROSS-003: Single-to-batch upgrade flow
 
     /// First request starts on single path, second request triggers upgrade,
     /// first continues without interruption, second starts generating.
+    /// Asserts uninterrupted token continuity: the first request should produce
+    /// a total token count consistent with its maxTokens regardless of upgrade.
     func testSingleToBatchUpgradeFlow() async throws {
         try skipIfMetalUnavailable()
 
@@ -484,7 +624,7 @@ class BatchingIntegrationTests: XCTestCase {
 
         // Consume remaining tokens from both streams concurrently
         var tokensAfterUpgrade = [String]()
-        var tokens2 = [String]()
+        var secondRequestChunks = [String]()
 
         await withTaskGroup(of: (Int, [String]).self) { group in
             group.addTask {
@@ -511,7 +651,7 @@ class BatchingIntegrationTests: XCTestCase {
                 if id == 1 {
                     tokensAfterUpgrade = chunks
                 } else {
-                    tokens2 = chunks
+                    secondRequestChunks = chunks
                 }
             }
         }
@@ -522,11 +662,15 @@ class BatchingIntegrationTests: XCTestCase {
             totalFirst, 0,
             "First request should produce tokens across the upgrade boundary")
 
-        // Verify token continuity: no gaps or duplicates in the sequence
-        // The total should not exceed maxTokens
+        // Verify token continuity: total should not exceed maxTokens
         XCTAssertLessThanOrEqual(
             totalFirst, 20,
             "First request total tokens should not exceed maxTokens (20)")
+
+        // Second request should also produce output
+        XCTAssertFalse(
+            secondRequestChunks.isEmpty,
+            "Second request should produce output after triggering upgrade")
     }
 
     // MARK: - VAL-CROSS-004: Fallback flow for incompatible requests
@@ -682,6 +826,126 @@ class BatchingIntegrationTests: XCTestCase {
         )
 
         XCTAssertFalse(compatible, "SSM model should be batch-incompatible")
+    }
+
+    /// Verify that two compatible requests batch, while a third incompatible
+    /// request falls back to the single path. All three produce valid output.
+    func testMixedCompatibleIncompatibleRequests() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = IntegrationTestMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // First compatible request
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        let params1 = GenerateParameters(maxTokens: 5, temperature: 0)
+        let stream1 = try await scheduler.submit(
+            input: input1, parameters: params1, model: model,
+            cache: nil, tokenizer: tokenizer, configuration: config
+        )
+
+        // Second compatible request — should trigger batch upgrade
+        let input2 = LMInput(tokens: MLXArray([Int32(10), Int32(20)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+        let stream2 = try await scheduler.submit(
+            input: input2, parameters: params2, model: model,
+            cache: nil, tokenizer: tokenizer, configuration: config
+        )
+
+        // Third request — incompatible (VLM with image) — falls back to single
+        let image = LMInput.ProcessedImage(pixels: MLXArray.zeros([1, 3, 224, 224]))
+        let input3 = LMInput(
+            text: .init(tokens: MLXArray([Int32(5), Int32(6)])),
+            image: image
+        )
+        let params3 = GenerateParameters(maxTokens: 3, temperature: 0)
+        let stream3 = try await scheduler.submit(
+            input: input3, parameters: params3, model: model,
+            cache: nil, tokenizer: tokenizer, configuration: config
+        )
+
+        // All three streams should produce output
+        var completedStreams = Set<Int>()
+        await withTaskGroup(of: Int.self) { group in
+            group.addTask {
+                for await _ in stream1 {}
+                return 1
+            }
+            group.addTask {
+                for await _ in stream2 {}
+                return 2
+            }
+            group.addTask {
+                for await _ in stream3 {}
+                return 3
+            }
+            for await id in group {
+                completedStreams.insert(id)
+            }
+        }
+
+        XCTAssertEqual(
+            completedStreams.count, 3,
+            "All three streams (2 compatible + 1 incompatible) should complete; "
+                + "completed: \(completedStreams)")
+    }
+
+    /// Verify isBatchCompatible correctly distinguishes compatible vs incompatible
+    /// request types.
+    func testBatchCompatibilityDetection() throws {
+        try skipIfMetalUnavailable()
+
+        let compatibleModel = IntegrationTestMockModel()
+        let ssmModel = IncompatibleSSMMockModel()
+
+        // Standard text-only LLM — compatible
+        let textInput = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        XCTAssertTrue(
+            InferenceScheduler.isBatchCompatible(
+                input: textInput,
+                parameters: GenerateParameters(temperature: 0),
+                cache: nil,
+                model: compatibleModel
+            ),
+            "Standard text-only LLM should be batch-compatible")
+
+        // VLM input — incompatible
+        let image = LMInput.ProcessedImage(pixels: MLXArray.zeros([1, 3, 224, 224]))
+        let vlmInput = LMInput(
+            text: .init(tokens: MLXArray([Int32(1)])),
+            image: image
+        )
+        XCTAssertFalse(
+            InferenceScheduler.isBatchCompatible(
+                input: vlmInput,
+                parameters: GenerateParameters(temperature: 0),
+                cache: nil,
+                model: compatibleModel
+            ),
+            "VLM input with image should be batch-incompatible")
+
+        // kvBits request — incompatible
+        XCTAssertFalse(
+            InferenceScheduler.isBatchCompatible(
+                input: textInput,
+                parameters: GenerateParameters(kvBits: 4, temperature: 0),
+                cache: nil,
+                model: compatibleModel
+            ),
+            "Request with kvBits should be batch-incompatible")
+
+        // SSM model — incompatible (detected via cache type)
+        let ssmCache = ssmModel.newCache(parameters: nil)
+        XCTAssertFalse(
+            InferenceScheduler.isBatchCompatible(
+                input: textInput,
+                parameters: GenerateParameters(temperature: 0),
+                cache: ssmCache,
+                model: ssmModel
+            ),
+            "SSM model with MambaCache should be batch-incompatible")
     }
 
     // MARK: - VAL-CROSS-005: Backward API compatibility
@@ -861,12 +1125,29 @@ class BatchingIntegrationTests: XCTestCase {
                 finishReasons[uid], .length,
                 "Prompt \(i) should finish with .length")
 
-            // Verify all tokens are valid
+            // Verify all tokens are valid and within vocabulary
             for token in tokens {
                 XCTAssertGreaterThanOrEqual(token, 0)
                 XCTAssertLessThan(token, model.vocabSize)
             }
         }
+
+        // Verify deterministic expected first tokens based on last prompt token:
+        // short: last = 10 % 64 = 10 → first output = 11
+        // medium: last = 100 % 64 = 36 → first output = 37
+        // long: last = 500 % 64 = 52 → first output = 53
+        let firstTokenShort = tokensPerUID[uids[0]]?.first
+        let firstTokenMedium = tokensPerUID[uids[1]]?.first
+        let firstTokenLong = tokensPerUID[uids[2]]?.first
+        XCTAssertEqual(
+            firstTokenShort, 11,
+            "Short prompt (last=10) should start generating at 11")
+        XCTAssertEqual(
+            firstTokenMedium, 37,
+            "Medium prompt (last=36) should start generating at 37")
+        XCTAssertEqual(
+            firstTokenLong, 53,
+            "Long prompt (last=52) should start generating at 53")
     }
 
     /// Variable-length prompts through the scheduler produce correct output.
@@ -1035,104 +1316,116 @@ class BatchingIntegrationTests: XCTestCase {
 
     // MARK: - VAL-CROSS-008: Tool calls in batch generation routed to correct stream
 
-    /// When a batched sequence generates a tool call token pattern, the parsed
-    /// ToolCall is emitted only on that request's stream, not cross-contaminated.
+    /// When a sequence generates a tool call token pattern through the scheduler,
+    /// the parsed ToolCall is emitted only on that request's stream.
     ///
-    /// This test verifies routing at the scheduler level: each request's stream
-    /// receives only its own Generation events (chunks, info, toolCalls).
-    func testToolCallsRoutedToCorrectStreamInBatch() async throws {
+    /// Uses `ToolCallMockModel` (emits `<tool_call>` tokens for prompt starting
+    /// with token 50) and `ToolCallTestTokenizer` (maps IDs 100-102 to tool-call
+    /// text). A single request (prompt [50]) receives a `.toolCall` event with
+    /// the correct function name.
+    func testToolCallEmittedOnCorrectStream() async throws {
         try skipIfMetalUnavailable()
 
-        let model = IntegrationTestMockModel()
-        let tokenizer = TestTokenizer()
-        let config = ModelConfiguration(id: "test-model")
+        let model = ToolCallMockModel()
+        let tokenizer = ToolCallTestTokenizer()
+        let config = ModelConfiguration(id: "test-tool-model")
         let scheduler = InferenceScheduler()
 
-        // Two concurrent requests — tool call routing is about stream isolation
-        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
-        let params1 = GenerateParameters(maxTokens: 8, temperature: 0)
+        // Single request producing tool call tokens on the single path
+        let input = LMInput(tokens: MLXArray([Int32(50)]))
+        let params = GenerateParameters(maxTokens: 5, temperature: 0)
 
-        let stream1 = try await scheduler.submit(
-            input: input1,
-            parameters: params1,
+        let stream = try await scheduler.submit(
+            input: input,
+            parameters: params,
             model: model,
             cache: nil,
             tokenizer: tokenizer,
             configuration: config
         )
 
-        let input2 = LMInput(tokens: MLXArray([Int32(10), Int32(20)]))
-        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+        // Collect all Generation events
+        var toolCallNames = [String]()
+        var hasInfo = false
 
-        let stream2 = try await scheduler.submit(
-            input: input2,
-            parameters: params2,
-            model: model,
-            cache: nil,
-            tokenizer: tokenizer,
-            configuration: config
-        )
-
-        // Collect all Generation events per stream
-        var events1 = [String]()
-        var events2 = [String]()
-
-        await withTaskGroup(of: (Int, [String]).self) { group in
-            group.addTask {
-                var events = [String]()
-                for await gen in stream1 {
-                    switch gen {
-                    case .chunk(let text):
-                        events.append("chunk:\(text)")
-                    case .info:
-                        events.append("info")
-                    case .toolCall(let tc):
-                        events.append("tool:\(tc.function.name)")
-                    }
-                }
-                return (1, events)
-            }
-            group.addTask {
-                var events = [String]()
-                for await gen in stream2 {
-                    switch gen {
-                    case .chunk(let text):
-                        events.append("chunk:\(text)")
-                    case .info:
-                        events.append("info")
-                    case .toolCall(let tc):
-                        events.append("tool:\(tc.function.name)")
-                    }
-                }
-                return (2, events)
-            }
-            for await (id, events) in group {
-                if id == 1 { events1 = events } else { events2 = events }
+        for await gen in stream {
+            switch gen {
+            case .chunk:
+                break
+            case .info:
+                hasInfo = true
+            case .toolCall(let tc):
+                toolCallNames.append(tc.function.name)
             }
         }
 
-        // Both streams should have received their own events independently.
-        // With our deterministic mock model, there are no actual tool call tokens,
-        // but the routing mechanism is tested: no events leak between streams.
-        //
-        // The key assertion: events from stream1 and stream2 are collected
-        // independently and do not cross-contaminate.
-        let totalEvents = events1.count + events2.count
-        XCTAssertGreaterThan(
-            totalEvents, 0,
-            "Should receive events from at least one stream")
-
-        // Verify both streams received their info event (completion)
-        let stream1HasInfo = events1.contains("info")
-        let stream2HasInfo = events2.contains("info")
-        let anyHasInfo = stream1HasInfo || stream2HasInfo
+        // The stream should have received a .toolCall event with "get_weather"
         XCTAssertTrue(
-            anyHasInfo,
-            "At least one stream should receive completion info")
+            toolCallNames.contains("get_weather"),
+            "Stream should receive .toolCall(get_weather); "
+                + "got tool calls: \(toolCallNames)")
+
+        XCTAssertTrue(hasInfo, "Stream should receive completion info")
+    }
+
+    /// Verify that two independent scheduler streams have complete isolation:
+    /// tool call events arrive only on the producing stream, not on others.
+    /// This uses two sequential requests (no concurrent batch upgrade complexity)
+    /// to verify the routing mechanism.
+    func testToolCallStreamIsolationSequential() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = ToolCallMockModel()
+        let tokenizer = ToolCallTestTokenizer()
+        let config = ModelConfiguration(id: "test-tool-model")
+
+        // First request: produces tool calls
+        let scheduler1 = InferenceScheduler()
+        let input1 = LMInput(tokens: MLXArray([Int32(50)]))
+        let params1 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream1 = try await scheduler1.submit(
+            input: input1, parameters: params1, model: model,
+            cache: nil, tokenizer: tokenizer, configuration: config
+        )
+
+        var toolCalls1 = [String]()
+        for await gen in stream1 {
+            if case .toolCall(let tc) = gen {
+                toolCalls1.append(tc.function.name)
+            }
+        }
+
+        // Second request: produces plain text (no tool calls)
+        let scheduler2 = InferenceScheduler()
+        let input2 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler2.submit(
+            input: input2, parameters: params2, model: model,
+            cache: nil, tokenizer: tokenizer, configuration: config
+        )
+
+        var toolCalls2 = [String]()
+        for await gen in stream2 {
+            if case .toolCall(let tc) = gen {
+                toolCalls2.append(tc.function.name)
+            }
+        }
+
+        // Tool call should appear on stream 1 only
+        XCTAssertTrue(
+            toolCalls1.contains("get_weather"),
+            "Tool-call stream should receive .toolCall(get_weather); "
+                + "got: \(toolCalls1)")
+        XCTAssertTrue(
+            toolCalls2.isEmpty,
+            "Plain-text stream should NOT receive any tool calls; "
+                + "got: \(toolCalls2)")
     }
 
     /// Verify stream isolation at the BatchTokenIterator level: each UID's
-    /// tokens are unique to that UID.
+    /// tokens match the deterministic expected sequence.
     func testBatchTokenIteratorStreamIsolation() throws {
         try skipIfMetalUnavailable()
 
@@ -1161,14 +1454,21 @@ class BatchingIntegrationTests: XCTestCase {
         let tokens0 = tokensPerUID[uids[0]] ?? []
         let tokens1 = tokensPerUID[uids[1]] ?? []
 
-        // Both should produce 5 tokens
+        // Both should produce exactly 5 tokens
         XCTAssertEqual(tokens0.count, 5, "First request should produce 5 tokens")
         XCTAssertEqual(tokens1.count, 5, "Second request should produce 5 tokens")
 
-        // Token sequences should be different (different prompts)
-        XCTAssertNotEqual(
-            tokens0, tokens1,
-            "Different prompts should produce different token sequences (stream isolation)")
+        // Verify deterministic expected sequences (stream isolation):
+        // Prompt [1,2,3]: last=3 → 4,5,6,7,8
+        // Prompt [30,40,50]: last=50 → 51,52,53,54,55
+        let expected0 = [4, 5, 6, 7, 8]
+        let expected1 = [51, 52, 53, 54, 55]
+        XCTAssertEqual(
+            tokens0, expected0,
+            "Prompt [1,2,3] should produce \(expected0), got \(tokens0)")
+        XCTAssertEqual(
+            tokens1, expected1,
+            "Prompt [30,40,50] should produce \(expected1), got \(tokens1)")
     }
 
     // MARK: - Additional Cross-Area Tests
@@ -1219,13 +1519,18 @@ class BatchingIntegrationTests: XCTestCase {
             }
         }
 
+        // Verify deterministic expected output:
+        // Prompt [5,10,15]: last=15 → 16,17,18,19,20
+        let expectedOutput = [16, 17, 18, 19, 20]
         XCTAssertEqual(
-            singleTokens.count, batchTokens.count,
-            "Single and batch should produce same token count")
+            singleTokens, expectedOutput,
+            "Single path should produce \(expectedOutput), got \(singleTokens)")
+        XCTAssertEqual(
+            batchTokens, expectedOutput,
+            "Batch path should produce \(expectedOutput), got \(batchTokens)")
         XCTAssertEqual(
             singleTokens, batchTokens,
-            "Batch output must match single-request output with ArgMax. "
-                + "Single: \(singleTokens), Batch: \(batchTokens)")
+            "Batch output must match single-request output with ArgMax")
     }
 
     /// ModelContainer with scheduler correctly routes through InferenceScheduler.
