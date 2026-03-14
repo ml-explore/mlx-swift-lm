@@ -2,8 +2,9 @@
 
 import Foundation
 import MLX
-@testable import MLXLMCommon
 import XCTest
+
+@testable import MLXLMCommon
 
 // MARK: - BatchKVCacheTests
 

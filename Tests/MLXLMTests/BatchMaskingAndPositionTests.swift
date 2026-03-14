@@ -3,8 +3,9 @@
 import Foundation
 import MLX
 import MLXNN
-@testable import MLXLMCommon
 import XCTest
+
+@testable import MLXLMCommon
 
 // MARK: - BatchMaskingAndPositionTests
 

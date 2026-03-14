@@ -136,7 +136,9 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
         }
         set {
             guard newValue.count == 4 else {
-                fatalError("BatchKVCache state must have exactly 4 arrays (keys, values, offset, leftPadding)")
+                fatalError(
+                    "BatchKVCache state must have exactly 4 arrays (keys, values, offset, leftPadding)"
+                )
             }
             self.keys = newValue[0]
             self.values = newValue[1]
