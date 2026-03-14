@@ -196,7 +196,7 @@ public final class ModelContainer: Sendable {
             // Read model, tokenizer, and configuration from the context.
             // Uses SendableBox to safely transfer non-Sendable types across
             // isolation boundaries (matching existing patterns in this codebase).
-            let (model, tokenizer, configuration) = await context.read { context in
+            let (modelBox, tokenizerBox, configuration) = await context.read { context in
                 (
                     SendableBox(context.model as AnyObject),
                     SendableBox(context.tokenizer as AnyObject),
@@ -204,8 +204,11 @@ public final class ModelContainer: Sendable {
                 )
             }
 
-            let resolvedModel = model.consume() as! any LanguageModel
-            let resolvedTokenizer = tokenizer.consume() as! Tokenizer
+            // Use nonisolated(unsafe) to safely transfer the model across the actor
+            // boundary. The value is consumed by the scheduler and never accessed again
+            // from this context — the SendableBox ensures single-ownership semantics.
+            nonisolated(unsafe) let resolvedModel = modelBox.consume() as! any LanguageModel
+            let resolvedTokenizer = tokenizerBox.consume() as! Tokenizer
 
             return try await scheduler.submit(
                 input: lmInput,

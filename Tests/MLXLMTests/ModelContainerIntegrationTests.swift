@@ -119,7 +119,7 @@ class ModelContainerIntegrationTests: XCTestCase {
         let container = makeModelContainer()
 
         // Scheduler should be nil by default
-        let schedulerIsNil = await container.scheduler == nil
+        let schedulerIsNil = container.scheduler == nil
         XCTAssertTrue(schedulerIsNil, "Default scheduler should be nil")
 
         let input = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
@@ -177,8 +177,6 @@ class ModelContainerIntegrationTests: XCTestCase {
         let scheduler = InferenceScheduler()
         let container = makeModelContainer(scheduler: scheduler)
 
-        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
-        let input2 = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
         let params = GenerateParameters(maxTokens: 5, temperature: 0)
 
         // Submit two requests concurrently
@@ -187,9 +185,10 @@ class ModelContainerIntegrationTests: XCTestCase {
 
         await withTaskGroup(of: (Int, [String]).self) { group in
             group.addTask {
+                let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
                 var chunks = [String]()
                 do {
-                    let stream = try await container.generate(input: input1, parameters: params)
+                    let stream = try await container.generate(input: input, parameters: params)
                     for await gen in stream {
                         if let chunk = gen.chunk {
                             chunks.append(chunk)
@@ -202,9 +201,10 @@ class ModelContainerIntegrationTests: XCTestCase {
             group.addTask {
                 // Small delay to ensure second request arrives while first is active
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                let input = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
                 var chunks = [String]()
                 do {
-                    let stream = try await container.generate(input: input2, parameters: params)
+                    let stream = try await container.generate(input: input, parameters: params)
                     for await gen in stream {
                         if let chunk = gen.chunk {
                             chunks.append(chunk)
@@ -241,8 +241,6 @@ class ModelContainerIntegrationTests: XCTestCase {
         let scheduler = InferenceScheduler()
         let container = makeModelContainer(scheduler: scheduler)
 
-        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
-        let input2 = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
         let params = GenerateParameters(maxTokens: 50, temperature: 0)
 
         var request1Cancelled = false
@@ -251,7 +249,8 @@ class ModelContainerIntegrationTests: XCTestCase {
         await withTaskGroup(of: (Int, Bool).self) { group in
             group.addTask {
                 do {
-                    let stream = try await container.generate(input: input1, parameters: params)
+                    let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+                    let stream = try await container.generate(input: input, parameters: params)
                     var count = 0
                     for await _ in stream {
                         count += 1
@@ -270,7 +269,8 @@ class ModelContainerIntegrationTests: XCTestCase {
                 // Small delay to start second request
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                 do {
-                    let stream = try await container.generate(input: input2, parameters: params)
+                    let input = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
+                    let stream = try await container.generate(input: input, parameters: params)
                     for await _ in stream {
                         // Consume fully
                     }
@@ -302,21 +302,16 @@ class ModelContainerIntegrationTests: XCTestCase {
         let scheduler = InferenceScheduler()
         let container = makeModelContainer(scheduler: scheduler)
 
-        // Request 1: short (3 tokens)
-        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
-        let params1 = GenerateParameters(maxTokens: 3, temperature: 0)
-
-        // Request 2: longer (10 tokens)
-        let input2 = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
-        let params2 = GenerateParameters(maxTokens: 10, temperature: 0)
-
         var completed1 = false
         var completed2 = false
 
         await withTaskGroup(of: (Int, Bool).self) { group in
             group.addTask {
                 do {
-                    let stream = try await container.generate(input: input1, parameters: params1)
+                    // Request 1: short (3 tokens)
+                    let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+                    let params = GenerateParameters(maxTokens: 3, temperature: 0)
+                    let stream = try await container.generate(input: input, parameters: params)
                     for await _ in stream {}
                     return (1, true)
                 } catch {
@@ -327,7 +322,10 @@ class ModelContainerIntegrationTests: XCTestCase {
             group.addTask {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms delay
                 do {
-                    let stream = try await container.generate(input: input2, parameters: params2)
+                    // Request 2: longer (10 tokens)
+                    let input = LMInput(tokens: MLXArray([Int32(5), Int32(6)]))
+                    let params = GenerateParameters(maxTokens: 10, temperature: 0)
+                    let stream = try await container.generate(input: input, parameters: params)
                     for await _ in stream {}
                     return (2, true)
                 } catch {
@@ -394,17 +392,15 @@ class ModelContainerIntegrationTests: XCTestCase {
         let scheduler = InferenceScheduler()
         let container = makeModelContainer(scheduler: scheduler)
 
-        // Create two ChatSessions sharing the same ModelContainer
-        let session1 = ChatSession(container)
-        let session2 = ChatSession(container)
-
         var result1: String?
         var result2: String?
 
         await withTaskGroup(of: (Int, String?).self) { group in
             group.addTask {
+                // Create ChatSession inside task to avoid sending non-Sendable across isolation
+                let session = ChatSession(container)
                 do {
-                    let response = try await session1.respond(to: "Hello world")
+                    let response = try await session.respond(to: "Hello world")
                     return (1, response)
                 } catch {
                     return (1, nil)
@@ -414,8 +410,10 @@ class ModelContainerIntegrationTests: XCTestCase {
             group.addTask {
                 // Small delay so second request arrives while first is generating
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                // Create ChatSession inside task to avoid sending non-Sendable across isolation
+                let session = ChatSession(container)
                 do {
-                    let response = try await session2.respond(to: "Goodbye world")
+                    let response = try await session.respond(to: "Goodbye world")
                     return (2, response)
                 } catch {
                     return (2, nil)
@@ -505,7 +503,7 @@ class ModelContainerIntegrationTests: XCTestCase {
         let container = makeModelContainer()
 
         // Default should be nil
-        var schedulerValue = await container.scheduler
+        var schedulerValue = container.scheduler
         XCTAssertNil(schedulerValue, "Default scheduler should be nil")
 
         // Set a scheduler
@@ -513,7 +511,7 @@ class ModelContainerIntegrationTests: XCTestCase {
         container.scheduler = scheduler
 
         // Should now be non-nil
-        schedulerValue = await container.scheduler
+        schedulerValue = container.scheduler
         XCTAssertNotNil(schedulerValue, "Scheduler should be set")
     }
 }
