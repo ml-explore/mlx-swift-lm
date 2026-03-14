@@ -1,0 +1,40 @@
+{
+  "featureId": "prompt-cache-batch-integration",
+  "reviewedAt": "2026-03-14T10:04:42Z",
+  "commitId": "b37a87600f5ad751f86731f890e77a886e326bd1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds cached-prefill plumbing to BatchTokenIterator and a new integration test suite, but the cached path is not semantically correct. Mixed cache-hit depths are implemented by inflating BatchKVCache.leftPadding without shifting the stored KV tensors or offsets, which causes real cached prefix tokens to be masked/extracted as padding. Exact cache hits are also wrong because the implementation synthesizes the last prompt token as a suffix and replays it even though that token is already present in the cache.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 602,
+        "severity": "blocking",
+        "description": "`processCachedPrompts()` handles mixed cache-hit depths by adding `suffixPadding` directly to `batchCache.leftPadding`, but it never shifts the already-merged keys/values or updates `batchOffsets`. `BatchKVCache.merge()` has already placed the shorter cached prefix at its original padded columns, so increasing `leftPadding` alone makes the mask and later `extract(idx:)` treat some real cached tokens as padding. In the exact scenario this feature is supposed to support (different cached-prefix depths in one batch), shorter prefixes lose attention to part of their cached context and round-tripped extracted caches drop real prefix tokens." 
+      },
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 582,
+        "severity": "blocking",
+        "description": "When the cached KV state already covers the full prompt, the code fabricates a one-token suffix from `prompt.tokens.last` and then calls `step()` with that token while the cache already contains it. That duplicates the last prompt token in the KV history and computes the first generated token for `prompt + lastToken` instead of for `prompt`, so exact cache hits can change generation output instead of just skipping prefill work." 
+      },
+      {
+        "file": "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift",
+        "line": 40,
+        "severity": "non_blocking",
+        "description": "The new test model never consults the `cache` argument or positional state; it predicts purely from the current input token. As a result, the suite only proves reduced call/token counts, not semantic equivalence with uncached generation. That is why the duplicated-last-token bug and the mixed-depth mask/data-layout bug above both slip through the added tests." 
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The mission library documents the left-padding strategy at a high level, but it does not capture the stronger invariant that changing `BatchKVCache.leftPadding` requires shifting the stored KV tensors (and corresponding offsets) to keep layout, masking, and extraction consistent. The worker appears to have improvised that rule during implementation and landed on a leftPadding-only mutation that breaks mixed cached-prefill.",
+      "evidence": ".factory/library/architecture.md:46-47 describes left-padding conceptually; Libraries/MLXLMCommon/Batching/BatchKVCache.swift:281-289 shows the actual invariant in production code by padding tensors whenever left padding changes; Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift:600-602 mutates `leftPadding` alone."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature metadata, handoff, transcript skeleton, skill file, shared-state files, and commit `b37a876`. The cached-prefill path is incorrect for mixed cache-depth batches and exact cache hits, and the new tests do not exercise real cache semantics strongly enough to catch those regressions."
+}

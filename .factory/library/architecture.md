@@ -46,6 +46,9 @@ A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, c
 ### Left-Padding Strategy
 Variable-length sequences are left-padded with zeros. `BatchKVCache` tracks per-sequence `leftPadding` and adjusts attention masks accordingly. This matches the Python mlx-lm approach.
 
+### BatchKVCache Left-Padding Invariant
+`BatchKVCache.leftPadding` is coupled to the physical tensor layout and batch offsets. If a workflow changes left padding after caches have already been merged or updated, it must also shift the stored key/value tensors and keep per-sequence offsets aligned. Mutating `leftPadding` alone makes masking and `extract(idx:)` treat real cached tokens as padding.
+
 ### Mask Before Cache Update
 Attention-mask creation uses the cache's pre-update position. `makeAttentionMask` / `createAttentionMask` call `cache.makeMask(...)` before the layer appends the current keys and values, so batch cache masking must use the current `_idx` / offset rather than subtracting `n` as if the cache had already been updated.
 
