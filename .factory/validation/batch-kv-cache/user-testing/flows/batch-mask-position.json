@@ -1,0 +1,102 @@
+{
+  "surface": "xcodebuild-test",
+  "group": "batch-mask-position",
+  "status": "fail",
+  "assertions": [
+    {
+      "id": "VAL-CACHE-011",
+      "status": "fail",
+      "reason": "Mapped to testBatchKVCacheMakeMaskWithLeftPadding; xcode-validation.log records `XCTAssertEqual failed: (\"10\") is not equal to (\"5\")` at BatchMaskingAndPositionTests.swift:117.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:96 testBatchKVCacheMakeMaskWithLeftPadding",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17446-17448"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-012",
+      "status": "pass",
+      "reason": "Mapped to testCreateCausalMaskWithLeftPadding; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:28 testCreateCausalMaskWithLeftPadding",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17455-17456"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-013",
+      "status": "pass",
+      "reason": "Mapped to testCreateCausalMaskBackwardCompatible; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:68 testCreateCausalMaskBackwardCompatible",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17453-17454"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-015",
+      "status": "pass",
+      "reason": "Mapped to testBatchPositionedKVCacheOffsets; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:202 testBatchPositionedKVCacheOffsets",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17449-17450"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-020",
+      "status": "fail",
+      "reason": "Mapped to testBatchKVCacheMakeMaskN1MasksPadding; xcode-validation.log records `XCTAssertEqual failed: (\"6\") is not equal to (\"5\")` at BatchMaskingAndPositionTests.swift:175.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:150 testBatchKVCacheMakeMaskN1MasksPadding",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17443-17445"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-022",
+      "status": "pass",
+      "reason": "Mapped to testCacheListBatchIncompatible and testMambaCacheBatchIncompatible; xcode-validation.log records both tests as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:229 testCacheListBatchIncompatible",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17451-17452",
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:237 testMambaCacheBatchIncompatible",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17463-17464"
+      ]
+    },
+    {
+      "id": "VAL-MODEL-002",
+      "status": "pass",
+      "reason": "Mapped to testApplyRotaryPositionWithKVCacheSimple; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:286 testApplyRotaryPositionWithKVCacheSimple",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17437-17438"
+      ]
+    },
+    {
+      "id": "VAL-MODEL-003",
+      "status": "pass",
+      "reason": "Mapped to testApplyRotaryPositionWithBatchPositionedKVCache; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:313 testApplyRotaryPositionWithBatchPositionedKVCache",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17435-17436"
+      ]
+    },
+    {
+      "id": "VAL-MODEL-004",
+      "status": "pass",
+      "reason": "Mapped to testApplyRotaryPositionWithNilCache; xcode-validation.log records the test as passed.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchMaskingAndPositionTests.swift:340 testApplyRotaryPositionWithNilCache",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17439-17440"
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-xcode-validation \"-only-testing:MLXLMTests/BatchKVCacheTests\" \"-only-testing:MLXLMTests/BatchMaskingAndPositionTests\" \"-only-testing:MLXLMTests/BatchRotatingKVCacheTests\"",
+      "exitCode": 65,
+      "observation": "xcode-validation.log shows `Test Suite 'Selected tests' failed ... Executed 88 tests, with 12 failures (0 unexpected)` and ends with `** TEST FAILED **`."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild test"
+  ],
+  "frictions": [],
+  "blockers": []
+}

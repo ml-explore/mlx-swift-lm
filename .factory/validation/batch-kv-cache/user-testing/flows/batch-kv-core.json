@@ -1,0 +1,157 @@
+{
+  "surface": "xcodebuild-test",
+  "group": "batch-kv-core",
+  "status": "pass",
+  "assertions": [
+    {
+      "id": "VAL-CACHE-001",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-001` section maps this assertion to `testInitWithLeftPadding()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:38-64 maps VAL-CACHE-001 to `testInitWithLeftPadding()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17405 `Test Case '-[MLXLMTests.BatchKVCacheTests testInitWithLeftPadding]' passed (0.002 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-002",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-002` section maps this assertion to `testFirstUpdate()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:65-94 maps VAL-CACHE-002 to `testFirstUpdate()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17401 `Test Case '-[MLXLMTests.BatchKVCacheTests testFirstUpdate]' passed (0.003 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-003",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-003` section maps this assertion to `testFilterRetainsIndices()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:95-118 maps VAL-CACHE-003 to `testFilterRetainsIndices()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17393 `Test Case '-[MLXLMTests.BatchKVCacheTests testFilterRetainsIndices]' passed (0.002 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-004",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-004` section maps this assertion to `testFilterShiftsPadding()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:119-142 maps VAL-CACHE-004 to `testFilterShiftsPadding()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17395 `Test Case '-[MLXLMTests.BatchKVCacheTests testFilterShiftsPadding]' passed (0.002 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-005",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-005` section maps this assertion to `testExtendMergesBatch()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:143-169 maps VAL-CACHE-005 to `testExtendMergesBatch()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17385 `Test Case '-[MLXLMTests.BatchKVCacheTests testExtendMergesBatch]' passed (0.001 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-006",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-006` section maps this assertion to `testExtendRightJustifies()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:170-200 maps VAL-CACHE-006 to `testExtendRightJustifies()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17387 `Test Case '-[MLXLMTests.BatchKVCacheTests testExtendRightJustifies]' passed (0.004 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-007",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-007` section maps this assertion to `testExtractReturnsKVCacheSimple()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:201-223 maps VAL-CACHE-007 to `testExtractReturnsKVCacheSimple()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17389 `Test Case '-[MLXLMTests.BatchKVCacheTests testExtractReturnsKVCacheSimple]' passed (0.001 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-008",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-008` section maps this assertion to `testExtractStripsPadding()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:224-247 maps VAL-CACHE-008 to `testExtractStripsPadding()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17391 `Test Case '-[MLXLMTests.BatchKVCacheTests testExtractStripsPadding]' passed (0.001 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-009",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-009` section maps this assertion to `testMergeFromIndividuals()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:248-274 maps VAL-CACHE-009 to `testMergeFromIndividuals()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17415 `Test Case '-[MLXLMTests.BatchKVCacheTests testMergeFromIndividuals]' passed (0.001 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-010",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-010` section maps this assertion to `testMergeLeftPads()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:275-303 maps VAL-CACHE-010 to `testMergeLeftPads()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17417 `Test Case '-[MLXLMTests.BatchKVCacheTests testMergeLeftPads]' passed (0.002 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-016",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-016` section maps this assertion to `testFromSingle()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:303-325 maps VAL-CACHE-016 to `testFromSingle()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17403 `Test Case '-[MLXLMTests.BatchKVCacheTests testFromSingle]' passed (0.002 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-017",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-017` section maps this assertion to `testBatch1Equivalence()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:326-354 maps VAL-CACHE-017 to `testBatch1Equivalence()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17381 `Test Case '-[MLXLMTests.BatchKVCacheTests testBatch1Equivalence]' passed (0.049 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-018",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-018` section maps this assertion to `testMergeExtractRoundTrip()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:355-400 maps VAL-CACHE-018 to `testMergeExtractRoundTrip()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17413 `Test Case '-[MLXLMTests.BatchKVCacheTests testMergeExtractRoundTrip]' passed (0.004 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-019",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-019` section maps this assertion to `testSuccessiveFilterExtendCycles()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:401-457 maps VAL-CACHE-019 to `testSuccessiveFilterExtendCycles()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17427 `Test Case '-[MLXLMTests.BatchKVCacheTests testSuccessiveFilterExtendCycles]' passed (0.004 seconds).`"
+      ]
+    },
+    {
+      "id": "VAL-CACHE-021",
+      "status": "pass",
+      "reason": "The `// MARK: - VAL-CACHE-021` section maps this assertion to `testFilterToEmptyBatch()`, and that test passed in the xcodebuild log.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchKVCacheTests.swift:458-478 maps VAL-CACHE-021 to `testFilterToEmptyBatch()`.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17399 `Test Case '-[MLXLMTests.BatchKVCacheTests testFilterToEmptyBatch]' passed (0.001 seconds).`"
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-xcode-validation \"-only-testing:MLXLMTests/BatchKVCacheTests\" \"-only-testing:MLXLMTests/BatchMaskingAndPositionTests\" \"-only-testing:MLXLMTests/BatchRotatingKVCacheTests\"",
+      "exitCode": 65,
+      "observation": "The selected run included BatchKVCacheTests, BatchMaskingAndPositionTests, and BatchRotatingKVCacheTests. `BatchKVCacheTests` passed with 26 tests and 0 failures (`xcode-validation.log:17432-17433`), while `BatchMaskingAndPositionTests` failed with 2 failures (`xcode-validation.log:17473-17474`) and `BatchRotatingKVCacheTests` failed with 10 failures (`xcode-validation.log:17574-17575`), so the overall session reported `** TEST FAILED **` (`xcode-validation.log:17587`)."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild test"
+  ],
+  "frictions": [
+    "The log contains `--- xcodebuild: WARNING: Using the first of multiple matching destinations:` at `xcode-validation.log:214`.",
+    "The selected xcodebuild run mixed passing BatchKVCacheTests with failing BatchMaskingAndPositionTests and BatchRotatingKVCacheTests, so assigned assertion status had to be determined from per-test log lines instead of the overall exit code."
+  ],
+  "blockers": []
+}

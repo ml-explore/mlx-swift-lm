@@ -1,0 +1,33 @@
+{
+  "surface": "xcodebuild-test",
+  "group": "batch-rotating",
+  "status": "pass",
+  "assertions": [
+    {
+      "id": "VAL-CACHE-014",
+      "status": "pass",
+      "reason": "Mapped `VAL-CACHE-014` to `BatchRotatingKVCacheTests.testMergeFromRotatingKVCacheInstances`, which is annotated under the assertion marker in `Tests/MLXLMTests/BatchRotatingKVCacheTests.swift` and passed in the xcodebuild log even though the overall test invocation failed on unrelated cases.",
+      "evidence": [
+        "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests/MLXLMTests/BatchRotatingKVCacheTests.swift:111-135 (`VAL-CACHE-014` / `testMergeFromRotatingKVCacheInstances` verifies `BatchRotatingKVCache.merge([cacheA, cacheB, cacheC])`, `batchSize == 3`, and `maxSize == 16`)",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17538-17539 (`testMergeFromRotatingKVCacheInstances` started and passed)",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/batch-kv-cache/xcode-validation.log:17587 (`** TEST FAILED **` belongs to unrelated failures in the same invocation, not this mapped assertion test)"
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-xcode-validation \"-only-testing:MLXLMTests/BatchKVCacheTests\" \"-only-testing:MLXLMTests/BatchMaskingAndPositionTests\" \"-only-testing:MLXLMTests/BatchRotatingKVCacheTests\"",
+      "exitCode": 65,
+      "observation": "The log ends with `** TEST FAILED **`, so the xcodebuild invocation failed overall, but the mapped assertion test `testMergeFromRotatingKVCacheInstances` passed before unrelated failures in `BatchMaskingAndPositionTests`, `testExtractRotatedKeepWindowWithNegativePadding`, and `testKeepOverflowMergeExtractRoundTrip`."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild test"
+  ],
+  "frictions": [
+    "The evidence comes from a shared xcodebuild run across three test classes, so suite-level failure does not reflect the status of `VAL-CACHE-014`; the assertion had to be evaluated from its specific test case outcome.",
+    "`BatchRotatingKVCacheTests` contains unrelated failing tests in the same run (`testExtractRotatedKeepWindowWithNegativePadding` and `testKeepOverflowMergeExtractRoundTrip`), which makes class-level status insufficient for assertion-level reporting.",
+    "The same xcodebuild invocation also failed two unrelated `BatchMaskingAndPositionTests` cases before `BatchRotatingKVCacheTests` started."
+  ],
+  "blockers": []
+}
