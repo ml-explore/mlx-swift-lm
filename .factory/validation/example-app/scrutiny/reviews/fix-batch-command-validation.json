@@ -1,0 +1,21 @@
+{
+  "featureId": "fix-batch-command-validation",
+  "reviewedAt": "2026-03-14T13:00:23Z",
+  "commitId": "072c3708db84c25f859b13c64dc77d75d2e407a4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix commit cleanly closes the remaining CLI validation hole in `BatchCommand.swift`: `validate()` now rejects non-positive `--batch-size` values before the batching loop can hang or slice invalid ranges, and the default-model path now emits an explicit fallback message before loading. The current CLI still leaves `--model` optional, but that is no longer a defect in this re-review because the follow-up feature explicitly superseded the original `--model required` contract and aligned the command with the existing chat/eval default-model behavior.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "Example-app CLI validation still depends on an ad-hoc `xcodebuild` command that is not captured in the shared command catalog, even though both the original feature and this fix relied on the same llm-tool build step.",
+      "evidence": "Both handoffs `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T12-18-01-272Z__example-batch-subcommand__9c99ce77-cda1-4eed-81a4-ecf440fc27f6.json` and `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T12-37-40-199Z__fix-batch-command-validation__1d99fd56-36ae-47a1-a7a0-bb20cdeaba54.json` record `xcodebuild build -scheme llm-tool -destination 'platform=macOS,arch=arm64' ONLY_ACTIVE_ARCH=YES ARCHS=arm64`, while `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/services.yaml:2-9` lists repo build/test commands but no reusable example-app / llm-tool build command."
+    }
+  ],
+  "addressesFailureFrom": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/validation/example-app/scrutiny/reviews/example-batch-subcommand.json",
+  "summary": "Pass. I reviewed the fix transcript skeleton, the original failed review, both handoffs, and the diffs for commits `2bcdcf78300056da7a7da8ff6716c94c8cb10020` and `072c3708db84c25f859b13c64dc77d75d2e407a4`. `BatchCommand.swift` now rejects `--batch-size <= 0`, eliminating the prior hang/crash path, and the default-model behavior is intentionally retained and now clearly surfaced, which matches the updated mission requirement rather than the superseded original `--model required` wording."
+}

@@ -40,6 +40,9 @@ Single requests use the existing `TokenIterator` path. Only when a second concur
 3. The scheduler uses the live cache/y/tokenCount to build the `ActiveBatch`.
 4. The first request's `onTermination` handler is rebound to remove its UID from `BatchTokenIterator` (not cancel the defunct single task).
 
+### Tool-Call Upgrade Limitation
+`ToolCallProcessor` state is not currently migrated when the first request upgrades from the single path into batched execution. Mid-tool-call upgrades can therefore lose parser state, so batched tool-call-routing validation should not assume upgrade-boundary continuity until that processor state is explicitly carried across the handoff.
+
 ### BatchPositionedKVCache Protocol
 A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, cache: cache)` instead of `rope(x, offset: cache.offset)`. This keeps per-model changes to ~4 lines while supporting both single (Int offset) and batch (MLXArray offset) modes.
 
