@@ -44,6 +44,7 @@ public class ChatSessionTests: XCTestCase {
     private let targetLength = 1
 
     func testChatSessionSync() async throws {
+        try skipIfMetalUnavailable()
         let model = model()
         let session = ChatSession(model, generateParameters: generationParameters)
 
@@ -54,6 +55,7 @@ public class ChatSessionTests: XCTestCase {
     }
 
     func testChatSessionAsync() async throws {
+        try skipIfMetalUnavailable()
         let model = model()
         let session = ChatSession(model, generateParameters: generationParameters)
 
@@ -71,6 +73,7 @@ public class ChatSessionTests: XCTestCase {
     }
 
     func testChatSessionAsyncInterrupt() async throws {
+        try skipIfMetalUnavailable()
         // interrupt the streamResponse and continue with another request
         let model = model()
         let session = ChatSession(model, generateParameters: generationParameters)
@@ -101,6 +104,7 @@ public class ChatSessionTests: XCTestCase {
     }
 
     func testChatSessionWithTools() async throws {
+        try skipIfMetalUnavailable()
         let model = model()
         let tools: [ToolSpec] = [
             [
@@ -134,6 +138,7 @@ public class ChatSessionTests: XCTestCase {
     }
 
     func testChatSessionWithToolsStreaming() async throws {
+        try skipIfMetalUnavailable()
         let model = model()
         let tools: [ToolSpec] = [
             [
@@ -290,6 +295,7 @@ public class ChatSessionTests: XCTestCase {
 
     @MainActor
     func testViewModel() async throws {
+        try skipIfMetalUnavailable()
         let model = ChatModel(model: model())
 
         // start producing a response but interrupt it

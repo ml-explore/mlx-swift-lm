@@ -36,7 +36,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-001: Init with left-padding
 
-    func testInitWithLeftPadding() {
+    func testInitWithLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 3, 0])
 
         // leftPadding stored correctly
@@ -60,7 +62,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-002: First update stores keys/values and advances offset
 
-    func testFirstUpdate() {
+    func testFirstUpdate() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 3, 0])
         let B = 3
         let H = 4
@@ -89,7 +93,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-003: Filter retains only selected batch indices
 
-    func testFilterRetainsIndices() {
+    func testFilterRetainsIndices() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 3, 0])
         let B = 3
         let H = 2
@@ -111,7 +117,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-004: Filter shifts left to reduce padding
 
-    func testFilterShiftsPadding() {
+    func testFilterShiftsPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [2, 4, 0])
         let B = 3
         let H = 2
@@ -133,7 +141,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-005: Extend merges two caches along batch dimension
 
-    func testExtendMergesBatch() {
+    func testExtendMergesBatch() throws {
+        try skipIfMetalUnavailable()
+
         let cacheA = BatchKVCache(leftPadding: [0, 0])
         let cacheB = BatchKVCache(leftPadding: [0])
 
@@ -158,7 +168,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-006: Extend right-justifies different lengths
 
-    func testExtendRightJustifies() {
+    func testExtendRightJustifies() throws {
+        try skipIfMetalUnavailable()
+
         let cacheA = BatchKVCache(leftPadding: [0])
         let cacheB = BatchKVCache(leftPadding: [0])
 
@@ -187,7 +199,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-007: Extract returns single-sequence KVCacheSimple
 
-    func testExtractReturnsKVCacheSimple() {
+    func testExtractReturnsKVCacheSimple() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [2, 0])
         let H = 2
         let S = 4
@@ -198,8 +212,8 @@ final class BatchKVCacheTests: XCTestCase {
 
         let extracted = cache.extract(idx: 1)
 
-        // Verify type
-        XCTAssertTrue(extracted is KVCacheSimple)
+        // extract(idx:) returns KVCacheSimple — verify it has the expected properties
+        XCTAssertEqual(String(describing: type(of: extracted)), "KVCacheSimple")
 
         // Batch dimension is 1
         XCTAssertEqual(extracted.keys!.dim(0), 1)
@@ -208,7 +222,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-008: Extract strips left-padding
 
-    func testExtractStripsPadding() {
+    func testExtractStripsPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [2, 0])
         let H = 2
         let S = 5
@@ -230,7 +246,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-009: Merge creates BatchKVCache from individual caches
 
-    func testMergeFromIndividuals() {
+    func testMergeFromIndividuals() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -255,7 +273,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-010: Merge left-pads shorter sequences
 
-    func testMergeLeftPads() {
+    func testMergeLeftPads() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -281,7 +301,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-016: fromSingle creates batch-1 cache
 
-    func testFromSingle() {
+    func testFromSingle() throws {
+        try skipIfMetalUnavailable()
+
         let simple = KVCacheSimple()
         let H = 2
         let D = 4
@@ -301,7 +323,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-017: Batch-1 equivalence
 
-    func testBatch1Equivalence() {
+    func testBatch1Equivalence() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
         let S = 5
@@ -328,7 +352,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-018: Merge-extract round-trip preserves data
 
-    func testMergeExtractRoundTrip() {
+    func testMergeExtractRoundTrip() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -372,7 +398,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-019: Successive filter-extend cycles
 
-    func testSuccessiveFilterExtendCycles() {
+    func testSuccessiveFilterExtendCycles() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -427,7 +455,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-021: Filter to empty batch
 
-    func testFilterToEmptyBatch() {
+    func testFilterToEmptyBatch() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 2, 0])
         let H = 2
         let S = 3
@@ -447,7 +477,9 @@ final class BatchKVCacheTests: XCTestCase {
 
     // MARK: - Additional tests
 
-    func testToSingle() {
+    func testToSingle() throws {
+        try skipIfMetalUnavailable()
+
         let simple = KVCacheSimple()
         let H = 2
         let D = 4
@@ -464,7 +496,9 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(backToSingle.keys!.dim(2), S)
     }
 
-    func testMultipleUpdates() {
+    func testMultipleUpdates() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [0, 0])
         let H = 2
         let D = 4
@@ -480,7 +514,9 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(cache._idx, 4)
     }
 
-    func testFilterSingleIndex() {
+    func testFilterSingleIndex() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [0, 2, 1])
         let H = 2
         let S = 4
@@ -495,7 +531,9 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(cache.leftPadding[0].item(Int32.self), 0)
     }
 
-    func testExtendEmptyWithNonEmpty() {
+    func testExtendEmptyWithNonEmpty() throws {
+        try skipIfMetalUnavailable()
+
         let emptyCache = BatchKVCache(leftPadding: [])
         let filledCache = BatchKVCache(leftPadding: [0])
 
@@ -511,7 +549,9 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(emptyCache.batchSize, 1)
     }
 
-    func testStateSerialization() {
+    func testStateSerialization() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 0])
         let H = 2
         let S = 3
@@ -532,12 +572,16 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertNotNil(newCache.values)
     }
 
-    func testIsTrimmable() {
+    func testIsTrimmable() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [0])
         XCTAssertTrue(cache.isTrimmable)
     }
 
-    func testTrim() {
+    func testTrim() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [0])
         let (k, v) = makeKV(batchSize: 1, heads: 2, seqLen: 5, headDim: 4)
         _ = cache.update(keys: k, values: v)

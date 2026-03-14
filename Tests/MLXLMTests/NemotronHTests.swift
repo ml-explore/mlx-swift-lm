@@ -9,6 +9,10 @@ import XCTest
 
 public class NemotronHTests: XCTestCase {
 
+    override public func setUpWithError() throws {
+        try skipIfMetalUnavailable()
+    }
+
     /// Create a minimal test configuration for NemotronH
     /// Uses small dimensions to keep tests fast
     private func makeTestConfig(pattern: String = "M*M-E") -> NemotronHConfiguration {

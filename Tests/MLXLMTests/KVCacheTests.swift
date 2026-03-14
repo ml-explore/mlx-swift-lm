@@ -13,6 +13,7 @@ private let cacheCreators: [() -> any KVCache] = [
 ]
 
 @Test(
+    .enabled(if: MLXMetalGuard.isAvailable, "Requires MLX Metal library (unavailable in SPM debug builds)"),
     .serialized,
     arguments: cacheCreators)
 func testCacheSerialization(creator: (() -> any KVCache)) async throws {

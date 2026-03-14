@@ -24,6 +24,7 @@ public class MediaProcesingTests: XCTestCase {
     }
 
     func testVideoFileAsSimpleProcessedSequence() async throws {
+        try skipIfMetalUnavailable()
         guard let fileURL = Bundle.module.url(forResource: "1080p_30", withExtension: "mov") else {
             XCTFail("Missing file: 1080p_30.mov")
             return
@@ -38,6 +39,7 @@ public class MediaProcesingTests: XCTestCase {
     }
 
     func testVideoFileValidationThisShouldFail() async throws {
+        try skipIfMetalUnavailable()
         guard let fileURL = Bundle.module.url(forResource: "audio_only", withExtension: "mov")
         else {
             XCTFail("Missing file: 1080p_30.mov")
@@ -54,6 +56,7 @@ public class MediaProcesingTests: XCTestCase {
     }
 
     func testVideoFileAsProcessedSequence() async throws {
+        try skipIfMetalUnavailable()
         // Bogus preprocessing values
         func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
             image
@@ -82,6 +85,7 @@ public class MediaProcesingTests: XCTestCase {
     }
 
     func testVideoFramesAsProcessedSequence() async throws {
+        try skipIfMetalUnavailable()
         // a function to make a set of frames from images
         func imageWithColor(_ color: CIColor) -> CIImage {
             let inputFilter = CIFilter(name: "CIConstantColorGenerator")!

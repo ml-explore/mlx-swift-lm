@@ -30,7 +30,8 @@ public class SampleTests: XCTestCase {
         }
     }
 
-    func testTopKSamplerKeepsOnlyTopToken() {
+    func testTopKSamplerKeepsOnlyTopToken() throws {
+        try skipIfMetalUnavailable()
         let sampler = TopPSampler(temperature: 1.0, topK: 1)
         let logits = MLXArray([0.1 as Float, 2.0 as Float, 1.0 as Float])[.newAxis, .ellipsis]
 
@@ -40,7 +41,8 @@ public class SampleTests: XCTestCase {
         }
     }
 
-    func testTopPSamplerLowThresholdKeepsMaxToken() {
+    func testTopPSamplerLowThresholdKeepsMaxToken() throws {
+        try skipIfMetalUnavailable()
         let probs = MLXArray([0.9 as Float, 0.0 as Float, 0.0 as Float, 0.1 as Float])[
             .newAxis, .ellipsis]
         let sampler = TopPSampler(temperature: 1.0, topP: 0.3)
@@ -50,7 +52,8 @@ public class SampleTests: XCTestCase {
         assertOnlySampled(counts, allowedTokens: [0])
     }
 
-    func testTopPSamplerPartialMassKeepsExpectedDistribution() {
+    func testTopPSamplerPartialMassKeepsExpectedDistribution() throws {
+        try skipIfMetalUnavailable()
         let probs = MLXArray([0.0 as Float, 0.5 as Float, 0.4 as Float, 0.1 as Float])[
             .newAxis, .ellipsis]
         let draws = 4000
@@ -62,7 +65,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(frequency(counts, token: 2, draws: draws), 0.4444, accuracy: 0.06)
     }
 
-    func testTopPSamplerHighThresholdKeepsExpectedDistribution() {
+    func testTopPSamplerHighThresholdKeepsExpectedDistribution() throws {
+        try skipIfMetalUnavailable()
         let probs = MLXArray([0.0 as Float, 0.5 as Float, 0.4 as Float, 0.1 as Float])[
             .newAxis, .ellipsis]
         let draws = 4000
@@ -75,7 +79,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(frequency(counts, token: 3, draws: draws), 0.1, accuracy: 0.04)
     }
 
-    func testTopKSamplerTopTwoKeepsExpectedDistribution() {
+    func testTopKSamplerTopTwoKeepsExpectedDistribution() throws {
+        try skipIfMetalUnavailable()
         let probs = MLXArray([0.6 as Float, 0.0 as Float, 0.1 as Float, 0.3 as Float])[
             .newAxis, .ellipsis]
         let draws = 4000
@@ -87,7 +92,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(frequency(counts, token: 3, draws: draws), 0.3333, accuracy: 0.06)
     }
 
-    func testMinPSamplerKeepsOnlyHighProbabilityToken() {
+    func testMinPSamplerKeepsOnlyHighProbabilityToken() throws {
+        try skipIfMetalUnavailable()
         let sampler = TopPSampler(temperature: 1.0, minP: 0.95)
         let logits = MLXArray([0.0 as Float, 0.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
 
@@ -97,7 +103,8 @@ public class SampleTests: XCTestCase {
         }
     }
 
-    func testMinPSamplerLowThresholdKeepsExpectedDistribution() {
+    func testMinPSamplerLowThresholdKeepsExpectedDistribution() throws {
+        try skipIfMetalUnavailable()
         let probs = MLXArray([0.9 as Float, 0.0 as Float, 0.0 as Float, 0.1 as Float])[
             .newAxis, .ellipsis]
         let draws = 4000
@@ -109,13 +116,15 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(frequency(counts, token: 3, draws: draws), 0.1, accuracy: 0.05)
     }
 
-    func testGenerateParametersCreatesExpectedSampler() {
+    func testGenerateParametersCreatesExpectedSampler() throws {
+        try skipIfMetalUnavailable()
         XCTAssertTrue(GenerateParameters(temperature: 0.7, topK: 40).sampler() is TopPSampler)
         XCTAssertTrue(GenerateParameters(temperature: 0.7, minP: 0.1).sampler() is TopPSampler)
         XCTAssertTrue(GenerateParameters(temperature: 0).sampler() is ArgMaxSampler)
     }
 
-    func testPresencePenaltyContextPenalizesSeenTokens() {
+    func testPresencePenaltyContextPenalizesSeenTokens() throws {
+        try skipIfMetalUnavailable()
         var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
         processor.prompt(MLXArray([1, 1, 3]))
 
@@ -129,7 +138,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
     }
 
-    func testFrequencyPenaltyContextPenalizesByCount() {
+    func testFrequencyPenaltyContextPenalizesByCount() throws {
+        try skipIfMetalUnavailable()
         var processor = FrequencyPenaltyContext(frequencyPenalty: 0.5, frequencyContextSize: 20)
         processor.prompt(MLXArray([1, 1, 3]))
 
@@ -143,7 +153,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
     }
 
-    func testGenerateParametersCreatesExpectedPenaltyProcessor() {
+    func testGenerateParametersCreatesExpectedPenaltyProcessor() throws {
+        try skipIfMetalUnavailable()
         XCTAssertNotNil(GenerateParameters(repetitionPenalty: 1.1).processor())
         XCTAssertNotNil(GenerateParameters(presencePenalty: 0.5).processor())
         XCTAssertNotNil(GenerateParameters(frequencyPenalty: 0.5).processor())
@@ -154,7 +165,8 @@ public class SampleTests: XCTestCase {
         )
     }
 
-    func testPresencePenaltyContextPenalizesUniqueSeenTokens() {
+    func testPresencePenaltyContextPenalizesUniqueSeenTokens() throws {
+        try skipIfMetalUnavailable()
         var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 5)
         processor.prompt(MLXArray([0, 0, 0, 1, 1]))
 
@@ -168,7 +180,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 0.0, accuracy: 1e-6)
     }
 
-    func testFrequencyPenaltyContextPenalizesByTokenCount() {
+    func testFrequencyPenaltyContextPenalizesByTokenCount() throws {
+        try skipIfMetalUnavailable()
         var processor = FrequencyPenaltyContext(frequencyPenalty: 0.5, frequencyContextSize: 5)
         processor.prompt(MLXArray([0, 0, 0, 1, 1]))
 
@@ -182,7 +195,8 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 0.0, accuracy: 1e-6)
     }
 
-    func testGenerateParametersPenaltyProcessorComposesPenaltiesInOrder() {
+    func testGenerateParametersPenaltyProcessorComposesPenaltiesInOrder() throws {
+        try skipIfMetalUnavailable()
         var processor = GenerateParameters(
             repetitionPenalty: 1.5, repetitionContextSize: 5,
             presencePenalty: 0.5, presenceContextSize: 5,

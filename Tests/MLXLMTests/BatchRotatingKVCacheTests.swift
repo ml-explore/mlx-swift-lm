@@ -36,7 +36,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Init
 
-    func testInitWithMaxSizeAndLeftPadding() {
+    func testInitWithMaxSizeAndLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 32, leftPadding: [1, 3, 0])
 
         // leftPadding stored correctly
@@ -59,7 +61,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Update (multi-token concat path)
 
-    func testUpdateConcatPath() {
+    func testUpdateConcatPath() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 0])
         let B = 2
         let H = 2
@@ -82,7 +86,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Update (single-token in-place rotation)
 
-    func testUpdateSingleToken() {
+    func testUpdateSingleToken() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 8, leftPadding: [0, 0])
         let B = 2
         let H = 2
@@ -103,7 +109,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - VAL-CACHE-014: Merge from RotatingKVCache instances
 
-    func testMergeFromRotatingKVCacheInstances() {
+    func testMergeFromRotatingKVCacheInstances() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -131,7 +139,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Merge rejects mismatched maxSize
 
-    func testMergeRejectsMismatchedMaxSize() {
+    func testMergeRejectsMismatchedMaxSize() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -152,7 +162,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Merge left-pads shorter sequences
 
-    func testMergeLeftPads() {
+    func testMergeLeftPads() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -174,7 +186,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Filter
 
-    func testFilterRetainsIndices() {
+    func testFilterRetainsIndices() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 3, 0])
         let B = 3
         let H = 2
@@ -195,7 +209,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Extend
 
-    func testExtendMergesBatch() {
+    func testExtendMergesBatch() throws {
+        try skipIfMetalUnavailable()
+
         let cacheA = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 0])
         let cacheB = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
 
@@ -218,7 +234,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         XCTAssertEqual(cacheA.leftPadding.dim(0), 3)
     }
 
-    func testExtendRightJustifiesDifferentLengths() {
+    func testExtendRightJustifiesDifferentLengths() throws {
+        try skipIfMetalUnavailable()
+
         let cacheA = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
         let cacheB = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
 
@@ -244,7 +262,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Extract returns RotatingKVCache (NOT KVCacheSimple)
 
-    func testExtractReturnsRotatingKVCache() {
+    func testExtractReturnsRotatingKVCache() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [2, 0])
         let H = 2
         let S = 4
@@ -255,14 +275,16 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
         let extracted = cache.extract(idx: 1)
 
-        // Verify return type is RotatingKVCache, NOT KVCacheSimple
-        XCTAssertTrue(extracted is RotatingKVCache)
+        // extract(idx:) returns RotatingKVCache — verify it has the expected properties
+        XCTAssertEqual(String(describing: type(of: extracted)), "RotatingKVCache")
 
         // Has valid state (non-empty)
         XCTAssertFalse(extracted.state.isEmpty)
     }
 
-    func testExtractStripsPadding() {
+    func testExtractStripsPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [2, 0])
         let H = 2
         let S = 5
@@ -280,7 +302,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - makeMask with window size and left-padding
 
-    func testMakeMaskWithLeftPadding() {
+    func testMakeMaskWithLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 3, 0])
         let B = 3
         let H = 2
@@ -321,7 +345,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         }
     }
 
-    func testMakeMaskN1MasksPadding() {
+    func testMakeMaskN1MasksPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [2, 0])
         let B = 2
         let H = 2
@@ -360,7 +386,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - BatchPositionedKVCache conformance
 
-    func testConformsToBatchPositionedKVCache() {
+    func testConformsToBatchPositionedKVCache() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [2, 0, 1])
         let B = 3
         let H = 2
@@ -384,7 +412,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - fromSingle / toSingle
 
-    func testFromSingle() {
+    func testFromSingle() throws {
+        try skipIfMetalUnavailable()
+
         let rotCache = RotatingKVCache(maxSize: 16)
         let H = 2
         let D = 4
@@ -401,7 +431,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         XCTAssertEqual(batchCache.maxSize, 16)
     }
 
-    func testToSingle() {
+    func testToSingle() throws {
+        try skipIfMetalUnavailable()
+
         let rotCache = RotatingKVCache(maxSize: 16)
         let H = 2
         let D = 4
@@ -413,13 +445,16 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         let batchCache = BatchRotatingKVCache.fromSingle(rotCache)
         let backToSingle = batchCache.toSingle()
 
-        XCTAssertTrue(backToSingle is RotatingKVCache)
+        // toSingle() returns RotatingKVCache — verify it has the expected properties
+        XCTAssertEqual(String(describing: type(of: backToSingle)), "RotatingKVCache")
         XCTAssertEqual(backToSingle.offset, S)
     }
 
     // MARK: - Round-trip: merge-extract preserves data
 
-    func testMergeExtractRoundTrip() {
+    func testMergeExtractRoundTrip() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -446,7 +481,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Filter-extend cycles
 
-    func testSuccessiveFilterExtendCycles() {
+    func testSuccessiveFilterExtendCycles() throws {
+        try skipIfMetalUnavailable()
+
         let H = 2
         let D = 4
 
@@ -491,12 +528,16 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Batch size and empty
 
-    func testBatchSize() {
+    func testBatchSize() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 1, 2])
         XCTAssertEqual(cache.batchSize, 3)
     }
 
-    func testIsEmpty() {
+    func testIsEmpty() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
         XCTAssertTrue(cache.isEmpty)
 
@@ -507,7 +548,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Multiple updates
 
-    func testMultipleUpdates() {
+    func testMultipleUpdates() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 0])
         let H = 2
         let D = 4
@@ -523,7 +566,9 @@ final class BatchRotatingKVCacheTests: XCTestCase {
 
     // MARK: - Rotation behavior
 
-    func testRotationBehaviorWhenMaxSizeExceeded() {
+    func testRotationBehaviorWhenMaxSizeExceeded() throws {
+        try skipIfMetalUnavailable()
+
         let maxSize = 8
         let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0])
         let H = 2

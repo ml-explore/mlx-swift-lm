@@ -24,7 +24,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-CACHE-012: createCausalMask with leftPadding masks padding positions
 
-    func testCreateCausalMaskWithLeftPadding() {
+    func testCreateCausalMaskWithLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         // 2 sequences: sequence 0 has 1 padding position, sequence 1 has 2
         let leftPadding = MLXArray([Int32(1), Int32(2)])
         let n = 4
@@ -62,7 +64,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-CACHE-013: createCausalMask backward compatible without leftPadding
 
-    func testCreateCausalMaskBackwardCompatible() {
+    func testCreateCausalMaskBackwardCompatible() throws {
+        try skipIfMetalUnavailable()
+
         let n = 4
         let offset = 2
 
@@ -88,7 +92,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-CACHE-011: makeMask generates correct causal mask with left-padding
 
-    func testBatchKVCacheMakeMaskWithLeftPadding() {
+    func testBatchKVCacheMakeMaskWithLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [1, 3, 0])
         let B = 3
         let H = 2
@@ -140,7 +146,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-CACHE-020: BatchKVCache makeMask with n=1 masks left-padding during decode
 
-    func testBatchKVCacheMakeMaskN1MasksPadding() {
+    func testBatchKVCacheMakeMaskN1MasksPadding() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [2, 0])
         let B = 2
         let H = 2
@@ -190,7 +198,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-CACHE-015: BatchPositionedKVCache protocol provides per-sequence offsets
 
-    func testBatchPositionedKVCacheOffsets() {
+    func testBatchPositionedKVCacheOffsets() throws {
+        try skipIfMetalUnavailable()
+
         let cache = BatchKVCache(leftPadding: [2, 0, 1])
         let B = 3
         let H = 2
@@ -272,12 +282,14 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-MODEL-002: applyRotaryPosition backward compatible with KVCacheSimple
 
-    func testApplyRotaryPositionWithKVCacheSimple() {
+    func testApplyRotaryPositionWithKVCacheSimple() throws {
+        try skipIfMetalUnavailable()
+
         let rope = RoPE(dimensions: 8)
         let x = MLXArray.ones([1, 4, 3, 8])  // [B, H, S, D]
 
         let cache = KVCacheSimple()
-        let (k, v) = cache.update(
+        _ = cache.update(
             keys: MLXArray.ones([1, 4, 3, 8]),
             values: MLXArray.ones([1, 4, 3, 8])
         )
@@ -297,12 +309,14 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-MODEL-003: applyRotaryPosition supports BatchPositionedKVCache
 
-    func testApplyRotaryPositionWithBatchPositionedKVCache() {
+    func testApplyRotaryPositionWithBatchPositionedKVCache() throws {
+        try skipIfMetalUnavailable()
+
         let rope = RoPE(dimensions: 8)
         let x = MLXArray.ones([2, 4, 3, 8])  // [B=2, H=4, S=3, D=8]
 
         let cache = BatchKVCache(leftPadding: [1, 0])
-        let (k, v) = cache.update(
+        _ = cache.update(
             keys: MLXArray.ones([2, 4, 3, 8]),
             values: MLXArray.ones([2, 4, 3, 8])
         )
@@ -322,7 +336,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - VAL-MODEL-004: applyRotaryPosition handles nil cache
 
-    func testApplyRotaryPositionWithNilCache() {
+    func testApplyRotaryPositionWithNilCache() throws {
+        try skipIfMetalUnavailable()
+
         let rope = RoPE(dimensions: 8)
         let x = MLXArray.ones([1, 4, 3, 8])
 
@@ -340,7 +356,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
 
     // MARK: - Additional mask tests
 
-    func testCreateCausalMaskWithWindowSizeAndLeftPadding() {
+    func testCreateCausalMaskWithWindowSizeAndLeftPadding() throws {
+        try skipIfMetalUnavailable()
+
         // Verify that windowSize and leftPadding work together
         let leftPadding = MLXArray([Int32(1)])
         let n = 4
@@ -361,7 +379,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         XCTAssertFalse(col0, "Padded position should be masked even with window")
     }
 
-    func testBatchKVCacheMakeMaskMultipleDecodeSteps() {
+    func testBatchKVCacheMakeMaskMultipleDecodeSteps() throws {
+        try skipIfMetalUnavailable()
+
         // Verify that mask remains correct across multiple decode steps
         let cache = BatchKVCache(leftPadding: [1, 0])
         let B = 2
@@ -398,10 +418,12 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         }
     }
 
-    func testNonBatchCacheMakeMaskN1ReturnsNone() {
+    func testNonBatchCacheMakeMaskN1ReturnsNone() throws {
+        try skipIfMetalUnavailable()
+
         // Verify that the existing non-batch behavior (BaseKVCache) returns .none for n=1
         let cache = KVCacheSimple()
-        let (k, v) = cache.update(
+        _ = cache.update(
             keys: MLXArray.ones([1, 2, 3, 4]),
             values: MLXArray.ones([1, 2, 3, 4])
         )

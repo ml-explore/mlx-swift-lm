@@ -11,6 +11,7 @@ import XCTest
 public class EvalTests: XCTestCase {
 
     func testLlamaEval() throws {
+        try skipIfMetalUnavailable()
         let config = LlamaConfiguration(
             hiddenSize: 64, hiddenLayers: 16, intermediateSize: 512, attentionHeads: 32,
             rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 8)
@@ -24,6 +25,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testLlamaLora() throws {
+        try skipIfMetalUnavailable()
         let config = LlamaConfiguration(
             hiddenSize: 64, hiddenLayers: 16, intermediateSize: 512, attentionHeads: 32,
             rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 8)
@@ -54,6 +56,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testConcurrentEvaluation() async throws {
+        try skipIfMetalUnavailable()
         let config = LlamaConfiguration(
             hiddenSize: 64, hiddenLayers: 4, intermediateSize: 128, attentionHeads: 8,
             rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 4)
@@ -104,6 +107,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testConcurrentSampling() async throws {
+        try skipIfMetalUnavailable()
         let vocabSize = 100
 
         let numSamplers = 4
@@ -139,6 +143,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testRandomStateIsolation() async throws {
+        try skipIfMetalUnavailable()
         // the logit sampler will not use shared random state
         let numSamplers = 5
         let samplesPerTask = 10
