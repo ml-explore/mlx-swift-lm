@@ -1,0 +1,22 @@
+{
+  "featureId": "fix-scheduler-maxtokens-overrun",
+  "reviewedAt": "2026-03-14T09:11:39Z",
+  "commitId": "44df53bc8fa4170bf20c2a214fec6eda4a0aa638",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The production fix in `InferenceScheduler.upgradeToBatch()` appears to address the prior blocking overrun by removing the `max(firstMaxTokens, 1)` clamp and by finishing the first request immediately when its remaining budget is zero. The Sendable annotations added in the test targets are straightforward. However, the new regression coverage does not actually guarantee the exact boundary condition from the feature description, so the fix is not fully covered by the required test evidence.",
+    "issues": [
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 989,
+        "severity": "blocking",
+        "description": "The new regression tests do not reliably trigger the required \"upgrade on the exact final allowed token\" scenario. `testMaxTokensNotOverrunOnUpgradeAtFinalToken` sleeps for 200 ms and explicitly allows the first request to have already finished before the second request is submitted (`lines 988-993`), so it can pass without exercising the upgrade path at all. `testFirstRequestProducesExactlyMaxTokensAcrossUpgrade` also uses a timing-based sleep (`line 1072`) and only asserts `<= maxTokens` (`lines 1094-1096`) instead of proving the zero-remaining-budget handoff produces exactly `maxTokens` total tokens. As written, the feature's required regression test coverage is still missing."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/validation/scheduler/scrutiny/reviews/fix-scheduler-upgrade-tensor-shape-boundary.json",
+  "summary": "I reviewed the prior failed review, both relevant handoffs, the fix feature transcript skeleton, and both commits (`fd8702b` and `44df53b`). The code change itself appears to resolve the prior maxTokens overrun, but the added tests are timing-based and can pass without forcing the exact final-token upgrade boundary, so the feature still falls short of its explicit regression-test requirement."
+}
