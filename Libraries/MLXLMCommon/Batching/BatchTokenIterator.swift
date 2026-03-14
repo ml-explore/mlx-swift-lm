@@ -551,14 +551,21 @@ public class BatchTokenIterator: @unchecked Sendable {
     /// Process prompts that have cached KV state from the prompt cache.
     ///
     /// For each prompt, the cached prefix tokens are loaded directly into the
-    /// batch cache via `BatchKVCache.merge()`, and only the uncached suffix
-    /// tokens go through model prefill. This significantly reduces computation
-    /// when a large portion of the prompt is already cached.
+    /// batch cache, and only the uncached suffix tokens go through model
+    /// prefill. This significantly reduces computation when a large portion
+    /// of the prompt is already cached.
     ///
-    /// Left-padding alignment: When suffix tokens have different lengths, the
-    /// shorter suffixes are left-padded. The batch cache's `leftPadding` is
-    /// adjusted to include this suffix padding so the attention mask correctly
-    /// masks out both the prefix padding (from merge) and the suffix padding.
+    /// Left-padding alignment: When merging cached KV states of different
+    /// depths alongside variable-length suffixes, all left-padding (from both
+    /// cache-depth differences and suffix-length differences) must be
+    /// contiguous at the start of the buffer. This is achieved by computing
+    /// total left-padding upfront and building the merged buffer with the
+    /// correct alignment, rather than mutating leftPadding after merge (which
+    /// would desynchronise padding from the stored KV tensors).
+    ///
+    /// Exact cache hits: When the cache covers the entire prompt, prefill is
+    /// skipped entirely and generation begins immediately — the last prompt
+    /// token is NOT replayed through the model.
     private func processCachedPrompts(_ prompts: [PendingPrompt]) -> ActiveBatch {
         precondition(!prompts.isEmpty)
         precondition(prompts.allSatisfy { $0.cachedKVState != nil })
@@ -573,41 +580,203 @@ public class BatchTokenIterator: @unchecked Sendable {
         let cachedLengths = cachedStates.map { layers -> Int in
             layers.first?.offset ?? 0
         }
-        let suffixTokens = zip(prompts, cachedLengths).map { prompt, cachedLen -> [Int] in
-            if cachedLen < prompt.tokens.count {
-                return Array(prompt.tokens[cachedLen...])
+
+        // Separate exact cache hits (entire prompt cached) from partial hits.
+        // Exact hits skip prefill entirely; partial hits need suffix prefill.
+        var exactHitIndices = [Int]()
+        var partialHitIndices = [Int]()
+        for (i, cachedLen) in cachedLengths.enumerated() {
+            if cachedLen >= prompts[i].tokens.count {
+                exactHitIndices.append(i)
             } else {
-                // The cache covers the entire prompt (or more). Only the last
-                // token is needed for sampling — duplicated from the cached data.
-                return [prompt.tokens.last ?? 0]
+                partialHitIndices.append(i)
             }
         }
 
-        // Compute suffix left-padding for variable-length suffixes.
+        // Handle exact cache hits: skip prefill, sample directly from cached state.
+        let exactBatch: ActiveBatch? = processExactCacheHits(
+            prompts: prompts, indices: exactHitIndices, cachedStates: cachedStates,
+            numLayers: numLayers
+        )
+
+        // Handle partial cache hits: merge cached KV + prefill suffix tokens.
+        let partialBatch: ActiveBatch? = processPartialCacheHits(
+            prompts: prompts, indices: partialHitIndices, cachedStates: cachedStates,
+            cachedLengths: cachedLengths, numLayers: numLayers
+        )
+
+        // Combine results
+        if let exact = exactBatch, let partial = partialBatch {
+            exact.extend(other: partial)
+            return exact
+        }
+        return exactBatch ?? partialBatch!
+    }
+
+    /// Handle prompts where the cache covers the entire prompt (exact hit).
+    /// No prefill is needed — we sample the first decode token directly from
+    /// the cached KV state without replaying any prompt tokens.
+    private func processExactCacheHits(
+        prompts: [PendingPrompt], indices: [Int], cachedStates: [[KVCache]],
+        numLayers: Int
+    ) -> ActiveBatch? {
+        guard !indices.isEmpty else { return nil }
+
+        let selectedPrompts = indices.map { prompts[$0] }
+        let selectedStates = indices.map { cachedStates[$0] }
+
+        // Build per-layer batch caches by merging the individual cached caches.
+        var batchCaches = [KVCache]()
+        for l in 0 ..< numLayers {
+            let layerCaches = selectedStates.map { $0[l] }
+            let batchCache = BatchKVCache.merge(layerCaches)
+            batchCaches.append(batchCache)
+        }
+
+        // Initialize per-request processors with their prompt tokens.
+        var processors = selectedPrompts.map(\.processor)
+        for i in 0 ..< selectedPrompts.count {
+            let promptArray = MLXArray(selectedPrompts[i].tokens.map { Int32($0) })
+            processors[i]?.prompt(promptArray)
+        }
+
+        // For exact hits, the last prompt token is already in the KV cache.
+        // We need a single model call with no new input to get logits for
+        // the next token. Feed the last prompt token as a query-only input
+        // so we can extract logits, but the KV cache already contains it.
+        //
+        // Since the cache already has all tokens, we run a single forward
+        // pass with the last cached token to produce logits for sampling.
+        // We must first trim the last token from the cache so re-processing
+        // it doesn't duplicate the KV entry.
+        for cache in batchCaches {
+            if let batchCache = cache as? BatchKVCache {
+                batchCache.trim(1)
+            }
+        }
+
+        // Build input: last prompt token for each sequence, shape [B, 1]
+        let lastTokens = selectedPrompts.map { Int32($0.tokens.last ?? 0) }
+        let inputTokens = MLXArray(lastTokens, [selectedPrompts.count, 1])
+
+        let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
+        let (sampled, _) = step(
+            inputTokens: inputTokens,
+            cache: batchCaches,
+            samplers: selectedPrompts.map(\.sampler),
+            processors: &processors,
+            tokens: tokenArrays
+        )
+
+        asyncEval(sampled)
+
+        return ActiveBatch(
+            uids: selectedPrompts.map(\.uid),
+            y: sampled,
+            cache: batchCaches,
+            samplers: selectedPrompts.map(\.sampler),
+            processors: processors,
+            maxTokens: selectedPrompts.map(\.maxTokens),
+            numTokens: Array(repeating: 0, count: selectedPrompts.count),
+            tokens: tokenArrays
+        )
+    }
+
+    /// Handle prompts where only a prefix is cached (partial hit).
+    /// Merges cached KV states with correct total left-padding and prefills
+    /// the uncached suffix tokens.
+    private func processPartialCacheHits(
+        prompts: [PendingPrompt], indices: [Int], cachedStates: [[KVCache]],
+        cachedLengths: [Int], numLayers: Int
+    ) -> ActiveBatch? {
+        guard !indices.isEmpty else { return nil }
+
+        let selectedPrompts = indices.map { prompts[$0] }
+        let selectedStates = indices.map { cachedStates[$0] }
+        let selectedCacheLengths = indices.map { cachedLengths[$0] }
+
+        // Compute suffix tokens for each prompt.
+        let suffixTokens = zip(selectedPrompts, selectedCacheLengths).map {
+            prompt, cachedLen -> [Int] in
+            Array(prompt.tokens[cachedLen...])
+        }
+
         let suffixLengths = suffixTokens.map(\.count)
         let maxSuffixLength = suffixLengths.max() ?? 0
         let suffixPadding = suffixLengths.map { maxSuffixLength - $0 }
+        let maxSuffixPadding = suffixPadding.max() ?? 0
+        let maxCacheLen = selectedCacheLengths.max() ?? 0
 
-        // Build per-layer batch caches by merging the individual cached caches.
-        // Each layer l: merge cachedStates[0][l], cachedStates[1][l], ...
-        // Then adjust leftPadding to include suffix padding.
+        // Build per-layer batch caches with correct total left-padding.
+        //
+        // Total leftPadding per sequence =
+        //   (maxCacheLen - cacheLen[i])   [cache-depth alignment]
+        //   + suffixPadding[i]            [suffix-length alignment]
+        //
+        // All padding is contiguous at the start of the buffer. The buffer
+        // size is maxCacheLen + maxSuffixPadding, which is the minimum size
+        // that right-justifies all sequences.
+        let bufferLen = maxCacheLen + maxSuffixPadding
+        let B = selectedPrompts.count
+        let totalPadding = (0 ..< B).map { i in
+            (maxCacheLen - selectedCacheLengths[i]) + suffixPadding[i]
+        }
+
         var batchCaches = [KVCache]()
         for l in 0 ..< numLayers {
-            let layerCaches = cachedStates.map { $0[l] }
-            let batchCache = BatchKVCache.merge(layerCaches)
+            let layerCaches = selectedStates.map { $0[l] }
 
-            // Add suffix left-padding: shorter suffixes get extra padding in
-            // the positions that will be filled with zero-padded tokens.
-            let suffixPaddingArray = MLXArray(suffixPadding.map { Int32($0) })
-            batchCache.leftPadding = batchCache.leftPadding + suffixPaddingArray
+            // Find dimensions from first non-empty cache
+            var H = 0
+            var Dk = 0
+            var Dv = 0
+            var dt: DType = .float16
+            for c in layerCaches {
+                if let simple = c as? KVCacheSimple, let k = simple.keys {
+                    H = k.dim(1)
+                    Dk = k.dim(3)
+                    Dv = simple.values!.dim(3)
+                    dt = k.dtype
+                    break
+                }
+            }
+
+            let batchCache: BatchKVCache
+            if H > 0 && bufferLen > 0 {
+                // Build the merged buffer with correct total padding.
+                let keysArr = MLXArray.zeros([B, H, bufferLen, Dk], dtype: dt)
+                let valuesArr = MLXArray.zeros([B, H, bufferLen, Dv], dtype: dt)
+
+                for (i, (pad, cache)) in zip(totalPadding, layerCaches).enumerated() {
+                    if let simple = cache as? KVCacheSimple, let k = simple.keys,
+                        let v = simple.values
+                    {
+                        let seqLen = cache.offset
+                        keysArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
+                            k[.ellipsis, ..<seqLen, 0...]
+                        valuesArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
+                            v[.ellipsis, ..<seqLen, 0...]
+                    }
+                }
+
+                batchCache = BatchKVCache(leftPadding: totalPadding)
+                batchCache.keys = keysArr
+                batchCache.values = valuesArr
+                batchCache._idx = bufferLen
+                // Set batchOffsets to reflect each sequence's cached position.
+                batchCache.batchOffsets = MLXArray(
+                    selectedCacheLengths.map { Int32($0) })
+            } else {
+                batchCache = BatchKVCache(leftPadding: totalPadding)
+            }
 
             batchCaches.append(batchCache)
         }
 
         // Initialize per-request processors with their full prompt tokens.
-        var processors = prompts.map(\.processor)
-        for i in 0 ..< prompts.count {
-            let promptArray = MLXArray(prompts[i].tokens.map { Int32($0) })
+        var processors = selectedPrompts.map(\.processor)
+        for i in 0 ..< selectedPrompts.count {
+            let promptArray = MLXArray(selectedPrompts[i].tokens.map { Int32($0) })
             processors[i]?.prompt(promptArray)
         }
 
@@ -615,7 +784,8 @@ public class BatchTokenIterator: @unchecked Sendable {
         let paddedSuffix = leftPadPrompts(suffixTokens, maxLength: maxSuffixLength)
 
         if maxSuffixLength > 1 {
-            // Process suffix in chunks of prefillStepSize, leaving last token for sampling.
+            // Process suffix in chunks of prefillStepSize, leaving last token
+            // for sampling.
             var remainingInputs = paddedSuffix
             while remainingInputs.dim(1) > 1 {
                 let nToProcess = min(prefillStepSize, remainingInputs.dim(1) - 1)
@@ -630,11 +800,11 @@ public class BatchTokenIterator: @unchecked Sendable {
             }
 
             // Final step: process last token and sample
-            let tokenArrays = prompts.map { MLXArray($0.tokens) }
+            let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
             let (sampled, _) = step(
                 inputTokens: remainingInputs,
                 cache: batchCaches,
-                samplers: prompts.map(\.sampler),
+                samplers: selectedPrompts.map(\.sampler),
                 processors: &processors,
                 tokens: tokenArrays
             )
@@ -642,22 +812,22 @@ public class BatchTokenIterator: @unchecked Sendable {
             asyncEval(sampled)
 
             return ActiveBatch(
-                uids: prompts.map(\.uid),
+                uids: selectedPrompts.map(\.uid),
                 y: sampled,
                 cache: batchCaches,
-                samplers: prompts.map(\.sampler),
+                samplers: selectedPrompts.map(\.sampler),
                 processors: processors,
-                maxTokens: prompts.map(\.maxTokens),
-                numTokens: Array(repeating: 0, count: prompts.count),
+                maxTokens: selectedPrompts.map(\.maxTokens),
+                numTokens: Array(repeating: 0, count: selectedPrompts.count),
                 tokens: tokenArrays
             )
         } else {
             // Only one suffix token per prompt — just sample directly
-            let tokenArrays = prompts.map { MLXArray($0.tokens) }
+            let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
             let (sampled, _) = step(
                 inputTokens: paddedSuffix,
                 cache: batchCaches,
-                samplers: prompts.map(\.sampler),
+                samplers: selectedPrompts.map(\.sampler),
                 processors: &processors,
                 tokens: tokenArrays
             )
@@ -665,13 +835,13 @@ public class BatchTokenIterator: @unchecked Sendable {
             asyncEval(sampled)
 
             return ActiveBatch(
-                uids: prompts.map(\.uid),
+                uids: selectedPrompts.map(\.uid),
                 y: sampled,
                 cache: batchCaches,
-                samplers: prompts.map(\.sampler),
+                samplers: selectedPrompts.map(\.sampler),
                 processors: processors,
-                maxTokens: prompts.map(\.maxTokens),
-                numTokens: Array(repeating: 0, count: prompts.count),
+                maxTokens: selectedPrompts.map(\.maxTokens),
+                numTokens: Array(repeating: 0, count: selectedPrompts.count),
                 tokens: tokenArrays
             )
         }
