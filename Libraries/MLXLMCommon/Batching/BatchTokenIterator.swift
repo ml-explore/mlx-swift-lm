@@ -512,7 +512,13 @@ public class BatchTokenIterator: @unchecked Sendable {
             for e in 0 ..< batchSize {
                 let sampleSampler = samplers[e] ?? defaultSampler
                 let sampleLogprobs = logprobs[e ..< (e + 1)]
-                let s = sampleSampler.sample(logits: sampleLogprobs)
+                var s = sampleSampler.sample(logits: sampleLogprobs)
+                // Normalize scalar (0-dim) results to 1-D so concatenation works.
+                // Some samplers (e.g. FixedTokenSampler, categorical) may return a
+                // 0-dimensional MLXArray, but concatenate requires at least 1 dimension.
+                if s.ndim == 0 {
+                    s = s.reshaped([1])
+                }
                 allSamples.append(s)
             }
             sampled = concatenated(allSamples, axis: 0)
