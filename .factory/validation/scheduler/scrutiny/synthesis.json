@@ -1,6 +1,6 @@
 {
   "milestone": "scheduler",
-  "round": 2,
+  "round": 3,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -24,36 +24,36 @@
     "passed": 0,
     "failed": 1,
     "failedFeatures": [
-      "fix-scheduler-upgrade-and-chatsession"
+      "fix-scheduler-upgrade-live-state"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-scheduler-upgrade-and-chatsession",
+      "featureId": "fix-scheduler-upgrade-live-state",
       "severity": "blocking",
-      "description": "`upgradeToBatch()` resumes the first request from the stale `existingSingle.iterator` snapshot even though `TokenIterator` is a mutating struct whose live decode state is advancing inside the single-request task, so active upgrades can duplicate/restart output and overrun the request's remaining token budget."
+      "description": "`upgradeToBatch()` materializes the upgraded first request with a 0-dimensional `y` (`firstLastToken...squeezed()`), so when the second request joins and `ActiveBatch.extend(other:)` concatenates along axis 0 the real MLX path crashes. The validator reproduced this with `xcodebuild test ... -only-testing:MLXLMTests/InferenceSchedulerTests -only-testing:MLXLMTests/ModelContainerIntegrationTests`, which failed in `testMultipleChatSessionsSharingModelContainerTriggerBatching` with `[concatenate] Axis 0 is out of bounds for array with 0 dimensions`."
     },
     {
-      "featureId": "fix-scheduler-upgrade-and-chatsession",
+      "featureId": "fix-scheduler-upgrade-live-state",
       "severity": "blocking",
-      "description": "After upgrade, the first request keeps its original `onTermination` handler that only cancels the obsolete single-request task instead of removing the upgraded UID from `BatchTokenIterator`, so cancelling the first stream does not stop generation for that batched request."
+      "description": "The cooperative handoff checks `upgradeRequested` only after `iter.next()` has already advanced `TokenIterator` state and returned the previous token, so the token produced on the upgrade iteration is never yielded before control transfers to the batch path. Even after the concatenate crash is fixed, the first request can still silently drop one token at the upgrade boundary."
     }
   ],
   "appliedUpdates": [
     {
       "target": "library",
-      "description": "Documented the scheduler upgrade constraint that `TokenIterator` is a mutable value type, so single-to-batch handoff cannot recover live decode progress from a separate stored copy.",
-      "sourceFeature": "fix-scheduler-upgrade-and-chatsession"
+      "description": "Added `.factory/library/mlx-validation.md` documenting that `swift test` is only smoke coverage for MLX-backed behavior in this repo and that targeted `xcodebuild test` runs are the authoritative path for scheduler batching/runtime validation.",
+      "sourceFeature": "fix-scheduler-upgrade-live-state"
     }
   ],
   "suggestedGuidanceUpdates": [
     {
       "target": "skills",
-      "suggestion": "Update the `swift-batching-worker` skill so scheduler features treat targeted `xcodebuild test` runs as required evidence for MLX-backed upgrade and cancellation assertions, with `swift test --filter MLXLMTests` used only as supplemental smoke coverage.",
-      "evidence": "The rerun review for `fix-scheduler-upgrade-and-chatsession` found the worker again followed `.factory/skills/swift-batching-worker/SKILL.md` toward `swift build` / `swift test` only, while `.factory/library/user-testing.md` already documents `xcodebuild test` as the stronger path when SwiftPM skips Metal-backed assertions; the same mismatch was previously reported in `.factory/validation/batch-engine/scrutiny/synthesis.json` and scheduler round 1.",
+      "suggestion": "Update the `swift-batching-worker` skill so scheduler and other MLX-backed runtime features require targeted `xcodebuild test` evidence, with `swift build` and `swift test --filter MLXLMTests` treated as baseline smoke checks only.",
+      "evidence": "The live-state fix handoff for `fix-scheduler-upgrade-live-state` recorded only `swift build`/`swift test`, yet the validator's targeted `xcodebuild test` run exposed the remaining concatenate crash immediately. The same gap was already reported in the prior scheduler synthesis and earlier batch-engine scrutiny findings.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/scheduler/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/scheduler/scrutiny/synthesis.round2.json"
 }
