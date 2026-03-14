@@ -1,0 +1,45 @@
+{
+  "featureId": "fix-scheduler-upgrade-and-chatsession",
+  "reviewedAt": "2026-03-14T07:19:15Z",
+  "commitId": "023a4d5",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The fix repairs the obvious continuation replacement and ChatSession history reset from the earlier reviews, but the upgraded first request still resumes from a stale TokenIterator snapshot and the reused first stream is never re-wired for batched cancellation. Because of that, the original single-to-batch correctness contract is still not met.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 475,
+        "severity": "blocking",
+        "description": "`upgradeToBatch()` reads `existingSingle.iterator` to recover `y` and remaining `maxTokens`, but `startSingleRequest()` boxed one copy of the `TokenIterator` into the generation task and stored a separate copy in `SingleRequestState` (`InferenceScheduler.swift:295-305,395-406`). `TokenIterator` is a struct whose `next()` mutates `y` and `tokenCount` (`Evaluate.swift:502-508,668-683`), so the actor-held copy is frozen at the post-prefill state. On any real in-flight upgrade after the first request has already emitted tokens, the batch resumes from the stale initial token and an unreduced token budget (`InferenceScheduler.swift:490-505`), which can duplicate/restart output and overrun the caller's max-token limit. That means the original VAL-SCHED-004/005 failure is not actually fixed for active requests."
+      },
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 389,
+        "severity": "blocking",
+        "description": "The first request's reused continuation keeps its original `onTermination` handler, which only cancels the now-obsolete single-request task (`InferenceScheduler.swift:389-392`). After upgrade, only the second and later batch streams remove their UID from `BatchTokenIterator` on cancellation (`InferenceScheduler.swift:629-632,673-678`). If the first caller cancels after batching begins, its sequence keeps running inside the batch until stop/length, consuming capacity and violating the per-request cancellation contract from the scheduler integration feature."
+      },
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 376,
+        "severity": "non_blocking",
+        "description": "The test suite still does not exercise the repaired upgrade path. `testEachRequestGetsIndependentStream()` only consumes one request and never forces a compatible single-to-batch upgrade, so it would not catch the stale-iterator resume bug above. `ModelContainerIntegrationTests.testRequestCancellationStopsOnlyThatRequest()` also only breaks out of the consumer loop without asserting that the upgraded first UID is removed from the batch. The fix landed without any regression test that directly covers the two scrutiny issues it was meant to address."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker skill still makes `swift build` + `swift test --filter MLXLMTests` the whole verification story, even though the repo's shared library knowledge says MLX-backed scheduler assertions require `xcodebuild test` because SwiftPM skips them without Metal. This fix worker followed the skill and never ran the feature's requested `xcodebuild` verification, which left the upgrade-path bug uncaught.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md:59-66` vs `.factory/library/user-testing.md:13-17,33-37`; the fix handoff at `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T07-13-31-021Z__fix-scheduler-upgrade-and-chatsession__6fe59efb-1db3-4dd3-bda2-d85b30fdea43.json` records `swift build`, `swift test`, `swift-format`, and `swift build --build-tests`, but no `xcodebuild test`."
+    },
+    {
+      "area": "library",
+      "observation": "The mission library documents the single-first upgrade pattern at a high level, but it does not record the critical implementation constraint that `TokenIterator` is a value type whose mutable decode state (`y`, `tokenCount`) cannot be recovered from a separately stored copy during upgrade. That missing knowledge is exactly what allowed the current stale-resume bug.",
+      "evidence": "`.factory/library/architecture.md:24-27` describes single-first upgrade conceptually, while `Libraries/MLXLMCommon/Evaluate.swift:502-508,668-683` shows `TokenIterator` is a mutating struct and `Libraries/MLXLMCommon/Batching/InferenceScheduler.swift:295-305,395-406,475-491` copies it into both the task and `SingleRequestState`."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/scheduler/scrutiny/reviews/inference-scheduler-core.json; .factory/validation/scheduler/scrutiny/reviews/model-container-integration.json",
+  "summary": "Fail. I reviewed the original failed-feature reviews, the corresponding handoffs and transcript skeletons, the fix handoff/session, and the diffs for commits `4b7d2ec`, `931f353`, and `023a4d5`. The fix correctly stops replacing the first stream outright and now persists ChatSession history, but the upgrade path still resumes the first request from a stale `TokenIterator` snapshot and does not propagate cancellation for the upgraded first stream into `BatchTokenIterator`, so the prior scheduler blocking issues are not fully resolved."
+}

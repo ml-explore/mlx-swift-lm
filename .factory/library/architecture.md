@@ -31,6 +31,9 @@ All new batching code goes in `Libraries/MLXLMCommon/Batching/`:
 ### Single-First Upgrade Pattern
 Single requests use the existing `TokenIterator` path. Only when a second concurrent request arrives does the system upgrade to batching. This ensures zero overhead for the common single-request case.
 
+### TokenIterator Upgrade Constraint
+`TokenIterator` in `Libraries/MLXLMCommon/Evaluate.swift` is a mutable value type (`struct`) whose decode state lives in fields like `y` and `tokenCount`. Scheduler upgrade code cannot recover live progress from a separately stored copy of a `TokenIterator`; any single-to-batch handoff must either keep mutating the same instance or explicitly persist the evolving decode state alongside the running task.
+
 ### BatchPositionedKVCache Protocol
 A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, cache: cache)` instead of `rope(x, offset: cache.offset)`. This keeps per-model changes to ~4 lines while supporting both single (Int offset) and batch (MLXArray offset) modes.
 
