@@ -1,0 +1,129 @@
+{
+  "groupId": "batch-engine-core",
+  "surface": "swift-test",
+  "summary": "Synthesized 16 batch-engine assertions from recorded evidence: 15 passed and 1 failed. VAL-ENGINE-013 failed because the dedicated xcodebuild run for testPerRequestSamplerIndependentBehavior crashed with an MLX concatenate fatal error; the supplemental swift-test evidence skipped MLX-backed batch-engine tests in the SPM debug build because the Metal library was unavailable.",
+  "commands": [
+    {
+      "command": "swift test (command not echoed in evidence file)",
+      "exitCode": 0,
+      "evidence": "swift-test-batch-engine.txt",
+      "observation": "Supplemental SwiftPM evidence completed with 192 tests, 172 skipped, and 0 failures; BatchTokenIteratorTests (19 tests) and BatchSamplingAndCorrectnessTests (10 tests) were skipped because the MLX Metal library was unavailable in the SPM debug build."
+    },
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-batch-engine-user-testing-batchtoken \"-only-testing:MLXLMTests/BatchTokenIteratorTests\"",
+      "exitCode": 0,
+      "evidence": "xcodebuild-batch-token-iterator.txt",
+      "observation": "Direct Metal-backed run succeeded with 19/19 BatchTokenIteratorTests passing, covering VAL-ENGINE-001 through VAL-ENGINE-012."
+    },
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-batch-engine-user-testing-sampler-only \"-only-testing:MLXLMTests/BatchSamplingAndCorrectnessTests/testPerRequestSamplerIndependentBehavior\"",
+      "exitCode": 65,
+      "evidence": "xcodebuild-batch-sampler-only.txt",
+      "observation": "Targeted per-request sampler run failed: testPerRequestSamplerIndependentBehavior crashed with `Fatal error: [concatenate] Axis 0 is out of bounds for array with 0 dimensions`, and the log ended with `** TEST FAILED **`."
+    },
+    {
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme mlx-swift-lm-Package -destination platform=macOS,arch=arm64 -derivedDataPath /tmp/mlx-swift-lm-batch-engine-user-testing-sampling-others \"-only-testing:MLXLMTests/BatchSamplingAndCorrectnessTests/testConcurrentInsertAndNextSafety\" \"-only-testing:MLXLMTests/BatchSamplingAndCorrectnessTests/testBatchVsSingleOutputMatchesWithArgMax\" \"-only-testing:MLXLMTests/BatchSamplingAndCorrectnessTests/testPerRequestProcessorIndependentState\"",
+      "exitCode": 0,
+      "evidence": "xcodebuild-batch-sampling-others.txt",
+      "observation": "Direct Metal-backed run succeeded with 3/3 targeted BatchSamplingAndCorrectnessTests passing, covering VAL-ENGINE-014 through VAL-ENGINE-016."
+    }
+  ],
+  "assertions": [
+    {
+      "id": "VAL-ENGINE-001",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testInsertReturnsUniqueUIDs passed, directly confirming unique UIDs are returned on insert."
+    },
+    {
+      "id": "VAL-ENGINE-002",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testPerRequestMaxTokensRespected passed, confirming independent maxTokens handling with `.length` completion."
+    },
+    {
+      "id": "VAL-ENGINE-003",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testPromptsSortedByAscendingLength passed, confirming pending prompts are ordered by ascending effective length before prefill."
+    },
+    {
+      "id": "VAL-ENGINE-004",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testLeftPaddingApplied passed, providing direct runtime evidence that variable-length prompts are left-padded during prefill."
+    },
+    {
+      "id": "VAL-ENGINE-005",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testPrefillChunkedByStepSize passed, confirming long prompts are processed in chunks no larger than prefillStepSize."
+    },
+    {
+      "id": "VAL-ENGINE-006",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testPrefillTransitionsToDecode passed, confirming prefill produces the first decode token and enters decode flow."
+    },
+    {
+      "id": "VAL-ENGINE-007",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testNextProducesOneTokenPerSequence passed, confirming each next() step yields one token per active sequence."
+    },
+    {
+      "id": "VAL-ENGINE-008",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testStopTokenTerminatesWithStop passed, confirming stop tokens terminate generation with finish reason `.stop`."
+    },
+    {
+      "id": "VAL-ENGINE-009",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testSequencesFinishIndependently passed, confirming sequences complete and are removed independently."
+    },
+    {
+      "id": "VAL-ENGINE-010",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testCompletionBatchSizeLimits passed, confirming active decode concurrency does not exceed completionBatchSize."
+    },
+    {
+      "id": "VAL-ENGINE-011",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testRemoveActiveSequence passed, confirming remove(uids:) drops an active sequence mid-generation."
+    },
+    {
+      "id": "VAL-ENGINE-012",
+      "status": "pass",
+      "reason": "xcodebuild-batch-token-iterator.txt shows testCloseStopsGeneration passed, confirming close() stops further token production."
+    },
+    {
+      "id": "VAL-ENGINE-013",
+      "status": "fail",
+      "reason": "xcodebuild-batch-sampler-only.txt shows testPerRequestSamplerIndependentBehavior crashed with an MLX concatenate fatal error instead of completing successfully, so per-request sampler independence failed under direct runtime evidence."
+    },
+    {
+      "id": "VAL-ENGINE-014",
+      "status": "pass",
+      "reason": "xcodebuild-batch-sampling-others.txt shows testConcurrentInsertAndNextSafety passed, confirming concurrent insert and next operations did not violate the checked safety invariants."
+    },
+    {
+      "id": "VAL-ENGINE-015",
+      "status": "pass",
+      "reason": "xcodebuild-batch-sampling-others.txt shows testBatchVsSingleOutputMatchesWithArgMax passed, confirming deterministic batch output matches single-request output under ArgMax sampling."
+    },
+    {
+      "id": "VAL-ENGINE-016",
+      "status": "pass",
+      "reason": "xcodebuild-batch-sampling-others.txt shows testPerRequestProcessorIndependentState passed, confirming per-request LogitProcessor state stays isolated across batched requests."
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The supplemental SwiftPM evidence could not directly validate the MLX-backed batch-engine assertions because the SPM debug build lacked the MLX Metal library, so BatchTokenIteratorTests and BatchSamplingAndCorrectnessTests were skipped and xcodebuild evidence had to supply direct coverage.",
+      "evidence": "swift-test-batch-engine.txt"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "The broader combined xcodebuild run revealed an additional non-contract sampler crash: testMixedDefaultAndCustomSamplers failed with `Fatal error: [concatenate] All the input arrays must have the same number of dimensions`, indicating sampler-path instability beyond VAL-ENGINE-013.",
+      "evidence": "xcodebuild-batch-engine.txt"
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild",
+    "swift test"
+  ]
+}
