@@ -1224,6 +1224,312 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
         )
     }
 
+    // MARK: - Prepare/Finalize Lifecycle Tests
+
+    /// Verify that BatchKVCache.prepare/finalize correctly rolls right-padding
+    /// zeros to the left side, adjusting leftPadding and batchOffsets.
+    func testBatchKVCachePrepareFinalize() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        // Simulate a mixed-depth scenario:
+        // Seq A: 3 cached tokens, suffix [4, 5, 6] (3 tokens)
+        // Seq B: 7 cached tokens, suffix [8, 9] (2 tokens)
+        //
+        // After right-padding suffix: maxSuffix = 3
+        //   A: [4, 5, 6] → no right-padding (rightPad = 0)
+        //   B: [8, 9, 0] → rightPad = 1
+        //
+        // Cache after merge: bufferLen = 7 (maxCacheLen)
+        //   A: leftPadding = 4 (7-3), data at positions 4..6
+        //   B: leftPadding = 0 (7-7), data at positions 0..6
+        //
+        // After prefill of 3 right-padded suffix tokens: _idx = 7 + 3 = 10
+        //   A: cached at 4..6, suffix at 7..9 → all valid
+        //   B: cached at 0..6, suffix at 7..8, padding zero at 9 → BAD position 9
+        //
+        // After finalize (roll by [0, 1]):
+        //   B: position 9 (padding) rolls to position 0 (left side)
+        //   B: leftPadding adjusts from 0 to 1, batchOffsets decreases by 1
+        //   Now all padding is on the LEFT for both sequences.
+
+        let batchCache = BatchKVCache(leftPadding: [4, 0])
+        // Simulate cached + suffix KV data: _idx = 10 (7 cached + 3 suffix)
+        let keysArr = MLXArray.zeros([2, H, 10, D])
+        let valuesArr = MLXArray.zeros([2, H, 10, D])
+
+        // Fill seq A: valid data at positions 4..9 (6 = 3 cached + 3 suffix)
+        keysArr[0 ..< 1, 0..., 4 ..< 10, 0...] = MLXArray.ones([1, H, 6, D]) * 1.0
+        valuesArr[0 ..< 1, 0..., 4 ..< 10, 0...] = MLXArray.ones([1, H, 6, D]) * 10.0
+
+        // Fill seq B: valid data at positions 0..8 (7 cached + 2 suffix), position 9 = padding
+        keysArr[1 ..< 2, 0..., 0 ..< 9, 0...] = MLXArray.ones([1, H, 9, D]) * 2.0
+        valuesArr[1 ..< 2, 0..., 0 ..< 9, 0...] = MLXArray.ones([1, H, 9, D]) * 20.0
+        // Position 9 for seq B is right-padding zero (already zero from MLXArray.zeros)
+
+        batchCache.keys = keysArr
+        batchCache.values = valuesArr
+        batchCache._idx = 10
+        batchCache.batchOffsets = MLXArray([Int32(6), Int32(9)])  // 3+3, 7+2
+
+        // Prepare with right-padding
+        let rightPad = MLXArray([Int32(0), Int32(1)])
+        batchCache.prepare(rightPadding: rightPad)
+
+        // Verify right-padding was stored
+        XCTAssertNotNil(batchCache._rightPadding)
+
+        // Finalize: roll right-padding zeros to the left
+        batchCache.finalize()
+
+        // After finalize:
+        // Seq A: leftPadding = 4 + 0 = 4, batchOffsets = 6 - 0 = 6
+        // Seq B: leftPadding = 0 + 1 = 1, batchOffsets = 9 - 1 = 8
+        XCTAssertEqual(
+            batchCache.leftPadding[0].item(Int32.self), 4,
+            "Seq A leftPadding should remain 4 (no right-padding)")
+        XCTAssertEqual(
+            batchCache.leftPadding[1].item(Int32.self), 1,
+            "Seq B leftPadding should be 1 (0 + rightPad of 1)")
+        XCTAssertEqual(
+            batchCache.batchOffsets[0].item(Int32.self), 6,
+            "Seq A batchOffsets should remain 6")
+        XCTAssertEqual(
+            batchCache.batchOffsets[1].item(Int32.self), 8,
+            "Seq B batchOffsets should be 8 (9 - 1)")
+
+        // Verify that rightPadding was cleared
+        XCTAssertNil(batchCache._rightPadding, "rightPadding should be nil after finalize")
+
+        // Verify the KV layout: for seq B, position 0 should now be the
+        // rolled padding zero, and positions 1..9 should be valid data.
+        let seqBKey0 = batchCache.keys![1, 0, 0, 0].item(Float.self)
+        let seqBKey1 = batchCache.keys![1, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(
+            seqBKey0, 0.0,
+            "Seq B position 0 should be padding (rolled from right)")
+        XCTAssertEqual(
+            seqBKey1, 2.0,
+            "Seq B position 1 should be valid data")
+    }
+
+    /// Verify that prepare(rightPadding:) is a no-op when all right-padding is zero.
+    func testPrepareWithZeroRightPaddingIsNoOp() throws {
+        try skipIfMetalUnavailable()
+
+        let batchCache = BatchKVCache(leftPadding: [2, 0])
+        let rightPad = MLXArray([Int32(0), Int32(0)])
+        batchCache.prepare(rightPadding: rightPad)
+
+        // Should not store rightPadding since max is 0
+        XCTAssertNil(batchCache._rightPadding, "Zero right-padding should not be stored")
+
+        // Finalize should be a no-op
+        batchCache.finalize()
+        XCTAssertEqual(
+            batchCache.leftPadding[0].item(Int32.self), 2,
+            "leftPadding should be unchanged")
+    }
+
+    /// Verify that mixed-depth cached-prefill with prepare/finalize produces
+    /// correct generation (tokens are produced for all sequences).
+    func testMixedDepthPrepareFinalizePrefillIntegration() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockCachePrefillModel(vocabSize: 32, numLayers: 2)
+
+        // Seq A: 5 cached, 3 suffix → [1,2,3,4,5, 6,7,8]
+        // Seq B: 3 cached, 5 suffix → [11,12,13, 14,15,16,17,18]
+        // This is the exact concrete example from the feature description.
+        let promptA = [1, 2, 3, 4, 5, 6, 7, 8]
+        let promptB = [11, 12, 13, 14, 15, 16, 17, 18]
+
+        let cachedA = makeMockPromptCache(layers: 2, seqLen: 5, value: 1.0)
+        let cachedB = makeMockPromptCache(layers: 2, seqLen: 3, value: 2.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [promptA, promptB],
+            maxTokens: [4, 4],
+            cachedKVStates: [cachedA, cachedB]
+        )
+
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 30 { break }
+        }
+
+        // Both should produce 4 tokens
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 4,
+            "Seq A (5 cached, 3 suffix) should produce 4 tokens with prepare/finalize"
+        )
+        XCTAssertEqual(
+            tokensPerUID[uids[1]]?.count, 4,
+            "Seq B (3 cached, 5 suffix) should produce 4 tokens with prepare/finalize"
+        )
+
+        // Verify all tokens are within vocabulary range
+        for (_, tokens) in tokensPerUID {
+            for token in tokens {
+                XCTAssertGreaterThanOrEqual(token, 0)
+                XCTAssertLessThan(token, model.vocabSize)
+            }
+        }
+    }
+
+    /// Verify that after finalize, extracting caches produces correct data
+    /// with all padding at the left side and no garbage entries.
+    func testKVLayoutAfterFinalizeHasPaddingOnLeft() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        // Build a batch cache mimicking a post-finalize state:
+        // Seq A: leftPadding=4, valid data at 4..9 (6 tokens)
+        // Seq B: leftPadding=1, valid data at 1..9 (9 tokens)
+        // _idx = 10
+        let batchCache = BatchKVCache(leftPadding: [4, 1])
+        let keysArr = MLXArray.zeros([2, H, 10, D])
+        let valuesArr = MLXArray.zeros([2, H, 10, D])
+
+        keysArr[0 ..< 1, 0..., 4 ..< 10, 0...] = MLXArray.ones([1, H, 6, D]) * 5.0
+        valuesArr[0 ..< 1, 0..., 4 ..< 10, 0...] = MLXArray.ones([1, H, 6, D]) * 50.0
+        keysArr[1 ..< 2, 0..., 1 ..< 10, 0...] = MLXArray.ones([1, H, 9, D]) * 7.0
+        valuesArr[1 ..< 2, 0..., 1 ..< 10, 0...] = MLXArray.ones([1, H, 9, D]) * 70.0
+
+        batchCache.keys = keysArr
+        batchCache.values = valuesArr
+        batchCache._idx = 10
+        batchCache.batchOffsets = MLXArray([Int32(6), Int32(9)])
+
+        // Extract and verify: no garbage entries in extracted caches
+        let extractedA = batchCache.extract(idx: 0)
+        let extractedB = batchCache.extract(idx: 1)
+
+        // Seq A: leftPadding=4, _idx=10, so extracted = 10-4 = 6 tokens
+        XCTAssertEqual(extractedA.offset, 6, "Extracted A should have 6 valid tokens")
+        XCTAssertEqual(extractedA.keys!.dim(2), 6)
+
+        // Seq B: leftPadding=1, _idx=10, so extracted = 10-1 = 9 tokens
+        XCTAssertEqual(extractedB.offset, 9, "Extracted B should have 9 valid tokens")
+        XCTAssertEqual(extractedB.keys!.dim(2), 9)
+
+        // All extracted positions should be real data (no zeros from padding)
+        for pos in 0 ..< 6 {
+            let val = extractedA.keys![0, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(val, 5.0, "Extracted A position \(pos) should be valid data (5.0)")
+        }
+        for pos in 0 ..< 9 {
+            let val = extractedB.keys![0, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(val, 7.0, "Extracted B position \(pos) should be valid data (7.0)")
+        }
+    }
+
+    /// Verify that mixed-depth partial-hit produces the same number of tokens
+    /// as individual processing (semantic equivalence check).
+    func testMixedDepthBatchVsIndividualTokenCount() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockCachePrefillModel(vocabSize: 32, numLayers: 2)
+
+        let promptA = [1, 2, 3, 4, 5, 6]
+        let promptB = [10, 11, 12, 13, 14, 15, 16, 17, 18]
+
+        let cachedA = makeMockPromptCache(layers: 2, seqLen: 2, value: 1.0)
+        let cachedB = makeMockPromptCache(layers: 2, seqLen: 7, value: 2.0)
+
+        // --- Individual processing ---
+        var individualTokenCounts = [Int: Int]()
+
+        model.resetCounters()
+        let iterA = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+        let uidsA = iterA.insert(
+            prompts: [promptA],
+            maxTokens: [3],
+            cachedKVStates: [cachedA]
+        )
+        var countA = 0
+        while let responses = iterA.next(), !responses.isEmpty {
+            countA += responses.count
+        }
+        individualTokenCounts[0] = countA
+
+        model.resetCounters()
+        let iterB = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+        let uidsB = iterB.insert(
+            prompts: [promptB],
+            maxTokens: [3],
+            cachedKVStates: [cachedB]
+        )
+        var countB = 0
+        while let responses = iterB.next(), !responses.isEmpty {
+            countB += responses.count
+        }
+        individualTokenCounts[1] = countB
+
+        // --- Batch processing ---
+        model.resetCounters()
+        let cachedA2 = makeMockPromptCache(layers: 2, seqLen: 2, value: 1.0)
+        let cachedB2 = makeMockPromptCache(layers: 2, seqLen: 7, value: 2.0)
+
+        let iterBatch = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+        let uidsBatch = iterBatch.insert(
+            prompts: [promptA, promptB],
+            maxTokens: [3, 3],
+            cachedKVStates: [cachedA2, cachedB2]
+        )
+
+        var batchTokenCounts = [Int: Int]()
+        var loopCount = 0
+        while let responses = iterBatch.next(), !responses.isEmpty {
+            for r in responses {
+                batchTokenCounts[r.uid, default: 0] += 1
+            }
+            loopCount += 1
+            if loopCount > 30 { break }
+        }
+
+        // Both paths should produce the same token count
+        XCTAssertEqual(
+            batchTokenCounts[uidsBatch[0]], individualTokenCounts[0],
+            "Batch prompt A should produce same token count as individual (\(individualTokenCounts[0]!))"
+        )
+        XCTAssertEqual(
+            batchTokenCounts[uidsBatch[1]], individualTokenCounts[1],
+            "Batch prompt B should produce same token count as individual (\(individualTokenCounts[1]!))"
+        )
+    }
+
     // MARK: - Helpers for RotatingKVCache tests
 
     /// Create a mock RotatingKVCache with synthetic keys/values.

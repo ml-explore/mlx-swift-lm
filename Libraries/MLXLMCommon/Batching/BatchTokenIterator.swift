@@ -687,14 +687,24 @@ public class BatchTokenIterator: @unchecked Sendable {
     }
 
     /// Handle prompts where only a prefix is cached (partial hit).
-    /// Merges cached KV states with correct left-padding and prefills
-    /// the uncached suffix tokens.
+    /// Merges cached KV states with correct left-padding, RIGHT-pads
+    /// the uncached suffix tokens, prefills through the model, then
+    /// calls `finalize()` to roll right-padding zeros to the left.
     ///
-    /// **Right-alignment invariant**: Each sequence's cached KV data is
-    /// right-aligned so that it ends exactly at `_idx`. This ensures the
-    /// region `leftPadding[i] ..< _idx` contains only valid written data
-    /// with no unwritten holes. The shared `_idx` constraint requires this
-    /// right-alignment because sequences have different cache depths.
+    /// **Prepare/finalize lifecycle** (ported from Python mlx-lm):
+    /// 1. Merge cached KV into batch caches (right-aligned by cache depth)
+    /// 2. RIGHT-pad suffix tokens (shorter suffixes padded on the right)
+    /// 3. Call `prepare(rightPadding:)` on each cache layer
+    /// 4. Prefill ALL right-padded suffix tokens through the model
+    /// 5. Call `finalize()` on each cache layer — this rolls the
+    ///    right-padding zeros to the LEFT side, adjusting `leftPadding`
+    ///    and `batchOffsets` so the causal mask correctly excludes them
+    /// 6. Trim the last token from cache, then re-process it via `step()`
+    ///    to get logits for sampling the first decode token
+    ///
+    /// This eliminates the mixed-depth hole problem: after finalize,
+    /// all padding is contiguous on the left and every position in
+    /// `leftPadding[i] ..< _idx` is valid cached or prefilled data.
     private func processPartialCacheHits(
         prompts: [PendingPrompt], indices: [Int], cachedStates: [[KVCache]],
         cachedLengths: [Int], numLayers: Int
@@ -718,17 +728,15 @@ public class BatchTokenIterator: @unchecked Sendable {
         // Buffer size = maxCacheLen (just enough for the longest cached prefix).
         // Each sequence's cached data is right-aligned to end at bufferLen,
         // so leftPadding[i] = bufferLen - cachedLen[i].
-        //
-        // This eliminates the mixed-depth hole problem: every position in
-        // leftPadding[i] ..< _idx is filled with actual cached KV data.
-        // Suffix-length differences are handled by the left-padded suffix
-        // input tokens, whose padding zeros produce KV entries that the
-        // cache's leftPadding correctly masks out during attention.
         let bufferLen = maxCacheLen
         let B = selectedPrompts.count
         let rightAlignedPadding = (0 ..< B).map { i in
             bufferLen - selectedCacheLengths[i]
         }
+
+        // Compute per-sequence right-padding for suffix alignment.
+        // Shorter suffixes are right-padded to match the longest suffix.
+        let suffixRightPadding = suffixLengths.map { maxSuffixLength - $0 }
 
         // Determine per-layer cache types from the first layer of the first state.
         let isRotating = selectedStates[0][0] is RotatingKVCache
@@ -739,8 +747,12 @@ public class BatchTokenIterator: @unchecked Sendable {
 
             if isRotating {
                 // Rotating cache path: use BatchRotatingKVCache.merge then
-                // right-align via prepare/finalize lifecycle if needed.
+                // prepare/finalize lifecycle for right-padding alignment.
                 let merged = BatchRotatingKVCache.merge(layerCaches)
+                merged.prepare(
+                    lengths: suffixLengths,
+                    rightPadding: suffixRightPadding
+                )
                 batchCaches.append(merged)
             } else {
                 // KVCacheSimple path: build right-aligned buffer manually.
@@ -751,6 +763,9 @@ public class BatchTokenIterator: @unchecked Sendable {
                     bufferLen: bufferLen,
                     batchSize: B
                 )
+                // Prepare for right-padded suffix prefill
+                let rpArray = MLXArray(suffixRightPadding.map { Int32($0) })
+                batchCache.prepare(rightPadding: rpArray)
                 batchCaches.append(batchCache)
             }
         }
@@ -762,71 +777,75 @@ public class BatchTokenIterator: @unchecked Sendable {
             processors[i]?.prompt(promptArray)
         }
 
-        // Left-pad the suffix tokens for prefill
-        let paddedSuffix = leftPadPrompts(suffixTokens, maxLength: maxSuffixLength)
+        // RIGHT-pad the suffix tokens for prefill (instead of left-padding).
+        // After prefill, finalize() will roll the right-padding zeros to the left.
+        let paddedSuffix = rightPadPrompts(suffixTokens, maxLength: maxSuffixLength)
 
-        if maxSuffixLength > 1 {
-            // Process suffix in chunks of prefillStepSize, leaving last token
-            // for sampling.
-            var remainingInputs = paddedSuffix
-            while remainingInputs.dim(1) > 1 {
-                let nToProcess = min(prefillStepSize, remainingInputs.dim(1) - 1)
-                let chunk = remainingInputs[0..., ..<nToProcess]
-                let _ = model(
-                    LMInput.Text(tokens: chunk),
-                    cache: batchCaches.isEmpty ? nil : batchCaches,
-                    state: nil
-                )
-                eval(batchCaches.flatMap { $0.innerState() })
+        // Prefill ALL right-padded suffix tokens through the model.
+        // Unlike the uncached path which holds back the last token for
+        // step(), here we process everything so that finalize() can
+        // operate on the complete KV state including all suffix tokens.
+        var remainingInputs = paddedSuffix
+        while remainingInputs.dim(1) > 0 {
+            let nToProcess = min(prefillStepSize, remainingInputs.dim(1))
+            let chunk = remainingInputs[0..., ..<nToProcess]
+            let _ = model(
+                LMInput.Text(tokens: chunk),
+                cache: batchCaches.isEmpty ? nil : batchCaches,
+                state: nil
+            )
+            eval(batchCaches.flatMap { $0.innerState() })
+            if nToProcess < remainingInputs.dim(1) {
                 remainingInputs = remainingInputs[0..., nToProcess...]
+            } else {
+                break
             }
-
-            // Final step: process last token and sample
-            let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
-            let (sampled, _) = step(
-                inputTokens: remainingInputs,
-                cache: batchCaches,
-                samplers: selectedPrompts.map(\.sampler),
-                processors: &processors,
-                tokens: tokenArrays
-            )
-
-            asyncEval(sampled)
-
-            return ActiveBatch(
-                uids: selectedPrompts.map(\.uid),
-                y: sampled,
-                cache: batchCaches,
-                samplers: selectedPrompts.map(\.sampler),
-                processors: processors,
-                maxTokens: selectedPrompts.map(\.maxTokens),
-                numTokens: Array(repeating: 0, count: selectedPrompts.count),
-                tokens: tokenArrays
-            )
-        } else {
-            // Only one suffix token per prompt — just sample directly
-            let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
-            let (sampled, _) = step(
-                inputTokens: paddedSuffix,
-                cache: batchCaches,
-                samplers: selectedPrompts.map(\.sampler),
-                processors: &processors,
-                tokens: tokenArrays
-            )
-
-            asyncEval(sampled)
-
-            return ActiveBatch(
-                uids: selectedPrompts.map(\.uid),
-                y: sampled,
-                cache: batchCaches,
-                samplers: selectedPrompts.map(\.sampler),
-                processors: processors,
-                maxTokens: selectedPrompts.map(\.maxTokens),
-                numTokens: Array(repeating: 0, count: selectedPrompts.count),
-                tokens: tokenArrays
-            )
         }
+
+        // Finalize: roll right-padding zeros to the left.
+        // After this, leftPadding is adjusted and all padding is
+        // contiguous on the left side of the buffer.
+        for cache in batchCaches {
+            if let batchCache = cache as? BatchKVCache {
+                batchCache.finalize()
+            } else if let batchRotCache = cache as? BatchRotatingKVCache {
+                batchRotCache.finalize()
+            }
+        }
+
+        // Trim the last token from cache and re-process it to get
+        // logits for sampling the first decode token. This mirrors
+        // the exact-hit path's trim+replay approach and ensures
+        // sampling sees the correct cache state after finalize.
+        for cache in batchCaches {
+            cache.trim(1)
+        }
+
+        // Build input: last real prompt token for each sequence
+        let lastTokens = selectedPrompts.map { Int32($0.tokens.last ?? 0) }
+        let lastTokenInput = MLXArray(lastTokens, [B, 1])
+
+        let tokenArrays = selectedPrompts.map { MLXArray($0.tokens) }
+        let (sampled, _) = step(
+            inputTokens: lastTokenInput,
+            cache: batchCaches,
+            samplers: selectedPrompts.map(\.sampler),
+            processors: &processors,
+            tokens: tokenArrays
+        )
+
+        asyncEval(sampled)
+
+        return ActiveBatch(
+            uids: selectedPrompts.map(\.uid),
+            y: sampled,
+            cache: batchCaches,
+            samplers: selectedPrompts.map(\.sampler),
+            processors: processors,
+            maxTokens: selectedPrompts.map(\.maxTokens),
+            numTokens: Array(repeating: 0, count: selectedPrompts.count),
+            tokens: tokenArrays
+        )
     }
 
     /// Build a right-aligned `BatchKVCache` for the partial-hit path.
@@ -961,6 +980,18 @@ public class BatchTokenIterator: @unchecked Sendable {
         let flat = prompts.flatMap { prompt -> [Int32] in
             let paddingCount = maxLength - prompt.count
             return Array(repeating: Int32(0), count: paddingCount) + prompt.map { Int32($0) }
+        }
+        return MLXArray(flat, [prompts.count, maxLength])
+    }
+
+    /// Right-pad token arrays to the given max length, returning shape `[B, maxLength]`.
+    ///
+    /// Mirrors `leftPadPrompts` but places padding zeros after the real tokens.
+    /// Used by the prepare/finalize lifecycle for mixed-depth cached-prompt prefill.
+    private func rightPadPrompts(_ prompts: [[Int]], maxLength: Int) -> MLXArray {
+        let flat = prompts.flatMap { prompt -> [Int32] in
+            let paddingCount = maxLength - prompt.count
+            return prompt.map { Int32($0) } + Array(repeating: Int32(0), count: paddingCount)
         }
         return MLXArray(flat, [prompts.count, maxLength])
     }

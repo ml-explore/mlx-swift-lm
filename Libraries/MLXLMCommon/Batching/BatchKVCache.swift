@@ -435,6 +435,56 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
         )
     }
 
+    // MARK: - Prepare / Finalize (Cached-Prompt Prefill)
+
+    /// Stored right-padding for the current prefill cycle.
+    /// Set by `prepare(rightPadding:)` and consumed by `finalize()`.
+    internal var _rightPadding: MLXArray?
+
+    /// Prepare the cache for a cached-prompt batch prefill with right-padding.
+    ///
+    /// During mixed-depth cached-prompt prefill, suffix tokens are
+    /// RIGHT-padded (shorter suffixes padded on the right to match the
+    /// longest suffix). After prefill, the right-padding zeros sit at
+    /// positions that `createCausalMask` does NOT mask out, corrupting
+    /// attention. `finalize()` fixes this by rolling the right-padding
+    /// zeros to the LEFT side of the buffer.
+    ///
+    /// Matches Python mlx-lm's `BatchKVCache.prepare()`.
+    ///
+    /// - Parameter rightPadding: Per-sequence right-padding amounts as
+    ///   an MLXArray of shape `[B]`.
+    public func prepare(rightPadding: MLXArray) {
+        // Only store if there's any non-zero padding
+        if rightPadding.max().item(Int32.self) > 0 {
+            _rightPadding = rightPadding
+        }
+    }
+
+    /// Finalize the cache after a cached-prompt batch prefill.
+    ///
+    /// If `prepare(rightPadding:)` was called, this method uses
+    /// `dynamicRoll` to shift each sequence's KV data so that
+    /// right-padding zeros move to the LEFT side of the buffer,
+    /// then adjusts `leftPadding += rightPadding` and
+    /// `batchOffsets -= rightPadding`.
+    ///
+    /// After finalize, all padding is contiguous on the left and
+    /// the causal mask correctly excludes it.
+    ///
+    /// Matches Python mlx-lm's `BatchKVCache.finalize()`.
+    public func finalize() {
+        guard let padding = _rightPadding else { return }
+
+        if let k = keys, let v = values {
+            self.keys = dynamicRoll(k, shifts: padding[0..., .newAxis], axis: 2)
+            self.values = dynamicRoll(v, shifts: padding[0..., .newAxis], axis: 2)
+        }
+        batchOffsets = batchOffsets - padding
+        leftPadding = leftPadding + padding
+        _rightPadding = nil
+    }
+
     public var debugDescription: String {
         "BatchKVCache batchSize: \(batchSize), _idx: \(_idx), keys: \(keys?.shape.description ?? "-"), values: \(values?.shape.description ?? "-")"
     }
