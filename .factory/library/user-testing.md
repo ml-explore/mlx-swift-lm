@@ -24,6 +24,7 @@ Primary testing tool: `swift test` (XCTest framework)
 - **Max concurrent validators:** 3 (conservative, since Swift builds are CPU-intensive)
 - **Rationale:** Swift compilation peaks at ~8GB RAM and saturates available cores. Running 3 concurrent validators uses ~24GB peak, leaving headroom for OS.
 - **Current batch-kv-cache decision:** Use **1 concurrent validator per repo checkout**. `swift test` writes to shared `.build` state, so validators must either run serially in the main checkout or use isolated scratch paths / working copies.
+- **Current example-app decision:** Use **at most 1 validator in `mlx-swift-lm` and 1 validator in `mlx-swift-examples` concurrently**. The repos are independent, but each validator must use its own DerivedData/build location because `xcodebuild` and SwiftPM build products are not safe to share during parallel validation.
 
 ## Testing Patterns
 
@@ -45,6 +46,7 @@ Primary testing tool: `swift test` (XCTest framework)
 - Capture the exact `swift test --filter ...` command, exit code, and the assertion IDs covered by that run in the flow report.
 - If Metal-backed MLX tests skip because the debug Metal library is unavailable, treat the skip as part of the observed behavior and report whether the targeted assertion still received direct evidence from the test run.
 - When MLX assertions require direct runtime evidence, prefer `xcodebuild test` on the Swift package (`mlx-swift-lm-Package`, destination `platform=macOS,arch=arm64`) and use `swift test` only as supplemental evidence.
+- If SwiftPM manifest linking fails in the default temp area with `errno=28` / `No space left on device`, retry with `TMPDIR` redirected to a validator-owned writable directory (for example under the evidence directory).
 
 ## Flow Validator Guidance: xcodebuild-test
 
@@ -54,3 +56,12 @@ Primary testing tool: `swift test` (XCTest framework)
 - For milestone `scheduler`, use `.factory/services.yaml` command `test-scheduler-runtime` or the equivalent `xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/InferenceSchedulerTests -only-testing:MLXLMTests/ModelContainerIntegrationTests`.
 - Capture the exact `xcodebuild test` command, exit code, assertion IDs covered, and notable test counts / failure lines in the flow report.
 - Save the raw xcodebuild log under the assigned evidence directory so later reruns can inspect the exact runtime output.
+
+## Flow Validator Guidance: llm-tool-cli
+
+- Surface: the `llm-tool` command-line app in `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-examples`.
+- Isolation boundary: do not edit source files; only write artifacts under `.factory/validation/<milestone>/user-testing/flows/` and mission evidence directories.
+- Build with a validator-specific DerivedData path, for example `xcodebuild build -scheme llm-tool -destination 'platform=macOS,arch=arm64' ONLY_ACTIVE_ARCH=YES ARCHS=arm64 -derivedDataPath /tmp/mlx-swift-examples-<milestone>-<group>/DerivedData`.
+- After building, run the produced binary directly from DerivedData (for example `/tmp/.../DerivedData/Build/Products/Debug/llm-tool --help` and `... llm-tool batch --help`) so the evidence reflects the real shipped CLI surface.
+- For runtime generation validation, only use an **already-present absolute local model directory** via `--model /absolute/path`. Do **not** trigger Hugging Face downloads during validation for this mission. If no local model assets are available, record the runtime assertion as blocked with that reason.
+- Capture the exact build/help/runtime commands, exit codes, notable output lines, and any blocked-runtime reason in the flow report. Save raw build logs under the assigned evidence directory.

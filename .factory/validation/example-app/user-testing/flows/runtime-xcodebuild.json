@@ -1,0 +1,384 @@
+{
+  "groupId": "runtime-xcodebuild",
+  "milestone": "example-app",
+  "surface": [
+    "swift-test",
+    "xcodebuild-test"
+  ],
+  "testedAt": "2026-03-14T13:15:40Z",
+  "assertionsTested": [
+    "VAL-MODEL-001",
+    "VAL-MODEL-005",
+    "VAL-MODEL-006",
+    "VAL-CROSS-001",
+    "VAL-CROSS-002",
+    "VAL-CROSS-003",
+    "VAL-CROSS-004",
+    "VAL-CROSS-005",
+    "VAL-CROSS-006",
+    "VAL-CROSS-007",
+    "VAL-CROSS-008",
+    "VAL-SCHED-004",
+    "VAL-SCHED-005",
+    "VAL-SCHED-006",
+    "VAL-SCHED-011",
+    "VAL-SCHED-016",
+    "VAL-SCHED-018"
+  ],
+  "isolation": {
+    "repoRoot": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm",
+    "missionDir": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c",
+    "derivedDataPath": "/tmp/mlx-swift-lm-example-app-runtime/DerivedData",
+    "reportPath": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/validation/example-app/user-testing/flows/runtime-xcodebuild.json",
+    "evidenceDir": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/runtime-xcodebuild"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "TodoWrite",
+    "XcodeBuildMCP.session_show_defaults"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-MODEL-001",
+      "status": "pass",
+      "reason": "Direct source scan found 0 obsolete `rope(... offset: cache.offset)` matches under `Libraries/MLXLLM/Models` and 89 `applyRotaryPosition(...)` call sites.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/VAL-MODEL-001-rotary-scan.json"
+      ]
+    },
+    {
+      "id": "VAL-MODEL-005",
+      "status": "pass",
+      "reason": "`swift build` succeeded after retrying with `TMPDIR` redirected into the assigned evidence directory.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-build.log",
+        "example-app/runtime-xcodebuild/swift-build-retry-tmpdir.log"
+      ]
+    },
+    {
+      "id": "VAL-MODEL-006",
+      "status": "pass",
+      "reason": "`swift test --filter MLXLMTests` exited 0 with 303 tests executed, 281 skipped by the known SwiftPM Metal guard, and 0 failures.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-001",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testSingleRequestFlowUnchanged` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testEndToEndBatchFlow` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testSingleToBatchUpgradeFlow` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-004",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testFallbackFlowForIncompatibleRequests` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "status": "pass",
+      "reason": "The broad `swift test --filter MLXLMTests` run completed with exit code 0 and no failures, which satisfies the contract evidence for backward API compatibility while noting known Metal-driven skips under SwiftPM.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-006",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testVariableSequenceLengthsInBatch` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-007",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testPromptCacheIntegrationWithBatchGeneration` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-008",
+      "status": "blocked",
+      "reason": "`BatchingIntegrationTests.testToolCallEmittedOnCorrectStream` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-004",
+      "status": "blocked",
+      "reason": "`InferenceSchedulerTests.testUpgradeUsesLiveTokenIteratorState` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-005",
+      "status": "blocked",
+      "reason": "`InferenceSchedulerTests.testUpgradeUsesLiveTokenIteratorState` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-006",
+      "status": "blocked",
+      "reason": "`ModelContainerIntegrationTests.testPaddingAndMaskingCorrectInBatchedMode` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-011",
+      "status": "blocked",
+      "reason": "`InferenceSchedulerTests.testEachRequestGetsIndependentStream` and `ModelContainerIntegrationTests.testEachRequestGetsIndependentStream` were skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-016",
+      "status": "blocked",
+      "reason": "`InferenceSchedulerTests.testThirdRequestJoinsExistingBatch` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    },
+    {
+      "id": "VAL-SCHED-018",
+      "status": "blocked",
+      "reason": "`ModelContainerIntegrationTests.testMultipleChatSessionsSharingModelContainerTriggerBatching` was skipped under SwiftPM because the MLX Metal library is unavailable in SPM debug builds, and xcodebuild runtime execution was blocked by disk-space exhaustion before tests could run.",
+      "evidenceFiles": [
+        "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+        "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+      ]
+    }
+  ],
+  "commandsRun": [
+    {
+      "surface": "direct-evidence",
+      "command": "python scan of Libraries/MLXLLM/Models for obsolete `rope(... offset: cache.offset)` usage and `applyRotaryPosition(...)` replacements",
+      "exitCode": 0,
+      "coveredAssertions": [
+        "VAL-MODEL-001"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/VAL-MODEL-001-rotary-scan.json",
+      "notableObservations": [
+        "0 obsolete `rope(... offset: cache.offset)` matches found.",
+        "89 `applyRotaryPosition(...)` call sites found under `Libraries/MLXLLM/Models`."
+      ]
+    },
+    {
+      "surface": "swift-build",
+      "command": "swift build --package-path /Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm",
+      "exitCode": 1,
+      "coveredAssertions": [
+        "VAL-MODEL-005"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/swift-build.log",
+      "notableObservations": [
+        "Initial build failed while linking a package manifest in the default temp location.",
+        "Failure text included `ld: open() failed, errno=28` and `No space left on device`."
+      ]
+    },
+    {
+      "surface": "swift-build",
+      "command": "env TMPDIR=/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/runtime-xcodebuild/tmp/ swift build --package-path /Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm",
+      "exitCode": 0,
+      "coveredAssertions": [
+        "VAL-MODEL-005"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/swift-build-retry-tmpdir.log",
+      "notableObservations": [
+        "Build completed successfully in 13.69s after redirecting TMPDIR."
+      ]
+    },
+    {
+      "surface": "swift-test",
+      "command": "env TMPDIR=/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/example-app/runtime-xcodebuild/tmp/ swift test --package-path /Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm --filter MLXLMTests",
+      "exitCode": 0,
+      "coveredAssertions": [
+        "VAL-MODEL-006",
+        "VAL-CROSS-001",
+        "VAL-CROSS-002",
+        "VAL-CROSS-003",
+        "VAL-CROSS-004",
+        "VAL-CROSS-005",
+        "VAL-CROSS-006",
+        "VAL-CROSS-007",
+        "VAL-CROSS-008",
+        "VAL-SCHED-004",
+        "VAL-SCHED-005",
+        "VAL-SCHED-006",
+        "VAL-SCHED-011",
+        "VAL-SCHED-016",
+        "VAL-SCHED-018"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+      "notableObservations": [
+        "Selected test run passed with 303 tests executed, 281 skipped, 0 failures.",
+        "`BatchingIntegrationTests`, `InferenceSchedulerTests`, and most `ModelContainerIntegrationTests` cases were skipped by `MLXMetalGuard` because the MLX Metal library is unavailable in SwiftPM debug builds."
+      ]
+    },
+    {
+      "surface": "xcodebuild-test",
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-example-app-runtime/DerivedData -only-testing:MLXLMTests/BatchingIntegrationTests",
+      "exitCode": 74,
+      "coveredAssertions": [
+        "VAL-CROSS-001",
+        "VAL-CROSS-002",
+        "VAL-CROSS-003",
+        "VAL-CROSS-004",
+        "VAL-CROSS-005",
+        "VAL-CROSS-006",
+        "VAL-CROSS-007",
+        "VAL-CROSS-008"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+      "notableObservations": [
+        "Package resolution failed while creating working copies because the volume ran out of space.",
+        "Representative failure: `unable to create file ... No space left on device`."
+      ]
+    },
+    {
+      "surface": "xcodebuild-test",
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -disableAutomaticPackageResolution -clonedSourcePackagesDirPath /Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.build/checkouts -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-example-app-runtime/DerivedData -only-testing:MLXLMTests/BatchingIntegrationTests",
+      "exitCode": 74,
+      "coveredAssertions": [
+        "VAL-CROSS-001",
+        "VAL-CROSS-002",
+        "VAL-CROSS-003",
+        "VAL-CROSS-004",
+        "VAL-CROSS-005",
+        "VAL-CROSS-006",
+        "VAL-CROSS-007",
+        "VAL-CROSS-008"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-checkouts.log",
+      "notableObservations": [
+        "Retry reused the wrong package root (`.build/checkouts`), which caused nested working copies under `.build/checkouts/checkouts`.",
+        "Resolution still failed because MLX submodule clones ran out of space."
+      ]
+    },
+    {
+      "surface": "xcodebuild-test",
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -disableAutomaticPackageResolution -clonedSourcePackagesDirPath /Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.build -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-example-app-runtime/DerivedData -only-testing:MLXLMTests/BatchingIntegrationTests",
+      "exitCode": 65,
+      "coveredAssertions": [
+        "VAL-CROSS-001",
+        "VAL-CROSS-002",
+        "VAL-CROSS-003",
+        "VAL-CROSS-004",
+        "VAL-CROSS-005",
+        "VAL-CROSS-006",
+        "VAL-CROSS-007",
+        "VAL-CROSS-008",
+        "VAL-SCHED-004",
+        "VAL-SCHED-005",
+        "VAL-SCHED-006",
+        "VAL-SCHED-011",
+        "VAL-SCHED-016",
+        "VAL-SCHED-018"
+      ],
+      "evidenceFile": "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log",
+      "notableObservations": [
+        "This retry successfully resolved package dependencies from the repo's existing `.build` root.",
+        "The build still failed before tests ran: `unable to write manifest ... because the volume ... is out of space`."
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Default SwiftPM temp locations were not usable for validation because package-manifest linking hit `No space left on device`.",
+      "resolved": true,
+      "resolution": "Retried `swift build` and `swift test` with `TMPDIR` redirected into the assigned evidence directory.",
+      "affectedAssertions": [
+        "VAL-MODEL-005",
+        "VAL-MODEL-006",
+        "VAL-CROSS-005"
+      ]
+    }
+  ],
+  "blockers": [
+    {
+      "description": "The macOS volume repeatedly ran out of space during xcodebuild package resolution and build-description generation, preventing any Metal-backed Xcode runtime tests from executing.",
+      "quickFixAttempted": "Retried xcodebuild three ways: baseline command, reuse `.build/checkouts`, and reuse the repo `.build` root with `-disableAutomaticPackageResolution`.",
+      "affectedAssertions": [
+        "VAL-CROSS-001",
+        "VAL-CROSS-002",
+        "VAL-CROSS-003",
+        "VAL-CROSS-004",
+        "VAL-CROSS-006",
+        "VAL-CROSS-007",
+        "VAL-CROSS-008",
+        "VAL-SCHED-004",
+        "VAL-SCHED-005",
+        "VAL-SCHED-006",
+        "VAL-SCHED-011",
+        "VAL-SCHED-016",
+        "VAL-SCHED-018"
+      ]
+    }
+  ],
+  "evidenceFiles": [
+    "example-app/runtime-xcodebuild/VAL-MODEL-001-rotary-scan.json",
+    "example-app/runtime-xcodebuild/swift-build.log",
+    "example-app/runtime-xcodebuild/swift-build-retry-tmpdir.log",
+    "example-app/runtime-xcodebuild/swift-test-MLXLMTests.log",
+    "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests.log",
+    "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-checkouts.log",
+    "example-app/runtime-xcodebuild/xcodebuild-BatchingIntegrationTests-reuse-build-root.log"
+  ],
+  "summary": {
+    "pass": 4,
+    "fail": 0,
+    "blocked": 13,
+    "skipped": 0,
+    "note": "SwiftPM validation succeeded for build and the broad MLXLMTests suite, but the Metal-backed xcodebuild runtime surface remained blocked by disk-space exhaustion."
+  }
+}
