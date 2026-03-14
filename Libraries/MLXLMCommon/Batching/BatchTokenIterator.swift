@@ -25,6 +25,13 @@ public struct PendingPrompt: @unchecked Sendable {
     /// Per-request logit processor (nil means no processing).
     public let processor: LogitProcessor?
 
+    /// Pre-existing per-layer KV cache from prompt cache (nil means no cached prefix).
+    ///
+    /// When non-nil, these caches cover a prefix of `tokens` and only the
+    /// uncached suffix needs to go through model prefill. The number of
+    /// cached tokens equals the cache's offset.
+    public let cachedKVState: [KVCache]?
+
     /// Total effective length for sorting (prompt tokens).
     public var effectiveLength: Int { tokens.count }
 }
@@ -250,13 +257,17 @@ public class BatchTokenIterator: @unchecked Sendable {
     ///   - maxTokens: Maximum tokens to generate per prompt (one per prompt).
     ///   - samplers: Optional per-request samplers. Nil entries use the default.
     ///   - processors: Optional per-request logit processors.
+    ///   - cachedKVStates: Optional per-prompt cached KV state from prompt cache.
+    ///     When non-nil for a prompt, only the uncached suffix tokens go through
+    ///     model prefill — the cached prefix is loaded directly into the batch cache.
     /// - Returns: Array of unique IDs, one per inserted prompt.
     @discardableResult
     public func insert(
         prompts: [[Int]],
         maxTokens: [Int],
         samplers: [LogitSampler?]? = nil,
-        processors: [LogitProcessor?]? = nil
+        processors: [LogitProcessor?]? = nil,
+        cachedKVStates: [[KVCache]?]? = nil
     ) -> [Int] {
         lock.lock()
         defer { lock.unlock() }
@@ -269,6 +280,7 @@ public class BatchTokenIterator: @unchecked Sendable {
 
         let samplerArray = samplers ?? Array(repeating: nil, count: prompts.count)
         let processorArray = processors ?? Array(repeating: nil, count: prompts.count)
+        let cachedArray = cachedKVStates ?? Array(repeating: nil, count: prompts.count)
 
         var uids = [Int]()
         for i in 0 ..< prompts.count {
@@ -280,7 +292,8 @@ public class BatchTokenIterator: @unchecked Sendable {
                     tokens: prompts[i],
                     maxTokens: maxTokens[i],
                     sampler: samplerArray[i],
-                    processor: processorArray[i]
+                    processor: processorArray[i],
+                    cachedKVState: cachedArray[i]
                 )
             )
             uids.append(uid)
@@ -448,7 +461,35 @@ public class BatchTokenIterator: @unchecked Sendable {
 
     /// Process a batch of pending prompts: left-pad, run prefill in chunks,
     /// then sample the first decode token.
+    ///
+    /// If any prompt has a `cachedKVState`, the cached and uncached prompts
+    /// are processed separately and the resulting batches are merged. Cached
+    /// prompts skip model prefill for the cached prefix tokens, running only
+    /// the uncached suffix through the model.
     internal func processPrompts(_ prompts: [PendingPrompt]) -> ActiveBatch {
+        // Partition into cached and uncached prompts
+        let cachedPrompts = prompts.filter { $0.cachedKVState != nil }
+        let uncachedPrompts = prompts.filter { $0.cachedKVState == nil }
+
+        if cachedPrompts.isEmpty {
+            // Fast path: no cached prompts, use standard prefill
+            return processUncachedPrompts(uncachedPrompts)
+        }
+
+        if uncachedPrompts.isEmpty {
+            // All prompts have cached KV state
+            return processCachedPrompts(cachedPrompts)
+        }
+
+        // Mixed: process both groups and merge
+        let cachedBatch = processCachedPrompts(cachedPrompts)
+        let uncachedBatch = processUncachedPrompts(uncachedPrompts)
+        cachedBatch.extend(other: uncachedBatch)
+        return cachedBatch
+    }
+
+    /// Process prompts without cached KV state (standard left-pad + full prefill).
+    private func processUncachedPrompts(_ prompts: [PendingPrompt]) -> ActiveBatch {
         let inputs = prompts.map(\.tokens)
         let lengths = inputs.map(\.count)
         let maxLength = lengths.max() ?? 0
@@ -505,6 +546,135 @@ public class BatchTokenIterator: @unchecked Sendable {
             numTokens: Array(repeating: 0, count: prompts.count),
             tokens: tokenArrays
         )
+    }
+
+    /// Process prompts that have cached KV state from the prompt cache.
+    ///
+    /// For each prompt, the cached prefix tokens are loaded directly into the
+    /// batch cache via `BatchKVCache.merge()`, and only the uncached suffix
+    /// tokens go through model prefill. This significantly reduces computation
+    /// when a large portion of the prompt is already cached.
+    ///
+    /// Left-padding alignment: When suffix tokens have different lengths, the
+    /// shorter suffixes are left-padded. The batch cache's `leftPadding` is
+    /// adjusted to include this suffix padding so the attention mask correctly
+    /// masks out both the prefix padding (from merge) and the suffix padding.
+    private func processCachedPrompts(_ prompts: [PendingPrompt]) -> ActiveBatch {
+        precondition(!prompts.isEmpty)
+        precondition(prompts.allSatisfy { $0.cachedKVState != nil })
+
+        // Each prompt has a cachedKVState covering some prefix.
+        // The suffix tokens (after the cached prefix) still need prefilling.
+        let cachedStates = prompts.map { $0.cachedKVState! }
+        let numLayers = cachedStates[0].count
+
+        // Compute suffix tokens for each prompt.
+        // The cached prefix length = cache offset (number of tokens already in cache).
+        let cachedLengths = cachedStates.map { layers -> Int in
+            layers.first?.offset ?? 0
+        }
+        let suffixTokens = zip(prompts, cachedLengths).map { prompt, cachedLen -> [Int] in
+            if cachedLen < prompt.tokens.count {
+                return Array(prompt.tokens[cachedLen...])
+            } else {
+                // The cache covers the entire prompt (or more). Only the last
+                // token is needed for sampling — duplicated from the cached data.
+                return [prompt.tokens.last ?? 0]
+            }
+        }
+
+        // Compute suffix left-padding for variable-length suffixes.
+        let suffixLengths = suffixTokens.map(\.count)
+        let maxSuffixLength = suffixLengths.max() ?? 0
+        let suffixPadding = suffixLengths.map { maxSuffixLength - $0 }
+
+        // Build per-layer batch caches by merging the individual cached caches.
+        // Each layer l: merge cachedStates[0][l], cachedStates[1][l], ...
+        // Then adjust leftPadding to include suffix padding.
+        var batchCaches = [KVCache]()
+        for l in 0 ..< numLayers {
+            let layerCaches = cachedStates.map { $0[l] }
+            let batchCache = BatchKVCache.merge(layerCaches)
+
+            // Add suffix left-padding: shorter suffixes get extra padding in
+            // the positions that will be filled with zero-padded tokens.
+            let suffixPaddingArray = MLXArray(suffixPadding.map { Int32($0) })
+            batchCache.leftPadding = batchCache.leftPadding + suffixPaddingArray
+
+            batchCaches.append(batchCache)
+        }
+
+        // Initialize per-request processors with their full prompt tokens.
+        var processors = prompts.map(\.processor)
+        for i in 0 ..< prompts.count {
+            let promptArray = MLXArray(prompts[i].tokens.map { Int32($0) })
+            processors[i]?.prompt(promptArray)
+        }
+
+        // Left-pad the suffix tokens for prefill
+        let paddedSuffix = leftPadPrompts(suffixTokens, maxLength: maxSuffixLength)
+
+        if maxSuffixLength > 1 {
+            // Process suffix in chunks of prefillStepSize, leaving last token for sampling.
+            var remainingInputs = paddedSuffix
+            while remainingInputs.dim(1) > 1 {
+                let nToProcess = min(prefillStepSize, remainingInputs.dim(1) - 1)
+                let chunk = remainingInputs[0..., ..<nToProcess]
+                let _ = model(
+                    LMInput.Text(tokens: chunk),
+                    cache: batchCaches.isEmpty ? nil : batchCaches,
+                    state: nil
+                )
+                eval(batchCaches.flatMap { $0.innerState() })
+                remainingInputs = remainingInputs[0..., nToProcess...]
+            }
+
+            // Final step: process last token and sample
+            let tokenArrays = prompts.map { MLXArray($0.tokens) }
+            let (sampled, _) = step(
+                inputTokens: remainingInputs,
+                cache: batchCaches,
+                samplers: prompts.map(\.sampler),
+                processors: &processors,
+                tokens: tokenArrays
+            )
+
+            asyncEval(sampled)
+
+            return ActiveBatch(
+                uids: prompts.map(\.uid),
+                y: sampled,
+                cache: batchCaches,
+                samplers: prompts.map(\.sampler),
+                processors: processors,
+                maxTokens: prompts.map(\.maxTokens),
+                numTokens: Array(repeating: 0, count: prompts.count),
+                tokens: tokenArrays
+            )
+        } else {
+            // Only one suffix token per prompt — just sample directly
+            let tokenArrays = prompts.map { MLXArray($0.tokens) }
+            let (sampled, _) = step(
+                inputTokens: paddedSuffix,
+                cache: batchCaches,
+                samplers: prompts.map(\.sampler),
+                processors: &processors,
+                tokens: tokenArrays
+            )
+
+            asyncEval(sampled)
+
+            return ActiveBatch(
+                uids: prompts.map(\.uid),
+                y: sampled,
+                cache: batchCaches,
+                samplers: prompts.map(\.sampler),
+                processors: processors,
+                maxTokens: prompts.map(\.maxTokens),
+                numTokens: Array(repeating: 0, count: prompts.count),
+                tokens: tokenArrays
+            )
+        }
     }
 
     /// Run one model step: forward pass, process logits, sample, update processor state.
