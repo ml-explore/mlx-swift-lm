@@ -453,7 +453,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
-    private var keep: Int
+    internal var keep: Int
     private var keys: MLXArray?
     private var values: MLXArray?
     private var maxCacheSize: Int

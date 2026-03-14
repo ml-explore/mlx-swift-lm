@@ -4,6 +4,53 @@ import Foundation
 import MLX
 import MLXNN
 
+// MARK: - Dynamic Roll Helper
+
+/// Per-element roll along a specified axis.
+///
+/// Ported from Python mlx-lm's `dynamic_roll`. Each element along the batch
+/// dimension is rolled by its own shift amount.
+///
+/// - Parameters:
+///   - x: The input array.
+///   - shifts: Per-batch shift amounts. Shape must broadcast with `x` along axes
+///     other than `axis`.
+///   - axis: The axis along which to roll.
+/// - Returns: The rolled array.
+internal func dynamicRoll(_ x: MLXArray, shifts: MLXArray, axis: Int) -> MLXArray {
+    let n = x.dim(axis)
+
+    // Build index shape for broadcasting.
+    let ndim = x.ndim
+    let positiveAxis = axis >= 0 ? axis : ndim + axis
+
+    // arange indices along the roll axis
+    let indices = MLXArray(Int32(0) ..< Int32(n))
+
+    // Reshape indices so they broadcast: [1, ..., 1, n, 1, ..., 1]
+    var idxShape = [Int](repeating: 1, count: ndim)
+    idxShape[positiveAxis] = n
+    let reshapedIndices = indices.reshaped(idxShape)
+
+    // Reshape shifts to broadcast: add trailing dims after the axis
+    // shifts shape: e.g. [B, 1] → needs to become [B, 1, 1, ..., 1]
+    var shiftShape = [Int](repeating: 1, count: ndim)
+    for d in 0 ..< shifts.ndim {
+        if d < ndim {
+            shiftShape[d] = shifts.dim(d)
+        }
+    }
+    let reshapedShifts = shifts.reshaped(shiftShape)
+
+    // Compute rolled indices: (indices - shifts) mod n
+    // Use ((x % n) + n) % n to ensure non-negative result (Python-style modulo)
+    let nArr = MLXArray(Int32(n))
+    let raw = remainder(reshapedIndices - reshapedShifts, nArr)
+    let idx = remainder(raw + nArr, nArr)
+
+    return takeAlong(x, idx.asType(.int32), axis: positiveAxis)
+}
+
 // MARK: - RotatingKVCache Internal Extension
 
 extension RotatingKVCache {
@@ -109,6 +156,14 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// Maximum cache size (sliding window size).
     private var maxCacheSize: Int
 
+    /// Number of tokens to always keep at the start of the cache during rotation.
+    /// Mirrors `RotatingKVCache.keep`.
+    public internal(set) var keep: Int = 0
+
+    /// Stored lengths for right-padded inputs during cached-prompt prefill.
+    /// Set by `prepare(rightPadding:lengths:)` and consumed by `finalize()`.
+    internal var _lengths: MLXArray?
+
     /// Step size for buffer allocation.
     public var step: Int = 256
 
@@ -126,16 +181,21 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// - Parameters:
     ///   - maxSize: The maximum cache size (sliding window size).
     ///   - leftPadding: Array of integers specifying the left-padding for each sequence.
-    public init(maxSize: Int, leftPadding: [Int]) {
+    ///   - keep: Number of tokens to always keep at the start during rotation (default 0).
+    public init(maxSize: Int, leftPadding: [Int], keep: Int = 0) {
         self.maxCacheSize = maxSize
+        self.keep = keep
         self.leftPadding = MLXArray(leftPadding.map { Int32($0) })
         self.batchOffsets = MLXArray(leftPadding.map { -Int32($0) })
         super.init()
     }
 
     /// Internal initializer with pre-built MLXArrays.
-    internal init(maxSize: Int, leftPaddingArray: MLXArray, batchOffsetsArray: MLXArray) {
+    internal init(
+        maxSize: Int, keep: Int = 0, leftPaddingArray: MLXArray, batchOffsetsArray: MLXArray
+    ) {
         self.maxCacheSize = maxSize
+        self.keep = keep
         self.leftPadding = leftPaddingArray
         self.batchOffsets = batchOffsetsArray
         super.init()
@@ -179,6 +239,16 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
                 self.values = self.values![.ellipsis, ..<_idx, 0...]
             }
 
+            // Roll right sequences that are padded to make sure that we don't
+            // trim valid cache entries (cached-prompt prefill support)
+            if let lengths = _lengths {
+                let roll = MLX.maximum(MLXArray(Int32(0)), batchOffsets - lengths)
+                self.keys = dynamicRoll(self.keys!, shifts: roll[0..., .newAxis], axis: 2)
+                self.values = dynamicRoll(self.values!, shifts: roll[0..., .newAxis], axis: 2)
+                leftPadding = leftPadding + roll
+                batchOffsets = batchOffsets - roll
+            }
+
             // The largest size is maxCacheSize + S - 1 to ensure
             // every token gets at least maxCacheSize context
             let trimSize = _idx - maxCacheSize + 1
@@ -201,6 +271,11 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
 
     /// Single-token in-place rotation path for decode.
     private func updateInPlace(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        precondition(
+            _lengths == nil,
+            "finalize() should be called before decoding with BatchRotatingKVCache"
+        )
+
         let B = keys.dim(0)
         let nKVHeads = keys.dim(1)
         let S = keys.dim(2)
@@ -323,17 +398,18 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         get {
             [
                 String(maxCacheSize), String(_scalarOffset), String(_idx),
-                String(rotated),
+                String(rotated), String(keep),
             ]
         }
         set {
-            guard newValue.count == 4 else {
-                fatalError("BatchRotatingKVCache metaState must have exactly 4 values")
+            guard newValue.count == 5 else {
+                fatalError("BatchRotatingKVCache metaState must have exactly 5 values")
             }
             self.maxCacheSize = Int(newValue[0]) ?? 0
             self._scalarOffset = Int(newValue[1]) ?? 0
             self._idx = Int(newValue[2]) ?? 0
             self.rotated = newValue[3] == "true"
+            self.keep = Int(newValue[4]) ?? 0
         }
     }
 
@@ -348,6 +424,57 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         _idx -= trimmed
         batchOffsets = batchOffsets - Int32(trimmed)
         return trimmed
+    }
+
+    // MARK: - Prepare / Finalize (Cached-Prompt Prefill)
+
+    /// Prepare the cache for a cached-prompt batch prefill.
+    ///
+    /// During prefill with cached prompts of different lengths, some sequences
+    /// may need right-padding to align. This method stores the state needed to
+    /// roll back to left-padding on `finalize()`.
+    ///
+    /// Matches Python mlx-lm's `BatchRotatingKVCache.prepare()`.
+    ///
+    /// - Parameters:
+    ///   - leftPadding: Optional additional left-padding to add (only valid on empty caches).
+    ///   - lengths: Per-sequence token lengths (required when `rightPadding` is used).
+    ///   - rightPadding: Per-sequence right-padding amounts. When provided,
+    ///     stores `_lengths = lengths + offset` so that `finalize()` can roll
+    ///     right-padded tokens back to left-padded order.
+    public func prepare(
+        leftPadding: [Int]? = nil, lengths: [Int]? = nil, rightPadding: [Int]? = nil
+    ) {
+        if let lp = leftPadding {
+            precondition(
+                keys == nil, "Left padding can only be added to an empty BatchRotatingKVCache")
+            let lpArray = MLXArray(lp.map { Int32($0) })
+            self.leftPadding = self.leftPadding + lpArray
+            self.batchOffsets = self.batchOffsets - lpArray
+        }
+
+        if let rp = rightPadding, rp.max()! > 0, let lengths = lengths {
+            self._lengths = MLXArray(lengths.map { Int32($0) }) + self.batchOffsets
+        }
+    }
+
+    /// Finalize the cache after a cached-prompt batch prefill.
+    ///
+    /// If `prepare(rightPadding:lengths:)` was called, this method rolls
+    /// right-padded key/value data back to left-padded order so that the
+    /// cache is in the correct state for subsequent decode steps.
+    ///
+    /// Matches Python mlx-lm's `BatchRotatingKVCache.finalize()`.
+    public func finalize() {
+        guard let lengths = _lengths else { return }
+        let roll = MLX.maximum(MLXArray(Int32(0)), batchOffsets - lengths)
+        if let k = keys, let v = values {
+            self.keys = dynamicRoll(k, shifts: roll[0..., .newAxis], axis: 2)
+            self.values = dynamicRoll(v, shifts: roll[0..., .newAxis], axis: 2)
+        }
+        self.leftPadding = self.leftPadding + roll
+        self.batchOffsets = self.batchOffsets - roll
+        self._lengths = nil
     }
 
     /// The batch size (number of sequences).
@@ -462,7 +589,7 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// - Parameter idx: The batch index of the sequence to extract.
     /// - Returns: A `RotatingKVCache` with the extracted sequence data.
     public func extract(idx: Int) -> RotatingKVCache {
-        let cache = RotatingKVCache(maxSize: maxCacheSize)
+        let cache = RotatingKVCache(maxSize: maxCacheSize, keep: keep)
         let padding = Int(leftPadding[idx].item(Int32.self))
         let seqOffset = Int(batchOffsets[idx].item(Int32.self))
 
@@ -488,7 +615,7 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
             // Set metaState to configure idx properly
             let cacheIdx = extractedK.dim(2)
             cache.metaState = [
-                "0", String(maxCacheSize), "256", String(seqOffset), String(cacheIdx),
+                String(keep), String(maxCacheSize), "256", String(seqOffset), String(cacheIdx),
             ]
         }
 
@@ -503,20 +630,27 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// - Parameter caches: An array of `RotatingKVCache` instances.
     /// - Returns: A new `BatchRotatingKVCache` containing all sequences.
     public class func merge(_ caches: [KVCache]) -> BatchRotatingKVCache {
-        // Validate all caches have the same maxSize
+        // Validate all caches have the same maxSize and keep
         var targetMaxSize: Int = 0
+        var targetKeep: Int = -1
         for cache in caches {
             guard let rotCache = cache as? RotatingKVCache else {
                 preconditionFailure(
                     "BatchRotatingKVCache.merge requires RotatingKVCache instances")
             }
             let ms = rotCache.maxSize ?? 0
+            let k = rotCache.keep
             if targetMaxSize == 0 {
                 targetMaxSize = ms
+                targetKeep = k
             } else {
                 precondition(
                     ms == targetMaxSize,
                     "BatchRotatingKVCache can only merge caches with the same maximum size"
+                )
+                precondition(
+                    k == targetKeep,
+                    "BatchRotatingKVCache can only merge caches with the same keep value"
                 )
             }
         }
@@ -549,7 +683,8 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         }
 
         guard H > 0 else {
-            return BatchRotatingKVCache(maxSize: targetMaxSize, leftPadding: padding)
+            return BatchRotatingKVCache(
+                maxSize: targetMaxSize, leftPadding: padding, keep: max(targetKeep, 0))
         }
 
         let keysArr = MLXArray.zeros([B, H, maxLength, Dk], dtype: dt)
@@ -572,7 +707,8 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
             }
         }
 
-        let cache = BatchRotatingKVCache(maxSize: targetMaxSize, leftPadding: padding)
+        let cache = BatchRotatingKVCache(
+            maxSize: targetMaxSize, leftPadding: padding, keep: max(targetKeep, 0))
         cache.keys = keysArr
         cache.values = valuesArr
         cache.batchOffsets = MLXArray(offsets.map { Int32($0) })
@@ -588,7 +724,8 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// - Returns: A new `BatchRotatingKVCache` with batch size 1.
     public class func fromSingle(_ cache: RotatingKVCache) -> BatchRotatingKVCache {
         let ms = cache.maxSize ?? 0
-        let batchCache = BatchRotatingKVCache(maxSize: ms, leftPadding: [0])
+        let k = cache.keep
+        let batchCache = BatchRotatingKVCache(maxSize: ms, leftPadding: [0], keep: k)
 
         let temporalData = cache.temporalState
         if temporalData.count >= 2 {
@@ -673,6 +810,6 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     }
 
     public var debugDescription: String {
-        "BatchRotatingKVCache batchSize: \(batchSize), maxSize: \(maxCacheSize), _idx: \(_idx), _offset: \(_scalarOffset), rotated: \(rotated), keys: \(keys?.shape.description ?? "-")"
+        "BatchRotatingKVCache batchSize: \(batchSize), maxSize: \(maxCacheSize), keep: \(keep), _idx: \(_idx), _offset: \(_scalarOffset), rotated: \(rotated), keys: \(keys?.shape.description ?? "-")"
     }
 }

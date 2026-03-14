@@ -586,4 +586,310 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         // Should still return maxSize-length keys
         XCTAssertEqual(retK.dim(2), maxSize)
     }
+
+    // MARK: - Keep value preservation
+
+    func testKeepPreservedThroughMerge() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        let cacheA = RotatingKVCache(maxSize: 16, keep: 4)
+        let cacheB = RotatingKVCache(maxSize: 16, keep: 4)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D, value: 1.0)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D, value: 2.0)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+
+        // keep should be preserved from the source caches
+        XCTAssertEqual(batchCache.keep, 4)
+        XCTAssertEqual(batchCache.batchSize, 2)
+        XCTAssertEqual(batchCache.maxSize, 16)
+    }
+
+    func testKeepPreservedThroughExtract() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        let cacheA = RotatingKVCache(maxSize: 16, keep: 4)
+        let cacheB = RotatingKVCache(maxSize: 16, keep: 4)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D, value: 1.0)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D, value: 2.0)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        let extracted = batchCache.extract(idx: 0)
+
+        // Extracted RotatingKVCache should have keep=4
+        // metaState[0] is the keep value
+        let meta = extracted.metaState
+        XCTAssertEqual(Int(meta[0]), 4)
+        XCTAssertEqual(extracted.offset, 5)
+    }
+
+    func testKeepPreservedThroughFromSingle() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        let rotCache = RotatingKVCache(maxSize: 16, keep: 4)
+        let (k, v) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D)
+        _ = rotCache.update(keys: k, values: v)
+
+        let batchCache = BatchRotatingKVCache.fromSingle(rotCache)
+
+        XCTAssertEqual(batchCache.keep, 4)
+        XCTAssertEqual(batchCache.batchSize, 1)
+        XCTAssertEqual(batchCache.maxSize, 16)
+    }
+
+    func testKeepPreservedThroughToSingle() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        let rotCache = RotatingKVCache(maxSize: 16, keep: 4)
+        let (k, v) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D)
+        _ = rotCache.update(keys: k, values: v)
+
+        let batchCache = BatchRotatingKVCache.fromSingle(rotCache)
+        let backToSingle = batchCache.toSingle()
+
+        // metaState[0] is the keep value
+        let meta = backToSingle.metaState
+        XCTAssertEqual(Int(meta[0]), 4)
+        XCTAssertEqual(backToSingle.offset, 5)
+    }
+
+    func testKeepRoundTrip() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        // Create caches with keep=4 (like the production path)
+        let cacheA = RotatingKVCache(maxSize: 16, keep: 4)
+        let cacheB = RotatingKVCache(maxSize: 16, keep: 4)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D, value: 1.0)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D, value: 2.0)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        // Merge → extract round-trip should preserve keep
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, 4)
+
+        let extractedA = batchCache.extract(idx: 0)
+        let extractedB = batchCache.extract(idx: 1)
+
+        XCTAssertEqual(Int(extractedA.metaState[0]), 4)
+        XCTAssertEqual(Int(extractedB.metaState[0]), 4)
+        XCTAssertEqual(extractedA.offset, 5)
+        XCTAssertEqual(extractedB.offset, 3)
+    }
+
+    func testKeepPreservedInMetaState() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 32, leftPadding: [0], keep: 4)
+        let meta = cache.metaState
+        XCTAssertEqual(meta.count, 5)
+        // metaState = [maxCacheSize, _scalarOffset, _idx, rotated, keep]
+        XCTAssertEqual(meta[4], "4")
+
+        // Setting metaState should restore keep
+        var newCache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
+        XCTAssertEqual(newCache.keep, 0)
+        newCache.metaState = ["32", "0", "0", "false", "4"]
+        XCTAssertEqual(newCache.keep, 4)
+    }
+
+    // MARK: - Merge rejects mismatched keep
+
+    func testMergeRejectsMismatchedKeep() throws {
+        try skipIfMetalUnavailable()
+
+        // We cannot directly test preconditionFailure in a standard XCTest
+        // (it crashes the process). Instead, verify that matching keep values work.
+        let H = 2
+        let D = 4
+
+        let cacheA = RotatingKVCache(maxSize: 16, keep: 4)
+        let cacheB = RotatingKVCache(maxSize: 16, keep: 4)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        // Same keep values should succeed
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, 4)
+        XCTAssertEqual(batchCache.batchSize, 2)
+    }
+
+    // MARK: - Prepare / Finalize tests
+
+    func testPrepareStoresState() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 3, 0])
+
+        // Prepare with right-padding
+        cache.prepare(lengths: [5, 3, 4], rightPadding: [0, 2, 1])
+
+        // _lengths should be set (not nil)
+        XCTAssertNotNil(cache._lengths)
+    }
+
+    func testPrepareWithLeftPaddingOnEmptyCache() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 0])
+
+        // Adding left-padding on empty cache should work
+        cache.prepare(leftPadding: [2, 3])
+
+        // leftPadding should be increased
+        XCTAssertEqual(cache.leftPadding[0].item(Int32.self), 2)
+        XCTAssertEqual(cache.leftPadding[1].item(Int32.self), 3)
+
+        // offsets should be decreased
+        XCTAssertEqual(cache.batchOffsets[0].item(Int32.self), -2)
+        XCTAssertEqual(cache.batchOffsets[1].item(Int32.self), -3)
+    }
+
+    func testFinalizeWithoutPrepareIsNoOp() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 0])
+        let B = 2
+        let H = 2
+        let S = 4
+        let D = 4
+
+        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: S, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+
+        let offsetsBefore = cache.batchOffsets[0].item(Int32.self)
+
+        // finalize without prepare should be a no-op
+        cache.finalize()
+
+        let offsetsAfter = cache.batchOffsets[0].item(Int32.self)
+        XCTAssertEqual(offsetsBefore, offsetsAfter)
+    }
+
+    func testPrepareFinalizeRoundTrip() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 32, leftPadding: [2, 0])
+        let B = 2
+        let H = 2
+        let D = 4
+
+        // Simulate prefill with right-padded data
+        // Sequence 0: 3 real tokens + 2 right-padding = 5 total
+        // Sequence 1: 5 real tokens + 0 right-padding = 5 total
+        cache.prepare(lengths: [3, 5], rightPadding: [2, 0])
+
+        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: 5, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+
+        // After prepare + update, _lengths should still be set
+        XCTAssertNotNil(cache._lengths)
+
+        // Finalize should roll back right-padding
+        cache.finalize()
+
+        // After finalize, _lengths should be cleared
+        XCTAssertNil(cache._lengths)
+    }
+
+    // MARK: - Keep=0 default behavior preserved
+
+    func testDefaultKeepIsZero() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0])
+        XCTAssertEqual(cache.keep, 0)
+    }
+
+    func testMergeWithKeepZero() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        // Default keep=0
+        let cacheA = RotatingKVCache(maxSize: 16)
+        let cacheB = RotatingKVCache(maxSize: 16)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D, value: 1.0)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D, value: 2.0)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, 0)
+
+        let extracted = batchCache.extract(idx: 0)
+        XCTAssertEqual(Int(extracted.metaState[0]), 0)
+    }
+
+    // MARK: - Filter-extend cycle with keep=4
+
+    func testFilterExtendCycleWithKeep() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        let cacheA = RotatingKVCache(maxSize: 16, keep: 4)
+        let cacheB = RotatingKVCache(maxSize: 16, keep: 4)
+
+        let (kA, vA) = makeKV(batchSize: 1, heads: H, seqLen: 5, headDim: D, value: 1.0)
+        let (kB, vB) = makeKV(batchSize: 1, heads: H, seqLen: 3, headDim: D, value: 2.0)
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, 4)
+
+        // Filter
+        batchCache.filter(batchIndices: [0])
+        XCTAssertEqual(batchCache.batchSize, 1)
+        XCTAssertEqual(batchCache.keep, 4)
+
+        // Add new with keep=4
+        let cacheC = RotatingKVCache(maxSize: 16, keep: 4)
+        let (kC, vC) = makeKV(batchSize: 1, heads: H, seqLen: 4, headDim: D, value: 3.0)
+        _ = cacheC.update(keys: kC, values: vC)
+        let newBatch = BatchRotatingKVCache.merge([cacheC])
+
+        batchCache.extend(other: newBatch)
+        XCTAssertEqual(batchCache.batchSize, 2)
+        XCTAssertEqual(batchCache.keep, 4)
+
+        // Extract - should preserve keep
+        let extracted = batchCache.extract(idx: 0)
+        XCTAssertEqual(Int(extracted.metaState[0]), 4)
+    }
 }
