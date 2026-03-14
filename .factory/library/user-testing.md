@@ -30,7 +30,7 @@ Primary testing tool: `swift test` (XCTest framework)
 - All batching tests use mock models (no model downloads)
 - Mock models return deterministic outputs for verifiable behavior
 - KV cache tests use synthetic tensors with known values
-- Scheduler tests use mock TokenIterator/BatchTokenIterator stubs
+- Scheduler tests use MLX-backed mock models and the real scheduler path, with `skipIfMetalUnavailable()` guarding the MLX assertions that SwiftPM skips when the Metal library is unavailable
 - Existing tests must continue passing (regression safety)
 - `swift test` is still useful for fast smoke checks, but MLX-dependent tests may all skip under SPM because `MLXMetalGuard` detects the missing Metal library.
 - For milestone `batch-kv-cache`, direct user-validation evidence came from `xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/<TestClass>`.

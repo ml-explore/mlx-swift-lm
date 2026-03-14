@@ -1,0 +1,40 @@
+{
+  "featureId": "model-container-integration",
+  "reviewedAt": "2026-03-14T06:58:09Z",
+  "commitId": "931f353",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature wires `ModelContainer` and `ChatSession` to `InferenceScheduler`, but it does not satisfy the scheduler milestone's transparent batching requirements. The single-to-batch upgrade still drops the first caller's stream instead of preserving it, and the new `ChatSession` scheduler branch throws away per-session conversation state. The added tests are also too weak to catch those regressions and mostly skip under the default SwiftPM path.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 419,
+        "severity": "blocking",
+        "description": "`upgradeToBatch()` cancels the first request's task (`existingSingle.task.cancel()`), creates a replacement `firstContinuation` that is never wired back to the stream already returned from the original `submit()` call (lines 485-491), and even documents at lines 607-617 that the original caller will just observe termination. That directly violates the feature requirements that each request keep its own AsyncStream, that cancelling one request not stop others, that staggered completions be handled correctly, and that multiple ChatSessions transparently batch when they share one ModelContainer."
+      },
+      {
+        "file": "Libraries/MLXLMCommon/ChatSession.swift",
+        "line": 286,
+        "severity": "blocking",
+        "description": "When `model.scheduler != nil`, the new scheduler branch resets `.kvcache` to `.empty` (lines 288-296), never stores replacement history or a new cache, and returns immediately after the stream finishes (lines 301-329). Because `ChatSession` is documented as a multi-turn conversation API (lines 8-16), every subsequent turn with batching enabled loses the prior conversation context instead of continuing the session transparently."
+      },
+      {
+        "file": "Tests/MLXLMTests/ModelContainerIntegrationTests.swift",
+        "line": 223,
+        "severity": "non_blocking",
+        "description": "The new integration tests do not actually prove the required behaviors. `testEachRequestGetsIndependentStream()` only checks that at least one stream emitted anything (lines 223-230), `testMultipleChatSessionsSharingModelContainerTriggerBatching()` passes if either session succeeds (lines 431-437), and `testPaddingAndMaskingCorrectInBatchedMode()` only runs a single request instead of comparing batched vs. single deterministic output (lines 350-383). Those assertions would still pass with the broken upgrade path above."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker skill still treats `swift test --filter MLXLMTests` as the main verification step even for scheduler features whose MLX-backed assertions usually skip under SwiftPM. For this feature the worker followed that guidance, and the handoff records that 9 of the 10 new integration tests were skipped, so the current skill still steers workers away from the stronger Metal-backed `xcodebuild test` path already captured in shared library knowledge.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md:59-64` tells workers to verify with `swift test --filter MLXLMTests`, while `.factory/library/user-testing.md:16,35-46` says MLX assertions should prefer `xcodebuild test` because SwiftPM may skip them. The handoff `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T06-54-07-055Z__model-container-integration__c3d90b6c-5de5-41d7-8b0f-cae50456c2db.json` records `swift test --filter MLXLMTests` with 218 tests executed / 197 skipped, including 9 of 10 new `ModelContainerIntegrationTests`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature metadata, worker transcript skeleton, handoff, and commit `931f353`. The ModelContainer integration compiles, but the single-to-batch upgrade still drops the first request and the new ChatSession batching path forgets prior turns, so the feature does not meet the scheduler milestone's transparent batching requirements."
+}

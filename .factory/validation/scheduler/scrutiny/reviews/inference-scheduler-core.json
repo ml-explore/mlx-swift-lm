@@ -1,0 +1,40 @@
+{
+  "featureId": "inference-scheduler-core",
+  "reviewedAt": "2026-03-14T06:57:46Z",
+  "commitId": "4b7d2ec",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The single-request path and the batch-compatibility gate are implemented, but the core single-to-batch upgrade contract is not. On upgrade the scheduler cancels the first request's original stream, never wires the first caller to the new batch continuation, and does not actually inject the migrated KVCacheSimple state into BatchTokenIterator, so the feature misses the required uninterrupted upgrade behavior.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 420,
+        "severity": "blocking",
+        "description": "`upgradeToBatch` cancels the first request's task before preserving its original continuation, then creates a brand-new `firstContinuation` that is never returned to the first caller. The inline comment at lines 607-617 explicitly says the first submitter will see its original stream terminate. That violates VAL-SCHED-005 and VAL-SCHED-011, which require the first request to continue without interruption and each request to keep its own AsyncStream routing through the upgrade." 
+      },
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 447,
+        "severity": "blocking",
+        "description": "The code builds `batchCaches` with `BatchKVCache.fromSingle(...)`, but those migrated caches are never given to `BatchTokenIterator`. Instead, the first request is reinserted as a fresh prompt from `firstIterator.y.tokens` at lines 457-468, so the accumulated KV state is discarded and the request effectively restarts from a one-token prompt. This does not satisfy VAL-SCHED-004's required KV-cache migration without data loss." 
+      },
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 376,
+        "severity": "non_blocking",
+        "description": "The added tests do not exercise the critical upgrade path. `testEachRequestGetsIndependentStream` only submits one request, and `testActorIsolationPreventDataRaces` (line 296) swallows upgrade failures instead of asserting upgrade behavior. As a result the suite never verifies VAL-SCHED-003/004/005/011/016/017 and would not catch the broken first-stream migration above." 
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "library",
+      "observation": "`.factory/library/user-testing.md` says scheduler tests use mock `TokenIterator`/`BatchTokenIterator` stubs, but the current `InferenceSchedulerTests` exercise the real scheduler path with an MLX-backed mock model and guard nearly every test with `skipIfMetalUnavailable()`. That note is stale and could mislead future workers about what the SwiftPM test surface actually covers.",
+      "evidence": "`.factory/library/user-testing.md:31-35` vs `Tests/MLXLMTests/InferenceSchedulerTests.swift:17-18, 85-95, 90, 128, 169`"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature metadata, handoff, transcript skeleton, and commit `4b7d2ec`. The implementation gets the compatibility checks and single-request path in place, but the advertised single-to-batch upgrade is not correct: the first caller's stream is cancelled during upgrade and the computed BatchKVCache migration is never actually used, so the feature does not meet the scheduler milestone's core correctness requirements."
+}

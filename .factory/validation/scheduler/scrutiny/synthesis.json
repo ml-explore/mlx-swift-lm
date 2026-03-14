@@ -1,0 +1,65 @@
+{
+  "milestone": "scheduler",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift test --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift build",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift-format lint --configuration .swift-format --recursive Libraries Tests",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 0,
+    "failed": 2,
+    "failedFeatures": [
+      "inference-scheduler-core",
+      "model-container-integration"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "inference-scheduler-core",
+      "severity": "blocking",
+      "description": "`InferenceScheduler.upgradeToBatch()` cancels the first request's original task/stream and creates a replacement continuation that is never returned to the caller, so the first request does not continue uninterrupted through upgrade and request streams are not preserved independently. This root cause was reported in both scheduler feature reviews."
+    },
+    {
+      "featureId": "inference-scheduler-core",
+      "severity": "blocking",
+      "description": "`InferenceScheduler.upgradeToBatch()` computes `BatchKVCache.fromSingle(...)` for the first request but never injects that migrated cache into `BatchTokenIterator`, instead reinserting the first request from prompt tokens and discarding accumulated KV state."
+    },
+    {
+      "featureId": "model-container-integration",
+      "severity": "blocking",
+      "description": "`ChatSession`'s scheduler-enabled path resets the session cache/history to `.empty` and returns without persisting updated state, so multi-turn conversations lose prior context when batching is enabled."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Updated `.factory/library/user-testing.md` to reflect that scheduler tests exercise the real scheduler path with MLX-backed mock models and Metal-availability guards, not TokenIterator/BatchTokenIterator stubs.",
+      "sourceFeature": "inference-scheduler-core"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update the `swift-batching-worker` skill to direct MLX-backed scheduler verification toward targeted `xcodebuild test` runs, with `swift test --filter MLXLMTests` as supplemental smoke coverage rather than the primary proof path.",
+      "evidence": "The `model-container-integration` review cites `.factory/skills/swift-batching-worker/SKILL.md:59-64` steering workers to `swift test --filter MLXLMTests`, while `.factory/library/user-testing.md:4,18,34-46` documents `xcodebuild test` as the stronger path when SwiftPM skips Metal-backed assertions; the feature handoff recorded 218 executed / 197 skipped tests under SwiftPM, and the same skill-gap was already called out in `.factory/validation/batch-engine/scrutiny/synthesis.json`.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
