@@ -312,10 +312,10 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
             leftPadding = leftPadding - Int32(trimSize)
         }
 
-        // Rotate
+        // Rotate — wrap to keep (not 0) so the first `keep` positions are never overwritten
         if _idx == maxCacheSize {
             rotated = true
-            _idx = 0
+            _idx = keep
         }
         if rotated {
             leftPadding = leftPadding - Int32(S)
@@ -341,10 +341,42 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     // MARK: - Temporal Order
 
     /// Rearrange the cache into temporal order by unrolling rotation.
+    ///
+    /// When `keep > 0`, the first `keep` positions are fixed and the circular
+    /// buffer operates on positions `keep..<maxCacheSize`. This mirrors the
+    /// `RotatingKVCache.temporalOrder` logic.
     private func temporalOrder() {
         guard rotated else { return }
-        self.keys = MLX.roll(self.keys!, shift: -_idx, axis: 2)
-        self.values = MLX.roll(self.values!, shift: -_idx, axis: 2)
+        guard let k = self.keys, let v = self.values else { return }
+
+        let seqDim = k.dim(2)
+        if _idx == seqDim {
+            // idx at the end means data is already in temporal order
+        } else if _idx < _scalarOffset && keep > 0 {
+            // Rotated with keep prefix: [keep tokens][newer(keep..<_idx)][older(_idx..)]
+            // Reorder to: [keep tokens][older(_idx..)][newer(keep..<_idx)]
+            self.keys = concatenated(
+                [
+                    k[.ellipsis, ..<keep, 0...],
+                    k[.ellipsis, _idx..., 0...],
+                    k[.ellipsis, keep ..< _idx, 0...],
+                ], axis: 2)
+            self.values = concatenated(
+                [
+                    v[.ellipsis, ..<keep, 0...],
+                    v[.ellipsis, _idx..., 0...],
+                    v[.ellipsis, keep ..< _idx, 0...],
+                ], axis: 2)
+        } else if _idx < _scalarOffset {
+            // Rotated without keep: simple roll
+            self.keys = MLX.roll(k, shift: -_idx, axis: 2)
+            self.values = MLX.roll(v, shift: -_idx, axis: 2)
+        } else {
+            // idx >= scalarOffset: slice off the end
+            self.keys = k[.ellipsis, ..<_idx, 0...]
+            self.values = v[.ellipsis, ..<_idx, 0...]
+        }
+
         _idx = self.keys!.dim(2)
         rotated = false
     }
@@ -352,17 +384,25 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     // MARK: - Trim Helper
 
     /// Trim the oldest entries from a buffer (after keep tokens).
+    ///
+    /// Preserves the first `keep` positions and trims from the window portion,
+    /// matching `RotatingKVCache.trim` semantics.
     private func trim(trimSize: Int, _ array: MLXArray, append: MLXArray? = nil) -> MLXArray {
-        var result: MLXArray
-        if trimSize > 0 {
-            result = array[.ellipsis, trimSize..., 0...]
+        var toCat: [MLXArray] = []
+        if trimSize > 0 && keep > 0 {
+            toCat = [
+                array[.ellipsis, ..<keep, 0...],
+                array[.ellipsis, (trimSize + keep)..., 0...],
+            ]
+        } else if trimSize > 0 {
+            toCat = [array[.ellipsis, trimSize..., 0...]]
         } else {
-            result = array
+            toCat = [array]
         }
         if let append = append {
-            result = concatenated([result, append], axis: 2)
+            toCat.append(append)
         }
-        return result
+        return concatenated(toCat, axis: 2)
     }
 
     // MARK: - State Serialization
@@ -599,8 +639,20 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
 
             // If rotated, unroll for this sequence
             if rotated {
-                extractedK = MLX.roll(extractedK, shift: -_idx, axis: 2)
-                extractedV = MLX.roll(extractedV, shift: -_idx, axis: 2)
+                if keep > 0 {
+                    // With keep: keep prefix is fixed, only roll the window portion
+                    let keepK = extractedK[.ellipsis, ..<keep, 0...]
+                    let windowK = extractedK[.ellipsis, keep..., 0...]
+                    let keepV = extractedV[.ellipsis, ..<keep, 0...]
+                    let windowV = extractedV[.ellipsis, keep..., 0...]
+                    extractedK = concatenated(
+                        [keepK, MLX.roll(windowK, shift: -(self._idx - keep), axis: 2)], axis: 2)
+                    extractedV = concatenated(
+                        [keepV, MLX.roll(windowV, shift: -(self._idx - keep), axis: 2)], axis: 2)
+                } else {
+                    extractedK = MLX.roll(extractedK, shift: -_idx, axis: 2)
+                    extractedV = MLX.roll(extractedV, shift: -_idx, axis: 2)
+                }
                 // After unrolling, strip padding from the front
                 let seqEnd = maxCacheSize
                 extractedK = MLX.contiguous(extractedK[0..., 0..., padding ..< seqEnd, 0...])
@@ -797,13 +849,23 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         let lp = effectiveLeftPadding[0..., .newAxis, .newAxis, .newAxis]
         mask = mask & (rindsRow .>= lp)
 
-        // Roll mask for rotated buffer
+        // Roll mask for rotated buffer, accounting for keep prefix
         if isRotated {
             var currentIdx = _idx
             if currentIdx >= maxCacheSize {
-                currentIdx = 0
+                currentIdx = keep
             }
-            mask = MLX.roll(mask, shift: currentIdx + 1, axis: -1)
+            if keep > 0 {
+                // With keep: only roll the window portion (positions keep..<maxCacheSize),
+                // leaving the first `keep` positions of the mask fixed.
+                let keepMask = mask[.ellipsis, ..<keep]
+                let windowMask = mask[.ellipsis, keep...]
+                let rolledWindow = MLX.roll(
+                    windowMask, shift: currentIdx - keep + 1, axis: -1)
+                mask = concatenated([keepMask, rolledWindow], axis: -1)
+            } else {
+                mask = MLX.roll(mask, shift: currentIdx + 1, axis: -1)
+            }
         }
 
         return .array(mask)

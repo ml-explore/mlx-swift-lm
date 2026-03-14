@@ -892,4 +892,281 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         let extracted = batchCache.extract(idx: 0)
         XCTAssertEqual(Int(extracted.metaState[0]), 4)
     }
+
+    // MARK: - Keep Semantics: Overflow Preservation
+
+    /// Test that updateConcat preserves the first `keep` tokens during overflow trim.
+    func testUpdateConcatPreservesKeepDuringOverflow() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 2
+        let H = 2
+        let D = 4
+
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0], keep: keepCount)
+
+        // Prefill with `maxSize` tokens — fill buffer exactly. First `keep` tokens are special.
+        // Use distinct values so we can verify: token i has value Float(i+1)
+        var keySlices: [MLXArray] = []
+        var valSlices: [MLXArray] = []
+        for i in 0 ..< maxSize {
+            keySlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            valSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        let initialKeys = concatenated(keySlices, axis: 2)
+        let initialValues = concatenated(valSlices, axis: 2)
+
+        _ = cache.update(keys: initialKeys, values: initialValues)
+        XCTAssertEqual(cache._idx, maxSize)
+
+        // Now add 3 more tokens via concat (this will trigger trimming)
+        let overflowKeys = MLXArray.ones([1, H, 3, D]) * Float(100)
+        let overflowValues = MLXArray.ones([1, H, 3, D]) * Float(1000)
+        let (retK, _) = cache.update(keys: overflowKeys, values: overflowValues)
+
+        // The first `keep` tokens should be preserved in the returned keys.
+        // Token 0 has value 1.0, token 1 has value 2.0
+        let firstKeepToken = retK[0, 0, 0, 0].item(Float.self)
+        let secondKeepToken = retK[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(firstKeepToken, 1.0, "First keep token should be preserved after overflow")
+        XCTAssertEqual(secondKeepToken, 2.0, "Second keep token should be preserved after overflow")
+
+        // The last 3 tokens should be the overflow values
+        let seqLen = retK.dim(2)
+        let lastToken = retK[0, 0, seqLen - 1, 0].item(Float.self)
+        XCTAssertEqual(lastToken, 100.0, "Overflow tokens should be at the end")
+    }
+
+    /// Test that updateInPlace wraps _idx to keep (not 0) during rotation.
+    func testUpdateInPlaceWrapsToKeep() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 2
+        let H = 2
+        let D = 4
+
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0], keep: keepCount)
+
+        // Prefill with distinct per-position values
+        var keySlices: [MLXArray] = []
+        var valSlices: [MLXArray] = []
+        for i in 0 ..< maxSize {
+            keySlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            valSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        let initialKeys = concatenated(keySlices, axis: 2)
+        let initialValues = concatenated(valSlices, axis: 2)
+        _ = cache.update(keys: initialKeys, values: initialValues)
+
+        // Now do single-token decodes to trigger rotation
+        let overflowK = MLXArray.ones([1, H, 1, D]) * Float(99)
+        let overflowV = MLXArray.ones([1, H, 1, D]) * Float(990)
+        let (retK, _) = cache.update(keys: overflowK, values: overflowV)
+
+        // Buffer should be full (maxSize)
+        XCTAssertEqual(retK.dim(2), maxSize)
+
+        // The first `keep` positions in the raw buffer should still be the original tokens
+        // Position 0: value 1.0, Position 1: value 2.0
+        let rawK = cache.keys!
+        let pos0 = rawK[0, 0, 0, 0].item(Float.self)
+        let pos1 = rawK[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(pos0, 1.0, "Keep position 0 should never be overwritten")
+        XCTAssertEqual(pos1, 2.0, "Keep position 1 should never be overwritten")
+
+        // The new token should be at position `keep` (where idx wrapped to)
+        let posKeep = rawK[0, 0, keepCount, 0].item(Float.self)
+        XCTAssertEqual(posKeep, 99.0, "New token should be written at keep position after wrap")
+    }
+
+    /// Test that temporal ordering handles the keep prefix correctly after rotation.
+    func testTemporalOrderWithKeep() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 2
+        let H = 2
+        let D = 4
+
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0], keep: keepCount)
+
+        // Fill with maxSize distinct tokens
+        var keySlices: [MLXArray] = []
+        var valSlices: [MLXArray] = []
+        for i in 0 ..< maxSize {
+            keySlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            valSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        let initialKeys = concatenated(keySlices, axis: 2)
+        let initialValues = concatenated(valSlices, axis: 2)
+        _ = cache.update(keys: initialKeys, values: initialValues)
+
+        // Two single-token decodes to rotate
+        for step in 0 ..< 2 {
+            let dk = MLXArray.ones([1, H, 1, D]) * Float(100 + step)
+            let dv = MLXArray.ones([1, H, 1, D]) * Float(1000 + step)
+            _ = cache.update(keys: dk, values: dv)
+        }
+
+        XCTAssertTrue(cache.rotated, "Cache should be rotated after overflow")
+
+        // Now do a multi-token concat which triggers temporalOrder()
+        let concatK = MLXArray.ones([1, H, 2, D]) * Float(200)
+        let concatV = MLXArray.ones([1, H, 2, D]) * Float(2000)
+        let (retK, _) = cache.update(keys: concatK, values: concatV)
+
+        // After temporal ordering + concat, the first `keep` tokens should still be
+        // the original values (1.0 and 2.0)
+        let first = retK[0, 0, 0, 0].item(Float.self)
+        let second = retK[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(first, 1.0, "Keep token 0 should be preserved after temporal reorder")
+        XCTAssertEqual(second, 2.0, "Keep token 1 should be preserved after temporal reorder")
+    }
+
+    /// Round-trip test: merge caches with keep=4, trigger overflow, extract — keep prefix intact.
+    func testKeepOverflowMergeExtractRoundTrip() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 4
+        let H = 2
+        let D = 4
+
+        // Create two RotatingKVCache with keep=4 and fill to near-max
+        let cacheA = RotatingKVCache(maxSize: maxSize, keep: keepCount)
+        let cacheB = RotatingKVCache(maxSize: maxSize, keep: keepCount)
+
+        // Cache A: 6 tokens (values 1..6)
+        var kaSlices: [MLXArray] = []
+        var vaSlices: [MLXArray] = []
+        for i in 0 ..< 6 {
+            kaSlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            vaSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        _ = cacheA.update(
+            keys: concatenated(kaSlices, axis: 2),
+            values: concatenated(vaSlices, axis: 2)
+        )
+
+        // Cache B: 4 tokens (values 11..14)
+        var kbSlices: [MLXArray] = []
+        var vbSlices: [MLXArray] = []
+        for i in 0 ..< 4 {
+            kbSlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 11))
+            vbSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 11) * 10))
+        }
+        _ = cacheB.update(
+            keys: concatenated(kbSlices, axis: 2),
+            values: concatenated(vbSlices, axis: 2)
+        )
+
+        // Merge into batch
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, keepCount)
+
+        // Add decode tokens to trigger overflow
+        for step in 0 ..< 4 {
+            let dk = MLXArray.ones([2, H, 1, D]) * Float(50 + step)
+            let dv = MLXArray.ones([2, H, 1, D]) * Float(500 + step)
+            _ = batchCache.update(keys: dk, values: dv)
+        }
+
+        // Extract and verify keep prefix intact
+        let extractedA = batchCache.extract(idx: 0)
+        let extractedB = batchCache.extract(idx: 1)
+
+        // Both should have keep=4 preserved
+        XCTAssertEqual(Int(extractedA.metaState[0]), keepCount)
+        XCTAssertEqual(Int(extractedB.metaState[0]), keepCount)
+
+        // Extracted state should have non-empty keys/values
+        XCTAssertFalse(extractedA.state.isEmpty)
+        XCTAssertFalse(extractedB.state.isEmpty)
+
+        // Offsets should have advanced: original + 4 decode tokens
+        XCTAssertEqual(extractedA.offset, 6 + 4)
+        XCTAssertEqual(extractedB.offset, 4 + 4)
+    }
+
+    /// Test that keep=0 (default) continues to work correctly with rotation.
+    func testKeepZeroRotationStillWorks() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let H = 2
+        let D = 4
+
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0])
+        XCTAssertEqual(cache.keep, 0)
+
+        // Fill and overflow
+        let (k1, v1) = makeKV(batchSize: 1, heads: H, seqLen: maxSize, headDim: D, value: 1.0)
+        _ = cache.update(keys: k1, values: v1)
+
+        // Single-token decode to trigger rotation
+        let (k2, v2) = makeKV(batchSize: 1, heads: H, seqLen: 1, headDim: D, value: 99.0)
+        let (retK, _) = cache.update(keys: k2, values: v2)
+
+        // Should still return maxSize
+        XCTAssertEqual(retK.dim(2), maxSize)
+        XCTAssertTrue(cache.rotated)
+        // _idx should be 1 (wrapped to keep=0, then advanced by 1)
+        XCTAssertEqual(cache._idx, 1)
+    }
+
+    /// Test that in-place rotation correctly wraps multiple times with keep > 0.
+    func testMultipleRotationCyclesWithKeep() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 2
+        let H = 2
+        let D = 4
+
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [0], keep: keepCount)
+
+        // Fill the buffer exactly
+        var keySlices: [MLXArray] = []
+        var valSlices: [MLXArray] = []
+        for i in 0 ..< maxSize {
+            keySlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            valSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        _ = cache.update(
+            keys: concatenated(keySlices, axis: 2),
+            values: concatenated(valSlices, axis: 2)
+        )
+
+        // Do (maxSize - keep) single-token decodes to wrap once fully through the window
+        let windowSize = maxSize - keepCount
+        for step in 0 ..< windowSize {
+            let dk = MLXArray.ones([1, H, 1, D]) * Float(200 + step)
+            let dv = MLXArray.ones([1, H, 1, D]) * Float(2000 + step)
+            _ = cache.update(keys: dk, values: dv)
+        }
+
+        // After full cycle, _idx should be back at keep + windowSize = maxSize, then wrap again
+        // Check that keep positions are still the originals
+        let rawK = cache.keys!
+        let pos0 = rawK[0, 0, 0, 0].item(Float.self)
+        let pos1 = rawK[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(pos0, 1.0, "Keep position 0 preserved after full rotation cycle")
+        XCTAssertEqual(pos1, 2.0, "Keep position 1 preserved after full rotation cycle")
+
+        // Do another cycle
+        for step in 0 ..< windowSize {
+            let dk = MLXArray.ones([1, H, 1, D]) * Float(300 + step)
+            let dv = MLXArray.ones([1, H, 1, D]) * Float(3000 + step)
+            _ = cache.update(keys: dk, values: dv)
+        }
+
+        // Keep positions should still be originals
+        let rawK2 = cache.keys!
+        let pos0b = rawK2[0, 0, 0, 0].item(Float.self)
+        let pos1b = rawK2[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(pos0b, 1.0, "Keep position 0 still preserved after 2nd rotation cycle")
+        XCTAssertEqual(pos1b, 2.0, "Keep position 1 still preserved after 2nd rotation cycle")
+    }
 }
