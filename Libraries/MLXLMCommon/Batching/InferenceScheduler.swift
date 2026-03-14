@@ -48,6 +48,12 @@ public actor InferenceScheduler {
         /// A single request is active via `TokenIterator`.
         case single(SingleRequestState)
 
+        /// A single-to-batch upgrade is in progress. The scheduler has
+        /// suspended to await live state from the single-request task.
+        /// Additional requests during this phase run independently on
+        /// the single path.
+        case upgrading
+
         /// Multiple requests are active via `BatchTokenIterator`.
         case batched(BatchedState)
     }
@@ -81,25 +87,64 @@ public actor InferenceScheduler {
     /// The scheduler's `upgradeToBatch()` awaits the live state before
     /// building the batch.
     class UpgradeFlag: @unchecked Sendable {
+        /// Lock protecting all mutable state in this class.
+        private let lock = NSLock()
+
         /// Set to `true` once the live state has been deposited and the
         /// batch loop owns the continuation.
-        var upgraded = false
+        private var _upgraded = false
 
         /// Set to `true` by `upgradeToBatch()` to request the task to
         /// capture its live state and stop iterating.
-        var upgradeRequested = false
+        private var _upgradeRequested = false
 
-        /// Lock protecting the continuation to avoid double-resume.
-        private let lock = NSLock()
+        /// Set to `true` when the single-request task has finished its
+        /// decode loop (naturally or via stop/cancel). Used to detect
+        /// that the task can no longer respond to an upgrade request.
+        private var _taskFinished = false
 
         /// Continuation that `upgradeToBatch()` awaits. Resumed by the
         /// task when it deposits live state.
-        private var liveContinuation: CheckedContinuation<LiveIteratorState, Never>?
+        private var liveContinuation: CheckedContinuation<LiveIteratorState?, Never>?
 
-        /// Called by the scheduler to provide the continuation to await.
-        func setLiveContinuation(_ continuation: CheckedContinuation<LiveIteratorState, Never>) {
+        /// Thread-safe getter for `upgraded`.
+        var upgraded: Bool {
             lock.lock()
+            defer { lock.unlock() }
+            return _upgraded
+        }
+
+        /// Thread-safe setter for `upgraded`.
+        func setUpgraded(_ value: Bool) {
+            lock.lock()
+            _upgraded = value
+            lock.unlock()
+        }
+
+        /// Thread-safe getter for `upgradeRequested`.
+        var upgradeRequested: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return _upgradeRequested
+        }
+
+        /// Called by the scheduler to provide the continuation and
+        /// atomically request the upgrade. If the task has already
+        /// finished, resumes the continuation immediately with `nil`
+        /// so the scheduler does not hang.
+        func requestUpgrade(
+            continuation: CheckedContinuation<LiveIteratorState?, Never>
+        ) {
+            lock.lock()
+            if _taskFinished {
+                // Task already exited its loop — it will never deposit
+                // state. Resume immediately so the scheduler can fall back.
+                lock.unlock()
+                continuation.resume(returning: nil)
+                return
+            }
             liveContinuation = continuation
+            _upgradeRequested = true
             lock.unlock()
         }
 
@@ -111,6 +156,21 @@ public actor InferenceScheduler {
             liveContinuation = nil
             lock.unlock()
             cont?.resume(returning: state)
+        }
+
+        /// Called by the single-request task when it exits the decode
+        /// loop (either naturally or via stop/cancel). If an upgrade
+        /// was requested but we already finished, resumes the
+        /// scheduler's continuation with `nil`.
+        func markTaskFinished() {
+            lock.lock()
+            _taskFinished = true
+            let cont = liveContinuation
+            liveContinuation = nil
+            lock.unlock()
+            // If the scheduler set a continuation before we could
+            // respond, resume it with nil to avoid hanging.
+            cont?.resume(returning: nil)
         }
     }
 
@@ -249,6 +309,19 @@ public actor InferenceScheduler {
                 configuration: configuration
             )
 
+        case .upgrading:
+            // Upgrade is in progress — run this request independently on
+            // the single path so it doesn't interfere with the ongoing
+            // handoff. It will complete on its own without joining the batch.
+            return try createSingleStream(
+                input: input,
+                parameters: parameters,
+                model: model,
+                cache: cache,
+                tokenizer: tokenizer,
+                configuration: configuration
+            )
+
         case .batched(var batchedState):
             // Third+ request: join existing batch
             return try joinExistingBatch(
@@ -359,25 +432,6 @@ public actor InferenceScheduler {
             var stopReason: GenerateStopReason?
 
             while let token = iter.next() {
-                // Check for upgrade request between decode steps.
-                // When upgradeRequested is set, deposit the live iterator
-                // state for the scheduler and exit the loop.
-                if upgradeFlag.upgradeRequested {
-                    let liveState = LiveIteratorState(
-                        cache: iter.cache,
-                        y: iter.y,
-                        tokenCount: iter.tokenCount,
-                        maxTokens: iter.maxTokens,
-                        sampler: iter.sampler,
-                        processor: iter.processor
-                    )
-                    upgradeFlag.depositLiveState(liveState)
-                    // The batch loop now owns the continuation. Exit without
-                    // finishing it — the upgraded flag will be set by the
-                    // scheduler after it receives the live state.
-                    return
-                }
-
                 if Task.isCancelled {
                     stopReason = .cancelled
                     break
@@ -396,7 +450,9 @@ public actor InferenceScheduler {
 
                 tokenCount += 1
 
-                // Detokenize and emit
+                // Detokenize and emit the token BEFORE checking the upgrade
+                // flag. This ensures the boundary token produced by this
+                // iteration is not dropped during handoff.
                 detokenizer.append(token: token)
                 if let chunk = detokenizer.next() {
                     if let textToYield = toolCallProcessor.processChunk(chunk) {
@@ -412,7 +468,33 @@ public actor InferenceScheduler {
                         }
                     }
                 }
+
+                // Check for upgrade request AFTER yielding the token.
+                // When upgradeRequested is set, deposit the live iterator
+                // state for the scheduler and exit the loop.
+                if upgradeFlag.upgradeRequested {
+                    let liveState = LiveIteratorState(
+                        cache: iter.cache,
+                        y: iter.y,
+                        tokenCount: iter.tokenCount,
+                        maxTokens: iter.maxTokens,
+                        sampler: iter.sampler,
+                        processor: iter.processor
+                    )
+                    upgradeFlag.depositLiveState(liveState)
+                    // The batch loop now owns the continuation. Exit without
+                    // finishing it — the upgraded flag will be set by the
+                    // scheduler after it receives the live state.
+                    return
+                }
             }
+
+            // Mark the task as finished so any future upgrade request
+            // knows it can no longer obtain live state from this task.
+            // If an upgrade request arrived but we already exited the
+            // loop, this also resumes the scheduler's continuation
+            // with nil to prevent hanging.
+            upgradeFlag.markTaskFinished()
 
             // If we were upgraded to batch mode, the batch loop now owns the
             // continuation. Do not emit completion info or finish it.
@@ -529,15 +611,36 @@ public actor InferenceScheduler {
         configuration: ModelConfiguration
     ) async throws -> AsyncStream<Generation> {
         // --- Phase 1: Request live state from the single-request task ---
-        // Set the upgradeRequested flag so the task captures its live state.
-        // Then await the live state via a checked continuation.
-        let liveState: LiveIteratorState = await withCheckedContinuation { continuation in
-            existingSingle.upgradeFlag.setLiveContinuation(continuation)
-            existingSingle.upgradeFlag.upgradeRequested = true
+        // Set state to .upgrading BEFORE the await so that additional
+        // requests arriving during the suspension run independently
+        // rather than triggering a duplicate upgrade on the same flag.
+        state = .upgrading
+
+        // Atomically set the upgradeRequested flag and provide the
+        // continuation. If the task has already finished, the
+        // continuation is resumed immediately with nil.
+        let liveState: LiveIteratorState? = await withCheckedContinuation { continuation in
+            existingSingle.upgradeFlag.requestUpgrade(continuation: continuation)
+        }
+
+        // If the task already finished before we could capture its state,
+        // fall back: the new request runs as an independent single stream
+        // and the scheduler remains in idle (the old single already cleaned
+        // up).
+        guard let liveState else {
+            state = .idle
+            return try startSingleRequest(
+                input: newInput,
+                parameters: newParameters,
+                model: model,
+                cache: cache,
+                tokenizer: tokenizer,
+                configuration: configuration
+            )
         }
 
         // Mark the upgrade as complete so any late checks in the task see it.
-        existingSingle.upgradeFlag.upgraded = true
+        existingSingle.upgradeFlag.setUpgraded(true)
 
         // --- Phase 2: Build the batch using live state ---
         let stopTokenIDs = Self.buildStopTokenIDs(
@@ -573,7 +676,7 @@ public actor InferenceScheduler {
 
         let firstBatch = ActiveBatch(
             uids: [firstUID],
-            y: firstLastToken.reshaped([1]).asType(Int32.self).squeezed(),
+            y: firstLastToken.reshaped([1]).asType(Int32.self),
             cache: batchCaches,
             samplers: [firstSampler],
             processors: [firstProcessor],
@@ -837,6 +940,7 @@ public actor InferenceScheduler {
         switch state {
         case .idle: return "idle"
         case .single: return "single"
+        case .upgrading: return "upgrading"
         case .batched: return "batched"
         }
     }
