@@ -31,8 +31,14 @@ All new batching code goes in `Libraries/MLXLMCommon/Batching/`:
 ### Single-First Upgrade Pattern
 Single requests use the existing `TokenIterator` path. Only when a second concurrent request arrives does the system upgrade to batching. This ensures zero overhead for the common single-request case.
 
-### TokenIterator Upgrade Constraint
-`TokenIterator` in `Libraries/MLXLMCommon/Evaluate.swift` is a mutable value type (`struct`) whose decode state lives in fields like `y` and `tokenCount`. Scheduler upgrade code cannot recover live progress from a separately stored copy of a `TokenIterator`; any single-to-batch handoff must either keep mutating the same instance or explicitly persist the evolving decode state alongside the running task.
+### TokenIterator Upgrade Constraint — Cooperative Handoff
+`TokenIterator` in `Libraries/MLXLMCommon/Evaluate.swift` is a mutable value type (`struct`) whose decode state lives in fields like `y`, `cache`, and `tokenCount`. The scheduler's actor state stores a copy at submission time, but as the single-request Task advances its own copy diverges. Reading the actor copy during upgrade would yield stale KV cache state.
+
+**Solution**: The `UpgradeFlag` class mediates a cooperative handoff. When a second request arrives:
+1. `upgradeToBatch()` sets `upgradeFlag.upgradeRequested = true` and suspends via `withCheckedContinuation`.
+2. The single-request task detects `upgradeRequested` between decode steps, captures its live `TokenIterator` state (`LiveIteratorState`), and resumes the continuation via `depositLiveState()`.
+3. The scheduler uses the live cache/y/tokenCount to build the `ActiveBatch`.
+4. The first request's `onTermination` handler is rebound to remove its UID from `BatchTokenIterator` (not cancel the defunct single task).
 
 ### BatchPositionedKVCache Protocol
 A protocol abstraction that lets models call `applyRotaryPosition(rope, to: x, cache: cache)` instead of `rope(x, offset: cache.offset)`. This keeps per-model changes to ~4 lines while supporting both single (Int offset) and batch (MLXArray offset) modes.

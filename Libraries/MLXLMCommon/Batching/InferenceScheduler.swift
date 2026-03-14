@@ -52,13 +52,66 @@ public actor InferenceScheduler {
         case batched(BatchedState)
     }
 
-    /// Shared mutable flag used to signal that a single request has been
-    /// upgraded to batch mode. The single-request task checks this flag
-    /// before finishing its continuation — if set, the continuation is
-    /// now owned by the batch loop and must not be finished by the
-    /// single-request task.
+    /// Snapshot of the live `TokenIterator` decode state, captured by the
+    /// running single-request task and handed to the scheduler during upgrade.
+    struct LiveIteratorState: @unchecked Sendable {
+        /// The per-layer KV caches with the latest decode state.
+        let cache: [KVCache]
+
+        /// The current decode token (`y`) — input for the next step.
+        let y: LMInput.Text
+
+        /// Tokens generated so far.
+        let tokenCount: Int
+
+        /// Maximum tokens allowed.
+        let maxTokens: Int?
+
+        /// The logit sampler.
+        let sampler: LogitSampler
+
+        /// The logit processor.
+        let processor: LogitProcessor?
+    }
+
+    /// Shared mutable flag used to signal that a single request should be
+    /// upgraded to batch mode. When the scheduler sets `upgradeRequested`,
+    /// the running single-request task captures its live `TokenIterator`
+    /// state, deposits it via `depositLiveState(_:)`, and exits its loop.
+    /// The scheduler's `upgradeToBatch()` awaits the live state before
+    /// building the batch.
     class UpgradeFlag: @unchecked Sendable {
+        /// Set to `true` once the live state has been deposited and the
+        /// batch loop owns the continuation.
         var upgraded = false
+
+        /// Set to `true` by `upgradeToBatch()` to request the task to
+        /// capture its live state and stop iterating.
+        var upgradeRequested = false
+
+        /// Lock protecting the continuation to avoid double-resume.
+        private let lock = NSLock()
+
+        /// Continuation that `upgradeToBatch()` awaits. Resumed by the
+        /// task when it deposits live state.
+        private var liveContinuation: CheckedContinuation<LiveIteratorState, Never>?
+
+        /// Called by the scheduler to provide the continuation to await.
+        func setLiveContinuation(_ continuation: CheckedContinuation<LiveIteratorState, Never>) {
+            lock.lock()
+            liveContinuation = continuation
+            lock.unlock()
+        }
+
+        /// Called by the single-request task to deposit live state and
+        /// resume the scheduler's continuation.
+        func depositLiveState(_ state: LiveIteratorState) {
+            lock.lock()
+            let cont = liveContinuation
+            liveContinuation = nil
+            lock.unlock()
+            cont?.resume(returning: state)
+        }
     }
 
     /// State for a single active request.
@@ -151,7 +204,7 @@ public actor InferenceScheduler {
         cache: [KVCache]?,
         tokenizer: Tokenizer,
         configuration: ModelConfiguration
-    ) throws -> AsyncStream<Generation> {
+    ) async throws -> AsyncStream<Generation> {
         // Check if this request is batch-compatible
         let compatible = Self.isBatchCompatible(
             input: input,
@@ -186,7 +239,7 @@ public actor InferenceScheduler {
 
         case .single(let singleState):
             // Second request while first is active: upgrade to batch
-            return try upgradeToBatch(
+            return try await upgradeToBatch(
                 existingSingle: singleState,
                 newInput: input,
                 newParameters: parameters,
@@ -294,7 +347,7 @@ public actor InferenceScheduler {
 
         let iteratorBox = SendableBox(iterator)
         let task = Task { [weak self] in
-            let iter = iteratorBox.consume()
+            var iter = iteratorBox.consume()
             let tok = tokenizerBox.consume() as! Tokenizer
 
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
@@ -305,7 +358,26 @@ public actor InferenceScheduler {
             var tokenCount = 0
             var stopReason: GenerateStopReason?
 
-            for token in iter {
+            while let token = iter.next() {
+                // Check for upgrade request between decode steps.
+                // When upgradeRequested is set, deposit the live iterator
+                // state for the scheduler and exit the loop.
+                if upgradeFlag.upgradeRequested {
+                    let liveState = LiveIteratorState(
+                        cache: iter.cache,
+                        y: iter.y,
+                        tokenCount: iter.tokenCount,
+                        maxTokens: iter.maxTokens,
+                        sampler: iter.sampler,
+                        processor: iter.processor
+                    )
+                    upgradeFlag.depositLiveState(liveState)
+                    // The batch loop now owns the continuation. Exit without
+                    // finishing it — the upgraded flag will be set by the
+                    // scheduler after it receives the live state.
+                    return
+                }
+
                 if Task.isCancelled {
                     stopReason = .cancelled
                     break
@@ -345,7 +417,6 @@ public actor InferenceScheduler {
             // If we were upgraded to batch mode, the batch loop now owns the
             // continuation. Do not emit completion info or finish it.
             if upgradeFlag.upgraded {
-                await self?.handleSingleRequestFinished(requestID: requestID)
                 return
             }
 
@@ -441,9 +512,13 @@ public actor InferenceScheduler {
     /// Key invariants maintained during upgrade:
     /// 1. The first request's original `AsyncStream` continuation is preserved.
     ///    Tokens continue to flow to the same stream the caller received from `submit()`.
-    /// 2. The first request's KV cache is migrated into `BatchKVCache` via `fromSingle()`,
-    ///    then injected into the `BatchTokenIterator` through `setActiveBatch()`.
+    /// 2. The first request's **live** KV cache is used — the running single-request
+    ///    task detects the upgrade flag, captures its current `TokenIterator` state
+    ///    (which includes the up-to-date cache), and deposits it back to the scheduler.
     /// 3. The second request goes through the normal insert → prefill pipeline.
+    /// 4. The first request's cancellation handler is rebound so that cancellation
+    ///    after upgrade removes its UID from the `BatchTokenIterator` rather than
+    ///    cancelling the defunct single-request task.
     private func upgradeToBatch(
         existingSingle: SingleRequestState,
         newInput: LMInput,
@@ -452,12 +527,19 @@ public actor InferenceScheduler {
         cache: [KVCache]?,
         tokenizer: Tokenizer,
         configuration: ModelConfiguration
-    ) throws -> AsyncStream<Generation> {
-        // Signal upgrade before cancelling so the single-request task knows
-        // not to finish the continuation — the batch loop now owns it.
-        existingSingle.upgradeFlag.upgraded = true
-        existingSingle.task.cancel()
+    ) async throws -> AsyncStream<Generation> {
+        // --- Phase 1: Request live state from the single-request task ---
+        // Set the upgradeRequested flag so the task captures its live state.
+        // Then await the live state via a checked continuation.
+        let liveState: LiveIteratorState = await withCheckedContinuation { continuation in
+            existingSingle.upgradeFlag.setLiveContinuation(continuation)
+            existingSingle.upgradeFlag.upgradeRequested = true
+        }
 
+        // Mark the upgrade as complete so any late checks in the task see it.
+        existingSingle.upgradeFlag.upgraded = true
+
+        // --- Phase 2: Build the batch using live state ---
         let stopTokenIDs = Self.buildStopTokenIDs(
             configuration: configuration,
             tokenizer: tokenizer
@@ -470,13 +552,9 @@ public actor InferenceScheduler {
             defaultSampler: ArgMaxSampler()
         )
 
-        // --- Migrate the first request's KV cache into a batch cache ---
-        let firstCache = existingSingle.cache
-        let firstIterator = existingSingle.iterator
-
-        // Convert each layer's KVCacheSimple into a batch-1 BatchKVCache.
+        // Convert each layer's live KVCacheSimple into a batch-1 BatchKVCache.
         var batchCaches = [KVCache]()
-        for layerCache in firstCache {
+        for layerCache in liveState.cache {
             if let simpleCache = layerCache as? KVCacheSimple {
                 batchCaches.append(BatchKVCache.fromSingle(simpleCache))
             } else {
@@ -484,13 +562,11 @@ public actor InferenceScheduler {
             }
         }
 
-        // Build an ActiveBatch for the first request with its migrated cache.
-        // The last token produced by the TokenIterator is the current decode
-        // token (`y`); it will be the "input" for the next decode step.
-        let firstLastToken = firstIterator.y.tokens
-        let firstMaxTokens = (firstIterator.maxTokens ?? 1000) - firstIterator.tokenCount
-        let firstSampler = firstIterator.sampler
-        let firstProcessor = firstIterator.processor
+        // The live `y` is the current decode token — input for the next step.
+        let firstLastToken = liveState.y.tokens
+        let firstMaxTokens = (liveState.maxTokens ?? 1000) - liveState.tokenCount
+        let firstSampler = liveState.sampler
+        let firstProcessor = liveState.processor
 
         // Allocate a UID for the first request inside the batch.
         let firstUID = batchIterator.allocateUID()
@@ -524,7 +600,7 @@ public actor InferenceScheduler {
         )
         let secondUID = secondUIDs[0]
 
-        // --- Set up continuations ---
+        // --- Phase 3: Set up continuations and cancellation ---
         // Reuse the original first-request continuation (preserving stream continuity).
         let firstContinuation = existingSingle.continuation
         let (secondStream, secondContinuation) = AsyncStream<Generation>.makeStream()
@@ -535,6 +611,15 @@ public actor InferenceScheduler {
         ]
 
         requestCounter += 1
+
+        // Rebind the first request's cancellation handler so it removes the
+        // UID from the BatchTokenIterator instead of cancelling the old task.
+        firstContinuation.onTermination = {
+            [weak batchIterator] termination in
+            if case .cancelled = termination {
+                batchIterator?.remove(uids: [firstUID])
+            }
+        }
 
         // Start the batch generation loop
         let task = Task { [weak self] in
@@ -625,10 +710,11 @@ public actor InferenceScheduler {
             await self?.handleBatchFinished()
         }
 
-        // Wire up cancellation
-        secondContinuation.onTermination = { termination in
+        // Wire up second request's cancellation
+        secondContinuation.onTermination = {
+            [weak batchIterator] termination in
             if case .cancelled = termination {
-                batchIterator.remove(uids: [secondUID])
+                batchIterator?.remove(uids: [secondUID])
             }
         }
 
