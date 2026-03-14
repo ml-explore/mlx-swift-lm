@@ -1,7 +1,7 @@
 {
   "groupId": "lru-cache",
   "surface": "xcodebuild-test",
-  "status": "fail",
+  "status": "pass",
   "assertionResults": [
     {
       "id": "VAL-PCACHE-001",
@@ -77,21 +77,22 @@
     },
     {
       "id": "VAL-PCACHE-013",
-      "status": "fail",
-      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed; the targeted xcodebuild run failed because the returned trimmed cache offset stayed at 5 instead of the expected 3.",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed; the isolated rerun after the fix passed, confirming a longer cached entry is trimmed to the queried common prefix with offset 3 and no remainder.",
       "evidence": [
         "Tests/MLXLMTests/LRUPromptCacheTests.swift:228-251 maps VAL-PCACHE-013 to testLongerCachedPrefixReturnsTrimmed.",
-        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17456 records XCTAssertEqual failed: (\"5\") is not equal to (\"3\") - Trimmed cache should have offset 3.",
-        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17457 shows testLongerCachedPrefixReturnsTrimmed failed."
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/VAL-PCACHE-013-rerun-xcodebuild.log:17449 shows testLongerCachedPrefixReturnsTrimmed passed.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/VAL-PCACHE-013-rerun-xcodebuild.log:17451 records 1 executed test with 0 failures.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/VAL-PCACHE-013-rerun-xcodebuild.log:17463 shows ** TEST SUCCEEDED **."
       ]
     }
   ],
   "commands": [
     {
-      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-prompt-cache-lru-cache-deriveddata-2 -only-testing:MLXLMTests/LRUPromptCacheTests/testEmptyCacheReturnsNil -only-testing:MLXLMTests/LRUPromptCacheTests/testSingleInsertionExactRetrieval -only-testing:MLXLMTests/LRUPromptCacheTests/testShorterPrefixMatch -only-testing:MLXLMTests/LRUPromptCacheTests/testLongestPrefixSelected -only-testing:MLXLMTests/LRUPromptCacheTests/testLRUEvictionAtMaxSize -only-testing:MLXLMTests/LRUPromptCacheTests/testMemoryAwareEviction -only-testing:MLXLMTests/LRUPromptCacheTests/testConcurrentAccessSafety -only-testing:MLXLMTests/LRUPromptCacheTests/testModelIsolation -only-testing:MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed",
-      "exitCode": 65,
-      "summary": "Targeted xcodebuild execution ran the nine assigned LRUPromptCache tests; eight passed and one failed (testLongerCachedPrefixReturnsTrimmed / VAL-PCACHE-013).",
-      "evidenceFile": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log"
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-prompt-cache-lru-cache-rerun-deriveddata -only-testing:MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed",
+      "exitCode": 0,
+      "summary": "Isolated xcodebuild rerun for VAL-PCACHE-013 passed (1 test executed, 0 failures). This supersedes the earlier failing VAL-PCACHE-013 evidence while preserving the other assertion results in this flow report.",
+      "evidenceFile": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/VAL-PCACHE-013-rerun-xcodebuild.log"
     }
   ],
   "toolsUsed": [
