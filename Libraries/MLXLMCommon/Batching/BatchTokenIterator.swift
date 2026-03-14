@@ -101,6 +101,8 @@ public class ActiveBatch {
         for c in cache {
             if let batchCache = c as? BatchKVCache {
                 batchCache.filter(batchIndices: keepIndices)
+            } else if let batchRotCache = c as? BatchRotatingKVCache {
+                batchRotCache.filter(batchIndices: keepIndices)
             }
         }
     }
@@ -120,6 +122,10 @@ public class ActiveBatch {
                 let otherBatch = otherCache as? BatchKVCache
             {
                 selfBatch.extend(other: otherBatch)
+            } else if let selfBatchRot = selfCache as? BatchRotatingKVCache,
+                let otherBatchRot = otherCache as? BatchRotatingKVCache
+            {
+                selfBatchRot.extend(other: otherBatchRot)
             }
         }
     }
@@ -626,11 +632,11 @@ public class BatchTokenIterator: @unchecked Sendable {
         let selectedStates = indices.map { cachedStates[$0] }
 
         // Build per-layer batch caches by merging the individual cached caches.
+        // Dispatches to the correct batch cache type based on the layer cache type.
         var batchCaches = [KVCache]()
         for l in 0 ..< numLayers {
             let layerCaches = selectedStates.map { $0[l] }
-            let batchCache = BatchKVCache.merge(layerCaches)
-            batchCaches.append(batchCache)
+            batchCaches.append(mergeLayerCaches(layerCaches))
         }
 
         // Initialize per-request processors with their prompt tokens.
@@ -650,9 +656,7 @@ public class BatchTokenIterator: @unchecked Sendable {
         // We must first trim the last token from the cache so re-processing
         // it doesn't duplicate the KV entry.
         for cache in batchCaches {
-            if let batchCache = cache as? BatchKVCache {
-                batchCache.trim(1)
-            }
+            cache.trim(1)
         }
 
         // Build input: last prompt token for each sequence, shape [B, 1]
@@ -683,8 +687,14 @@ public class BatchTokenIterator: @unchecked Sendable {
     }
 
     /// Handle prompts where only a prefix is cached (partial hit).
-    /// Merges cached KV states with correct total left-padding and prefills
+    /// Merges cached KV states with correct left-padding and prefills
     /// the uncached suffix tokens.
+    ///
+    /// **Right-alignment invariant**: Each sequence's cached KV data is
+    /// right-aligned so that it ends exactly at `_idx`. This ensures the
+    /// region `leftPadding[i] ..< _idx` contains only valid written data
+    /// with no unwritten holes. The shared `_idx` constraint requires this
+    /// right-alignment because sequences have different cache depths.
     private func processPartialCacheHits(
         prompts: [PendingPrompt], indices: [Int], cachedStates: [[KVCache]],
         cachedLengths: [Int], numLayers: Int
@@ -703,74 +713,46 @@ public class BatchTokenIterator: @unchecked Sendable {
 
         let suffixLengths = suffixTokens.map(\.count)
         let maxSuffixLength = suffixLengths.max() ?? 0
-        let suffixPadding = suffixLengths.map { maxSuffixLength - $0 }
-        let maxSuffixPadding = suffixPadding.max() ?? 0
         let maxCacheLen = selectedCacheLengths.max() ?? 0
 
-        // Build per-layer batch caches with correct total left-padding.
+        // Buffer size = maxCacheLen (just enough for the longest cached prefix).
+        // Each sequence's cached data is right-aligned to end at bufferLen,
+        // so leftPadding[i] = bufferLen - cachedLen[i].
         //
-        // Total leftPadding per sequence =
-        //   (maxCacheLen - cacheLen[i])   [cache-depth alignment]
-        //   + suffixPadding[i]            [suffix-length alignment]
-        //
-        // All padding is contiguous at the start of the buffer. The buffer
-        // size is maxCacheLen + maxSuffixPadding, which is the minimum size
-        // that right-justifies all sequences.
-        let bufferLen = maxCacheLen + maxSuffixPadding
+        // This eliminates the mixed-depth hole problem: every position in
+        // leftPadding[i] ..< _idx is filled with actual cached KV data.
+        // Suffix-length differences are handled by the left-padded suffix
+        // input tokens, whose padding zeros produce KV entries that the
+        // cache's leftPadding correctly masks out during attention.
+        let bufferLen = maxCacheLen
         let B = selectedPrompts.count
-        let totalPadding = (0 ..< B).map { i in
-            (maxCacheLen - selectedCacheLengths[i]) + suffixPadding[i]
+        let rightAlignedPadding = (0 ..< B).map { i in
+            bufferLen - selectedCacheLengths[i]
         }
+
+        // Determine per-layer cache types from the first layer of the first state.
+        let isRotating = selectedStates[0][0] is RotatingKVCache
 
         var batchCaches = [KVCache]()
         for l in 0 ..< numLayers {
             let layerCaches = selectedStates.map { $0[l] }
 
-            // Find dimensions from first non-empty cache
-            var H = 0
-            var Dk = 0
-            var Dv = 0
-            var dt: DType = .float16
-            for c in layerCaches {
-                if let simple = c as? KVCacheSimple, let k = simple.keys {
-                    H = k.dim(1)
-                    Dk = k.dim(3)
-                    Dv = simple.values!.dim(3)
-                    dt = k.dtype
-                    break
-                }
-            }
-
-            let batchCache: BatchKVCache
-            if H > 0 && bufferLen > 0 {
-                // Build the merged buffer with correct total padding.
-                let keysArr = MLXArray.zeros([B, H, bufferLen, Dk], dtype: dt)
-                let valuesArr = MLXArray.zeros([B, H, bufferLen, Dv], dtype: dt)
-
-                for (i, (pad, cache)) in zip(totalPadding, layerCaches).enumerated() {
-                    if let simple = cache as? KVCacheSimple, let k = simple.keys,
-                        let v = simple.values
-                    {
-                        let seqLen = cache.offset
-                        keysArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
-                            k[.ellipsis, ..<seqLen, 0...]
-                        valuesArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
-                            v[.ellipsis, ..<seqLen, 0...]
-                    }
-                }
-
-                batchCache = BatchKVCache(leftPadding: totalPadding)
-                batchCache.keys = keysArr
-                batchCache.values = valuesArr
-                batchCache._idx = bufferLen
-                // Set batchOffsets to reflect each sequence's cached position.
-                batchCache.batchOffsets = MLXArray(
-                    selectedCacheLengths.map { Int32($0) })
+            if isRotating {
+                // Rotating cache path: use BatchRotatingKVCache.merge then
+                // right-align via prepare/finalize lifecycle if needed.
+                let merged = BatchRotatingKVCache.merge(layerCaches)
+                batchCaches.append(merged)
             } else {
-                batchCache = BatchKVCache(leftPadding: totalPadding)
+                // KVCacheSimple path: build right-aligned buffer manually.
+                let batchCache = buildRightAlignedBatchCache(
+                    layerCaches: layerCaches,
+                    rightAlignedPadding: rightAlignedPadding,
+                    cachedLengths: selectedCacheLengths,
+                    bufferLen: bufferLen,
+                    batchSize: B
+                )
+                batchCaches.append(batchCache)
             }
-
-            batchCaches.append(batchCache)
         }
 
         // Initialize per-request processors with their full prompt tokens.
@@ -845,6 +827,64 @@ public class BatchTokenIterator: @unchecked Sendable {
                 tokens: tokenArrays
             )
         }
+    }
+
+    /// Build a right-aligned `BatchKVCache` for the partial-hit path.
+    ///
+    /// Each sequence's cached KV data is placed so it ends exactly at
+    /// `bufferLen` (which becomes `_idx`), ensuring no unwritten holes
+    /// in the `leftPadding[i] ..< _idx` region.
+    private func buildRightAlignedBatchCache(
+        layerCaches: [KVCache],
+        rightAlignedPadding: [Int],
+        cachedLengths: [Int],
+        bufferLen: Int,
+        batchSize B: Int
+    ) -> BatchKVCache {
+        // Find dimensions from first non-empty cache (KVCacheSimple or RotatingKVCache)
+        var H = 0
+        var Dk = 0
+        var Dv = 0
+        var dt: DType = .float16
+        for c in layerCaches {
+            if let simple = c as? KVCacheSimple, let k = simple.keys {
+                H = k.dim(1)
+                Dk = k.dim(3)
+                Dv = simple.values!.dim(3)
+                dt = k.dtype
+                break
+            }
+        }
+
+        guard H > 0 && bufferLen > 0 else {
+            return BatchKVCache(leftPadding: rightAlignedPadding)
+        }
+
+        // Build the merged buffer with right-aligned cached data.
+        let keysArr = MLXArray.zeros([B, H, bufferLen, Dk], dtype: dt)
+        let valuesArr = MLXArray.zeros([B, H, bufferLen, Dv], dtype: dt)
+
+        for (i, cache) in layerCaches.enumerated() {
+            let pad = rightAlignedPadding[i]
+            if let simple = cache as? KVCacheSimple, let k = simple.keys,
+                let v = simple.values
+            {
+                let seqLen = cache.offset
+                // Right-align: data fills pad ..< bufferLen
+                keysArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
+                    k[.ellipsis, ..<seqLen, 0...]
+                valuesArr[i ..< (i + 1), 0..., pad ..< (pad + seqLen), 0...] =
+                    v[.ellipsis, ..<seqLen, 0...]
+            }
+        }
+
+        let batchCache = BatchKVCache(leftPadding: rightAlignedPadding)
+        batchCache.keys = keysArr
+        batchCache.values = valuesArr
+        batchCache._idx = bufferLen
+        // Set batchOffsets to reflect each sequence's cached position.
+        batchCache.batchOffsets = MLXArray(cachedLengths.map { Int32($0) })
+        return batchCache
     }
 
     /// Run one model step: forward pass, process logits, sample, update processor state.
@@ -930,6 +970,25 @@ public class BatchTokenIterator: @unchecked Sendable {
         let templateCache = model.newCache(parameters: nil)
         return templateCache.map { _ in
             BatchKVCache(leftPadding: leftPadding)
+        }
+    }
+
+    /// Merge individual per-layer caches into the appropriate batch cache type.
+    ///
+    /// Dispatches to `BatchRotatingKVCache.merge()` for `RotatingKVCache` layers
+    /// and `BatchKVCache.merge()` for `KVCacheSimple` layers. This ensures that
+    /// cached RotatingKVCache entries survive the cached-prefill path instead of
+    /// being silently dropped.
+    private func mergeLayerCaches(_ caches: [KVCache]) -> KVCache {
+        guard !caches.isEmpty else {
+            return BatchKVCache(leftPadding: [])
+        }
+
+        // Check if the first non-empty cache is a RotatingKVCache
+        if caches.first is RotatingKVCache {
+            return BatchRotatingKVCache.merge(caches)
+        } else {
+            return BatchKVCache.merge(caches)
         }
     }
 }

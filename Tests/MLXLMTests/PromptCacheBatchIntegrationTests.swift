@@ -665,9 +665,9 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
         // Prompt B: 7 tokens cached out of 9 → suffix = [8, 9] (2 tokens)
         //
         // Cache depths differ (3 vs 7), suffix lengths differ (3 vs 2).
-        // The merge must produce correct padding = cacheDiff + suffixPadding.
-        //   A: pad = (7-3) + (3-3) = 4
-        //   B: pad = (7-7) + (3-2) = 1
+        // Right-aligned layout: bufferLen = maxCacheLen = 7
+        //   A: leftPadding = 7 - 3 = 4 (data at positions 4..6)
+        //   B: leftPadding = 7 - 7 = 0 (data at positions 0..6)
         let promptA = [1, 2, 3, 4, 5, 6]
         let promptB = [10, 11, 12, 13, 14, 15, 16, 17, 18]
 
@@ -718,8 +718,12 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
         )
     }
 
-    /// Verify that extracting a cache from a mixed-depth merged batch produces
-    /// correct per-sequence data (no padding leaking into extracted cache).
+    /// Verify that extracting a cache from a right-aligned mixed-depth merged
+    /// batch produces correct per-sequence data with no holes.
+    ///
+    /// The right-alignment invariant: each sequence's cached KV data ends
+    /// exactly at `_idx`, so `leftPadding[i] ..< _idx` contains only valid
+    /// written data. This eliminates unwritten holes that the old layout had.
     func testMixedDepthExtractAfterMerge() throws {
         try skipIfMetalUnavailable()
 
@@ -738,55 +742,59 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
         _ = cacheShort.update(keys: kShort, values: vShort)
         _ = cacheLong.update(keys: kLong, values: vLong)
 
-        // Merge with suffix padding: short has longer suffix (5), long has shorter (2)
-        // totalPadding[short] = (10-2) + (5-5) = 8
-        // totalPadding[long]  = (10-10) + (5-2) = 3
-        // bufferLen = 10 + 3 = 13
-        let maxCacheLen = 10
-        let suffixPadding = [0, 3]  // short suffix=5, long suffix=2 → padding [5-5, 5-2]=[0,3]
-        let maxSuffixPadding = 3
-        let bufferLen = maxCacheLen + maxSuffixPadding
-        let totalPadding = [
-            (maxCacheLen - 2) + 0,  // 8
-            (maxCacheLen - 10) + 3,  // 3
+        // Right-aligned layout: bufferLen = maxCacheLen = 10
+        // Short (2 tokens): padding = 10 - 2 = 8, data at positions 8..9
+        // Long (10 tokens): padding = 10 - 10 = 0, data at positions 0..9
+        let bufferLen = 10  // maxCacheLen
+        let rightAlignedPadding = [
+            bufferLen - 2,  // 8
+            bufferLen - 10,  // 0
         ]
 
-        // Build merged cache manually (as processCachedPrompts now does)
+        // Build merged cache manually (as processPartialCacheHits now does)
         let keysArr = MLXArray.zeros([2, H, bufferLen, D])
         let valuesArr = MLXArray.zeros([2, H, bufferLen, D])
 
-        // Place short cache data at position 8..9
+        // Place short cache data at position 8..9 (right-aligned to _idx=10)
         keysArr[0 ..< 1, 0..., 8 ..< 10, 0...] = kShort
         valuesArr[0 ..< 1, 0..., 8 ..< 10, 0...] = vShort
-        // Place long cache data at position 3..12
-        keysArr[1 ..< 2, 0..., 3 ..< 13, 0...] = kLong
-        valuesArr[1 ..< 2, 0..., 3 ..< 13, 0...] = vLong
+        // Place long cache data at position 0..9 (right-aligned to _idx=10)
+        keysArr[1 ..< 2, 0..., 0 ..< 10, 0...] = kLong
+        valuesArr[1 ..< 2, 0..., 0 ..< 10, 0...] = vLong
 
-        let batchCache = BatchKVCache(leftPadding: totalPadding)
+        let batchCache = BatchKVCache(leftPadding: rightAlignedPadding)
         batchCache.keys = keysArr
         batchCache.values = valuesArr
         batchCache._idx = bufferLen
         batchCache.batchOffsets = MLXArray([Int32(2), Int32(10)])
 
-        // Extract and verify
+        // Extract and verify: no holes in extracted data
         let extractedShort = batchCache.extract(idx: 0)
         let extractedLong = batchCache.extract(idx: 1)
 
-        XCTAssertEqual(extractedShort.offset, 5, "Short cache should have offset 5 (13-8)")
-        XCTAssertEqual(extractedLong.offset, 10, "Long cache should have offset 10 (13-3)")
-
-        // The extracted short cache should have the real data at the end
-        let shortKeyVal = extractedShort.keys![0, 0, 3, 0].item(Float.self)
+        // Short: leftPadding=8, _idx=10, so extracted has 10-8 = 2 positions
+        XCTAssertEqual(extractedShort.offset, 2, "Short cache should have offset 2 (no holes)")
         XCTAssertEqual(
-            shortKeyVal, 5.0,
-            "Extracted short cache should contain original key values"
-        )
+            extractedShort.keys!.dim(2), 2,
+            "Short extracted keys should have exactly 2 positions (no padding, no holes)")
 
-        let longKeyVal = extractedLong.keys![0, 0, 0, 0].item(Float.self)
+        // Long: leftPadding=0, _idx=10, so extracted has 10-0 = 10 positions
+        XCTAssertEqual(extractedLong.offset, 10, "Long cache should have offset 10")
         XCTAssertEqual(
-            longKeyVal, 9.0,
-            "Extracted long cache should contain original key values"
-        )
+            extractedLong.keys!.dim(2), 10,
+            "Long extracted keys should have exactly 10 positions")
+
+        // Every position in extracted short cache should be real data (value 5.0)
+        let shortKeyVal0 = extractedShort.keys![0, 0, 0, 0].item(Float.self)
+        let shortKeyVal1 = extractedShort.keys![0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(shortKeyVal0, 5.0, "All extracted short positions should be real data")
+        XCTAssertEqual(shortKeyVal1, 5.0, "All extracted short positions should be real data")
+
+        // Every position in extracted long cache should be real data (value 9.0)
+        let longKeyVal0 = extractedLong.keys![0, 0, 0, 0].item(Float.self)
+        let longKeyVal9 = extractedLong.keys![0, 0, 9, 0].item(Float.self)
+        XCTAssertEqual(longKeyVal0, 9.0, "All extracted long positions should be real data")
+        XCTAssertEqual(longKeyVal9, 9.0, "All extracted long positions should be real data")
     }
 
     /// Verify that exact cache hits mixed with partial hits in a single batch
@@ -939,6 +947,308 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             "Cache passed to model should have pre-loaded keys from prompt cache"
         )
     }
+
+    // MARK: - Right-Aligned Mixed-Depth Layout Tests
+
+    /// Verify that the right-aligned layout produces a BatchKVCache where every
+    /// position in `leftPadding[i] ..< _idx` is filled with valid cached data
+    /// (no unwritten holes).
+    func testRightAlignedLayoutNoHoles() throws {
+        try skipIfMetalUnavailable()
+
+        let H = 2
+        let D = 4
+
+        // Simulate the right-aligned layout produced by processPartialCacheHits.
+        // Sequence A: 3 tokens cached
+        // Sequence B: 7 tokens cached
+        // bufferLen = maxCacheLen = 7
+        let cacheA = KVCacheSimple()
+        let cacheB = KVCacheSimple()
+
+        let kA = MLXArray.ones([1, H, 3, D]) * 3.0
+        let vA = MLXArray.ones([1, H, 3, D]) * 30.0
+        let kB = MLXArray.ones([1, H, 7, D]) * 7.0
+        let vB = MLXArray.ones([1, H, 7, D]) * 70.0
+
+        _ = cacheA.update(keys: kA, values: vA)
+        _ = cacheB.update(keys: kB, values: vB)
+
+        let bufferLen = 7  // maxCacheLen
+        let rightAlignedPadding = [
+            bufferLen - 3,  // 4
+            bufferLen - 7,  // 0
+        ]
+
+        let keysArr = MLXArray.zeros([2, H, bufferLen, D])
+        let valuesArr = MLXArray.zeros([2, H, bufferLen, D])
+
+        // Right-align: A at positions 4..6, B at positions 0..6
+        keysArr[0 ..< 1, 0..., 4 ..< 7, 0...] = kA
+        valuesArr[0 ..< 1, 0..., 4 ..< 7, 0...] = vA
+        keysArr[1 ..< 2, 0..., 0 ..< 7, 0...] = kB
+        valuesArr[1 ..< 2, 0..., 0 ..< 7, 0...] = vB
+
+        let batchCache = BatchKVCache(leftPadding: rightAlignedPadding)
+        batchCache.keys = keysArr
+        batchCache.values = valuesArr
+        batchCache._idx = bufferLen
+
+        // Check no holes: every position from leftPadding[i] to _idx should be non-zero.
+        // For sequence A (leftPadding=4, _idx=7): positions 4,5,6 should all be 3.0
+        for pos in 4 ..< 7 {
+            let val = keysArr[0, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(
+                val, 3.0,
+                "Sequence A position \(pos) should contain valid data (3.0), got \(val)"
+            )
+        }
+        // Padding positions should be zero
+        for pos in 0 ..< 4 {
+            let val = keysArr[0, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(
+                val, 0.0,
+                "Sequence A position \(pos) should be padding (0.0), got \(val)"
+            )
+        }
+
+        // For sequence B (leftPadding=0, _idx=7): all positions should be 7.0
+        for pos in 0 ..< 7 {
+            let val = keysArr[1, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(
+                val, 7.0,
+                "Sequence B position \(pos) should contain valid data (7.0), got \(val)"
+            )
+        }
+
+        // Extract and verify no holes in extracted caches
+        let extractedA = batchCache.extract(idx: 0)
+        let extractedB = batchCache.extract(idx: 1)
+
+        XCTAssertEqual(extractedA.offset, 3, "Extracted A should have offset 3 (no holes)")
+        XCTAssertEqual(extractedB.offset, 7, "Extracted B should have offset 7 (no holes)")
+
+        // All 3 positions in extracted A should be real data
+        for pos in 0 ..< 3 {
+            let val = extractedA.keys![0, 0, pos, 0].item(Float.self)
+            XCTAssertEqual(
+                val, 3.0,
+                "Extracted A position \(pos) should be real data (3.0)"
+            )
+        }
+    }
+
+    /// Verify that mixed-depth cached prompts through the full BatchTokenIterator
+    /// produce correct generation with the right-aligned layout.
+    func testMixedDepthCachedPrefillIntegration() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockCachePrefillModel(vocabSize: 32, numLayers: 2)
+
+        // Three prompts with very different cache depths
+        let promptA = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  // 10 tokens, 2 cached
+        let promptB = [11, 12, 13, 14, 15]  // 5 tokens, 4 cached
+        let promptC = [21, 22, 23, 24, 25, 26, 27]  // 7 tokens, 7 cached (exact hit)
+
+        let cachedA = makeMockPromptCache(layers: 2, seqLen: 2, value: 1.0)
+        let cachedB = makeMockPromptCache(layers: 2, seqLen: 4, value: 2.0)
+        let cachedC = makeMockPromptCache(layers: 2, seqLen: 7, value: 3.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [promptA, promptB, promptC],
+            maxTokens: [3, 3, 3],
+            cachedKVStates: [cachedA, cachedB, cachedC]
+        )
+
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 30 { break }
+        }
+
+        // All three should produce their requested token count
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 3,
+            "Prompt A (partial hit, deep suffix) should produce 3 tokens"
+        )
+        XCTAssertEqual(
+            tokensPerUID[uids[1]]?.count, 3,
+            "Prompt B (partial hit, shallow suffix) should produce 3 tokens"
+        )
+        XCTAssertEqual(
+            tokensPerUID[uids[2]]?.count, 3,
+            "Prompt C (exact hit) should produce 3 tokens"
+        )
+    }
+
+    // MARK: - RotatingKVCache Cached-Prefill Tests
+
+    /// Verify that RotatingKVCache entries survive the exact-hit cached-prefill path.
+    /// Previously, RotatingKVCache layers were silently dropped because the code
+    /// hard-coded BatchKVCache.merge which only handles KVCacheSimple.
+    func testRotatingKVCacheSurvivesExactHitPath() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockRotatingCacheModel(vocabSize: 32, numLayers: 2, maxKVSize: 64)
+
+        // Create a cached prompt state using RotatingKVCache
+        let prompt = [1, 2, 3, 4, 5]
+        let cachedKV = makeMockRotatingPromptCache(
+            layers: 2, seqLen: 5, maxSize: 64, value: 1.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [prompt],
+            maxTokens: [2],
+            cachedKVStates: [cachedKV]
+        )
+
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 20 { break }
+        }
+
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 2,
+            "RotatingKVCache exact-hit should produce 2 tokens"
+        )
+    }
+
+    /// Verify that RotatingKVCache entries survive the partial-hit cached-prefill path.
+    func testRotatingKVCacheSurvivesPartialHitPath() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockRotatingCacheModel(vocabSize: 32, numLayers: 2, maxKVSize: 64)
+
+        // 8-token prompt, 5 cached as RotatingKVCache → suffix = [6, 7, 8]
+        let prompt = [1, 2, 3, 4, 5, 6, 7, 8]
+        let cachedKV = makeMockRotatingPromptCache(
+            layers: 2, seqLen: 5, maxSize: 64, value: 1.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [prompt],
+            maxTokens: [2],
+            cachedKVStates: [cachedKV]
+        )
+
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 20 { break }
+        }
+
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 2,
+            "RotatingKVCache partial-hit should produce 2 tokens"
+        )
+    }
+
+    /// Verify that mixed-depth RotatingKVCache entries in a batch work correctly.
+    func testMixedDepthRotatingCachePrefill() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockRotatingCacheModel(vocabSize: 32, numLayers: 2, maxKVSize: 64)
+
+        // Two prompts with different rotating cache depths
+        let promptA = [1, 2, 3, 4, 5, 6]  // 6 tokens, 3 cached
+        let promptB = [10, 11, 12, 13, 14, 15, 16, 17]  // 8 tokens, 6 cached
+
+        let cachedA = makeMockRotatingPromptCache(
+            layers: 2, seqLen: 3, maxSize: 64, value: 1.0)
+        let cachedB = makeMockRotatingPromptCache(
+            layers: 2, seqLen: 6, maxSize: 64, value: 2.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [promptA, promptB],
+            maxTokens: [2, 2],
+            cachedKVStates: [cachedA, cachedB]
+        )
+
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 20 { break }
+        }
+
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 2,
+            "Prompt A with rotating cache should produce 2 tokens"
+        )
+        XCTAssertEqual(
+            tokensPerUID[uids[1]]?.count, 2,
+            "Prompt B with rotating cache should produce 2 tokens"
+        )
+    }
+
+    // MARK: - Helpers for RotatingKVCache tests
+
+    /// Create a mock RotatingKVCache with synthetic keys/values.
+    private func makeMockRotatingCache(
+        seqLen: Int, maxSize: Int, heads: Int = 2, headDim: Int = 4, value: Float = 1.0
+    ) -> RotatingKVCache {
+        let cache = RotatingKVCache(maxSize: maxSize)
+        if seqLen > 0 {
+            let keys = MLXArray.ones([1, heads, seqLen, headDim]) * value
+            let values = MLXArray.ones([1, heads, seqLen, headDim]) * (value + 1)
+            _ = cache.update(keys: keys, values: values)
+        }
+        return cache
+    }
+
+    /// Create a multi-layer mock prompt cache using RotatingKVCache.
+    private func makeMockRotatingPromptCache(
+        layers: Int = 2, seqLen: Int, maxSize: Int, heads: Int = 2, headDim: Int = 4,
+        value: Float = 1.0
+    ) -> [KVCache] {
+        (0 ..< layers).map { _ in
+            makeMockRotatingCache(
+                seqLen: seqLen, maxSize: maxSize, heads: heads, headDim: headDim, value: value)
+        }
+    }
 }
 
 // MARK: - Cache-Observing Mock Model
@@ -994,6 +1304,60 @@ private class CacheObservingModel: Module, LanguageModel {
 
     func newCache(parameters: GenerateParameters?) -> [KVCache] {
         (0 ..< numLayers).map { _ in KVCacheSimple() }
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+}
+
+// MARK: - Mock Rotating Cache Model
+
+/// A mock model that produces RotatingKVCache layers, for testing that
+/// cached RotatingKVCache entries survive the cached-prefill path.
+private class MockRotatingCacheModel: Module, LanguageModel {
+    let vocabSize: Int
+    let numLayers: Int
+    let maxKVSize: Int
+
+    var callCount = 0
+
+    init(vocabSize: Int = 32, numLayers: Int = 2, maxKVSize: Int = 64) {
+        self.vocabSize = vocabSize
+        self.numLayers = numLayers
+        self.maxKVSize = maxKVSize
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        callCount += 1
+        let tokens = input.tokens
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+
+        // Same deterministic logits as MockCachePrefillModel
+        var logitsFlat = [Float]()
+        for b in 0 ..< B {
+            for s in 0 ..< S {
+                let lastToken = tokens[b, s].item(Int32.self)
+                let predictedToken = (Int(lastToken) + 1) % vocabSize
+                var row = [Float](repeating: -100.0, count: vocabSize)
+                row[predictedToken] = 0.0
+                logitsFlat.append(contentsOf: row)
+            }
+        }
+
+        let logits = MLXArray(logitsFlat, [B, S, vocabSize])
+        return LMOutput(logits: logits)
+    }
+
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        (0 ..< numLayers).map { _ in RotatingKVCache(maxSize: maxKVSize) }
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
