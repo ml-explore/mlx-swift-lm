@@ -1,0 +1,7 @@
+commands:
+  build: swift build
+  test: swift test --filter MLXLMTests
+  test-all: swift test
+  typecheck: swift build
+
+services: {}
