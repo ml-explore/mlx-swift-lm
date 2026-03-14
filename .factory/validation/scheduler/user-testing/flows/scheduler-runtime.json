@@ -1,0 +1,140 @@
+{
+  "surface": "xcodebuild-test (primary), swift-test (supplemental)",
+  "testedAt": "2026-03-14T09:24:18.900679+00:00",
+  "assertionsTested": [
+    "VAL-SCHED-001",
+    "VAL-SCHED-002",
+    "VAL-SCHED-003",
+    "VAL-SCHED-004",
+    "VAL-SCHED-005",
+    "VAL-SCHED-006",
+    "VAL-SCHED-007",
+    "VAL-SCHED-008",
+    "VAL-SCHED-009",
+    "VAL-SCHED-010",
+    "VAL-SCHED-011",
+    "VAL-SCHED-012",
+    "VAL-SCHED-013",
+    "VAL-SCHED-014",
+    "VAL-SCHED-015",
+    "VAL-SCHED-016",
+    "VAL-SCHED-017",
+    "VAL-SCHED-018"
+  ],
+  "assertionResults": [
+    {
+      "id": "VAL-SCHED-001",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `InferenceSchedulerTests.testSingleRequestUsesTokenIteratorDirectly` passed under xcodebuild and verified the scheduler entered `single` state for a lone request."
+    },
+    {
+      "id": "VAL-SCHED-002",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `InferenceSchedulerTests.testSingleRequestReceivesCompleteOutput` passed and observed streamed chunks plus completion info for a single request."
+    },
+    {
+      "id": "VAL-SCHED-003",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `InferenceSchedulerTests.testUpgradeUsesLiveTokenIteratorState` passed and asserted the scheduler transitioned to `batched` after a second request arrived while the first was active."
+    },
+    {
+      "id": "VAL-SCHED-004",
+      "status": "fail",
+      "reason": "No direct runtime evidence was observed that compares the first request's KV cache before vs. after migration into `BatchKVCache`; the targeted Xcode tests passed, but none exposed or asserted cache-state equivalence in the observed run."
+    },
+    {
+      "id": "VAL-SCHED-005",
+      "status": "fail",
+      "reason": "The observed Xcode tests showed the first request continued producing output across upgrade boundaries, but they did not directly verify the contract's required no-missed-token/no-duplicate/no-restart monotonic sequence property."
+    },
+    {
+      "id": "VAL-SCHED-006",
+      "status": "fail",
+      "reason": "`ModelContainerIntegrationTests.testPaddingAndMaskingCorrectInBatchedMode` passed, but its observed behavior only checked that a scheduled request produced chunks/info; it did not directly validate variable-length batched masking/padding correctness against solo deterministic output."
+    },
+    {
+      "id": "VAL-SCHED-007",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: compatibility/fallback tests passed for image/video inputs, SSM/Mamba cache, CacheList, and model-container fallback (`testVLMInputFallsBackToSinglePath`, `testVideoInputFallsBackToSinglePath`, `testSSMModelIsIncompatible`, `testCacheListIsIncompatible`, `testIncompatibleRequestWithSchedulerFallsBack`)."
+    },
+    {
+      "id": "VAL-SCHED-008",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `InferenceSchedulerTests.testStandardLLMIsBatchCompatible` and `testKVCacheSimpleIsCompatible` passed for the standard text-only mock model / KVCacheSimple path."
+    },
+    {
+      "id": "VAL-SCHED-009",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `ModelContainerIntegrationTests.testModelContainerWithoutSchedulerUsesExistingPath` passed and observed successful generation with `scheduler == nil`."
+    },
+    {
+      "id": "VAL-SCHED-010",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `ModelContainerIntegrationTests.testModelContainerWithSchedulerRoutesThrough` passed and asserted the scheduler entered `single` state when generation routed through it."
+    },
+    {
+      "id": "VAL-SCHED-011",
+      "status": "fail",
+      "reason": "The observed runtime tests did not directly prove the contract's no-cross-contamination requirement: the scheduler-level test only consumed one stream, and the integration test only asserted some total output rather than stream-specific token isolation."
+    },
+    {
+      "id": "VAL-SCHED-012",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `ModelContainerIntegrationTests.testRequestCancellationStopsOnlyThatRequest` and `InferenceSchedulerTests.testCancellationAfterUpgradeRemovesUID` passed, showing one request can stop while another continues/completes."
+    },
+    {
+      "id": "VAL-SCHED-013",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `ModelContainerIntegrationTests.testStaggeredCompletionHandledCorrectly` passed with a short request finishing before a longer one, and both completed successfully."
+    },
+    {
+      "id": "VAL-SCHED-014",
+      "status": "fail",
+      "reason": "The strict-concurrency warning-free criterion was not met. Both xcodebuild and swift test logs contain `sending ... risks causing data races` warnings (for example `Libraries/MLXLMCommon/ModelContainer.swift:210`) plus additional sendability warnings in `ModelContainerIntegrationTests.swift`."
+    },
+    {
+      "id": "VAL-SCHED-015",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `InferenceSchedulerTests.testKvBitsRequestIsIncompatible` and `ModelContainerIntegrationTests.testKvBitsRequestFallsBackToDirectPath` both passed."
+    },
+    {
+      "id": "VAL-SCHED-016",
+      "status": "fail",
+      "reason": "`InferenceSchedulerTests.testThirdRequestJoinsExistingBatch` passed and showed the scheduler stayed `batched`, but the observed assertion only required batched state persistence and some output; it did not directly verify the contract's full no-disruption/all-correct-output behavior for three staggered requests."
+    },
+    {
+      "id": "VAL-SCHED-017",
+      "status": "pass",
+      "reason": "Direct Xcode runtime evidence: `ModelContainerIntegrationTests.testStaggeredCompletionHandledCorrectly` passed with the longer request surviving after the shorter one completed and then finishing successfully itself."
+    },
+    {
+      "id": "VAL-SCHED-018",
+      "status": "fail",
+      "reason": "`ModelContainerIntegrationTests.testMultipleChatSessionsSharingModelContainerTriggerBatching` passed, but the observed assertion only required at least one session to succeed; it did not directly confirm that shared-container ChatSessions actually triggered batch mode."
+    }
+  ],
+  "commands": [
+    {
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath '/tmp/mlx-swift-lm-scheduler-runtime/DerivedData' -only-testing:MLXLMTests/InferenceSchedulerTests -only-testing:MLXLMTests/ModelContainerIntegrationTests",
+      "exitCode": 0,
+      "observation": "Passed under Xcode with direct Metal runtime: `InferenceSchedulerTests` 23/23 passed, `ModelContainerIntegrationTests` 10/10 passed, 33 tests total, 0 failures. xcresult was written under the validator-specific DerivedData path. The log also contains strict-concurrency/data-race warnings and an unused-variable warning."
+    },
+    {
+      "command": "swift test --scratch-path '/tmp/mlx-swift-lm-scheduler-runtime/swiftpm-build' --filter MLXLMTests",
+      "exitCode": 0,
+      "observation": "Supplemental SwiftPM run completed with 225 tests executed, 204 skipped, 0 failures. Scheduler coverage was not direct here because `InferenceSchedulerTests` were 23/23 skipped and `ModelContainerIntegrationTests` were 9/10 skipped due `MLX Metal library unavailable (SPM debug build)`; only `testSchedulerPropertySetAndRead` ran in that suite. The log also reports strict-concurrency/data-race warnings."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild-test",
+    "swift-test"
+  ],
+  "frictions": [],
+  "blockers": [],
+  "evidenceFiles": [
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/scheduler/scheduler-runtime/xcodebuild-test.log",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/scheduler/scheduler-runtime/swift-test-MLXLMTests.log",
+    "/tmp/mlx-swift-lm-scheduler-runtime/DerivedData/Logs/Test/Test-mlx-swift-lm-Package-2026.03.14_02-18-19--0700.xcresult"
+  ],
+  "summary": "Overall scheduler runtime validation is mixed: direct Xcode runtime evidence supports 11 of 18 assigned scheduler assertions, 7 assertions do not currently have sufficient direct runtime evidence or fail the warning-free strict-concurrency criterion, and supplemental SwiftPM coverage mostly skips scheduler runtime tests because Metal is unavailable in SPM debug builds."
+}

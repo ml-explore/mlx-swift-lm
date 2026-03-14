@@ -44,3 +44,12 @@ Primary testing tool: `swift test` (XCTest framework)
 - Capture the exact `swift test --filter ...` command, exit code, and the assertion IDs covered by that run in the flow report.
 - If Metal-backed MLX tests skip because the debug Metal library is unavailable, treat the skip as part of the observed behavior and report whether the targeted assertion still received direct evidence from the test run.
 - When MLX assertions require direct runtime evidence, prefer `xcodebuild test` on the Swift package (`mlx-swift-lm-Package`, destination `platform=macOS,arch=arm64`) and use `swift test` only as supplemental evidence.
+
+## Flow Validator Guidance: xcodebuild-test
+
+- Surface: Xcode package tests via `xcodebuild test` against scheme `mlx-swift-lm-Package` on destination `platform=macOS,arch=arm64`.
+- Isolation boundary: do not edit source files; only write artifacts under `.factory/validation/<milestone>/user-testing/flows/` and mission evidence directories.
+- Use a validator-specific DerivedData path (for example `/tmp/mlx-swift-lm-<milestone>-<group>/DerivedData`) so concurrent or repeated runs do not reuse stale build products.
+- For milestone `scheduler`, use `.factory/services.yaml` command `test-scheduler-runtime` or the equivalent `xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/InferenceSchedulerTests -only-testing:MLXLMTests/ModelContainerIntegrationTests`.
+- Capture the exact `xcodebuild test` command, exit code, assertion IDs covered, and notable test counts / failure lines in the flow report.
+- Save the raw xcodebuild log under the assigned evidence directory so later reruns can inspect the exact runtime output.

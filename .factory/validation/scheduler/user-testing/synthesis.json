@@ -1,0 +1,63 @@
+{
+  "milestone": "scheduler",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 18,
+    "passed": 11,
+    "failed": 7,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SCHED-001",
+    "VAL-SCHED-002",
+    "VAL-SCHED-003",
+    "VAL-SCHED-007",
+    "VAL-SCHED-008",
+    "VAL-SCHED-009",
+    "VAL-SCHED-010",
+    "VAL-SCHED-012",
+    "VAL-SCHED-013",
+    "VAL-SCHED-015",
+    "VAL-SCHED-017"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-SCHED-004",
+      "reason": "No direct runtime evidence was observed that compares the first request's KV cache before vs. after migration into `BatchKVCache`; the targeted Xcode tests passed, but none exposed or asserted cache-state equivalence in the observed run."
+    },
+    {
+      "id": "VAL-SCHED-005",
+      "reason": "The observed Xcode tests showed the first request continued producing output across upgrade boundaries, but they did not directly verify the contract's required no-missed-token/no-duplicate/no-restart monotonic sequence property."
+    },
+    {
+      "id": "VAL-SCHED-006",
+      "reason": "`ModelContainerIntegrationTests.testPaddingAndMaskingCorrectInBatchedMode` passed, but its observed behavior only checked that a scheduled request produced chunks/info; it did not directly validate variable-length batched masking/padding correctness against solo deterministic output."
+    },
+    {
+      "id": "VAL-SCHED-011",
+      "reason": "The observed runtime tests did not directly prove the contract's no-cross-contamination requirement: the scheduler-level test only consumed one stream, and the integration test only asserted some total output rather than stream-specific token isolation."
+    },
+    {
+      "id": "VAL-SCHED-014",
+      "reason": "The strict-concurrency warning-free criterion was not met. Both xcodebuild and swift test logs contain `sending ... risks causing data races` warnings (for example `Libraries/MLXLMCommon/ModelContainer.swift:210`) plus additional sendability warnings in `ModelContainerIntegrationTests.swift`."
+    },
+    {
+      "id": "VAL-SCHED-016",
+      "reason": "`InferenceSchedulerTests.testThirdRequestJoinsExistingBatch` passed and showed the scheduler stayed `batched`, but the observed assertion only required batched state persistence and some output; it did not directly verify the contract's full no-disruption/all-correct-output behavior for three staggered requests."
+    },
+    {
+      "id": "VAL-SCHED-018",
+      "reason": "`ModelContainerIntegrationTests.testMultipleChatSessionsSharingModelContainerTriggerBatching` passed, but the observed assertion only required at least one session to succeed; it did not directly confirm that shared-container ChatSessions actually triggered batch mode."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance for xcodebuild-based package testing, including validator-specific DerivedData isolation and the shared scheduler runtime command.",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}
