@@ -314,6 +314,22 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
 
         // Rotate — wrap to keep (not 0) so the first `keep` positions are never overwritten
         if _idx == maxCacheSize {
+            // When keep > 0 and some sequences have left-padding, the keep zone
+            // (positions 0..<keep) may contain padding zeros rather than the
+            // sequence's actual keep-prefix tokens. Roll away the left-padding
+            // so that each sequence's data starts at position 0, ensuring the
+            // global keep zone correctly protects per-sequence keep prefixes.
+            // On subsequent wraps leftPadding is already ≤ 0 so the roll is a no-op.
+            if keep > 0 {
+                let effectivePadding = MLX.maximum(MLXArray(Int32(0)), leftPadding)
+                if effectivePadding.max().item(Int32.self) > 0 {
+                    self.keys = dynamicRoll(
+                        self.keys!, shifts: -effectivePadding[0..., .newAxis], axis: 2)
+                    self.values = dynamicRoll(
+                        self.values!, shifts: -effectivePadding[0..., .newAxis], axis: 2)
+                    leftPadding = leftPadding - effectivePadding
+                }
+            }
             rotated = true
             _idx = keep
         }
