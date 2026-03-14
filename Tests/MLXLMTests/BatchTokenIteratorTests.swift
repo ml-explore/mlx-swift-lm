@@ -571,6 +571,111 @@ class BatchTokenIteratorTests: XCTestCase {
 
         XCTAssertEqual(totalTokens, maxToks, "Should produce exactly maxTokens tokens")
     }
+
+    // MARK: - completionBatchSize independent from prefillBatchSize
+
+    /// completionBatchSize can be smaller than prefillBatchSize — they are independent.
+    func testCompletionBatchSizeIndependentFromPrefill() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockBatchLanguageModel()
+        // completionBatchSize (3) < prefillBatchSize (8) — must NOT be clamped up
+        let iterator = BatchTokenIterator(
+            model: model,
+            completionBatchSize: 3,
+            prefillBatchSize: 8
+        )
+
+        XCTAssertEqual(
+            iterator.completionBatchSize, 3,
+            "completionBatchSize must not be clamped to prefillBatchSize"
+        )
+        XCTAssertEqual(iterator.prefillBatchSize, 8)
+
+        // Insert 5 prompts
+        let _ = iterator.insert(
+            prompts: [[1], [2], [3], [4], [5]],
+            maxTokens: [3, 3, 3, 3, 3]
+        )
+
+        // First next(): should admit at most completionBatchSize (3) prompts
+        let responses = iterator.next()
+        XCTAssertNotNil(responses)
+        XCTAssertLessThanOrEqual(
+            responses?.count ?? 0, 3,
+            "Active batch should not exceed completionBatchSize even when prefillBatchSize is larger"
+        )
+    }
+
+    // MARK: - Partial admission fills free slots
+
+    /// When fewer than prefillBatchSize slots are free, pending prompts are still
+    /// admitted to fill remaining capacity rather than leaving slots idle.
+    func testPartialAdmissionFillsFreeSlots() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockBatchLanguageModel()
+        // completionBatchSize=3, prefillBatchSize=2
+        // After admitting 2 prompts, 1 free slot remains (< prefillBatchSize).
+        // The 3rd prompt should still be admitted to fill that slot.
+        let iterator = BatchTokenIterator(
+            model: model,
+            completionBatchSize: 3,
+            prefillBatchSize: 2
+        )
+
+        let uids = iterator.insert(
+            prompts: [[1], [2], [3]],
+            maxTokens: [5, 5, 5]
+        )
+
+        // First next() should admit all 3: first batch of 2, then 1 more for
+        // the remaining free slot.
+        let responses = iterator.next()
+        XCTAssertNotNil(responses)
+        XCTAssertEqual(
+            responses?.count, 3,
+            "All 3 prompts should be admitted: 2 in first prefill batch, "
+                + "1 in second (partial) batch filling the remaining slot"
+        )
+
+        // All UIDs should be present
+        let responseUIDs = Set(responses?.map(\.uid) ?? [])
+        XCTAssertEqual(responseUIDs, Set(uids))
+    }
+
+    // MARK: - Slots not left idle when pending exist
+
+    /// Regression: with the old code, if freeSlots < prefillBatchSize and there
+    /// were pending prompts, the while-loop exited and left slots idle.
+    func testSlotsNotLeftIdleWithPendingPrompts() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockBatchLanguageModel()
+        // completionBatchSize=5, prefillBatchSize=4
+        // Insert 5 prompts. First iteration admits 4 (min(5,4,5)=4),
+        // leaving 1 free slot. Second iteration should admit 1 more.
+        let iterator = BatchTokenIterator(
+            model: model,
+            completionBatchSize: 5,
+            prefillBatchSize: 4
+        )
+
+        let uids = iterator.insert(
+            prompts: [[1], [2], [3], [4], [5]],
+            maxTokens: [3, 3, 3, 3, 3]
+        )
+
+        let responses = iterator.next()
+        XCTAssertNotNil(responses)
+        XCTAssertEqual(
+            responses?.count, 5,
+            "All 5 prompts should be admitted to fill all 5 decode slots"
+        )
+
+        let responseUIDs = Set(responses?.map(\.uid) ?? [])
+        XCTAssertEqual(responseUIDs, Set(uids))
+    }
 }
 
 // MARK: - Mock Samplers & Processors for Sampling Tests
@@ -962,64 +1067,113 @@ class BatchSamplingAndCorrectnessTests: XCTestCase {
     // MARK: - VAL-ENGINE-014: Concurrent safety
 
     /// Concurrent insert and next calls from concurrent contexts must be safe.
+    /// Asserts structural invariants that would fail under unsynchronized races:
+    /// - No duplicate UIDs in responses from a single next() call
+    /// - Response count per step never exceeds completionBatchSize
+    /// - No response for a UID that was never inserted
+    /// - close() is respected (next() returns nil afterward)
     func testConcurrentInsertAndNextSafety() throws {
         try skipIfMetalUnavailable()
 
+        let completionBatch = 8
         let model = MockBatchLanguageModel(vocabSize: 32)
         let iterator = BatchTokenIterator(
             model: model,
-            completionBatchSize: 32,
-            prefillBatchSize: 8
+            completionBatchSize: completionBatch,
+            prefillBatchSize: 4
         )
 
+        // Track all inserted UIDs for validation (nonisolated(unsafe) because
+        // access is serialised by uidLock / responseLock; the compiler cannot see that).
+        nonisolated(unsafe) var allInsertedUIDs = Set<Int>()
+        let uidLock = NSLock()
+
         // Insert initial prompts
-        let _ = iterator.insert(
+        let initialUIDs = iterator.insert(
             prompts: [[1, 2], [3, 4]],
             maxTokens: [10, 10]
         )
+        allInsertedUIDs.formUnion(initialUIDs)
 
-        // Use a concurrent dispatch group to test that concurrent operations
-        // don't crash or corrupt state.
         let group = DispatchGroup()
         let queue = DispatchQueue(
             label: "test.concurrent", attributes: .concurrent)
 
-        var allResponses = [[BatchTokenIterator.Response]]()
-        let lock = NSLock()
+        nonisolated(unsafe) var allResponses = [[BatchTokenIterator.Response]]()
+        let responseLock = NSLock()
 
-        // Multiple concurrent next() calls and inserts
-        for _ in 0 ..< 5 {
+        // Multiple concurrent next() calls
+        for _ in 0 ..< 10 {
             group.enter()
             queue.async {
                 if let responses = iterator.next() {
-                    lock.lock()
+                    responseLock.lock()
                     allResponses.append(responses)
-                    lock.unlock()
+                    responseLock.unlock()
                 }
                 group.leave()
             }
         }
 
-        // Also do concurrent inserts
-        for i in 0 ..< 3 {
+        // Concurrent inserts
+        for i in 0 ..< 5 {
             group.enter()
             queue.async {
-                let _ = iterator.insert(
+                let uids = iterator.insert(
                     prompts: [[Int(i) + 100]],
                     maxTokens: [5]
                 )
+                uidLock.lock()
+                allInsertedUIDs.formUnion(uids)
+                uidLock.unlock()
                 group.leave()
             }
         }
 
-        let result = group.wait(timeout: .now() + 10.0)
+        // Concurrent removes (remove UIDs that may not exist — must not crash)
+        for _ in 0 ..< 3 {
+            group.enter()
+            queue.async {
+                iterator.remove(uids: [999, 998])
+                group.leave()
+            }
+        }
+
+        let result = group.wait(timeout: .now() + 30.0)
         XCTAssertEqual(
             result, .success,
             "Concurrent operations should complete without deadlock"
         )
 
-        // Verify the iterator is still in a valid state after concurrent access
-        // (no crash = basic safety check)
+        // --- Invariant assertions ---
+
+        for (stepIdx, responses) in allResponses.enumerated() {
+            // 1. No duplicate UIDs in a single step's response
+            let stepUIDs = responses.map(\.uid)
+            XCTAssertEqual(
+                Set(stepUIDs).count, stepUIDs.count,
+                "Step \(stepIdx): duplicate UIDs in a single next() response"
+            )
+
+            // 2. Response count never exceeds completionBatchSize
+            XCTAssertLessThanOrEqual(
+                responses.count, completionBatch,
+                "Step \(stepIdx): response count exceeds completionBatchSize"
+            )
+
+            // 3. Every UID in the response must have been inserted
+            uidLock.lock()
+            let knownUIDs = allInsertedUIDs
+            uidLock.unlock()
+            for r in responses {
+                XCTAssertTrue(
+                    knownUIDs.contains(r.uid),
+                    "Step \(stepIdx): response contains unknown UID \(r.uid)"
+                )
+            }
+        }
+
+        // 4. close() is respected: next() returns nil afterward
         iterator.close()
         let afterClose = iterator.next()
         XCTAssertNil(afterClose, "next() should return nil after close()")

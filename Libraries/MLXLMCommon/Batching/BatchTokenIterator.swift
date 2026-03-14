@@ -141,10 +141,10 @@ public class ActiveBatch {
 /// }
 /// iterator.close()
 /// ```
-public class BatchTokenIterator {
+public class BatchTokenIterator: @unchecked Sendable {
 
     /// A single token response from one sequence in the batch.
-    public struct Response {
+    public struct Response: Sendable {
         /// The unique request ID.
         public let uid: Int
 
@@ -175,7 +175,12 @@ public class BatchTokenIterator {
     /// Maximum tokens to process per prefill chunk.
     public let prefillStepSize: Int
 
-    // MARK: - State
+    // MARK: - Synchronization
+
+    /// Lock protecting all mutable state below.
+    private let lock = NSLock()
+
+    // MARK: - State (protected by `lock`)
 
     /// Prompts waiting to be prefilled.
     internal var pendingPrompts: [PendingPrompt] = []
@@ -214,7 +219,7 @@ public class BatchTokenIterator {
         self.model = model
         self.stopTokens = stopTokens
         self.defaultSampler = defaultSampler
-        self.completionBatchSize = max(completionBatchSize, prefillBatchSize)
+        self.completionBatchSize = completionBatchSize
         self.prefillBatchSize = prefillBatchSize
         self.prefillStepSize = prefillStepSize
     }
@@ -239,6 +244,9 @@ public class BatchTokenIterator {
         samplers: [LogitSampler?]? = nil,
         processors: [LogitProcessor?]? = nil
     ) -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+
         precondition(!isClosed, "Cannot insert into a closed BatchTokenIterator")
         precondition(
             prompts.count == maxTokens.count,
@@ -277,25 +285,21 @@ public class BatchTokenIterator {
     ///   when all generation is complete (no pending and no active sequences).
     ///   Returns `nil` if the iterator is closed.
     public func next() -> [Response]? {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard !isClosed else { return nil }
 
-        // Check for free slots and prefill pending prompts
+        // Check for free slots and prefill pending prompts.
+        // Admit min(freeSlots, prefillBatchSize, pendingCount) prompts per
+        // iteration so that free decode capacity is filled even when fewer
+        // than prefillBatchSize slots are available.
         let numActive = activeBatch?.count ?? 0
-        var numToAdd = completionBatchSize - numActive
+        var freeSlots = completionBatchSize - numActive
 
-        while numToAdd >= prefillBatchSize {
-            let promptsToProcess = Array(pendingPrompts.prefix(prefillBatchSize))
-
-            // No more pending prompts
-            if promptsToProcess.isEmpty {
-                if numActive > 0 || activeBatch != nil {
-                    break  // Still have active sequences to decode
-                } else {
-                    // No pending and no active: generation complete
-                    activeBatch = nil
-                    return []
-                }
-            }
+        while freeSlots > 0 && !pendingPrompts.isEmpty {
+            let numToAdmit = min(freeSlots, prefillBatchSize, pendingPrompts.count)
+            let promptsToProcess = Array(pendingPrompts.prefix(numToAdmit))
 
             // Prefill this batch of prompts
             let newBatch = processPrompts(promptsToProcess)
@@ -307,11 +311,11 @@ public class BatchTokenIterator {
                 activeBatch!.extend(other: newBatch)
             }
 
-            numToAdd -= newBatch.count
+            freeSlots -= newBatch.count
         }
 
         guard let batch = activeBatch else {
-            // Edge case: nothing to do
+            // No pending and no active: generation complete
             return []
         }
 
@@ -374,6 +378,9 @@ public class BatchTokenIterator {
     ///
     /// - Parameter uids: The UIDs of the sequences to remove.
     public func remove(uids: Set<Int>) {
+        lock.lock()
+        defer { lock.unlock() }
+
         // Remove from active batch
         if let batch = activeBatch {
             let keepIndices = batch.uids.enumerated()
@@ -393,6 +400,9 @@ public class BatchTokenIterator {
 
     /// Stop all generation. After calling close, `next()` returns nil.
     public func close() {
+        lock.lock()
+        defer { lock.unlock() }
+
         isClosed = true
         activeBatch = nil
         pendingPrompts.removeAll()
