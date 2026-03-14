@@ -1026,6 +1026,7 @@ final class BatchRotatingKVCacheTests: XCTestCase {
     }
 
     /// Round-trip test: merge caches with keep=4, trigger overflow, extract — keep prefix intact.
+    /// Asserts actual key/value tensor CONTENTS after extraction, not just metadata.
     func testKeepOverflowMergeExtractRoundTrip() throws {
         try skipIfMetalUnavailable()
 
@@ -1038,7 +1039,7 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         let cacheA = RotatingKVCache(maxSize: maxSize, keep: keepCount)
         let cacheB = RotatingKVCache(maxSize: maxSize, keep: keepCount)
 
-        // Cache A: 6 tokens (values 1..6)
+        // Cache A: 6 tokens (key values 1..6, value values 10..60)
         var kaSlices: [MLXArray] = []
         var vaSlices: [MLXArray] = []
         for i in 0 ..< 6 {
@@ -1050,7 +1051,7 @@ final class BatchRotatingKVCacheTests: XCTestCase {
             values: concatenated(vaSlices, axis: 2)
         )
 
-        // Cache B: 4 tokens (values 11..14)
+        // Cache B: 4 tokens (key values 11..14, value values 110..140)
         var kbSlices: [MLXArray] = []
         var vbSlices: [MLXArray] = []
         for i in 0 ..< 4 {
@@ -1067,17 +1068,18 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         XCTAssertEqual(batchCache.keep, keepCount)
 
         // Add decode tokens to trigger overflow
+        // Each decode step adds 1 token to both batch elements
         for step in 0 ..< 4 {
             let dk = MLXArray.ones([2, H, 1, D]) * Float(50 + step)
             let dv = MLXArray.ones([2, H, 1, D]) * Float(500 + step)
             _ = batchCache.update(keys: dk, values: dv)
         }
 
-        // Extract and verify keep prefix intact
+        // Extract and verify keep prefix data is actually preserved
         let extractedA = batchCache.extract(idx: 0)
         let extractedB = batchCache.extract(idx: 1)
 
-        // Both should have keep=4 preserved
+        // Both should have keep=4 preserved in metadata
         XCTAssertEqual(Int(extractedA.metaState[0]), keepCount)
         XCTAssertEqual(Int(extractedB.metaState[0]), keepCount)
 
@@ -1088,6 +1090,64 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         // Offsets should have advanced: original + 4 decode tokens
         XCTAssertEqual(extractedA.offset, 6 + 4)
         XCTAssertEqual(extractedB.offset, 4 + 4)
+
+        // --- Assert actual tensor contents ---
+
+        // Extracted A: keep prefix should be tokens 1, 2, 3, 4
+        let stateA = extractedA.state
+        XCTAssertEqual(stateA.count, 2, "Extracted state should have keys and values")
+        let keysA = stateA[0]
+        let valsA = stateA[1]
+
+        // Cache A had 6 tokens + 4 decode = 10 total, maxSize=8, keep=4
+        // Extracted should have maxSize=8 tokens: [keep: 1,2,3,4] [window: 50,51,52,53]
+        XCTAssertEqual(keysA.dim(2), maxSize, "Extracted A should have maxSize tokens")
+
+        // Verify keep prefix key contents (positions 0..3 should be 1.0, 2.0, 3.0, 4.0)
+        for i in 0 ..< keepCount {
+            let keyVal = keysA[0, 0, i, 0].item(Float.self)
+            XCTAssertEqual(
+                keyVal, Float(i + 1),
+                "Extracted A keep prefix key[\(i)] should be \(i + 1), got \(keyVal)"
+            )
+        }
+
+        // Verify keep prefix value contents (positions 0..3 should be 10, 20, 30, 40)
+        for i in 0 ..< keepCount {
+            let valVal = valsA[0, 0, i, 0].item(Float.self)
+            XCTAssertEqual(
+                valVal, Float((i + 1) * 10),
+                "Extracted A keep prefix val[\(i)] should be \((i + 1) * 10), got \(valVal)"
+            )
+        }
+
+        // Extracted B: keep prefix should be tokens 11, 12, 13, 14
+        let stateB = extractedB.state
+        XCTAssertEqual(stateB.count, 2, "Extracted state should have keys and values")
+        let keysB = stateB[0]
+        let valsB = stateB[1]
+
+        // Cache B had 4 tokens + 4 decode = 8 total, maxSize=8, keep=4
+        // Extracted should have maxSize=8 tokens: [keep: 11,12,13,14] [window: 50,51,52,53]
+        XCTAssertEqual(keysB.dim(2), maxSize, "Extracted B should have maxSize tokens")
+
+        // Verify keep prefix key contents (positions 0..3 should be 11, 12, 13, 14)
+        for i in 0 ..< keepCount {
+            let keyVal = keysB[0, 0, i, 0].item(Float.self)
+            XCTAssertEqual(
+                keyVal, Float(i + 11),
+                "Extracted B keep prefix key[\(i)] should be \(i + 11), got \(keyVal)"
+            )
+        }
+
+        // Verify keep prefix value contents (positions 0..3 should be 110, 120, 130, 140)
+        for i in 0 ..< keepCount {
+            let valVal = valsB[0, 0, i, 0].item(Float.self)
+            XCTAssertEqual(
+                valVal, Float((i + 11) * 10),
+                "Extracted B keep prefix val[\(i)] should be \((i + 11) * 10), got \(valVal)"
+            )
+        }
     }
 
     /// Test that keep=0 (default) continues to work correctly with rotation.
@@ -1168,5 +1228,136 @@ final class BatchRotatingKVCacheTests: XCTestCase {
         let pos1b = rawK2[0, 0, 1, 0].item(Float.self)
         XCTAssertEqual(pos0b, 1.0, "Keep position 0 still preserved after 2nd rotation cycle")
         XCTAssertEqual(pos1b, 2.0, "Keep position 1 still preserved after 2nd rotation cycle")
+    }
+
+    // MARK: - Extract with negative leftPadding after overflow
+
+    /// Test that extract() correctly handles negative leftPadding after overflow.
+    /// After rotation, updateInPlace decrements leftPadding each step, which can
+    /// make it negative. extract() must clamp to non-negative before slicing.
+    func testExtractWithNegativeLeftPaddingAfterOverflow() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let H = 2
+        let D = 4
+
+        // Create a batch with padding: seq 0 has padding=2, seq 1 has padding=0
+        let cache = BatchRotatingKVCache(maxSize: maxSize, leftPadding: [2, 0])
+
+        // Prefill with 6 tokens (padded to 6 for both)
+        let (keys, values) = makeDistinctKV(batchSize: 2, heads: H, seqLen: 6, headDim: D)
+        _ = cache.update(keys: keys, values: values)
+
+        // Now do single-token decodes to overflow the cache
+        // After maxSize - 6 = 2 more tokens the buffer is full, then rotation starts
+        for step in 0 ..< 6 {
+            let dk = MLXArray.ones([2, H, 1, D]) * Float(90 + step)
+            let dv = MLXArray.ones([2, H, 1, D]) * Float(900 + step)
+            _ = cache.update(keys: dk, values: dv)
+        }
+
+        // After overflow, leftPadding should be negative for at least one sequence
+        let lp0 = cache.leftPadding[0].item(Int32.self)
+        XCTAssertLessThan(lp0, 0, "leftPadding should be negative after overflow")
+
+        // extract() should NOT crash despite negative leftPadding
+        let extracted0 = cache.extract(idx: 0)
+        let extracted1 = cache.extract(idx: 1)
+
+        // Extracted caches should have valid state
+        XCTAssertFalse(extracted0.state.isEmpty, "Extracted cache 0 should have data")
+        XCTAssertFalse(extracted1.state.isEmpty, "Extracted cache 1 should have data")
+
+        // Extracted keys should have shape [1, H, seqLen, D] where seqLen <= maxSize
+        let extractedK0 = extracted0.state[0]
+        let extractedK1 = extracted1.state[0]
+        XCTAssertGreaterThan(extractedK0.dim(2), 0, "Extracted key seq length should be positive")
+        XCTAssertLessThanOrEqual(
+            extractedK0.dim(2), maxSize, "Extracted key seq length should not exceed maxSize")
+        XCTAssertGreaterThan(extractedK1.dim(2), 0, "Extracted key seq length should be positive")
+        XCTAssertLessThanOrEqual(
+            extractedK1.dim(2), maxSize, "Extracted key seq length should not exceed maxSize")
+
+        // Offsets should be positive and valid
+        XCTAssertGreaterThan(extracted0.offset, 0)
+        XCTAssertGreaterThan(extracted1.offset, 0)
+    }
+
+    /// Test that extract() handles a rotated keep+window buffer with negative leftPadding.
+    func testExtractRotatedKeepWindowWithNegativePadding() throws {
+        try skipIfMetalUnavailable()
+
+        let maxSize = 8
+        let keepCount = 2
+        let H = 2
+        let D = 4
+
+        // Create individual caches with keep, fill them, merge
+        let cacheA = RotatingKVCache(maxSize: maxSize, keep: keepCount)
+        let cacheB = RotatingKVCache(maxSize: maxSize, keep: keepCount)
+
+        // Cache A: 6 tokens with distinct values
+        var kaSlices: [MLXArray] = []
+        var vaSlices: [MLXArray] = []
+        for i in 0 ..< 6 {
+            kaSlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 1))
+            vaSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 1) * 10))
+        }
+        _ = cacheA.update(
+            keys: concatenated(kaSlices, axis: 2),
+            values: concatenated(vaSlices, axis: 2))
+
+        // Cache B: 4 tokens
+        var kbSlices: [MLXArray] = []
+        var vbSlices: [MLXArray] = []
+        for i in 0 ..< 4 {
+            kbSlices.append(MLXArray.ones([1, H, 1, D]) * Float(i + 11))
+            vbSlices.append(MLXArray.ones([1, H, 1, D]) * Float((i + 11) * 10))
+        }
+        _ = cacheB.update(
+            keys: concatenated(kbSlices, axis: 2),
+            values: concatenated(vbSlices, axis: 2))
+
+        let batchCache = BatchRotatingKVCache.merge([cacheA, cacheB])
+        XCTAssertEqual(batchCache.keep, keepCount)
+
+        // Add enough decode tokens to trigger overflow and make leftPadding go negative
+        for step in 0 ..< 8 {
+            let dk = MLXArray.ones([2, H, 1, D]) * Float(50 + step)
+            let dv = MLXArray.ones([2, H, 1, D]) * Float(500 + step)
+            _ = batchCache.update(keys: dk, values: dv)
+        }
+
+        // leftPadding should now be negative for at least the shorter sequence
+        XCTAssertTrue(batchCache.rotated, "Cache should be rotated after overflow")
+
+        // extract() should NOT crash
+        let extractedA = batchCache.extract(idx: 0)
+        let extractedB = batchCache.extract(idx: 1)
+
+        // Extracted states should be valid
+        XCTAssertFalse(extractedA.state.isEmpty)
+        XCTAssertFalse(extractedB.state.isEmpty)
+
+        // Keep prefix should be preserved in the extracted keys
+        let keysA = extractedA.state[0]
+        let keysB = extractedB.state[0]
+
+        // Cache A keep prefix: tokens 1, 2
+        let keepA0 = keysA[0, 0, 0, 0].item(Float.self)
+        let keepA1 = keysA[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(keepA0, 1.0, "Extracted A keep[0] should be 1.0")
+        XCTAssertEqual(keepA1, 2.0, "Extracted A keep[1] should be 2.0")
+
+        // Cache B keep prefix: tokens 11, 12
+        let keepB0 = keysB[0, 0, 0, 0].item(Float.self)
+        let keepB1 = keysB[0, 0, 1, 0].item(Float.self)
+        XCTAssertEqual(keepB0, 11.0, "Extracted B keep[0] should be 11.0")
+        XCTAssertEqual(keepB1, 12.0, "Extracted B keep[1] should be 12.0")
+
+        // Keep value preserved in metaState
+        XCTAssertEqual(Int(extractedA.metaState[0]), keepCount)
+        XCTAssertEqual(Int(extractedB.metaState[0]), keepCount)
     }
 }

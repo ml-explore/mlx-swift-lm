@@ -630,14 +630,19 @@ public class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// - Returns: A `RotatingKVCache` with the extracted sequence data.
     public func extract(idx: Int) -> RotatingKVCache {
         let cache = RotatingKVCache(maxSize: maxCacheSize, keep: keep)
-        let padding = Int(leftPadding[idx].item(Int32.self))
+        let rawPadding = Int(leftPadding[idx].item(Int32.self))
         let seqOffset = Int(batchOffsets[idx].item(Int32.self))
+
+        // After overflow (rotation), leftPadding can become negative because
+        // updateInPlace decrements it each step. Clamp to non-negative for slicing:
+        // the effective valid start is max(0, leftPadding).
+        let padding = max(0, rawPadding)
 
         if let k = keys, let v = values {
             var extractedK = k[idx ..< (idx + 1)]
             var extractedV = v[idx ..< (idx + 1)]
 
-            // If rotated, unroll for this sequence
+            // If rotated, apply temporal ordering before extraction
             if rotated {
                 if keep > 0 {
                     // With keep: keep prefix is fixed, only roll the window portion
