@@ -212,7 +212,7 @@ class Gemma3nAttention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     @ModuleInfo(key: "v_norm") var vNorm: RMSNoScale
-    @ModuleInfo var rope: OffsetLayer
+    @ModuleInfo var rope: RoPELayer
 
     init(_ config: Gemma3nTextConfiguration, layerIdx: Int) {
         let layerTypes =
@@ -263,13 +263,6 @@ class Gemma3nAttention: Module {
         queries = queries.reshaped(B, L, -1, headDim)
         queries = qNorm(queries)
 
-        let offset =
-            if isKvSharedLayer && cache != nil {
-                cache!.offset
-            } else {
-                cache?.offset ?? 0
-            }
-
         var keys: MLXArray
         var values: MLXArray
 
@@ -282,7 +275,7 @@ class Gemma3nAttention: Module {
                 keys = kProj(x).reshaped(B, L, -1, headDim)
                 keys = kNorm(keys)
                 keys = keys.transposed(0, 2, 1, 3)
-                keys = rope(keys, offset: offset)
+                keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
                 values = vProj(x).reshaped(B, L, -1, headDim)
                 values = vNorm(values)
@@ -296,7 +289,7 @@ class Gemma3nAttention: Module {
             keys = kProj(x).reshaped(B, L, -1, headDim)
             keys = kNorm(keys)
             keys = keys.transposed(0, 2, 1, 3)
-            keys = rope(keys, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
             values = vProj(x).reshaped(B, L, -1, headDim)
             values = vNorm(values)
@@ -308,7 +301,7 @@ class Gemma3nAttention: Module {
         }
 
         queries = queries.transposed(0, 2, 1, 3)
-        queries = rope(queries, offset: offset)
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
 
         var adjustedMask = mask
         if case .array(let maskArray) = mask {
