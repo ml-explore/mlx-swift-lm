@@ -230,7 +230,7 @@ public final class LRUPromptCache: @unchecked Sendable {
 
         // Shorter prefix
         var shorter: [Int]?
-        if lastCacheIndex > 0 {
+        if lastCacheIndex >= 0 {
             shorter = Array(tokens[...lastCacheIndex])
         }
 
@@ -314,6 +314,12 @@ public final class LRUPromptCache: @unchecked Sendable {
         }
     }
 
+    /// Refresh LRU recency for the given entry (move to most-recently-used).
+    private func _touch(model: String, tokens: [Int]) {
+        lru.remove(model: model, tokens: tokens)
+        lru.push(model: model, tokens: tokens)
+    }
+
     /// Internal fetch without locking.
     private func _fetchNearestCache(model: String, tokens: [Int]) -> ([KVCache]?, [Int]) {
         let result = _search(model: model, tokens: tokens)
@@ -321,6 +327,7 @@ public final class LRUPromptCache: @unchecked Sendable {
         // Exact match
         if let exact = result.exact {
             let entry = _get(model: result.model, tokens: exact)
+            _touch(model: result.model, tokens: exact)
             return (_deepCopy(entry.promptCache), [])
         }
 
@@ -331,16 +338,19 @@ public final class LRUPromptCache: @unchecked Sendable {
             let entry = _get(model: result.model, tokens: longer)
             if canTrimPromptCache(entry.promptCache) {
                 let copy = _deepCopy(entry.promptCache)
-                let prefix = min(tokens.count - 1, result.commonPrefix)
+                let prefix = min(tokens.count, result.commonPrefix)
                 let numToTrim = longer.count - prefix
                 trimPromptCache(copy, numTokens: numToTrim)
-                return (copy, Array(tokens[prefix...]))
+                let remainder = prefix < tokens.count ? Array(tokens[prefix...]) : []
+                _touch(model: result.model, tokens: longer)
+                return (copy, remainder)
             }
         }
 
         // Shorter prefix
         if shortLength > 0 {
             let entry = _get(model: result.model, tokens: result.shorter!)
+            _touch(model: result.model, tokens: result.shorter!)
             return (_deepCopy(entry.promptCache), Array(tokens[shortLength...]))
         }
 
@@ -393,7 +403,7 @@ public final class LRUPromptCache: @unchecked Sendable {
         }
 
         // Evict if over maxBytes
-        while _nBytes > maxBytes, lru.count > 1 {
+        while _nBytes > maxBytes {
             guard let evicted = lru.pop() else { break }
             _delete(model: evicted.model, tokens: evicted.tokens)
         }

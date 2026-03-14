@@ -239,17 +239,15 @@ final class LRUPromptCacheTests: XCTestCase {
         let (result, remainder) = cache.fetchNearestCache(model: "model1", tokens: [1, 2, 3])
 
         XCTAssertNotNil(result, "Should find longer prefix and return trimmed cache")
-        // After trimming, the cache should cover the common prefix (3 tokens)
-        // and remainder should be the tokens after the prefix match point
+        // After trimming, the cache should cover the full query (3 tokens).
+        // prefix = min(tokens.count, commonPrefix) = min(3, 3) = 3
+        // numToTrim = longer.count - prefix = 5 - 3 = 2
+        // After trimming 2 tokens from a 5-token cache: offset = 3
         if let result {
             for layer in result {
-                // Each layer's offset should be 2 (trimmed from 5 to prefix=2)
-                // Python: prefix = min(len(tokens)-1, commonPrefix) = min(2, 3) = 2
-                // numToTrim = len(longer) - prefix = 5 - 2 = 3
-                // After trimming 3 tokens from a 5-token cache: offset = 2
-                XCTAssertEqual(layer.offset, 2, "Trimmed cache should have offset 2")
+                XCTAssertEqual(layer.offset, 3, "Trimmed cache should have offset 3")
             }
-            XCTAssertEqual(remainder, [3], "Remainder should start from prefix point")
+            XCTAssertEqual(remainder, [], "Remainder should be empty (all query tokens covered)")
         }
     }
 
@@ -375,5 +373,208 @@ final class LRUPromptCacheTests: XCTestCase {
 
         XCTAssertNotNil(resultA)
         XCTAssertNotNil(resultB)
+    }
+
+    // MARK: - Regression: Bug 1 — Single-token prefix miss
+
+    func testSingleTokenPrefixMatch() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 10)
+        cache.insertCache(
+            model: "model1", tokens: [42], promptCache: makeMockPromptCache(seqLen: 1))
+
+        // Query extends beyond the single cached token
+        let (result, remainder) = cache.fetchNearestCache(
+            model: "model1", tokens: [42, 100, 200])
+
+        XCTAssertNotNil(result, "Single-token cached prefix must be found")
+        XCTAssertEqual(
+            remainder, [100, 200], "Remainder should be tokens after the single-token prefix")
+    }
+
+    func testSingleTokenExactMatch() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 10)
+        cache.insertCache(
+            model: "model1", tokens: [42], promptCache: makeMockPromptCache(seqLen: 1))
+
+        // Exact single-token query
+        let (result, remainder) = cache.fetchNearestCache(model: "model1", tokens: [42])
+
+        XCTAssertNotNil(result, "Single-token exact match must be found")
+        XCTAssertEqual(remainder, [], "Exact match remainder should be empty")
+    }
+
+    // MARK: - Regression: Bug 2 — Longer-prefix under-trim
+
+    func testLongerPrefixTrimAlignedToQueryLength() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 10)
+        // Cached entry covers 10 tokens
+        cache.insertCache(
+            model: "model1", tokens: Array(1 ... 10),
+            promptCache: makeMockPromptCache(seqLen: 10))
+
+        // Query covers the first 5 tokens
+        let (result, remainder) = cache.fetchNearestCache(
+            model: "model1", tokens: Array(1 ... 5))
+
+        XCTAssertNotNil(result, "Longer prefix should return trimmed cache")
+        if let result {
+            for layer in result {
+                // prefix = min(5, 5) = 5, numToTrim = 10 - 5 = 5
+                // After trimming 5 tokens from 10: offset = 5
+                XCTAssertEqual(
+                    layer.offset, 5, "Trimmed cache should have offset equal to query length")
+            }
+        }
+        // All query tokens are covered — remainder should be empty
+        XCTAssertEqual(remainder, [], "All query tokens are covered by the longer cached entry")
+    }
+
+    func testLongerPrefixTrimPartialQueryMatch() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 10)
+        // Cached entry: [1, 2, 3, 4, 5]
+        cache.insertCache(
+            model: "model1", tokens: [1, 2, 3, 4, 5],
+            promptCache: makeMockPromptCache(seqLen: 5))
+
+        // Query [1, 2, 3, 6, 7] diverges at index 3
+        // commonPrefix = 3, longer prefix = [1,2,3,4,5] (found via DFS)
+        let (result, remainder) = cache.fetchNearestCache(
+            model: "model1", tokens: [1, 2, 3, 6, 7])
+
+        XCTAssertNotNil(result, "Should find longer prefix from diverging query")
+        if let result {
+            for layer in result {
+                // prefix = min(5, 3) = 3, numToTrim = 5 - 3 = 2
+                XCTAssertEqual(layer.offset, 3, "Trimmed cache should cover common prefix")
+            }
+        }
+        XCTAssertEqual(remainder, [6, 7], "Remainder should be the diverging suffix")
+    }
+
+    // MARK: - Regression: Bug 3 — LRU recency not refreshed on fetch
+
+    func testFetchRefreshesLRURecency() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 3)
+
+        // Insert 3 entries in order: [1], [2], [3]
+        cache.insertCache(
+            model: "model1", tokens: [1], promptCache: makeMockPromptCache(seqLen: 1))
+        cache.insertCache(
+            model: "model1", tokens: [2], promptCache: makeMockPromptCache(seqLen: 1))
+        cache.insertCache(
+            model: "model1", tokens: [3], promptCache: makeMockPromptCache(seqLen: 1))
+
+        // Fetch [1] to refresh its recency — it becomes the most-recently-used
+        let (fetched, _) = cache.fetchNearestCache(model: "model1", tokens: [1])
+        XCTAssertNotNil(fetched, "[1] should still be present before eviction")
+
+        // Insert [4], which must evict the LRU entry.
+        // Without the fix, [1] would be evicted (insertion order).
+        // With the fix, [2] should be evicted (least recently used after [1] was fetched).
+        cache.insertCache(
+            model: "model1", tokens: [4], promptCache: makeMockPromptCache(seqLen: 1))
+        XCTAssertEqual(cache.count, 3)
+
+        // [1] should survive because it was recently fetched
+        let (result1, _) = cache.fetchNearestCache(model: "model1", tokens: [1])
+        XCTAssertNotNil(result1, "[1] should survive eviction because fetch refreshed its recency")
+
+        // [2] should be evicted (oldest unfetched entry)
+        let (result2, _) = cache.fetchNearestCache(model: "model1", tokens: [2])
+        XCTAssertNil(result2, "[2] should be evicted as least-recently-used")
+
+        // [3] and [4] should still be present
+        let (result3, _) = cache.fetchNearestCache(model: "model1", tokens: [3])
+        XCTAssertNotNil(result3, "[3] should still be present")
+        let (result4, _) = cache.fetchNearestCache(model: "model1", tokens: [4])
+        XCTAssertNotNil(result4, "[4] should still be present")
+    }
+
+    func testFetchRefreshesLRURecencyShorterPrefix() throws {
+        try skipIfMetalUnavailable()
+
+        let cache = LRUPromptCache(maxSize: 3)
+
+        // Insert 3 entries
+        cache.insertCache(
+            model: "model1", tokens: [10, 20],
+            promptCache: makeMockPromptCache(seqLen: 2))
+        cache.insertCache(
+            model: "model1", tokens: [30],
+            promptCache: makeMockPromptCache(seqLen: 1))
+        cache.insertCache(
+            model: "model1", tokens: [40],
+            promptCache: makeMockPromptCache(seqLen: 1))
+
+        // Fetch [10, 20, 99] which triggers shorter-prefix match on [10, 20]
+        let (fetched, rem) = cache.fetchNearestCache(
+            model: "model1", tokens: [10, 20, 99])
+        XCTAssertNotNil(fetched, "Should find shorter prefix [10,20]")
+        XCTAssertEqual(rem, [99])
+
+        // Insert [50] — this should evict [30] (LRU), not [10,20]
+        cache.insertCache(
+            model: "model1", tokens: [50],
+            promptCache: makeMockPromptCache(seqLen: 1))
+
+        let (r1020, _) = cache.fetchNearestCache(model: "model1", tokens: [10, 20])
+        XCTAssertNotNil(r1020, "[10,20] should survive because fetch refreshed its recency")
+
+        let (r30, _) = cache.fetchNearestCache(model: "model1", tokens: [30])
+        XCTAssertNil(r30, "[30] should be evicted as least-recently-used")
+    }
+
+    // MARK: - Regression: Bug 4 — maxBytes eviction stops at 1 entry
+
+    func testMaxBytesEvictsLastOversizedEntry() throws {
+        try skipIfMetalUnavailable()
+
+        // Set maxBytes to 0: every entry should be evicted immediately after insertion
+        let cache = LRUPromptCache(maxSize: 100, maxBytes: 0)
+
+        cache.insertCache(
+            model: "model1", tokens: [1], promptCache: makeMockPromptCache(seqLen: 5))
+
+        // With the bug (lru.count > 1), the single entry would stay.
+        // With the fix, it should be evicted since its bytes > maxBytes(0).
+        XCTAssertEqual(
+            cache.count, 0, "Single oversized entry should be evicted when exceeding maxBytes")
+        XCTAssertEqual(cache.nbytes, 0, "Byte count should be 0 after evicting oversized entry")
+    }
+
+    func testMaxBytesEvictsDownToLimit() throws {
+        try skipIfMetalUnavailable()
+
+        let promptCache = makeMockPromptCache(seqLen: 5)
+        let bytesPerEntry = promptCache.reduce(0) { $0 + $1.state.reduce(0) { $0 + $1.nbytes } }
+
+        // Set maxBytes to fit exactly 1 entry
+        let cache = LRUPromptCache(maxSize: 100, maxBytes: bytesPerEntry)
+
+        cache.insertCache(
+            model: "model1", tokens: [1], promptCache: makeMockPromptCache(seqLen: 5))
+        cache.insertCache(
+            model: "model1", tokens: [2], promptCache: makeMockPromptCache(seqLen: 5))
+
+        // After inserting 2nd entry, total bytes = 2 * bytesPerEntry > maxBytes.
+        // Should evict down until within budget. Only 1 entry should remain.
+        XCTAssertEqual(cache.count, 1, "Should evict down to 1 entry to stay within maxBytes")
+        XCTAssertLessThanOrEqual(cache.nbytes, bytesPerEntry)
+
+        // The surviving entry should be [2] (most recently inserted)
+        let (result1, _) = cache.fetchNearestCache(model: "model1", tokens: [1])
+        XCTAssertNil(result1, "[1] should be evicted (LRU)")
+        let (result2, _) = cache.fetchNearestCache(model: "model1", tokens: [2])
+        XCTAssertNotNil(result2, "[2] should survive (most recent)")
     }
 }
