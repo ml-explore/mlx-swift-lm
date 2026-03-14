@@ -41,8 +41,9 @@ For Python reference implementation details, search for `BatchGenerator`, `Batch
 - Write failing tests that cover the feature's expectedBehavior
 - Tests MUST use mock models and synthetic data — NO model downloads
 - For mock models, create minimal `LanguageModel` conforming types that return deterministic outputs
-- Run `swift test --filter MLXLMTests` to confirm tests fail (red)
+- **MLX/Metal limitation**: In SPM debug builds, MLX array evaluation crashes (Metal library unavailable). Tests that use MLX arrays MUST call `try skipIfMetalUnavailable()` in setUp or at the start of each test method (see `Tests/MLXLMTests/MLXMetalGuard.swift`). Tests will be skipped in SPM but run fully in Xcode.
 - If tests can't compile yet (new types don't exist), create minimal stubs first
+- **Accepted deviation**: When MLX-dependent tests can't be observed red/green in SPM, write tests alongside implementation and verify through compilation + code review. Record this deviation honestly in the handoff.
 
 ### 3. Implement (Green Phase)
 - New batching code goes in `Libraries/MLXLMCommon/Batching/` directory
