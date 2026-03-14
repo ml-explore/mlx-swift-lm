@@ -325,7 +325,7 @@ public class BatchTokenIterator {
             inputTokens: batch.y[0..., .newAxis],
             cache: batch.cache,
             samplers: batch.samplers,
-            processors: batch.processors,
+            processors: &batch.processors,
             tokens: batch.tokens
         )
 
@@ -414,6 +414,14 @@ public class BatchTokenIterator {
         // Create batch KV cache with one BatchKVCache per layer
         let promptCache = makeBatchCache(leftPadding: padding)
 
+        // Initialize per-request processors with their prompt tokens.
+        // This mirrors TokenIterator.prepare() calling processor?.prompt(tokens).
+        var processors = prompts.map(\.processor)
+        for i in 0 ..< prompts.count {
+            let promptArray = MLXArray(prompts[i].tokens.map { Int32($0) })
+            processors[i]?.prompt(promptArray)
+        }
+
         // Process prompt in chunks of prefillStepSize.
         // We leave the last token for the sampling step below.
         var remainingInputs = paddedInputs
@@ -435,7 +443,7 @@ public class BatchTokenIterator {
             inputTokens: remainingInputs,
             cache: promptCache,
             samplers: prompts.map(\.sampler),
-            processors: prompts.map(\.processor),
+            processors: &processors,
             tokens: tokenArrays
         )
 
@@ -446,19 +454,19 @@ public class BatchTokenIterator {
             y: sampled,
             cache: promptCache,
             samplers: prompts.map(\.sampler),
-            processors: prompts.map(\.processor),
+            processors: processors,
             maxTokens: prompts.map(\.maxTokens),
             numTokens: Array(repeating: 0, count: prompts.count),
             tokens: tokenArrays
         )
     }
 
-    /// Run one model step: forward pass, process logits, sample.
+    /// Run one model step: forward pass, process logits, sample, update processor state.
     private func step(
         inputTokens: MLXArray,
         cache: [KVCache],
         samplers: [LogitSampler?],
-        processors: [LogitProcessor?],
+        processors: inout [LogitProcessor?],
         tokens: [MLXArray]
     ) -> (MLXArray, [MLXArray]) {
         let batchSize = inputTokens.dim(0)
@@ -477,8 +485,8 @@ public class BatchTokenIterator {
             var processedLogits = [MLXArray]()
             for e in 0 ..< batchSize {
                 var sampleLogits = logits[e ..< (e + 1)]
-                if let proc = processors[e] {
-                    sampleLogits = proc.process(logits: sampleLogits)
+                if processors[e] != nil {
+                    sampleLogits = processors[e]!.process(logits: sampleLogits)
                 }
                 processedLogits.append(sampleLogits)
             }
@@ -500,6 +508,16 @@ public class BatchTokenIterator {
             sampled = concatenated(allSamples, axis: 0)
         } else {
             sampled = defaultSampler.sample(logits: logprobs)
+        }
+
+        // Notify processors of the sampled tokens so penalty state stays current.
+        // This mirrors TokenIterator's processor?.didSample(token: y) pattern.
+        if processors.contains(where: { $0 != nil }) {
+            for e in 0 ..< batchSize {
+                if processors[e] != nil {
+                    processors[e]!.didSample(token: sampled[e])
+                }
+            }
         }
 
         let logprobsList = (0 ..< batchSize).map { logprobs[$0] }
