@@ -1,0 +1,40 @@
+{
+  "featureId": "batch-token-iterator-core",
+  "reviewedAt": "2026-03-14T05:36:26Z",
+  "commitId": "8b25e9c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds the BatchTokenIterator types and most of the happy-path generation flow, but the core scheduling logic does not fully satisfy the advertised continuous-batching behavior. In particular, the iterator can ignore free decode slots and can even exceed the caller's configured completionBatchSize, and the added tests do not cover those cases.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 217,
+        "severity": "blocking",
+        "description": "The initializer rewrites `completionBatchSize` to `max(completionBatchSize, prefillBatchSize)`, so callers cannot actually request a decode batch smaller than the prefill batch. For example, `completionBatchSize: 1, prefillBatchSize: 8` still allows up to 8 active decode sequences, violating the feature's configurable `completionBatchSize` contract and VAL-ENGINE-010."
+      },
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 286,
+        "severity": "blocking",
+        "description": "`next()` only admits pending prompts while `numToAdd >= prefillBatchSize`. If there are pending prompts and fewer than `prefillBatchSize` free decode slots, the iterator leaves those slots idle instead of filling them. With the default settings (`completionBatchSize = 32`, `prefillBatchSize = 8`), an active batch of 29 leaves 3 slots unused until 8 slots free up at once, which contradicts the expected behavior that each `next()` checks for free slots and prefills pending work when slots are available."
+      },
+      {
+        "file": "Tests/MLXLMTests/BatchTokenIteratorTests.swift",
+        "line": 381,
+        "severity": "non_blocking",
+        "description": "`testCompletionBatchSizeLimits` only checks the first `next()` call in the aligned `completionBatchSize == prefillBatchSize` case. It never exercises a partially full active batch or a smaller configured decode limit, so it would not catch either scheduling bug above even when the tests run under Xcode."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker skill's mock-model example is incomplete for this repo's test harness: batch-engine mock models need to conform to `Module` as well as `LanguageModel`.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md:104-115` shows `class MockLanguageModel: LanguageModel`, while the worker's implementation uses `private class MockBatchLanguageModel: Module, LanguageModel` in `Tests/MLXLMTests/BatchTokenIteratorTests.swift:17`, and the handoff explicitly requests this skill update at `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T05-25-14-372Z__batch-token-iterator-core__376c7c01-d763-4c45-8e40-354a6dc1897f.json:116-118`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature metadata, transcript skeleton, handoff, commit `8b25e9c`, and the current BatchTokenIterator/tests. The main batching types are in place, but the scheduler does not honor the configured decode-batch limit and it leaves free slots unused unless an entire prefill-sized chunk is available, so the feature does not fully satisfy the batch-engine expected behavior."
+}
