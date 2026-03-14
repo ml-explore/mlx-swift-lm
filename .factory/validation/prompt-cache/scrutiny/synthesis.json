@@ -1,6 +1,6 @@
 {
   "milestone": "prompt-cache",
-  "round": 2,
+  "round": 3,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -20,40 +20,29 @@
     }
   },
   "reviewsSummary": {
-    "total": 2,
-    "passed": 1,
+    "total": 1,
+    "passed": 0,
     "failed": 1,
     "failedFeatures": [
-      "fix-prompt-cache-batch-integration-correctness"
+      "fix-cached-prefill-layout-and-rotating"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-prompt-cache-batch-integration-correctness",
+      "featureId": "fix-cached-prefill-layout-and-rotating",
       "severity": "blocking",
-      "description": "`processPartialCacheHits()` sets a shared `_idx` of `maxCacheLen + maxSuffixPadding`, but shorter cached prefixes only write through `maxCacheLen + suffixPadding[i]`. Mixed-depth cached-prefill batches therefore leave interior holes inside `leftPadding[idx] ..< _idx`, and later extraction/decode treat those unwritten slots as real cached tokens."
-    },
-    {
-      "featureId": "fix-prompt-cache-batch-integration-correctness",
-      "severity": "blocking",
-      "description": "The cached-prefill path still hard-codes `BatchKVCache` / `KVCacheSimple`. Exact-hit and partial-hit cache merging silently drop cached `RotatingKVCache` layers even though rotating caches are otherwise treated as batch-compatible and are preserved by `LRUPromptCache`."
+      "description": "`processPartialCacheHits()` still left-pads unequal suffixes while `leftPadding` only reflects cached-prefix depth. Those suffix pad zeros get appended after the shared `_idx`, and `createCausalMask()` only masks positions before `leftPadding`, so later suffix/decode steps can still treat pad-derived positions as real cached tokens."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated `.factory/library/architecture.md` to document the shared `_idx` invariant for `BatchKVCache`: every sequence's valid region must extend through `leftPadding[idx] ..< _idx`, or extraction/decode will interpret holes as real cached tokens.",
-      "sourceFeature": "fix-prompt-cache-batch-integration-correctness"
-    }
-  ],
+  "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "skill: swift-batching-worker",
-      "suggestion": "Update the batching worker skill's compatibility guidance to state that batch-compatible prompt caches can contain both `KVCacheSimple` and `RotatingKVCache` / `BatchRotatingKVCache`, not only the standard simple-cache path.",
-      "evidence": "The `fix-prompt-cache-batch-integration-correctness` review found the skill still describes `isBatchCompatible()` in terms of standard `KVCacheSimple`, while the codebase now treats rotating caches as batch-compatible (`BatchPositionedCache.swift`) and `LRUPromptCache` deep-copies them.",
+      "suggestion": "Update the batching worker skill to warn that cached-prefill with a shared `_idx` cannot safely left-pad the uncached suffix after an existing cached prefix unless those appended pad positions are also excluded from the logical cache/mask.",
+      "evidence": "The `fix-cached-prefill-layout-and-rotating` review found the worker assumed left-padded suffix zeros would be masked automatically, but `createCausalMask()` only excludes positions before `leftPadding`, not pad zeros appended after `_idx` during mixed-depth cached-prefill assembly.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/prompt-cache/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/prompt-cache/scrutiny/synthesis.round2.json"
 }

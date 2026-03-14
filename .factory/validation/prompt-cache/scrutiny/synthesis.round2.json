@@ -1,0 +1,59 @@
+{
+  "milestone": "prompt-cache",
+  "round": 2,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "swift test --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "swift-format lint --configuration \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.swift-format\" --recursive \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Libraries\" \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests\"",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-prompt-cache-batch-integration-correctness"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-prompt-cache-batch-integration-correctness",
+      "severity": "blocking",
+      "description": "`processPartialCacheHits()` sets a shared `_idx` of `maxCacheLen + maxSuffixPadding`, but shorter cached prefixes only write through `maxCacheLen + suffixPadding[i]`. Mixed-depth cached-prefill batches therefore leave interior holes inside `leftPadding[idx] ..< _idx`, and later extraction/decode treat those unwritten slots as real cached tokens."
+    },
+    {
+      "featureId": "fix-prompt-cache-batch-integration-correctness",
+      "severity": "blocking",
+      "description": "The cached-prefill path still hard-codes `BatchKVCache` / `KVCacheSimple`. Exact-hit and partial-hit cache merging silently drop cached `RotatingKVCache` layers even though rotating caches are otherwise treated as batch-compatible and are preserved by `LRUPromptCache`."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Updated `.factory/library/architecture.md` to document the shared `_idx` invariant for `BatchKVCache`: every sequence's valid region must extend through `leftPadding[idx] ..< _idx`, or extraction/decode will interpret holes as real cached tokens.",
+      "sourceFeature": "fix-prompt-cache-batch-integration-correctness"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skill: swift-batching-worker",
+      "suggestion": "Update the batching worker skill's compatibility guidance to state that batch-compatible prompt caches can contain both `KVCacheSimple` and `RotatingKVCache` / `BatchRotatingKVCache`, not only the standard simple-cache path.",
+      "evidence": "The `fix-prompt-cache-batch-integration-correctness` review found the skill still describes `isBatchCompatible()` in terms of standard `KVCacheSimple`, while the codebase now treats rotating caches as batch-compatible (`BatchPositionedCache.swift`) and `LRUPromptCache` deep-copies them.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/prompt-cache/scrutiny/synthesis.round1.json"
+}
