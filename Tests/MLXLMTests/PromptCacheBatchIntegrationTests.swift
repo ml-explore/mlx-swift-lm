@@ -525,7 +525,10 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
 
     /// Exact cache match: entire prompt is cached, prefill is skipped entirely.
     /// The last prompt token is replayed from the trimmed cache (trim+re-process)
-    /// to get logits for the first decode token, requiring exactly 1 model call.
+    /// to get logits for the first decode token, then one decode step produces
+    /// the generated token. This follows the pattern: 1 trim+replay + maxTokens
+    /// decode steps = 2 total model calls (matching testCacheCoversFull which
+    /// expects 1 + 2 = 3 for maxTokens=2).
     func testExactCacheMatchSkipsPrefill() throws {
         try skipIfMetalUnavailable()
 
@@ -550,15 +553,15 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
 
         let _ = iterator.next()
 
-        // Exact hit: cache is trimmed by 1, then last token re-processed.
-        // This is 1 model call with 1 token — no redundant prefill.
+        // Exact hit: cache is trimmed by 1, then last token re-processed (1 call),
+        // plus 1 decode step for the generated token = 2 total model calls.
         XCTAssertEqual(
-            model.callCount, 1,
-            "Exact cache match should require exactly 1 model call (trim + replay last token)"
+            model.callCount, 2,
+            "Exact cache match should require 2 model calls (1 trim+replay + 1 decode)"
         )
         XCTAssertEqual(
-            model.totalTokensProcessed, 1,
-            "Exact cache match should process exactly 1 token"
+            model.totalTokensProcessed, 2,
+            "Exact cache match should process 2 tokens (1 replay + 1 decode)"
         )
     }
 

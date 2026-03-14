@@ -1529,7 +1529,11 @@ public func canTrimPromptCache(_ cache: [KVCache]) -> Bool {
 @discardableResult
 public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     guard canTrimPromptCache(cache), !cache.isEmpty else { return 0 }
-    return cache.first?.trim(numTokens) ?? 0
+    var trimmed = 0
+    for layer in cache {
+        trimmed = layer.trim(numTokens)
+    }
+    return trimmed
 }
 
 // MARK: - Type Aliases
