@@ -2,6 +2,7 @@ commands:
   build: swift build
   format: swift-format format --in-place --configuration .swift-format --recursive .
   lint: swift-format lint --configuration .swift-format --recursive Libraries Tests
+  test-scheduler-runtime: xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/InferenceSchedulerTests -only-testing:MLXLMTests/ModelContainerIntegrationTests
   test: swift test --filter MLXLMTests
   test-all: swift test
   typecheck: swift build
