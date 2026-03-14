@@ -22,7 +22,8 @@ Environment variables, external dependencies, and setup notes.
 
 - StrictConcurrency is enabled for all targets
 - Metal library loading may show warnings in test environments without GPU — this is expected and doesn't affect test results
-- The mlx-swift-examples repo uses an Xcode project (.xcodeproj) and references mlx-swift-lm as a remote SPM dependency
+- The mlx-swift-examples repo uses an Xcode project (.xcodeproj)
+- For milestone `example-app`, the active examples checkout references the sibling local package at `../mlx-swift-lm` rather than a remote `mlx-swift-lm` dependency
 
 ## Test Notes
 

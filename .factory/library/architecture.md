@@ -69,7 +69,7 @@ During active sliding-window decode, `BatchRotatingKVCache` can drive per-sequen
 
 ## Existing Infrastructure Used
 
-- RoPE with MLXArray offsets: All RoPE implementations already support `callAsFunction(_ x: MLXArray, offset: MLXArray)` via `ArrayOffsetLayer` protocol
+- RoPE with MLXArray offsets: Batch-aware RoPE flows rely on `callAsFunction(_ x: MLXArray, offset: MLXArray)` / `ArrayOffsetLayer`, but model-specific RoPE variants still need audit to confirm the MLXArray path preserves true per-sequence semantics instead of collapsing to a batch-wide approximation
 - `createCausalMask` already has a `lengths: MLXArray?` parameter for per-sequence masking
 - KV cache tensors already have batch dimension `[B, H, S, D]`
 - `ModelContainer` has `SerialAccessContainer` for thread-safe model access

@@ -1,0 +1,51 @@
+{
+  "featureId": "cross-area-integration-tests",
+  "reviewedAt": "2026-03-14T12:30:03Z",
+  "commitId": "d787171",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The new file adds a broad matrix of smoke/integration tests and useful deterministic mocks, but several contract-critical flows are only checked for 'some output' rather than the promised end-to-end behavior. In particular, the batch-flow, single-to-batch upgrade, incompatible-fallback, and tool-call-routing cases do not actually verify the specific outcomes required by VAL-CROSS-002/003/004/008, so this feature does not yet provide the milestone-level evidence it claims.",
+    "issues": [
+      {
+        "file": "Tests/MLXLMTests/BatchingIntegrationTests.swift",
+        "line": 367,
+        "severity": "blocking",
+        "description": "`testEndToEndBatchFlow` finishes by asserting only that `chunks1.count + chunks2.count > 0`. It never requires both requests to complete, never checks the deterministic per-request token sequences, and never inspects any batch-specific behavior such as distinct outputs or per-sequence offset handling. That means it does not supply the validation-contract evidence for VAL-CROSS-002 ('correct independent outputs with per-sequence RoPE offsets')."
+      },
+      {
+        "file": "Tests/MLXLMTests/BatchingIntegrationTests.swift",
+        "line": 457,
+        "severity": "blocking",
+        "description": "`testSingleToBatchUpgradeFlow` consumes `stream1` in one `for await` loop, breaks after two chunks, then starts a second `for await` over the same `AsyncStream` and finally asserts only `0 < totalFirst <= 20`. It never compares the first request against the deterministic expected token sequence, never checks for missing/duplicate boundary tokens, and never even asserts that `tokens2` contains valid output. This does not prove the contract's required token continuity across upgrade for VAL-CROSS-003."
+      },
+      {
+        "file": "Tests/MLXLMTests/BatchingIntegrationTests.swift",
+        "line": 577,
+        "severity": "blocking",
+        "description": "The incompatible-fallback coverage never exercises 'compatible ones continue in batch'. `testFallbackFlowForIncompatibleRequests` intentionally keeps the scheduler in `single` state after submitting an image request, and `testKvBitsRequestFallsBack` does the same for `kvBits`. These tests show only that an incompatible second request does not trigger batching; they do not cover the mixed scenario described by VAL-CROSS-004 where an active compatible batch keeps running while incompatible work falls back to the single path."
+      },
+      {
+        "file": "Tests/MLXLMTests/BatchingIntegrationTests.swift",
+        "line": 1115,
+        "severity": "blocking",
+        "description": "`testToolCallsRoutedToCorrectStreamInBatch` explicitly notes that the mock model never emits tool-call tokens, then asserts only that some events were seen and that at least one stream received `.info`. No `.toolCall` event is required, no distinct tool-call prompts are constructed, and no request-specific routing is verified. As written, the test does not cover VAL-CROSS-008's promised 'parsed ToolCall is emitted only on that request's stream, not cross-contaminated.'"
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The shared worker guidance still steers MLX-backed batching features toward `swift test --filter MLXLMTests` even when the mission library says those assertions need real-Metal `xcodebuild test` evidence. That mismatch made it easy for this feature to hand off skipped runtime coverage as if it had been fully validated.",
+      "evidence": "`/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/AGENTS.md:42-49,78-78` and `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/skills/swift-batching-worker/SKILL.md:59-64` still tell workers to verify with `swift test --filter MLXLMTests`, while `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/library/mlx-validation.md` and `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/library/user-testing.md` say scheduler/runtime MLX behavior should prefer targeted `xcodebuild test`. The handoff `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T12-25-11-883Z__cross-area-integration-tests__fb49b51e-ea4f-4a4e-9962-f2776d3024de.json` records only `swift build` and `swift test`, and explicitly notes the new integration tests were skipped in SwiftPM debug builds."
+    },
+    {
+      "area": "services",
+      "observation": "The repo-level services file exposes an `xcodebuild` command for scheduler runtime tests, but there is no analogous reusable command for the example-app cross-area integration test class. For MLX-backed validation work, that makes the correct runtime path discoverable only from prose docs and ad-hoc reasoning instead of from the shared command catalog.",
+      "evidence": "`/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/services.yaml:5-6` defines `test-scheduler-runtime` and plain `test`, but nothing for `MLXLMTests/BatchingIntegrationTests`, even though `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/library/mlx-validation.md` says MLX-backed scheduler/cache behaviors should use targeted `xcodebuild test` runs."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature metadata, handoff, transcript skeleton, commit `d787171`, and the current `BatchingIntegrationTests.swift`. The file adds broad smoke coverage, but several milestone-critical assertions remain unverified: batch output correctness, upgrade continuity, mixed fallback behavior, and actual tool-call routing are not meaningfully tested."
+}
