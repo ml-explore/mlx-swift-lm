@@ -34,6 +34,15 @@ import Tokenizers
 public final class ModelContainer: Sendable {
     private let context: SerialAccessContainer<ModelContext>
 
+    /// Optional inference scheduler for transparent batching support.
+    ///
+    /// When set, compatible generation requests are routed through the scheduler,
+    /// enabling automatic batching when multiple concurrent requests arrive.
+    /// When `nil` (default), the existing direct `TokenIterator` path is used unchanged.
+    ///
+    /// - Note: `InferenceScheduler` is a Swift actor and inherently `Sendable`.
+    public nonisolated(unsafe) var scheduler: InferenceScheduler?
+
     public var configuration: ModelConfiguration {
         get async {
             await context.read { $0.configuration }
@@ -52,8 +61,9 @@ public final class ModelContainer: Sendable {
         }
     }
 
-    public init(context: consuming ModelContext) {
+    public init(context: consuming ModelContext, scheduler: InferenceScheduler? = nil) {
         self.context = .init(context)
+        self.scheduler = scheduler
     }
 
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as
@@ -176,6 +186,38 @@ public final class ModelContainer: Sendable {
     ) async throws -> AsyncStream<Generation> {
         let input = SendableBox(input)
 
+        // When a scheduler is set, route through InferenceScheduler for
+        // transparent batching. The scheduler handles batch compatibility
+        // checks internally — incompatible requests (VLMs, kvBits, SSM models)
+        // automatically fall back to the single TokenIterator path.
+        if let scheduler {
+            let lmInput = input.consume()
+
+            // Read model, tokenizer, and configuration from the context.
+            // Uses SendableBox to safely transfer non-Sendable types across
+            // isolation boundaries (matching existing patterns in this codebase).
+            let (model, tokenizer, configuration) = await context.read { context in
+                (
+                    SendableBox(context.model as AnyObject),
+                    SendableBox(context.tokenizer as AnyObject),
+                    context.configuration
+                )
+            }
+
+            let resolvedModel = model.consume() as! any LanguageModel
+            let resolvedTokenizer = tokenizer.consume() as! Tokenizer
+
+            return try await scheduler.submit(
+                input: lmInput,
+                parameters: parameters,
+                model: resolvedModel,
+                cache: nil,
+                tokenizer: resolvedTokenizer,
+                configuration: configuration
+            )
+        }
+
+        // No scheduler: use existing direct path unchanged
         // Note: this is only visiting the model exclusively
         // for the pre-fill time.  Beyond that there is no
         // shared mutable state.

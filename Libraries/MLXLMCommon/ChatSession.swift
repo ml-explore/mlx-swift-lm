@@ -363,6 +363,56 @@ public final class ChatSession {
                         messages.append(.system(instructions))
                     }
 
+                    // When a scheduler is present, route through
+                    // ModelContainer.generate() for transparent batching.
+                    // This bypasses KV cache reuse (the scheduler manages
+                    // its own caches) but enables concurrent request batching.
+                    if model.scheduler != nil {
+                        // Build full message history for scheduler path
+                        switch cache {
+                        case .empty:
+                            break
+                        case .kvcache:
+                            // Scheduler path doesn't reuse KV caches — reset
+                            cache = .empty
+                        case .history(let history):
+                            messages.append(contentsOf: history)
+                            cache = .empty
+                        }
+
+                        messages.append(message.consume())
+
+                        restart: while !messages.isEmpty {
+                            let userInput = UserInput(
+                                chat: messages, processing: processing,
+                                tools: tools, additionalContext: additionalContext)
+                            let lmInput = try await processor.prepare(input: userInput)
+                            messages.removeAll()
+
+                            let stream = try await model.generate(
+                                input: SendableBox(lmInput).consume(),
+                                parameters: generateParameters
+                            )
+
+                            for await item in stream {
+                                if let toolCall = item.toolCall, let toolDispatch {
+                                    let toolResult = try await toolDispatch(toolCall)
+                                    messages = [.tool(toolResult)]
+                                    break
+                                }
+
+                                if let value = transform(item) {
+                                    if case .terminated = continuation.yield(value) {
+                                        break
+                                    }
+                                }
+                            }
+                        }
+
+                        continuation.finish()
+                        return
+                    }
+
                     // prepare the cache, if needed.  note:
                     // this is using the LanguageModel (not Sendable) outside
                     // the protective lock.  Assuming the weights are not
