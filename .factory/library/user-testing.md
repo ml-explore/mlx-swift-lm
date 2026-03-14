@@ -35,6 +35,7 @@ Primary testing tool: `swift test` (XCTest framework)
 - `swift test` is still useful for fast smoke checks, but MLX-dependent tests may all skip under SPM because `MLXMetalGuard` detects the missing Metal library.
 - For milestone `batch-kv-cache`, direct user-validation evidence came from `xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/<TestClass>`.
 - For milestone `batch-engine`, direct user-validation evidence came from targeted `xcodebuild` runs: `BatchTokenIteratorTests` can run as a class, while sampler assertions are safer to isolate per test (`testPerRequestSamplerIndependentBehavior`, `testConcurrentInsertAndNextSafety`, `testBatchVsSingleOutputMatchesWithArgMax`, `testPerRequestProcessorIndependentState`) because broader combined sampler runs can crash in the MLX concatenate path.
+- For milestone `prompt-cache`, `PromptCacheBatchIntegrationTests` may need targeted `-only-testing` reruns for assigned assertions because the broader class run can fail on unrelated `testExactCacheMatchSkipsPrefill`; keep both the broad run log and the isolated rerun log as evidence when that happens.
 
 ## Flow Validator Guidance: swift-test
 

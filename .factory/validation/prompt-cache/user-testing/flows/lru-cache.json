@@ -1,0 +1,102 @@
+{
+  "groupId": "lru-cache",
+  "surface": "xcodebuild-test",
+  "status": "fail",
+  "assertionResults": [
+    {
+      "id": "VAL-PCACHE-001",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testEmptyCacheReturnsNil; the targeted xcodebuild run passed, confirming an empty cache returns nil with the full token remainder.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:34-39 maps VAL-PCACHE-001 to testEmptyCacheReturnsNil.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17454 shows testEmptyCacheReturnsNil passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-002",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testSingleInsertionExactRetrieval; the targeted xcodebuild run passed, confirming exact retrieval after a single insertion.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:46-56 maps VAL-PCACHE-002 to testSingleInsertionExactRetrieval.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17469 shows testSingleInsertionExactRetrieval passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-003",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testShorterPrefixMatch; the targeted xcodebuild run passed, confirming shorter prefix matches return the cached prefix plus the uncached remainder.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:63-73 maps VAL-PCACHE-003 to testShorterPrefixMatch.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17467 shows testShorterPrefixMatch passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-004",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testLongestPrefixSelected; the targeted xcodebuild run passed, confirming the longest available cached prefix is selected.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:80-92 maps VAL-PCACHE-004 to testLongestPrefixSelected.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17459 shows testLongestPrefixSelected passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-005",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testLRUEvictionAtMaxSize; the targeted xcodebuild run passed, confirming least-recently-used eviction occurs on the fourth insert when maxSize is 3.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:99-131 maps VAL-PCACHE-005 to testLRUEvictionAtMaxSize.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17461 shows testLRUEvictionAtMaxSize passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-006",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testMemoryAwareEviction; the targeted xcodebuild run passed, confirming byte-budget eviction keeps the cache within maxBytes.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:133-158 maps VAL-PCACHE-006 to testMemoryAwareEviction.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17463 shows testMemoryAwareEviction passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-011",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testConcurrentAccessSafety; the targeted xcodebuild run passed, confirming concurrent inserts and fetches completed without crashing and left the cache in a valid state.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:160-205 maps VAL-PCACHE-011 to testConcurrentAccessSafety.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17452 shows testConcurrentAccessSafety passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-012",
+      "status": "pass",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testModelIsolation; the targeted xcodebuild run passed, confirming cache lookups remain isolated by model key.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:207-226 maps VAL-PCACHE-012 to testModelIsolation.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17465 shows testModelIsolation passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-013",
+      "status": "fail",
+      "reason": "Mapped to MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed; the targeted xcodebuild run failed because the returned trimmed cache offset stayed at 5 instead of the expected 3.",
+      "evidence": [
+        "Tests/MLXLMTests/LRUPromptCacheTests.swift:228-251 maps VAL-PCACHE-013 to testLongerCachedPrefixReturnsTrimmed.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17456 records XCTAssertEqual failed: (\"5\") is not equal to (\"3\") - Trimmed cache should have offset 3.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log:17457 shows testLongerCachedPrefixReturnsTrimmed failed."
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-prompt-cache-lru-cache-deriveddata-2 -only-testing:MLXLMTests/LRUPromptCacheTests/testEmptyCacheReturnsNil -only-testing:MLXLMTests/LRUPromptCacheTests/testSingleInsertionExactRetrieval -only-testing:MLXLMTests/LRUPromptCacheTests/testShorterPrefixMatch -only-testing:MLXLMTests/LRUPromptCacheTests/testLongestPrefixSelected -only-testing:MLXLMTests/LRUPromptCacheTests/testLRUEvictionAtMaxSize -only-testing:MLXLMTests/LRUPromptCacheTests/testMemoryAwareEviction -only-testing:MLXLMTests/LRUPromptCacheTests/testConcurrentAccessSafety -only-testing:MLXLMTests/LRUPromptCacheTests/testModelIsolation -only-testing:MLXLMTests/LRUPromptCacheTests/testLongerCachedPrefixReturnsTrimmed",
+      "exitCode": 65,
+      "summary": "Targeted xcodebuild execution ran the nine assigned LRUPromptCache tests; eight passed and one failed (testLongerCachedPrefixReturnsTrimmed / VAL-PCACHE-013).",
+      "evidenceFile": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/lru-cache/assigned-assertions.log"
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild"
+  ],
+  "frictions": [],
+  "blockers": []
+}

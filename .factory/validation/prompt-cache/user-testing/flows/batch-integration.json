@@ -1,0 +1,72 @@
+{
+  "groupId": "batch-integration",
+  "surface": "xcodebuild-test",
+  "status": "pass",
+  "assertionResults": [
+    {
+      "id": "VAL-PCACHE-007",
+      "status": "pass",
+      "reason": "Mapped to testExtractFromBatchRemovesPadding; the isolated xcodebuild rerun passed, confirming BatchKVCache.extract(idx:) returns a single-sequence cache with padding removed.",
+      "evidence": [
+        "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift:128-158 maps VAL-PCACHE-007 to testExtractFromBatchRemovesPadding.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log:751-752 shows testExtractFromBatchRemovesPadding started and passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-008",
+      "status": "pass",
+      "reason": "Mapped to testMergeCreatesCorrectLeftPadding; the isolated xcodebuild rerun passed, confirming BatchKVCache.merge creates the expected left-padding layout.",
+      "evidence": [
+        "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift:160-184 maps VAL-PCACHE-008 to testMergeCreatesCorrectLeftPadding.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log:753-754 shows testMergeCreatesCorrectLeftPadding started and passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-009",
+      "status": "pass",
+      "reason": "Mapped to testCachedPromptReducesPrefillTokenCount; the isolated xcodebuild rerun passed, confirming cached prefixes reduce prefill work versus a full prefill.",
+      "evidence": [
+        "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift:186-257 maps VAL-PCACHE-009 to testCachedPromptReducesPrefillTokenCount.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log:747-750 shows testCachedPromptReducesPrefillTokenCount started and passed."
+      ]
+    },
+    {
+      "id": "VAL-PCACHE-010",
+      "status": "pass",
+      "reason": "Mapped to testMergeExtractRoundtripPreservesData; the isolated xcodebuild rerun passed, confirming merge-then-extract preserves offsets and KV tensor data.",
+      "evidence": [
+        "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift:355-414 maps VAL-PCACHE-010 to testMergeExtractRoundtripPreservesData.",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log:755-756 shows testMergeExtractRoundtripPreservesData started and passed."
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-prompt-cache-batch-integration-deriveddata -only-testing:MLXLMTests/PromptCacheBatchIntegrationTests",
+      "exitCode": 65,
+      "summary": "Primary class-level run executed 26 PromptCacheBatchIntegrationTests; the assigned assertions all ran, but the overall suite failed because unrelated testExactCacheMatchSkipsPrefill reported 2 XCTAssertEqual failures.",
+      "evidenceFile": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/evidence.log"
+    },
+    {
+      "command": "xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-prompt-cache-batch-integration-deriveddata -only-testing:MLXLMTests/PromptCacheBatchIntegrationTests/testExtractFromBatchRemovesPadding -only-testing:MLXLMTests/PromptCacheBatchIntegrationTests/testMergeCreatesCorrectLeftPadding -only-testing:MLXLMTests/PromptCacheBatchIntegrationTests/testCachedPromptReducesPrefillTokenCount -only-testing:MLXLMTests/PromptCacheBatchIntegrationTests/testMergeExtractRoundtripPreservesData",
+      "exitCode": 0,
+      "summary": "Isolated rerun of the four assigned assertions passed cleanly: 4 tests executed, 0 failures.",
+      "evidenceFile": "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log"
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild"
+  ],
+  "frictions": [
+    {
+      "description": "The requested class-level xcodebuild run exited 65 because unrelated testExactCacheMatchSkipsPrefill failed, so a second xcodebuild run scoped to the four assigned assertions was needed to produce clean direct evidence.",
+      "resolved": true,
+      "resolution": "Reran only the four assigned tests with individual -only-testing filters; that rerun passed.",
+      "evidence": [
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/evidence.log:17486-17545",
+        "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/prompt-cache/batch-integration/assigned-assertions.log:757-762"
+      ]
+    }
+  ],
+  "blockers": []
+}
