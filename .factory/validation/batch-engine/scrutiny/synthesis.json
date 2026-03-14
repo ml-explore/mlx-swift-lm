@@ -1,45 +1,31 @@
 {
   "milestone": "batch-engine",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
-      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift test --filter MLXLMTests",
+      "command": "swift test --filter MLXLMTests --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
       "exitCode": 0
     },
     "typecheck": {
       "passed": true,
-      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift build",
+      "command": "swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
       "exitCode": 0
     },
     "lint": {
       "passed": true,
-      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift-format lint --configuration .swift-format --recursive Libraries Tests",
+      "command": "swift-format lint --configuration \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.swift-format\" --recursive \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Libraries\" \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests\"",
       "exitCode": 0
     }
   },
   "reviewsSummary": {
-    "total": 2,
-    "passed": 0,
-    "failed": 2,
-    "failedFeatures": [
-      "batch-token-iterator-core",
-      "batch-sampling-and-correctness"
-    ]
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "batch-token-iterator-core",
-      "severity": "blocking",
-      "description": "`BatchTokenIterator` does not reliably honor `completionBatchSize`: the initializer clamps it up to at least `prefillBatchSize`, and `next()` only admits pending prompts when free slots are at least `prefillBatchSize`, leaving smaller numbers of free decode slots idle instead of filling them."
-    },
-    {
-      "featureId": "batch-sampling-and-correctness",
-      "severity": "blocking",
-      "description": "`BatchTokenIterator` remains an unsynchronized mutable class, so concurrent `insert`, `next`, `remove`, and `close` calls can race on shared state and do not satisfy VAL-ENGINE-014's concurrency-safety requirement."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
@@ -51,10 +37,10 @@
     {
       "target": "skills",
       "suggestion": "Update the `swift-batching-worker` verification guidance so MLX-backed assertions prefer `xcodebuild test` when SwiftPM skips Metal-dependent checks, instead of relying solely on `swift test --filter MLXLMTests`.",
-      "evidence": "The review for `batch-sampling-and-correctness` found the feature's new tests were skipped under SwiftPM due to Metal unavailability even though repo library guidance already documents `xcodebuild test` as the stronger path for MLX-backed validation.",
+      "evidence": "The round-1 review for `batch-sampling-and-correctness` and the rerun review for `fix-batch-engine-scheduling-concurrency` both found that workers followed `.factory/skills/swift-batching-worker/SKILL.md` toward `swift test --filter MLXLMTests` even though `.factory/library/user-testing.md` documents `xcodebuild test` as the stronger path when SwiftPM skips Metal-dependent checks; the rerun handoff still recorded 172 skipped tests under SwiftPM.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/batch-engine/scrutiny/synthesis.round1.json"
 }

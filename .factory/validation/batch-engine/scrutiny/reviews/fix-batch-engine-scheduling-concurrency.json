@@ -1,0 +1,24 @@
+{
+  "featureId": "fix-batch-engine-scheduling-concurrency",
+  "reviewedAt": "2026-03-14T05:48:41Z",
+  "commitId": "5d661b4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The fix addresses both prior blocking issues: `completionBatchSize` is now stored verbatim in `Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift:211-224`, `next()` now keeps admitting pending prompts while free decode slots remain in `Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift:293-315`, and shared mutable iterator state is serialized with `NSLock` across `insert`/`next`/`remove`/`close` in `Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift:247-404`. The updated tests add direct regression coverage for admission behavior in `Tests/MLXLMTests/BatchTokenIteratorTests.swift:578-678` and strengthen the concurrency regression with UID/count invariants in `Tests/MLXLMTests/BatchTokenIteratorTests.swift:1075-1179`.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker skill still funnels validation toward `swift test --filter MLXLMTests`, even though repo testing guidance says MLX-backed assertions should prefer `xcodebuild test` when SwiftPM skips Metal-dependent checks. In this fix run the worker followed the skill and reported 172 skipped tests, so the skill guidance still understates the stronger validation path.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md:59-63` instructs workers to use `swift test --filter MLXLMTests`; `.factory/library/user-testing.md:16,35,45` says `xcodebuild test` is required/preferred for MLX-backed direct runtime evidence; handoff `/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/handoffs/2026-03-14T05-44-34-145Z__fix-batch-engine-scheduling-concurrency__60359ba8-e500-454e-948b-ed6ab3203a3a.json:16-18` records `swift test --filter MLXLMTests` with `172 skipped`, and `:59` records `followedProcedure: true`."
+    }
+  ],
+  "addressesFailureFrom": [
+    "batch-token-iterator-core",
+    "batch-sampling-and-correctness"
+  ],
+  "summary": "Pass. I reviewed the fix feature metadata, prior failed reviews, transcript skeleton, handoff, commit `5d661b4`, and the current `BatchTokenIterator` / test changes at HEAD. The fix removes the batch-size clamping, fills partial free decode capacity, and serializes mutable iterator state with locking; the new regression tests cover both original failure modes, so the prior blocking issues are addressed."
+}
