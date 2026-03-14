@@ -46,6 +46,9 @@ The repo's existing max-KV path preserves a fixed prefix when it creates `Rotati
 ### Rotating Cache Cached-Prompt Prefill
 Batch rotating-cache cached-prefill uses a `prepare(... rightPadding:)` / `finalize()` lifecycle. During mixed-length cached prompt prefill, sequences temporarily switch to right-padding so concatenation and trimming operate on aligned suffixes, then `finalize()` rolls the data back into the normal left-padded layout used for decode.
 
+### Rotating Cache Overflow Extraction
+During active sliding-window decode, `BatchRotatingKVCache` can drive per-sequence `leftPadding` below zero as wrapped tokens replace old window positions. Extraction must clamp that value back to `max(0, leftPadding)` before slicing, otherwise overflowed batch caches can slice from a negative start and drop the preserved `[keep-prefix | window]` contents during merge → overflow → extract round-trips.
+
 ## Existing Infrastructure Used
 
 - RoPE with MLXArray offsets: All RoPE implementations already support `callAsFunction(_ x: MLXArray, offset: MLXArray)` via `ArrayOffsetLayer` protocol

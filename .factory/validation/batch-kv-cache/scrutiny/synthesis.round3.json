@@ -1,7 +1,7 @@
 {
   "milestone": "batch-kv-cache",
-  "round": 4,
-  "status": "pass",
+  "round": 3,
+  "status": "fail",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -21,11 +21,19 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 1,
-    "failed": 0,
-    "failedFeatures": []
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-rotating-cache-keep-semantics"
+    ]
   },
-  "blockingIssues": [],
+  "blockingIssues": [
+    {
+      "featureId": "fix-rotating-cache-keep-semantics",
+      "severity": "blocking",
+      "description": "`BatchRotatingKVCache` now preserves `keep` during trim, wrap, and temporal reordering, but `extract()` still slices with raw negative `leftPadding` after overflow, so merge→overflow→extract can drop preserved-prefix tokens and the keep-prefix round-trip remains unresolved."
+    }
+  ],
   "appliedUpdates": [
     {
       "target": "services.yaml",
@@ -41,11 +49,6 @@
       "target": "library",
       "description": "Documented the batch rotating-cache cached-prefill `prepare(... rightPadding:)` / `finalize()` lifecycle and its temporary right-padding state.",
       "sourceFeature": "fix-rotating-cache-prepare-keep"
-    },
-    {
-      "target": "library",
-      "description": "Documented the rotating-cache overflow invariant that wrapped batches can temporarily drive `leftPadding` negative and extraction must clamp to `max(0, leftPadding)` before slicing preserved `[keep-prefix | window]` contents.",
-      "sourceFeature": "fix-rotating-extract-negative-padding"
     }
   ],
   "suggestedGuidanceUpdates": [
@@ -57,5 +60,5 @@
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/batch-kv-cache/scrutiny/synthesis.round3.json"
+  "previousRound": ".factory/validation/batch-kv-cache/scrutiny/synthesis.round2.json"
 }
