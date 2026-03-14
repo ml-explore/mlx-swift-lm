@@ -52,6 +52,15 @@ public actor InferenceScheduler {
         case batched(BatchedState)
     }
 
+    /// Shared mutable flag used to signal that a single request has been
+    /// upgraded to batch mode. The single-request task checks this flag
+    /// before finishing its continuation — if set, the continuation is
+    /// now owned by the batch loop and must not be finished by the
+    /// single-request task.
+    class UpgradeFlag: @unchecked Sendable {
+        var upgraded = false
+    }
+
     /// State for a single active request.
     struct SingleRequestState {
         /// The token iterator for the active request.
@@ -77,6 +86,14 @@ public actor InferenceScheduler {
 
         /// The model configuration.
         let configuration: ModelConfiguration
+
+        /// The AsyncStream continuation for the first request's stream.
+        /// Stored so it can be reused during upgrade to batch mode.
+        let continuation: AsyncStream<Generation>.Continuation
+
+        /// Shared flag signaling that this request was upgraded to batch.
+        /// When set, the single-request task must not finish the continuation.
+        let upgradeFlag: UpgradeFlag
     }
 
     /// State for batched generation.
@@ -271,6 +288,10 @@ public actor InferenceScheduler {
         let toolCallFormat = configuration.toolCallFormat ?? .json
         let tokenizerBox = SendableBox(tokenizer as AnyObject)
 
+        // Shared flag: when set by upgradeToBatch(), the task must not
+        // finish the continuation — the batch loop now owns it.
+        let upgradeFlag = UpgradeFlag()
+
         let iteratorBox = SendableBox(iterator)
         let task = Task { [weak self] in
             let iter = iteratorBox.consume()
@@ -319,6 +340,13 @@ public actor InferenceScheduler {
                         }
                     }
                 }
+            }
+
+            // If we were upgraded to batch mode, the batch loop now owns the
+            // continuation. Do not emit completion info or finish it.
+            if upgradeFlag.upgraded {
+                await self?.handleSingleRequestFinished(requestID: requestID)
+                return
             }
 
             if stopReason == nil {
@@ -373,7 +401,9 @@ public actor InferenceScheduler {
                 tokensGenerated: 0,
                 model: model,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                continuation: continuation,
+                upgradeFlag: upgradeFlag
             ))
 
         return stream
@@ -407,6 +437,13 @@ public actor InferenceScheduler {
     // MARK: - Upgrade to Batch
 
     /// Upgrade from single to batched mode when a second request arrives.
+    ///
+    /// Key invariants maintained during upgrade:
+    /// 1. The first request's original `AsyncStream` continuation is preserved.
+    ///    Tokens continue to flow to the same stream the caller received from `submit()`.
+    /// 2. The first request's KV cache is migrated into `BatchKVCache` via `fromSingle()`,
+    ///    then injected into the `BatchTokenIterator` through `setActiveBatch()`.
+    /// 3. The second request goes through the normal insert → prefill pipeline.
     private func upgradeToBatch(
         existingSingle: SingleRequestState,
         newInput: LMInput,
@@ -416,7 +453,9 @@ public actor InferenceScheduler {
         tokenizer: Tokenizer,
         configuration: ModelConfiguration
     ) throws -> AsyncStream<Generation> {
-        // Cancel the single request's task — we'll take over its generation
+        // Signal upgrade before cancelling so the single-request task knows
+        // not to finish the continuation — the batch loop now owns it.
+        existingSingle.upgradeFlag.upgraded = true
         existingSingle.task.cancel()
 
         let stopTokenIDs = Self.buildStopTokenIDs(
@@ -431,19 +470,11 @@ public actor InferenceScheduler {
             defaultSampler: ArgMaxSampler()
         )
 
-        // Migrate the first request's state into the batch.
-        // We insert the first request's remaining tokens as a new prompt in the batch.
-        // The first request has already consumed its prompt via TokenIterator,
-        // so we just insert a minimal prompt and set up its continuation.
-        _ = existingSingle.requestID
-
-        // Extract the first request's cache and migrate it into the batch.
-        // The first request's TokenIterator has already built a KVCacheSimple.
-        // We create a BatchKVCache from it via fromSingle().
+        // --- Migrate the first request's KV cache into a batch cache ---
         let firstCache = existingSingle.cache
         let firstIterator = existingSingle.iterator
 
-        // Create batch KV caches by merging the first request's cache
+        // Convert each layer's KVCacheSimple into a batch-1 BatchKVCache.
         var batchCaches = [KVCache]()
         for layerCache in firstCache {
             if let simpleCache = layerCache as? KVCacheSimple {
@@ -453,41 +484,54 @@ public actor InferenceScheduler {
             }
         }
 
-        // The first request: we need to continue generating from where it left off.
-        // We set up a "virtual" insert with a single-token prompt (the last generated token).
-        let firstLastToken = firstIterator.y.tokens.asArray(Int.self)
+        // Build an ActiveBatch for the first request with its migrated cache.
+        // The last token produced by the TokenIterator is the current decode
+        // token (`y`); it will be the "input" for the next decode step.
+        let firstLastToken = firstIterator.y.tokens
         let firstMaxTokens = (firstIterator.maxTokens ?? 1000) - firstIterator.tokenCount
         let firstSampler = firstIterator.sampler
         let firstProcessor = firstIterator.processor
 
-        // Create a fresh ActiveBatch from the migrated cache and the first request's state
-        let firstUID = batchIterator.insert(
-            prompts: [firstLastToken],
-            maxTokens: [max(firstMaxTokens, 1)],
+        // Allocate a UID for the first request inside the batch.
+        let firstUID = batchIterator.allocateUID()
+
+        let firstBatch = ActiveBatch(
+            uids: [firstUID],
+            y: firstLastToken.reshaped([1]).asType(Int32.self).squeezed(),
+            cache: batchCaches,
             samplers: [firstSampler],
-            processors: [firstProcessor]
+            processors: [firstProcessor],
+            maxTokens: [max(firstMaxTokens, 1)],
+            numTokens: [0],
+            tokens: [MLXArray]([MLXArray([Int32]())])
         )
 
-        // Now insert the second (new) request
+        // Inject the pre-filled batch so the first request resumes from its
+        // existing KV state — no re-prefill needed.
+        batchIterator.setActiveBatch(firstBatch)
+
+        // --- Insert the second (new) request via normal pipeline ---
         let newPromptTokens = newInput.text.tokens.asArray(Int.self)
         let newMaxTokens = newParameters.maxTokens ?? 1000
         let newSampler = newParameters.sampler()
         let newProcessor = newParameters.processor()
 
-        let secondUID = batchIterator.insert(
+        let secondUIDs = batchIterator.insert(
             prompts: [newPromptTokens],
             maxTokens: [newMaxTokens],
             samplers: [newSampler],
             processors: [newProcessor]
         )
+        let secondUID = secondUIDs[0]
 
-        // Set up continuations for both streams
-        let (_, firstContinuation) = AsyncStream<Generation>.makeStream()
+        // --- Set up continuations ---
+        // Reuse the original first-request continuation (preserving stream continuity).
+        let firstContinuation = existingSingle.continuation
         let (secondStream, secondContinuation) = AsyncStream<Generation>.makeStream()
 
         let continuations: [Int: AsyncStream<Generation>.Continuation] = [
-            firstUID[0]: firstContinuation,
-            secondUID[0]: secondContinuation,
+            firstUID: firstContinuation,
+            secondUID: secondContinuation,
         ]
 
         requestCounter += 1
@@ -503,7 +547,7 @@ public actor InferenceScheduler {
             var tokenCounts: [Int: Int] = [:]
 
             let now = Date.timeIntervalSinceReferenceDate
-            for uid in [firstUID[0], secondUID[0]] {
+            for uid in [firstUID, secondUID] {
                 detokenizers[uid] = NaiveStreamingDetokenizer(tokenizer: tokenizer)
                 toolCallProcessors[uid] = ToolCallProcessor(format: format)
                 starts[uid] = Date(timeIntervalSinceReferenceDate: now)
@@ -582,14 +626,9 @@ public actor InferenceScheduler {
         }
 
         // Wire up cancellation
-        firstContinuation.onTermination = { termination in
-            if case .cancelled = termination {
-                batchIterator.remove(uids: Set(firstUID))
-            }
-        }
         secondContinuation.onTermination = { termination in
             if case .cancelled = termination {
-                batchIterator.remove(uids: Set(secondUID))
+                batchIterator.remove(uids: [secondUID])
             }
         }
 
@@ -603,18 +642,6 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 stopTokenIDs: stopTokenIDs
             ))
-
-        // Return the first request's stream — the caller already has the first stream
-        // We need to return the NEW (second) request's stream
-        // But we also need to make the first request's old stream redirect...
-        // Actually, in the single-first upgrade design, the first request's stream
-        // was already returned from the first submit() call. The first task was cancelled.
-        // We need to re-emit the first request's tokens through firstStream.
-        // For simplicity in this implementation, the first request's original stream
-        // will get the cancellation, and firstStream becomes its replacement.
-        // The caller of the first submit() will see the stream terminate.
-        // This is a known limitation — proper migration requires storing the first
-        // request's continuation at submit time.
 
         return secondStream
     }

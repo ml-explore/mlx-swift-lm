@@ -226,6 +226,20 @@ public class BatchTokenIterator: @unchecked Sendable {
 
     // MARK: - Public API
 
+    /// Allocate a unique ID without inserting a prompt.
+    ///
+    /// Used by the scheduler's upgrade path to reserve a UID for a request
+    /// that will be injected directly via `setActiveBatch()`.
+    ///
+    /// - Returns: A unique request ID.
+    public func allocateUID() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let uid = uidCounter
+        uidCounter += 1
+        return uid
+    }
+
     /// Insert new prompts for generation.
     ///
     /// Prompts are queued as pending and will be prefilled on the next `next()` call
@@ -372,6 +386,28 @@ public class BatchTokenIterator: @unchecked Sendable {
         stepCount += 1
 
         return responses
+    }
+
+    /// Set a pre-existing active batch directly, bypassing the normal
+    /// insert → prefill pipeline.
+    ///
+    /// This is used by the scheduler's single-to-batch upgrade path to
+    /// migrate an in-flight request (with its already-filled KV cache)
+    /// into the batch without re-prefilling.
+    ///
+    /// - Parameter batch: A fully constructed `ActiveBatch` with pre-filled
+    ///   cache and current decode state.
+    public func setActiveBatch(_ batch: ActiveBatch) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        precondition(!isClosed, "Cannot set active batch on a closed BatchTokenIterator")
+
+        if let existing = activeBatch {
+            existing.extend(other: batch)
+        } else {
+            activeBatch = batch
+        }
     }
 
     /// Remove sequences from the active batch or pending queue.

@@ -367,20 +367,29 @@ public final class ChatSession {
                     // ModelContainer.generate() for transparent batching.
                     // This bypasses KV cache reuse (the scheduler manages
                     // its own caches) but enables concurrent request batching.
+                    // We preserve conversation history so multi-turn works.
                     if model.scheduler != nil {
-                        // Build full message history for scheduler path
+                        // Build full message history for scheduler path.
+                        // Collect the prior turns so we can persist them later.
+                        var history: [Chat.Message] = []
                         switch cache {
                         case .empty:
                             break
                         case .kvcache:
-                            // Scheduler path doesn't reuse KV caches — reset
-                            cache = .empty
-                        case .history(let history):
-                            messages.append(contentsOf: history)
-                            cache = .empty
+                            // Scheduler path can't reuse KV caches directly.
+                            // We lose the cached state but the conversation
+                            // can continue via history re-hydration.
+                            break
+                        case .history(let h):
+                            history = h
+                            messages.append(contentsOf: h)
                         }
 
-                        messages.append(message.consume())
+                        let userMessage = message.consume()
+                        messages.append(userMessage)
+                        history.append(userMessage)
+
+                        var assistantText = ""
 
                         restart: while !messages.isEmpty {
                             let userInput = UserInput(
@@ -401,6 +410,10 @@ public final class ChatSession {
                                     break
                                 }
 
+                                if let chunk = item.chunk {
+                                    assistantText += chunk
+                                }
+
                                 if let value = transform(item) {
                                     if case .terminated = continuation.yield(value) {
                                         break
@@ -408,6 +421,13 @@ public final class ChatSession {
                                 }
                             }
                         }
+
+                        // Persist the updated session state: prior history +
+                        // user message (already appended above) + assistant response.
+                        if !assistantText.isEmpty {
+                            history.append(.assistant(assistantText))
+                        }
+                        cache = .history(history)
 
                         continuation.finish()
                         return
