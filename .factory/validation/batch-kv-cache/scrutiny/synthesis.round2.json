@@ -1,6 +1,6 @@
 {
   "milestone": "batch-kv-cache",
-  "round": 3,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -20,18 +20,18 @@
     }
   },
   "reviewsSummary": {
-    "total": 1,
-    "passed": 0,
+    "total": 2,
+    "passed": 1,
     "failed": 1,
     "failedFeatures": [
-      "fix-rotating-cache-keep-semantics"
+      "fix-rotating-cache-prepare-keep"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-rotating-cache-keep-semantics",
+      "featureId": "fix-rotating-cache-prepare-keep",
       "severity": "blocking",
-      "description": "`BatchRotatingKVCache` now preserves `keep` during trim, wrap, and temporal reordering, but `extract()` still slices with raw negative `leftPadding` after overflow, so merge→overflow→extract can drop preserved-prefix tokens and the keep-prefix round-trip remains unresolved."
+      "description": "`BatchRotatingKVCache` now preserves `keep` metadata and adds `prepare` / `finalize`, but its active sliding-window trim and overflow paths still drop protected-prefix semantics by trimming from the absolute front and resetting `_idx` to `0` instead of preserving the first `keep` tokens."
     }
   ],
   "appliedUpdates": [
@@ -60,5 +60,5 @@
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/batch-kv-cache/scrutiny/synthesis.round2.json"
+  "previousRound": ".factory/validation/batch-kv-cache/scrutiny/synthesis.round1.json"
 }

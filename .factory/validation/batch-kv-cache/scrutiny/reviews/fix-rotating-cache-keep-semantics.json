@@ -1,0 +1,28 @@
+{
+  "featureId": "fix-rotating-cache-keep-semantics",
+  "reviewedAt": "2026-03-14T03:50:53Z",
+  "commitId": "297ed04",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The fix correctly updates the active rotation logic to preserve the keep prefix during trim, wrap, and temporal reordering, but it still does not satisfy the required overflow round-trip behavior. After rotated decode steps, BatchRotatingKVCache can drive leftPadding below zero and extract() then uses that negative value directly as a slice start, so merge→overflow→extract can return the wrong segment instead of the full keep-preserving cache contents.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchRotatingKVCache.swift",
+        "line": 658,
+        "severity": "blocking",
+        "description": "The fix still fails the required overflow extraction path. During rotated decode, `leftPadding` is decremented on every step (`BatchRotatingKVCache.swift:320-321`), so sequences with little or no initial padding quickly become negative. `extract()` then reads that raw value (`:633`) and slices with `padding ..< seqEnd` / `padding ..< _idx` (`:658-662`) instead of clamping it to zero. MLX negative starts are suffix indexes in this codebase (see `Libraries/MLXLMCommon/KVCache.swift:980-981`), so extracting after overflow can strip from the tail and drop preserved-prefix tokens. That means the feature still does not reliably satisfy the expected merge→overflow→extract keep-prefix round-trip semantics from the prior failure."
+      },
+      {
+        "file": "Tests/MLXLMTests/BatchRotatingKVCacheTests.swift",
+        "line": 1029,
+        "severity": "non_blocking",
+        "description": "The new overflow round-trip regression test only checks the extracted caches' metadata and offsets, not the extracted key/value contents or the preserved keep prefix. Because of that, it would not catch the negative-padding extraction bug above even though the feature description explicitly requires verifying that the keep prefix remains intact after merge, overflow, and extract."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/validation/batch-kv-cache/scrutiny/reviews/fix-rotating-cache-prepare-keep.json",
+  "summary": "Reviewed the README, mission context, prior failed review, fix handoff, transcript skeleton, and both diffs (`ff17a17` and `297ed04`). This rerun fixes the previously-missing keep handling in trim/wrap/temporal-order paths, but it still leaves a blocking extraction bug once overflow drives `leftPadding` negative, so the original keep-semantics failure is not fully resolved."
+}
