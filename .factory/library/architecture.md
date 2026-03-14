@@ -49,7 +49,8 @@ Variable-length sequences are left-padded with zeros. `BatchKVCache` tracks per-
 ### BatchKVCache Left-Padding Invariant
 `BatchKVCache.leftPadding` is coupled to the physical tensor layout and batch offsets. If a workflow changes left padding after caches have already been merged or updated, it must also shift the stored key/value tensors and keep per-sequence offsets aligned. Mutating `leftPadding` alone makes masking and `extract(idx:)` treat real cached tokens as padding.
 
-**Resolved:** `processCachedPrompts` now builds merged caches with total leftPadding (cache-depth alignment + suffix-length alignment) upfront instead of mutating leftPadding after merge. The buffer is sized to `maxCacheLen + maxSuffixPadding` with each sequence's cached KV data placed at the correct total-padding offset. Exact cache hits (entire prompt cached) skip prefill entirely — the cache is trimmed by 1 and the last token replayed to get logits for the first decode token.
+### BatchKVCache Shared `_idx` Invariant
+`BatchKVCache.extract(idx:)` and decode-time masking treat every position in `leftPadding[idx] ..< _idx` as valid sequence data. Mixed-depth cached-prefill layouts therefore must ensure each batch element's written KV region extends all the way to the shared `_idx`; leaving interior holes before `_idx` causes extraction and later decode steps to interpret unwritten slots as real cached tokens.
 
 ### Mask Before Cache Update
 Attention-mask creation uses the cache's pre-update position. `makeAttentionMask` / `createAttentionMask` call `cache.makeMask(...)` before the layer appends the current keys and values, so batch cache masking must use the current `_idx` / offset rather than subtracting `n` as if the cache had already been updated.

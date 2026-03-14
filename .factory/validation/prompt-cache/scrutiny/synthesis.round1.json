@@ -1,0 +1,80 @@
+{
+  "milestone": "prompt-cache",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "swift test --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "swift-format lint --configuration \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.swift-format\" --recursive \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Libraries\" \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/Tests\"",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 0,
+    "failed": 2,
+    "failedFeatures": [
+      "lru-prompt-cache",
+      "prompt-cache-batch-integration"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "lru-prompt-cache",
+      "severity": "blocking",
+      "description": "`LRUPromptCache._search()` only records a shorter-prefix match when `lastCacheIndex > 0`, so cached prefixes of length 1 are missed during lookups such as `[1, 2]`, violating the deepest-prefix lookup contract."
+    },
+    {
+      "featureId": "lru-prompt-cache",
+      "severity": "blocking",
+      "description": "The longer-prefix fetch path trims to `min(tokens.count - 1, commonPrefix)` and returns the remainder from that shorter prefix, so querying `[1,2,3]` against cached `[1,2,3,4,5]` yields a cache covering only `[1,2]` instead of the requested/common prefix required by the mission contract."
+    },
+    {
+      "featureId": "lru-prompt-cache",
+      "severity": "blocking",
+      "description": "Prompt-cache reads do not refresh LRU recency: fetches return deep copies without touching the LRU list, so eviction order degrades to insertion order after reads rather than least-recently-used behavior."
+    },
+    {
+      "featureId": "lru-prompt-cache",
+      "severity": "blocking",
+      "description": "`maxBytes` eviction stops once only one entry remains, so a single oversized prompt-cache entry can keep total cache bytes above the configured limit."
+    },
+    {
+      "featureId": "prompt-cache-batch-integration",
+      "severity": "blocking",
+      "description": "`BatchTokenIterator.processCachedPrompts()` handles mixed cached-prefix depths by increasing `BatchKVCache.leftPadding` without shifting merged key/value tensors or aligned offsets, so real cached tokens are later masked and extracted as padding."
+    },
+    {
+      "featureId": "prompt-cache-batch-integration",
+      "severity": "blocking",
+      "description": "Exact cache hits replay the last prompt token even though it is already present in the cached KV state, so generation can be computed for `prompt + lastToken` instead of reusing the cached prompt unchanged."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added a `BatchKVCache` left-padding invariant to `.factory/library/architecture.md`, documenting that changing `leftPadding` after merge/update also requires shifting stored KV tensors and aligned offsets.",
+      "sourceFeature": "prompt-cache-batch-integration"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "validation-contract.md",
+      "suggestion": "Clarify longer-prefix prompt-cache semantics for queries shorter than a cached entry, and align feature text/tests to that rule instead of leaving workers to choose between the mission contract and the current Python `len(tokens) - 1` trimming behavior.",
+      "evidence": "The `lru-prompt-cache` review found `features.json` and `VAL-PCACHE-013` describe trimming to the requested/common-prefix length, while `Tests/MLXLMTests/LRUPromptCacheTests.swift` asserts Python-style trimming to offset 2 with remainder `[3]` for query `[1,2,3]`.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

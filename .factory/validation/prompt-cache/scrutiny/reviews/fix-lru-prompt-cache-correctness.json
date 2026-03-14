@@ -1,0 +1,22 @@
+{
+  "featureId": "fix-lru-prompt-cache-correctness",
+  "reviewedAt": "2026-03-14T10:28:38Z",
+  "commitId": "0216b5e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix commit adequately addresses the four blocking failures from the original LRUPromptCache review. The trie search now returns single-token shorter-prefix hits, longer-prefix fetches trim to the query/common-prefix length, fetches refresh recency before future eviction decisions, and maxBytes eviction can remove a final oversized entry. The updated test suite also adds focused regression coverage for each bug and corrects VAL-PCACHE-013 to the contract-aligned behavior.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/LRUPromptCache.swift",
+        "line": 318,
+        "severity": "non_blocking",
+        "description": "`_touch()` always requeues a fetched entry via `lru.push(model:tokens:)` without preserving whether it originally lived in `lruCheckpoints`. If a caller inserts an entry with `checkpoint: true`, fetching it will silently convert it into a regular entry and change future eviction priority instead of only refreshing recency within the checkpoint bucket. There are no current in-repo call sites using `checkpoint: true`, so this does not block the reviewed fix." 
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": ".factory/validation/prompt-cache/scrutiny/reviews/lru-prompt-cache.json",
+  "summary": "Pass. I reviewed the feature metadata, prior failed review, fix handoff, transcript skeleton, both relevant diffs/code state, and the shared-state files. Commit `0216b5e` resolves the four original blocking LRUPromptCache correctness issues and adds regression tests for each; I only found one non-blocking checkpoint-recency edge case outside the originally failed paths."
+}

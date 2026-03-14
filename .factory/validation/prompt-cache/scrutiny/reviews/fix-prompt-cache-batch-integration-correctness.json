@@ -1,0 +1,45 @@
+{
+  "featureId": "fix-prompt-cache-batch-integration-correctness",
+  "reviewedAt": "2026-03-14T10:29:52Z",
+  "commitId": "d2da25788ab10d780875a5c8d2c69a7bd7385f2c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The fix removes the original leftPadding-only mutation and exact-hit KV duplication, but the replacement mixed-depth merge is still not correct. `processPartialCacheHits()` now builds batch caches whose per-sequence data no longer ends at the shared `_idx`, so mixed cached-prefix batches still contain interior holes that `extract(idx:)` and later decode steps treat as real positions. The cached path also still hard-codes `BatchKVCache`/`KVCacheSimple`, which drops rotating prompt caches even though the rest of batching marks them as batch-compatible, and the strengthened tests encode the holey layout instead of catching it.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 719,
+        "severity": "blocking",
+        "description": "`processPartialCacheHits()` sets `bufferLen = maxCacheLen + maxSuffixPadding` and then sets `_idx = bufferLen`, but each cached prefix is only written through `totalPadding[i] + cacheLen[i] = maxCacheLen + suffixPadding[i]`. Any sequence with `suffixPadding[i] < maxSuffixPadding` therefore has unwritten slots inside `[leftPadding, _idx)`. Later prefill appends after this shared `_idx`, so those holes become part of the logical cache and `extract(idx:)` (which slices `padding ..< _idx`) exposes them as if they were real tokens. Mixed-depth cached batches still do not round-trip correctly." 
+      },
+      {
+        "file": "Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift",
+        "line": 632,
+        "severity": "blocking",
+        "description": "The cached-prefill path still only works for `KVCacheSimple`. `processExactCacheHits()` hard-codes `BatchKVCache.merge(layerCaches)`, and `processPartialCacheHits()` only discovers/copies layers via `if let simple = ... as? KVCacheSimple`. `BatchKVCache.merge()` itself only copies `KVCacheSimple` state, so cached `RotatingKVCache` layers accepted elsewhere by `isBatchCompatible`/`LRUPromptCache` are silently dropped in both exact-hit and partial-hit paths." 
+      },
+      {
+        "file": "Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift",
+        "line": 723,
+        "severity": "non_blocking",
+        "description": "The new tests still do not protect the real invariant. `testMixedDepthExtractAfterMerge()` asserts that a 2-token cached prefix extracted from a 13-slot buffer should have offset 5, which bakes the gap-filled layout into the suite, and `testCachedVsUncachedGenerationSemanticEquivalence()` still only checks token counts/ranges instead of equality. That leaves the remaining mixed-depth layout bug above uncaught." 
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The library note captures the leftPadding/tensor-alignment rule, but it still does not document the companion `BatchKVCache` invariant that every sequence's valid region must end at the shared `_idx`. The worker's new 'resolved' note blesses a `maxCacheLen + maxSuffixPadding` layout that leaves interior holes before `_idx`, which `extract(idx:)` and decode logic are not designed to tolerate.",
+      "evidence": ".factory/library/architecture.md:49-52 documents the leftPadding invariant and says the new layout is resolved; Libraries/MLXLMCommon/Batching/BatchKVCache.swift:314-316 shows extraction always treats `padding ..< _idx` as valid data; Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift:719-768 builds caches where some sequences stop before `_idx`."
+    },
+    {
+      "area": "skills",
+      "observation": "The batching worker skill still describes scheduler compatibility as 'standard KVCacheSimple', while the codebase now treats `RotatingKVCache` as batch-compatible and the prompt cache preserves rotating caches. That mismatch likely nudges workers toward `BatchKVCache`-only implementations in cached-prefill paths.",
+      "evidence": ".factory/skills/swift-batching-worker/SKILL.md:99-102 says `isBatchCompatible()` is for standard KVCacheSimple; Libraries/MLXLMCommon/Batching/BatchPositionedCache.swift:71-74 lists `RotatingKVCache` as batch-compatible; Libraries/MLXLMCommon/Batching/LRUPromptCache.swift:303-306 deep-copies rotating caches."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/prompt-cache/scrutiny/reviews/prompt-cache-batch-integration.json",
+  "summary": "Fail. I reviewed the prior failure report, feature metadata, handoff, transcript skeleton, current code, and both commit diffs (`b37a876` and `d2da257`). The exact-hit duplication bug is addressed, but the mixed-depth rewrite still builds invalid holey batch caches, rotating prompt caches are still dropped on the cached path, and the new tests codify the broken layout instead of catching it."
+}
