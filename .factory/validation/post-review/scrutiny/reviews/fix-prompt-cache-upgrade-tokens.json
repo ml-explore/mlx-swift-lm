@@ -1,0 +1,28 @@
+{
+  "featureId": "fix-prompt-cache-upgrade-tokens",
+  "reviewedAt": "2026-03-15T18:54:21.456413Z",
+  "commitId": "fa3beff5708596785bfa48fa2df74b46c34964e7",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the original failed feature (`85fd40616abcdd8b56b18c91dc8d97405bb86f2c`) together with the follow-up fix (`fa3beff5708596785bfa48fa2df74b46c34964e7`). The new commit now carries the first request's already-emitted token IDs through `LiveIteratorState.generatedTokenIds` at handoff (`InferenceScheduler.swift:547-556`), seeds those pre-upgrade tokens into the batch loop before further decode (`InferenceScheduler.swift:885-889`), and continues to write back the final cache under `inputTokens + generatedTokenIds[uid]` (`InferenceScheduler.swift:992-996`). That closes the prior blocking single\u2192batch prompt-cache key mismatch for the upgraded first request.",
+    "issues": [
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 2288,
+        "severity": "non_blocking",
+        "description": "The new regression test does not strictly prove the stored trie key length. It derives `expectedFullKey` from `firstInfo.generationTokenCount`, but batched completion info is still sourced from `tokenCounts[uid]`, which is initialized to `0` after upgrade and only counts post-upgrade emissions for the first request (`Libraries/MLXLMCommon/Batching/InferenceScheduler.swift:873-883,970-972`). The test then calls `promptCache.fetchNearestCache(...)` (`InferenceSchedulerTests.swift:2294-2307`), and `LRUPromptCache` can satisfy a shorter query by trimming a longer stored entry (`Libraries/MLXLMCommon/Batching/LRUPromptCache.swift:343-352`). So this test is weaker than its comment claims, even though the production code fix itself looks correct."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker guidance does not warn that `LRUPromptCache.fetchNearestCache()` can trim longer cached entries to a shorter query, which makes prompt-cache key-length regressions easy to test too loosely. For write-back key fixes, the skill should steer workers toward an exact-key assertion or an explicit negative assertion on the shorter key.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md` asks for deterministic regression tests, but `Tests/MLXLMTests/InferenceSchedulerTests.swift:2294-2307` uses `fetchNearestCache(...)` while `Libraries/MLXLMCommon/Batching/LRUPromptCache.swift:343-352` trims longer cached entries to the requested prefix."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/post-review/scrutiny/reviews/fix-prompt-cache-writeback-key.json",
+  "summary": "Pass. The code change fixes the original upgraded-first-request prompt-cache write-back bug by carrying pre-upgrade generated tokens into the batch loop and including them in the stored key. I found one non-blocking regression-test gap: the new test uses nearest-cache lookup and post-upgrade-only completion counts, so it does not strictly prove exact key length across the upgrade."
+}

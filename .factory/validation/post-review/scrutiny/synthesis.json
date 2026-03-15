@@ -1,72 +1,45 @@
 {
   "milestone": "post-review",
-  "round": 3,
-  "status": "fail",
+  "round": 4,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
-      "command": "swift test --filter MLXLMTests",
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift test --filter MLXLMTests",
       "exitCode": 0
     },
     "typecheck": {
       "passed": true,
-      "command": "swift build",
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift build",
       "exitCode": 0
     },
     "lint": {
       "passed": true,
-      "command": "swift-format lint --configuration .swift-format --recursive Libraries Tests",
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift-format lint --configuration .swift-format --recursive Libraries Tests",
       "exitCode": 0
     }
   },
   "reviewsSummary": {
-    "total": 3,
-    "passed": 0,
-    "failed": 3,
-    "failedFeatures": [
-      "fix-rotating-cache-test-deterministic",
-      "fix-rotating-cache-test-flaky-timing",
-      "fix-prompt-cache-writeback-key"
-    ]
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "fix-rotating-cache-test-deterministic",
-      "severity": "blocking",
-      "description": "The rereview still does not provide a deterministic, runtime-sound scheduler regression for rotating-cache migration: it relies on a fixed 50ms sleep and makes upgraded-cache assertions through `RotatingCacheMockModel`, whose `callAsFunction` never mutates cache state."
-    },
-    {
-      "featureId": "fix-rotating-cache-test-flaky-timing",
-      "severity": "blocking",
-      "description": "The timing follow-up remains racy because the first request can still hit EOS before upgrade; with `TestTokenizer` treating token `0` as EOS/unknown and the mock model wrapping modulo 32, `maxTokens: 1000` is not a reliable liveness guarantee for exercising the upgraded batch path."
-    },
-    {
-      "featureId": "fix-prompt-cache-writeback-key",
-      "severity": "blocking",
-      "description": "Prompt-cache write-back still loses the upgraded first request's pre-handoff generated tokens, so the final trie key can remain shorter than the stored KV depth after a single→batch upgrade."
-    }
-  ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Documented the scheduler-test liveness caveat in `.factory/library/user-testing.md`: `TestTokenizer` treats token `0` as EOS/unknown and common mock models wrap modulo 32, so `maxTokens` alone does not guarantee a request stays active long enough to trigger upgrade.",
-      "sourceFeature": "fix-rotating-cache-test-flaky-timing"
-    }
-  ],
+  "blockingIssues": [],
+  "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "skill:swift-batching-worker",
-      "suggestion": "For MLX-backed scheduler/runtime fixes, require the feature-specified `xcodebuild` validation (or `.factory/services.yaml` runtime command) to be run and reported instead of relying on `swift build`/`swift test` alone.",
-      "evidence": "The review for `fix-rotating-cache-test-deterministic` found the worker handoff reported only `swift build`, `swift build --build-tests`, and `swift test --filter MLXLMTests` even though the feature verification in `features.json` required targeted `xcodebuild` coverage and `.factory/library/mlx-validation.md` already states SwiftPM runs are only baseline evidence for MLX-backed scheduler behavior.",
-      "isSystemic": true
-    },
-    {
-      "target": "skill:swift-batching-worker",
-      "suggestion": "Require prompt-cache write-back fixes to cover the upgraded first request across single→batch handoff, including preservation of pre-upgrade generated tokens in the final cache key, rather than only pure single-path or later-joiner scenarios.",
-      "evidence": "The review for `fix-prompt-cache-writeback-key` found the new tests in `InferenceSchedulerTests.swift` only covered pure single-path write-back, direct prompt-cache lookup, and the second batched request, leaving the first upgraded request's write-back key unverified while the original key/depth mismatch remained in `InferenceScheduler.submit()`/batch completion.",
+      "suggestion": "For prompt-cache write-back regressions, prefer exact-key assertions (or explicit negative assertions on shorter keys) instead of relying on `LRUPromptCache.fetchNearestCache(...)`, because it can trim longer stored entries to a shorter query and make key-length tests pass too loosely.",
+      "evidence": "The review for `fix-prompt-cache-upgrade-tokens` found the production fix was correct, but `Tests/MLXLMTests/InferenceSchedulerTests.swift:2294-2307` used `fetchNearestCache(...)` while `Libraries/MLXLMCommon/Batching/LRUPromptCache.swift:343-352` can trim longer cached entries to the requested prefix, weakening the regression's ability to prove exact stored key length across a single→batch upgrade.",
       "isSystemic": false
     }
   ],
-  "rejectedObservations": [],
-  "previousRound": ".factory/validation/post-review/scrutiny/synthesis.round2.json"
+  "rejectedObservations": [
+    {
+      "observation": "Document that `TestTokenizer` treats token `0` as EOS/unknown so scheduler mock models used in upgrade tests must avoid generating `0` when they rely on request liveness.",
+      "reason": "already-documented in `.factory/library/user-testing.md` under the scheduler-test liveness caveat"
+    }
+  ],
+  "previousRound": ".factory/validation/post-review/scrutiny/synthesis.round3.json"
 }
