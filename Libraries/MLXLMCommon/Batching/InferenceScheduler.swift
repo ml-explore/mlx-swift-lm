@@ -84,6 +84,11 @@ public actor InferenceScheduler {
 
         /// The time taken for prompt processing (prefill) on the single path.
         let promptTime: TimeInterval
+
+        /// Token IDs generated on the single path before the upgrade.
+        /// Carried into the batch loop so that the prompt cache write-back
+        /// key includes these pre-upgrade tokens.
+        let generatedTokenIds: [Int]
     }
 
     /// Shared mutable flag used to signal that a single request should be
@@ -547,7 +552,8 @@ public actor InferenceScheduler {
                         sampler: iter.sampler,
                         processor: iter.processor,
                         promptTokenCount: promptTokenCount,
-                        promptTime: promptTime + iter.promptPrefillTime
+                        promptTime: promptTime + iter.promptPrefillTime,
+                        generatedTokenIds: generatedTokenIds
                     )
                     upgradeFlag.depositLiveState(liveState)
                     // The batch loop now owns the continuation. Exit without
@@ -848,10 +854,11 @@ public actor InferenceScheduler {
             }
         }
 
-        // Capture per-UID prompt token counts and first request's prompt time
-        // for use inside the batch loop Task.
+        // Capture per-UID prompt token counts, first request's prompt time,
+        // and pre-upgrade generated tokens for use inside the batch loop Task.
         let firstPromptTokenCount = liveState.promptTokenCount
         let firstPromptTime = liveState.promptTime
+        let firstPreUpgradeTokens = liveState.generatedTokenIds
         let secondPromptTokenCount = newInput.text.tokens.size
 
         // Start the batch generation loop
@@ -874,6 +881,12 @@ public actor InferenceScheduler {
                 promptTimes[uid] = 0
                 tokenCounts[uid] = 0
             }
+
+            // Seed the first request's generated token list with tokens
+            // produced on the single path before the upgrade. This ensures
+            // the prompt cache write-back key includes the full sequence:
+            // inputTokens + preUpgradeTokens + batchGeneratedTokens.
+            generatedTokenIds[firstUID] = firstPreUpgradeTokens
 
             // Store per-UID prompt token counts.
             promptTokenCounts[firstUID] = firstPromptTokenCount
