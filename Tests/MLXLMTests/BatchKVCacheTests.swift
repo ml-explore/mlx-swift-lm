@@ -667,15 +667,16 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(restored.leftPadding.dim(0), 0)
     }
 
-    // MARK: - makeMask uses pre-update offset (real call order)
+    // MARK: - makeMask called before update still spans post-update width
 
     func testMakeMaskBeforeUpdate() throws {
         try skipIfMetalUnavailable()
 
         // Simulate the real model call order: makeMask THEN update.
-        // After prefill of S=4, _idx=4. Then for a decode step with n=1,
-        // makeMask should produce a mask spanning columns 0..<(4+1)=5
-        // (the 4 cached tokens plus the 1 new token).
+        // attentionWithCacheUpdate() appends the current step's KV tensors
+        // before running attention, so the mask must already span the
+        // post-update width. After prefill of S=4, a decode step with n=1
+        // therefore needs a 5-column mask.
         let cache = BatchKVCache(leftPadding: [1, 0])
         let B = 2
         let H = 2
@@ -708,7 +709,7 @@ final class BatchKVCacheTests: XCTestCase {
         XCTAssertEqual(cache._idx, S + n)
     }
 
-    // MARK: - makeMask masks left-padding in decode step
+    // MARK: - makeMask masks left-padding for the post-update decode width
 
     func testMakeMaskLeftPaddingDecode() throws {
         try skipIfMetalUnavailable()

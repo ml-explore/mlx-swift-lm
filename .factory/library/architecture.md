@@ -55,8 +55,8 @@ Variable-length sequences are left-padded with zeros. `BatchKVCache` tracks per-
 ### BatchKVCache Shared `_idx` Invariant
 `BatchKVCache.extract(idx:)` and decode-time masking treat every position in `leftPadding[idx] ..< _idx` as valid sequence data. Mixed-depth cached-prefill layouts therefore must ensure each batch element's written KV region extends all the way to the shared `_idx`; leaving interior holes before `_idx` causes extraction and later decode steps to interpret unwritten slots as real cached tokens.
 
-### Mask Before Cache Update
-Attention-mask creation uses the cache's pre-update position. `makeAttentionMask` / `createAttentionMask` call `cache.makeMask(...)` before the layer appends the current keys and values, so batch cache masking must use the current `_idx` / offset rather than subtracting `n` as if the cache had already been updated.
+### Batch mask width vs cache update timing
+`makeAttentionMask` / `createAttentionMask` call `cache.makeMask(...)` before the layer appends the current keys and values, but `attentionWithCacheUpdate()` updates the KV cache before it launches attention. Batch cache masks therefore need the post-update key width: pass the current `_idx` as the causal-mask offset so `createCausalMask` spans `_idx + n` columns while still masking left padding.
 
 ### Rotating cache keep semantics
 The repo's existing max-KV path preserves a fixed prefix when it creates `RotatingKVCache(maxSize: maxKVSize, keep: 4)` in `Libraries/MLXLMCommon/LanguageModel.swift`. Any batch rotating-cache implementation needs to preserve and round-trip nonzero `keep` values instead of assuming the default `keep = 0`.

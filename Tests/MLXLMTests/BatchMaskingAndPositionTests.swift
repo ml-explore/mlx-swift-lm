@@ -102,16 +102,15 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         let S = 5
         let D = 4
 
-        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: S, headDim: D)
-        _ = cache.update(keys: keys, values: values)
-
-        // Now cache._idx = 5. Ask for mask with n=5 (full prefill)
+        // makeMask() runs before the cache update, but attention sees the
+        // post-update keys/values after attentionWithCacheUpdate() appends
+        // the current prompt chunk.
         let maskMode = cache.makeMask(n: S, windowSize: nil, returnArray: false)
 
         // Should always return .array for batch caches
         switch maskMode {
         case .array(let mask):
-            // Check shape: should be [B, 1, n, S_total]
+            // Check shape: should be [B, 1, n, S_total] where S_total == S.
             XCTAssertEqual(mask.dim(0), B)
             XCTAssertEqual(mask.dim(2), S)
             XCTAssertEqual(mask.dim(3), S)
@@ -143,6 +142,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         default:
             XCTFail("Expected .array mask from batch cache, got \(maskMode)")
         }
+
+        let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: S, headDim: D)
+        _ = cache.update(keys: keys, values: values)
     }
 
     // MARK: - VAL-CACHE-020: BatchKVCache makeMask with n=1 masks left-padding during decode
@@ -159,16 +161,15 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         let (keys, values) = makeKV(batchSize: B, heads: H, seqLen: 4, headDim: D)
         _ = cache.update(keys: keys, values: values)
 
-        // Now do a decode step with n=1
-        let (decK, decV) = makeKV(batchSize: B, heads: H, seqLen: 1, headDim: D)
-        _ = cache.update(keys: decK, values: decV)
-
-        // Get mask for n=1 (single token decode)
+        // Get the decode mask before the update. attentionWithCacheUpdate()
+        // will append the single-token decode step before applying attention,
+        // so the mask must already include that extra column.
         let maskMode = cache.makeMask(n: 1, windowSize: nil, returnArray: false)
 
         switch maskMode {
         case .array(let mask):
-            // For n=1, we have 1 query position attending to 5 key positions (_idx=5)
+            // For n=1, we have 1 query position attending to 5 key positions
+            // (4 cached + 1 incoming decode token).
             // Mask shape: [B, 1, 1, 5]
             XCTAssertEqual(mask.dim(0), B)
             XCTAssertEqual(mask.dim(2), 1)
@@ -195,6 +196,9 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         default:
             XCTFail("Batch cache must return .array mask for n=1, not .none")
         }
+
+        let (decK, decV) = makeKV(batchSize: B, heads: H, seqLen: 1, headDim: D)
+        _ = cache.update(keys: decK, values: decV)
     }
 
     // MARK: - VAL-CACHE-015: BatchPositionedKVCache protocol provides per-sequence offsets
@@ -401,11 +405,13 @@ final class BatchMaskingAndPositionTests: XCTestCase {
         let (d2k, d2v) = makeKV(batchSize: B, heads: H, seqLen: 1, headDim: D)
         _ = cache.update(keys: d2k, values: d2v)
 
-        // Mask for n=1 at _idx=5
+        // Mask for the next decode step after two prior decode updates.
         let maskMode = cache.makeMask(n: 1, windowSize: nil, returnArray: false)
 
         switch maskMode {
         case .array(let mask):
+            XCTAssertEqual(mask.dim(3), 6)
+
             // Seq 0 (padding=1): column 0 should still be False
             let seq0col0 = mask[0, 0, 0, 0].item(Bool.self)
             XCTAssertFalse(seq0col0, "After multiple decode steps, padding should still be masked")

@@ -423,14 +423,13 @@ public class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
         // Batch caches always need an explicit mask to handle left-padding,
         // even for n=1 decode steps.
         //
-        // The mask key dimension must equal _idx (the total number of
-        // key/value positions currently stored in the cache).
-        // createCausalMask produces key-width = offset + n, so we pass
-        // offset = _idx - n to obtain key-width = _idx.
-        let offset = _idx - n
+        // makeMask() runs before attentionWithCacheUpdate(), but that helper
+        // appends the current step's keys/values before launching attention.
+        // The attention kernel therefore sees the post-update cache width, so
+        // the mask must span the existing cache plus the n incoming tokens.
         return .array(
             createCausalMask(
-                n: n, offset: offset, windowSize: windowSize, leftPadding: leftPadding
+                n: n, offset: _idx, windowSize: windowSize, leftPadding: leftPadding
             )
         )
     }
