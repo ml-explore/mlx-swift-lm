@@ -46,6 +46,8 @@ private class MockCachePrefillModel: Module, LanguageModel {
         inputShapes.append([B, S])
         totalTokensProcessed += B * S
 
+        appendSyntheticKV(to: cache, inputTokens: tokens)
+
         // Build logits: predicted next token = (last_input_token + 1) % vocabSize
         var logitsFlat = [Float]()
         for b in 0 ..< B {
@@ -75,6 +77,30 @@ private class MockCachePrefillModel: Module, LanguageModel {
         callCount = 0
         totalTokensProcessed = 0
         inputShapes = []
+    }
+}
+
+private func appendSyntheticKV(
+    to caches: [KVCache]?, inputTokens: MLXArray, defaultHeads: Int = 2, defaultHeadDim: Int = 4
+) {
+    guard let caches else { return }
+
+    let batchSize = inputTokens.dim(0)
+    let seqLen = inputTokens.dim(1)
+
+    for (layerIndex, cache) in caches.enumerated() {
+        let state = cache.innerState()
+        let existingKeys = state.first
+        let existingValues = state.count > 1 ? state[1] : nil
+
+        let heads = existingKeys?.dim(1) ?? defaultHeads
+        let keyDim = existingKeys?.dim(3) ?? defaultHeadDim
+        let valueDim = existingValues?.dim(3) ?? keyDim
+
+        let baseValue = Float(layerIndex + 1)
+        let keys = MLXArray.ones([batchSize, heads, seqLen, keyDim]) * baseValue
+        let values = MLXArray.ones([batchSize, heads, seqLen, valueDim]) * (baseValue + 1)
+        _ = cache.update(keys: keys, values: values)
     }
 }
 
@@ -863,7 +889,7 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             completionBatchSize: 32,
             prefillBatchSize: 8
         )
-        let uidsUncached = iteratorUncached.insert(
+        _ = iteratorUncached.insert(
             prompts: [prompt],
             maxTokens: [5]
         )
@@ -885,7 +911,7 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             completionBatchSize: 32,
             prefillBatchSize: 8
         )
-        let uidsCached = iteratorCached.insert(
+        _ = iteratorCached.insert(
             prompts: [prompt],
             maxTokens: [5],
             cachedKVStates: [cachedKV]
@@ -1070,11 +1096,21 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             cachedKVStates: [cachedA, cachedB, cachedC]
         )
 
+        let expectedOffsets = [
+            uids[0]: promptA.count + 3,
+            uids[1]: promptB.count + 3,
+            uids[2]: promptC.count + 3,
+        ]
+
         var tokensPerUID = [Int: [Int]]()
+        var finalCaches = [Int: [KVCache]]()
         var loopCount = 0
         while let responses = iterator.next(), !responses.isEmpty {
             for r in responses {
                 tokensPerUID[r.uid, default: []].append(r.token)
+                if let finalCache = r.finalCache {
+                    finalCaches[r.uid] = finalCache
+                }
             }
             loopCount += 1
             if loopCount > 30 { break }
@@ -1093,6 +1129,31 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             tokensPerUID[uids[2]]?.count, 3,
             "Prompt C (exact hit) should produce 3 tokens"
         )
+
+        XCTAssertEqual(finalCaches.count, 3, "Each finished request should include a final cache")
+
+        for uid in uids {
+            guard let finalCache = finalCaches[uid] else {
+                XCTFail("Expected final cache for uid \(uid)")
+                continue
+            }
+
+            XCTAssertEqual(finalCache.count, 2, "Final cache should preserve both layers")
+
+            let expectedOffset = expectedOffsets[uid]!
+            for (layerIndex, layerCache) in finalCache.enumerated() {
+                guard let simpleCache = layerCache as? KVCacheSimple else {
+                    XCTFail(
+                        "Expected KVCacheSimple final cache for layer \(layerIndex), got \(type(of: layerCache))"
+                    )
+                    continue
+                }
+                XCTAssertEqual(
+                    simpleCache.offset, expectedOffset,
+                    "Final cache layer \(layerIndex) should remain extractable with the full prompt + generation length"
+                )
+            }
+        }
     }
 
     // MARK: - RotatingKVCache Cached-Prefill Tests
@@ -1574,7 +1635,7 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             completionBatchSize: 32,
             prefillBatchSize: 8
         )
-        let uidsA = iterA.insert(
+        _ = iterA.insert(
             prompts: [promptA],
             maxTokens: [3],
             cachedKVStates: [cachedA]
@@ -1592,7 +1653,7 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
             completionBatchSize: 32,
             prefillBatchSize: 8
         )
-        let uidsB = iterB.insert(
+        _ = iterB.insert(
             prompts: [promptB],
             maxTokens: [3],
             cachedKVStates: [cachedB]
@@ -1694,6 +1755,8 @@ private class CacheObservingModel: Module, LanguageModel {
         let B = tokens.dim(0)
         let S = tokens.dim(1)
 
+        appendSyntheticKV(to: cache, inputTokens: tokens)
+
         // Check if cache has pre-loaded keys
         if let caches = cache {
             for c in caches {
@@ -1757,6 +1820,8 @@ private class MockRotatingCacheModel: Module, LanguageModel {
         let B = tokens.dim(0)
         let S = tokens.dim(1)
 
+        appendSyntheticKV(to: cache, inputTokens: tokens)
+
         // Same deterministic logits as MockCachePrefillModel
         var logitsFlat = [Float]()
         for b in 0 ..< B {
@@ -1809,6 +1874,8 @@ private class MockMixedLayerCacheModel: Module, LanguageModel {
         let tokens = input.tokens
         let B = tokens.dim(0)
         let S = tokens.dim(1)
+
+        appendSyntheticKV(to: cache, inputTokens: tokens)
 
         var logitsFlat = [Float]()
         for b in 0 ..< B {

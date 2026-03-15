@@ -67,6 +67,9 @@ Batch rotating-cache cached-prefill uses a `prepare(... rightPadding:)` / `final
 ### BatchKVCache Cached-Prompt Prefill
 Plain `BatchKVCache` now uses the same `prepare(rightPadding:)` / `finalize()` lifecycle for mixed-depth cached-prefill. `processPartialCacheHits()` right-pads uncached suffix tokens, prefills the full aligned suffix, then `finalize()` rolls pad-derived KV entries back into left padding and updates offsets before decode. The first decode sample still trims/replays the last real prompt token after finalize so batching resumes from a clean left-padded layout.
 
+### Batching test doubles must mutate caches
+Mock `LanguageModel` implementations used to exercise batching or prompt-cache flows need to append synthetic K/V data into the provided caches during `callAsFunction`. `BatchTokenIterator` assumes real model forwards advance cache metadata during prefill/replay/decode; mocks that only return logits leave `_idx`/`batchOffsets` stuck at pre-replay values and can produce invalid final-cache extraction states that do not reflect production behavior.
+
 ### Rotating Cache Overflow Extraction
 During active sliding-window decode, `BatchRotatingKVCache` can drive per-sequence `leftPadding` below zero as wrapped tokens replace old window positions. Extraction must clamp that value back to `max(0, leftPadding)` before slicing, otherwise overflowed batch caches can slice from a negative start and drop the preserved `[keep-prefix | window]` contents during merge → overflow → extract round-trips.
 
