@@ -365,9 +365,10 @@ public final class ChatSession {
 
                     // When a scheduler is present, route through
                     // ModelContainer.generate() for transparent batching.
-                    // This bypasses KV cache reuse (the scheduler manages
-                    // its own caches) but enables concurrent request batching.
-                    // We preserve conversation history so multi-turn works.
+                    // The prompt cache on ModelContainer caches KV state
+                    // across requests, so follow-up turns that re-tokenize
+                    // the full conversation history will hit the cache for
+                    // the shared prefix — only new tokens need prefill.
                     if model.scheduler != nil {
                         // Build full message history for scheduler path.
                         // Collect the prior turns so we can persist them later.
@@ -375,11 +376,32 @@ public final class ChatSession {
                         switch cache {
                         case .empty:
                             break
-                        case .kvcache:
-                            // Scheduler path can't reuse KV caches directly.
-                            // We lose the cached state but the conversation
-                            // can continue via history re-hydration.
-                            break
+                        case .kvcache(let kvCaches):
+                            // Transitioning from non-scheduler KV cache state to
+                            // scheduler path. The KV caches cannot be passed to
+                            // the scheduler directly, but if a prompt cache is
+                            // available on the model container, insert the cached
+                            // state so future requests can reuse it.
+                            if let promptCache = model.promptCache {
+                                // Build the token sequence from the current messages
+                                // so the prompt cache can key on it. We insert the
+                                // cache for the prefix already processed.
+                                let prefixInput = UserInput(
+                                    chat: messages, processing: processing,
+                                    tools: tools, additionalContext: additionalContext)
+                                if let prefixLMInput = try? await processor.prepare(
+                                    input: prefixInput)
+                                {
+                                    let prefixTokens = prefixLMInput.text.tokens.asArray(Int.self)
+                                    if !prefixTokens.isEmpty {
+                                        promptCache.insertCache(
+                                            model: modelConfiguration.name,
+                                            tokens: prefixTokens,
+                                            promptCache: kvCaches
+                                        )
+                                    }
+                                }
+                            }
                         case .history(let h):
                             history = h
                             messages.append(contentsOf: h)

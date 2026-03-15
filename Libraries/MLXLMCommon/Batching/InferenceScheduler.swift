@@ -269,6 +269,9 @@ public actor InferenceScheduler {
     ///   - cache: Optional pre-existing KV cache.
     ///   - tokenizer: The tokenizer for detokenization and EOS detection.
     ///   - configuration: The model configuration (EOS tokens, tool call format, etc.).
+    ///   - cachedKVState: Optional cached KV state from `LRUPromptCache`. When provided,
+    ///     the cached prefix is loaded directly into the batch cache and only the uncached
+    ///     suffix tokens go through model prefill.
     /// - Returns: An `AsyncStream<Generation>` yielding generation events for this request.
     public func submit(
         input: LMInput,
@@ -276,7 +279,8 @@ public actor InferenceScheduler {
         model: any LanguageModel,
         cache: [KVCache]?,
         tokenizer: Tokenizer,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        cachedKVState: [KVCache]? = nil
     ) async throws -> AsyncStream<Generation> {
         // Check if this request is batch-compatible
         let compatible = Self.isBatchCompatible(
@@ -319,7 +323,8 @@ public actor InferenceScheduler {
                 model: model,
                 cache: cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                cachedKVState: cachedKVState
             )
 
         case .upgrading:
@@ -341,7 +346,8 @@ public actor InferenceScheduler {
                 batchedState: &batchedState,
                 input: input,
                 parameters: parameters,
-                tokenizer: tokenizer
+                tokenizer: tokenizer,
+                cachedKVState: cachedKVState
             )
         }
     }
@@ -624,7 +630,8 @@ public actor InferenceScheduler {
         model: any LanguageModel,
         cache: [KVCache]?,
         tokenizer: Tokenizer,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        cachedKVState: [KVCache]? = nil
     ) async throws -> AsyncStream<Generation> {
         // --- Phase 1: Request live state from the single-request task ---
         // Set state to .upgrading BEFORE the await so that additional
@@ -746,7 +753,8 @@ public actor InferenceScheduler {
             prompts: [newPromptTokens],
             maxTokens: [newMaxTokens],
             samplers: [newSampler],
-            processors: [newProcessor]
+            processors: [newProcessor],
+            cachedKVStates: [cachedKVState]
         )
         let secondUID = secondUIDs[0]
 
@@ -924,7 +932,8 @@ public actor InferenceScheduler {
         batchedState: inout BatchedState,
         input: LMInput,
         parameters: GenerateParameters,
-        tokenizer: Tokenizer
+        tokenizer: Tokenizer,
+        cachedKVState: [KVCache]? = nil
     ) throws -> AsyncStream<Generation> {
         let promptTokens = input.text.tokens.asArray(Int.self)
         let maxTokens = parameters.maxTokens ?? 1000
@@ -935,7 +944,8 @@ public actor InferenceScheduler {
             prompts: [promptTokens],
             maxTokens: [maxTokens],
             samplers: [sampler],
-            processors: [processor]
+            processors: [processor],
+            cachedKVStates: [cachedKVState]
         )
 
         let uid = uids[0]

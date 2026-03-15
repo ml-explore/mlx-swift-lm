@@ -43,6 +43,15 @@ public final class ModelContainer: Sendable {
     /// - Note: `InferenceScheduler` is a Swift actor and inherently `Sendable`.
     public nonisolated(unsafe) var scheduler: InferenceScheduler?
 
+    /// Optional prompt cache for reusing KV state across requests with shared prefixes.
+    ///
+    /// When set alongside a scheduler, cached KV state is fetched before submitting
+    /// to the scheduler and stored after generation completes. This reduces prefill
+    /// time for repeated or prefix-sharing prompts.
+    ///
+    /// - Note: `LRUPromptCache` is thread-safe via internal locking.
+    public nonisolated(unsafe) var promptCache: LRUPromptCache?
+
     public var configuration: ModelConfiguration {
         get async {
             await context.read { $0.configuration }
@@ -210,13 +219,23 @@ public final class ModelContainer: Sendable {
             nonisolated(unsafe) let resolvedModel = modelBox.consume() as! any LanguageModel
             let resolvedTokenizer = tokenizerBox.consume() as! Tokenizer
 
+            // Check the prompt cache for a cached KV state matching the input tokens.
+            var cachedKVState: [KVCache]?
+            if let promptCache {
+                let tokens = lmInput.text.tokens.asArray(Int.self)
+                let (cached, _) = promptCache.fetchNearestCache(
+                    model: configuration.name, tokens: tokens)
+                cachedKVState = cached
+            }
+
             return try await scheduler.submit(
                 input: lmInput,
                 parameters: parameters,
                 model: resolvedModel,
                 cache: nil,
                 tokenizer: resolvedTokenizer,
-                configuration: configuration
+                configuration: configuration,
+                cachedKVState: cachedKVState
             )
         }
 

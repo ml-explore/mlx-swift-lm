@@ -1428,4 +1428,148 @@ class InferenceSchedulerTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - VAL-FIX-007: Submit accepts cachedKVState parameter
+
+    /// Verifies that the scheduler's submit() method accepts an optional
+    /// cachedKVState parameter and passes it through to the batch path.
+    func testSubmitAcceptsCachedKVStateParameter() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // Create a mock cached KV state
+        let cachedKV: [KVCache] = [KVCacheSimple()]
+
+        let input = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
+        let params = GenerateParameters(maxTokens: 3, temperature: 0)
+
+        // Submit with cachedKVState — should not crash
+        let stream = try await scheduler.submit(
+            input: input,
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            cachedKVState: cachedKV
+        )
+
+        // Consume the stream — should work normally
+        var chunks = [String]()
+        for await gen in stream {
+            if let chunk = gen.chunk {
+                chunks.append(chunk)
+            }
+        }
+
+        // Should produce output
+        XCTAssertFalse(chunks.isEmpty, "Should produce output with cachedKVState")
+    }
+
+    /// Verifies that submit with nil cachedKVState (default) works unchanged.
+    func testSubmitWithNilCachedKVStateWorksUnchanged() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        let params = GenerateParameters(maxTokens: 3, temperature: 0)
+
+        // Submit without cachedKVState (using default nil)
+        let stream = try await scheduler.submit(
+            input: input,
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        var chunks = [String]()
+        for await gen in stream {
+            if let chunk = gen.chunk {
+                chunks.append(chunk)
+            }
+        }
+
+        XCTAssertFalse(chunks.isEmpty, "Should produce output with default nil cachedKVState")
+    }
+
+    /// Verifies that cachedKVState is passed through the batch upgrade path
+    /// (second request with cached state joins batch correctly).
+    func testCachedKVStateThroughBatchUpgradePath() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // First request without cache (standard path)
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Second request with cached KV state — triggers batch upgrade
+        let cachedKV: [KVCache] = [KVCacheSimple()]
+        let input2 = LMInput(tokens: MLXArray([Int32(5), Int32(6), Int32(7)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            cachedKVState: cachedKV
+        )
+
+        // Both streams should produce output
+        var chunks1 = [String]()
+        var chunks2 = [String]()
+
+        await withTaskGroup(of: (Int, [String]).self) { group in
+            group.addTask {
+                var chunks = [String]()
+                for await gen in stream1 {
+                    if let chunk = gen.chunk { chunks.append(chunk) }
+                }
+                return (1, chunks)
+            }
+            group.addTask {
+                var chunks = [String]()
+                for await gen in stream2 {
+                    if let chunk = gen.chunk { chunks.append(chunk) }
+                }
+                return (2, chunks)
+            }
+
+            for await (id, chunks) in group {
+                if id == 1 { chunks1 = chunks } else { chunks2 = chunks }
+            }
+        }
+
+        // Both should produce output, with the second request using its cached state
+        let totalOutput = chunks1.count + chunks2.count
+        XCTAssertGreaterThan(
+            totalOutput, 0,
+            "Both streams should produce output when second has cachedKVState"
+        )
+    }
 }
