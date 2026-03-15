@@ -80,6 +80,9 @@ private class RotatingCacheMockModel: Module, LanguageModel, @unchecked Sendable
         .tokens(input.text)
     }
 
+    /// Produces tokens deterministically that NEVER hit token 0 (EOS).
+    /// Formula: output = (sum of input tokens % (vocabSize - 1)) + 1
+    /// This guarantees all output tokens are in range [1, vocabSize-1].
     func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
@@ -89,8 +92,11 @@ private class RotatingCacheMockModel: Module, LanguageModel, @unchecked Sendable
         var logitsFlat = [Float]()
         for b in 0 ..< B {
             for s in 0 ..< S {
-                let lastToken = tokens[b, s].item(Int32.self)
-                let predictedToken = (Int(lastToken) + 1) % vocabSize
+                var sum: Int = 0
+                for t in 0 ..< S {
+                    sum += Int(tokens[b, t].item(Int32.self))
+                }
+                let predictedToken = (sum % (vocabSize - 1)) + 1
                 var row = [Float](repeating: -100.0, count: vocabSize)
                 row[predictedToken] = 0.0
                 logitsFlat.append(contentsOf: row)
