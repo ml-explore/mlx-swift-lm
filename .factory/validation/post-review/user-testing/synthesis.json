@@ -1,0 +1,31 @@
+{
+  "milestone": "post-review",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-FIX-001",
+    "VAL-FIX-002",
+    "VAL-FIX-003",
+    "VAL-FIX-004",
+    "VAL-FIX-005",
+    "VAL-FIX-006",
+    "VAL-FIX-007",
+    "VAL-FIX-008"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Recorded the exact post-review xcodebuild test locations for the stream-metadata, rotating-cache, prompt-cache, and ChatSession assertions, and noted that Metal flock warnings are non-fatal when the run still ends with TEST SUCCEEDED.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}
