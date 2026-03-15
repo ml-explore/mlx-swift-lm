@@ -1,0 +1,28 @@
+{
+  "featureId": "fix-rotating-cache-batching",
+  "reviewedAt": "2026-03-15T05:34:04.550411Z",
+  "commitId": "4d37949",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The production changes in `BatchTokenIterator.swift` and `InferenceScheduler.swift` match the intended rotating-cache fix, but the new scheduler regression test does not actually verify cache preservation. Because the mock model ignores cache state, the pre-fix broken upgrade path would still pass the added test, so VAL-FIX-004 remains unproven.",
+    "issues": [
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 1174,
+        "severity": "blocking",
+        "description": "`testUpgradePreservesRotatingKVCacheState` is vacuous. `RotatingCacheMockModel.callAsFunction` ignores the `cache` argument (`Tests/MLXLMTests/InferenceSchedulerTests.swift:84-94`), and the test only asserts that both streams emit some tokens and the scheduler returns to idle (`Tests/MLXLMTests/InferenceSchedulerTests.swift:1234-1248`). The old broken upgrade path that discarded `RotatingKVCache` state would still satisfy those assertions, so this feature does not actually verify the required upgrade-preservation behavior."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `swift-batching-worker` skill's testing guidance is too generic for cache-migration fixes. It tells workers to write deterministic mock-model tests, but it does not warn that cache migration tests must either inspect cache contents/types directly or use cache-sensitive mocks; otherwise regressions can pass vacuously.",
+      "evidence": ".factory/skills/swift-batching-worker/SKILL.md:41-43 only requires tests that cover expected behavior plus deterministic mock models; in this feature, `Tests/MLXLMTests/InferenceSchedulerTests.swift:84-94` ignores `cache`, and the new test at `Tests/MLXLMTests/InferenceSchedulerTests.swift:1174-1248` therefore cannot distinguish preserved vs discarded rotating-cache state."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed commit `4d37949` plus the worker transcript skeleton and handoff. The functional code changes are directionally correct in `Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift` and `Libraries/MLXLMCommon/Batching/InferenceScheduler.swift`, and the mixed-cache batch-construction test is adequate, but the added scheduler upgrade test does not validate rotating-cache preservation. Review status: fail due to the blocking gap in VAL-FIX-004 coverage."
+}

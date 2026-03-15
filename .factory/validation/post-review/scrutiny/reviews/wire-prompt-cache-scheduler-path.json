@@ -1,0 +1,40 @@
+{
+  "featureId": "wire-prompt-cache-scheduler-path",
+  "reviewedAt": "2026-03-15T05:35:32.489121Z",
+  "commitId": "c24b728",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The patch threads cached KV state into the batch-upgrade/join code paths, but it does not deliver the required end-to-end prompt-cache reuse. Sequential scheduler requests still bypass cached state, scheduler-routed generations never automatically persist new KV state back into LRUPromptCache, and ChatSession's kvcache migration stores caches under a mismatched token key.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 306,
+        "severity": "blocking",
+        "description": "`submit()` ignores `cachedKVState` whenever the scheduler is idle (and also on the single-path fallback helpers). `case .idle` calls `startSingleRequest()` and the single-stream helpers have no way to consume the fetched cache, so a repeated prompt submitted after the previous request finishes still re-prefills the full prompt instead of reusing the cached prefix. That misses VAL-FIX-007's repeated-prompt behavior for the common sequential case."
+      },
+      {
+        "file": "Libraries/MLXLMCommon/ModelContainer.swift",
+        "line": 223,
+        "severity": "blocking",
+        "description": "`ModelContainer.generate()` fetches from `promptCache`, but there is no corresponding production write-back after scheduler-routed generation completes. Repo-wide, the only non-test `insertCache` call is ChatSession's special migration branch, so plain `ModelContainer` usage never seeds LRUPromptCache and scheduler-native ChatSession turns have nothing to reuse on later requests. This leaves the 'insert the final KV state into the promptCache for future reuse' part of the feature unimplemented."
+      },
+      {
+        "file": "Libraries/MLXLMCommon/ChatSession.swift",
+        "line": 301,
+        "severity": "blocking",
+        "description": "The `.kvcache` migration path does not preserve the prior conversation correctly. It tokenizes `messages` before any prior turns or the current user message are appended, then stores the existing full-session KV cache under that shorter token sequence via `promptCache.insertCache(...)`. Later full-history lookups will not match that cache entry, so the attempted ChatSession cache-preservation path is keyed incorrectly and does not satisfy VAL-FIX-008."
+      },
+      {
+        "file": "Tests/MLXLMTests/ModelContainerIntegrationTests.swift",
+        "line": 541,
+        "severity": "non_blocking",
+        "description": "The new regression tests do not actually prove the required behavior. `testPromptCacheWiredIntoSchedulerPath()` manually seeds the prompt cache and then only asserts `promptCache.count == 1`, and the ChatSession tests only check that responses are non-empty. As written, these tests would still pass even though prompt-cache reuse/regression behavior is broken."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Fail. Reviewed the worker transcript skeleton, handoff, and commit c24b728 across `InferenceScheduler.swift`, `ModelContainer.swift`, `ChatSession.swift`, `InferenceSchedulerTests.swift`, and `ModelContainerIntegrationTests.swift`. Blocking gaps remain in cached-state consumption and persistence, so the implementation does not yet satisfy VAL-FIX-007 / VAL-FIX-008."
+}
