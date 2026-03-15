@@ -216,6 +216,15 @@ public actor InferenceScheduler {
 
         /// The number of tokens in the original prompt input.
         let promptTokenCount: Int
+
+        /// The input token sequence for prompt cache write-back.
+        let inputTokens: [Int]?
+
+        /// Optional prompt cache for write-back after generation.
+        let promptCache: LRUPromptCache?
+
+        /// Model name for prompt cache operations.
+        let promptCacheModelName: String?
     }
 
     /// State for batched generation.
@@ -238,6 +247,9 @@ public actor InferenceScheduler {
         /// that join the batch after upgrade (3rd+ requests via joinExistingBatch).
         var submitTimes: [Int: Date]
 
+        /// Mapping from UID -> input token sequence for prompt cache write-back.
+        var inputTokens: [Int: [Int]]
+
         /// The model being used.
         let model: any LanguageModel
 
@@ -249,6 +261,12 @@ public actor InferenceScheduler {
 
         /// Stop token IDs.
         let stopTokenIDs: Set<Int>
+
+        /// Optional prompt cache for write-back after generation.
+        let promptCache: LRUPromptCache?
+
+        /// Model name for prompt cache operations.
+        let promptCacheModelName: String?
     }
 
     // MARK: - Properties
@@ -277,6 +295,12 @@ public actor InferenceScheduler {
     ///   - cachedKVState: Optional cached KV state from `LRUPromptCache`. When provided,
     ///     the cached prefix is loaded directly into the batch cache and only the uncached
     ///     suffix tokens go through model prefill.
+    ///   - promptCache: Optional `LRUPromptCache` for writing back final KV state after
+    ///     generation completes. When provided, the final per-request KV cache is stored
+    ///     so future requests with the same prefix can skip prefill.
+    ///   - promptCacheModelName: Model name used as key for prompt cache operations.
+    ///   - inputTokens: The full token sequence for this request, used as key for prompt
+    ///     cache write-back.
     /// - Returns: An `AsyncStream<Generation>` yielding generation events for this request.
     public func submit(
         input: LMInput,
@@ -285,7 +309,10 @@ public actor InferenceScheduler {
         cache: [KVCache]?,
         tokenizer: Tokenizer,
         configuration: ModelConfiguration,
-        cachedKVState: [KVCache]? = nil
+        cachedKVState: [KVCache]? = nil,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil
     ) async throws -> AsyncStream<Generation> {
         // Check if this request is batch-compatible
         let compatible = Self.isBatchCompatible(
@@ -309,14 +336,20 @@ public actor InferenceScheduler {
 
         switch state {
         case .idle:
-            // First request: use single path (TokenIterator)
+            // First request: use single path (TokenIterator).
+            // When cachedKVState is provided (from LRUPromptCache), use it
+            // as the initial cache so the TokenIterator skips prefill for
+            // the cached prefix tokens.
             return try startSingleRequest(
                 input: input,
                 parameters: parameters,
                 model: model,
-                cache: cache,
+                cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens
             )
 
         case .single(let singleState):
@@ -329,18 +362,22 @@ public actor InferenceScheduler {
                 cache: cache,
                 tokenizer: tokenizer,
                 configuration: configuration,
-                cachedKVState: cachedKVState
+                cachedKVState: cachedKVState,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens
             )
 
         case .upgrading:
             // Upgrade is in progress — run this request independently on
             // the single path so it doesn't interfere with the ongoing
             // handoff. It will complete on its own without joining the batch.
+            // Use cachedKVState if available.
             return try createSingleStream(
                 input: input,
                 parameters: parameters,
                 model: model,
-                cache: cache,
+                cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
                 configuration: configuration
             )
@@ -410,7 +447,10 @@ public actor InferenceScheduler {
         model: any LanguageModel,
         cache: [KVCache]?,
         tokenizer: Tokenizer,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil
     ) throws -> AsyncStream<Generation> {
         let iterator = try TokenIterator(
             input: input,
@@ -558,6 +598,17 @@ public actor InferenceScheduler {
             )
             _ = continuation.yield(.info(info))
 
+            // Write back final KV cache to prompt cache for future reuse.
+            if let promptCache, let modelName = promptCacheModelName,
+                let tokens = inputTokens, !tokens.isEmpty
+            {
+                promptCache.insertCache(
+                    model: modelName,
+                    tokens: tokens,
+                    promptCache: iter.cache
+                )
+            }
+
             Stream().synchronize()
             continuation.finish()
 
@@ -583,7 +634,10 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 continuation: continuation,
                 upgradeFlag: upgradeFlag,
-                promptTokenCount: promptTokenCount
+                promptTokenCount: promptTokenCount,
+                inputTokens: inputTokens,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName
             ))
 
         return stream
@@ -636,7 +690,10 @@ public actor InferenceScheduler {
         cache: [KVCache]?,
         tokenizer: Tokenizer,
         configuration: ModelConfiguration,
-        cachedKVState: [KVCache]? = nil
+        cachedKVState: [KVCache]? = nil,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil
     ) async throws -> AsyncStream<Generation> {
         // --- Phase 1: Request live state from the single-request task ---
         // Set state to .upgrading BEFORE the await so that additional
@@ -898,6 +955,25 @@ public actor InferenceScheduler {
                         _ = cont.yield(.info(info))
                         cont.finish()
 
+                        // Write back final KV cache for this request to prompt cache.
+                        // The cache was extracted by BatchTokenIterator.next() before
+                        // the batch was filtered, so it's always available for finished
+                        // sequences regardless of post-filter batch state.
+                        if let finalCache = response.finalCache,
+                            let tokens = await self?.getInputTokens(uid: uid),
+                            !tokens.isEmpty
+                        {
+                            let (pCache, modelName) =
+                                await self?.getPromptCacheInfo() ?? (nil, nil)
+                            if let pCache, let modelName {
+                                pCache.insertCache(
+                                    model: modelName,
+                                    tokens: tokens,
+                                    promptCache: finalCache
+                                )
+                            }
+                        }
+
                         await self?.removeContinuation(uid: uid)
                     }
                 }
@@ -916,6 +992,17 @@ public actor InferenceScheduler {
             }
         }
 
+        // Capture input tokens for prompt cache write-back.
+        // First request's tokens come from the SingleRequestState.
+        // Second request's tokens come from the submit() call.
+        var batchInputTokens: [Int: [Int]] = [:]
+        if let firstTokens = existingSingle.inputTokens {
+            batchInputTokens[firstUID] = firstTokens
+        }
+        if let secondTokens = inputTokens {
+            batchInputTokens[secondUID] = secondTokens
+        }
+
         state = .batched(
             BatchedState(
                 batchIterator: batchIterator,
@@ -926,10 +1013,13 @@ public actor InferenceScheduler {
                     secondUID: secondPromptTokenCount,
                 ],
                 submitTimes: [:],
+                inputTokens: batchInputTokens,
                 model: model,
                 tokenizer: tokenizer,
                 configuration: configuration,
-                stopTokenIDs: stopTokenIDs
+                stopTokenIDs: stopTokenIDs,
+                promptCache: promptCache ?? existingSingle.promptCache,
+                promptCacheModelName: promptCacheModelName ?? existingSingle.promptCacheModelName
             ))
 
         return secondStream
@@ -972,6 +1062,7 @@ public actor InferenceScheduler {
         batchedState.continuations[uid] = continuation
         batchedState.promptTokenCounts[uid] = input.text.tokens.size
         batchedState.submitTimes[uid] = Date()
+        batchedState.inputTokens[uid] = promptTokens
 
         // Update state
         state = .batched(batchedState)
@@ -1025,6 +1116,22 @@ public actor InferenceScheduler {
             return batchedState.submitTimes[uid]
         }
         return nil
+    }
+
+    /// Get the input tokens for a UID from the batched state (for prompt cache write-back).
+    private func getInputTokens(uid: Int) -> [Int]? {
+        if case .batched(let batchedState) = state {
+            return batchedState.inputTokens[uid]
+        }
+        return nil
+    }
+
+    /// Get the prompt cache and model name from the batched state (for write-back).
+    private func getPromptCacheInfo() -> (LRUPromptCache?, String?) {
+        if case .batched(let batchedState) = state {
+            return (batchedState.promptCache, batchedState.promptCacheModelName)
+        }
+        return (nil, nil)
     }
 
     /// Finish all remaining continuations (e.g., on batch loop exit).

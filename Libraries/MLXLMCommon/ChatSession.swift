@@ -376,32 +376,16 @@ public final class ChatSession {
                         switch cache {
                         case .empty:
                             break
-                        case .kvcache(let kvCaches):
+                        case .kvcache:
                             // Transitioning from non-scheduler KV cache state to
-                            // scheduler path. The KV caches cannot be passed to
-                            // the scheduler directly, but if a prompt cache is
-                            // available on the model container, insert the cached
-                            // state so future requests can reuse it.
-                            if let promptCache = model.promptCache {
-                                // Build the token sequence from the current messages
-                                // so the prompt cache can key on it. We insert the
-                                // cache for the prefix already processed.
-                                let prefixInput = UserInput(
-                                    chat: messages, processing: processing,
-                                    tools: tools, additionalContext: additionalContext)
-                                if let prefixLMInput = try? await processor.prepare(
-                                    input: prefixInput)
-                                {
-                                    let prefixTokens = prefixLMInput.text.tokens.asArray(Int.self)
-                                    if !prefixTokens.isEmpty {
-                                        promptCache.insertCache(
-                                            model: modelConfiguration.name,
-                                            tokens: prefixTokens,
-                                            promptCache: kvCaches
-                                        )
-                                    }
-                                }
-                            }
+                            // scheduler path. The KV caches cannot be inserted into
+                            // the prompt cache because we don't have the exact token
+                            // sequence that was processed (the non-scheduler path
+                            // doesn't store message history). The cache is discarded;
+                            // the full conversation will be re-tokenized and processed
+                            // fresh, with the scheduler writing back the new KV state
+                            // under the correct token key for future reuse.
+                            break
                         case .history(let h):
                             history = h
                             messages.append(contentsOf: h)

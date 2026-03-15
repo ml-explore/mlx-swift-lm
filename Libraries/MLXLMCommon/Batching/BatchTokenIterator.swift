@@ -157,7 +157,7 @@ public class ActiveBatch {
 public class BatchTokenIterator: @unchecked Sendable {
 
     /// A single token response from one sequence in the batch.
-    public struct Response: Sendable {
+    public struct Response: @unchecked Sendable {
         /// The unique request ID.
         public let uid: Int
 
@@ -166,6 +166,11 @@ public class BatchTokenIterator: @unchecked Sendable {
 
         /// Why this sequence finished, or `nil` if it's still generating.
         public let finishReason: GenerateStopReason?
+
+        /// The extracted per-layer KV cache for this sequence, available only when
+        /// `finishReason` is non-nil. Used for prompt cache write-back after
+        /// generation completes. Extracted before the batch is filtered.
+        public let finalCache: [KVCache]?
     }
 
     // MARK: - Configuration
@@ -390,7 +395,27 @@ public class BatchTokenIterator: @unchecked Sendable {
                 keepIndices.append(e)
             }
 
-            responses.append(Response(uid: uid, token: token, finishReason: finishReason))
+            // Extract per-layer KV cache for finished sequences BEFORE filtering.
+            // This allows the caller to write-back the final cache to LRUPromptCache.
+            var extractedCache: [KVCache]?
+            if finishReason != nil {
+                var layers = [KVCache]()
+                for layerCache in batch.cache {
+                    if let batchCache = layerCache as? BatchKVCache {
+                        layers.append(batchCache.extract(idx: e))
+                    } else if let batchRotCache = layerCache as? BatchRotatingKVCache {
+                        layers.append(batchRotCache.extract(idx: e))
+                    }
+                }
+                if !layers.isEmpty {
+                    extractedCache = layers
+                }
+            }
+
+            responses.append(
+                Response(
+                    uid: uid, token: token, finishReason: finishReason,
+                    finalCache: extractedCache))
         }
 
         // Remove finished sequences

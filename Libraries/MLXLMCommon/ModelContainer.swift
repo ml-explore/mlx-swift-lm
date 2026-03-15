@@ -221,10 +221,10 @@ public final class ModelContainer: Sendable {
 
             // Check the prompt cache for a cached KV state matching the input tokens.
             var cachedKVState: [KVCache]?
+            let inputTokens = lmInput.text.tokens.asArray(Int.self)
             if let promptCache {
-                let tokens = lmInput.text.tokens.asArray(Int.self)
                 let (cached, _) = promptCache.fetchNearestCache(
-                    model: configuration.name, tokens: tokens)
+                    model: configuration.name, tokens: inputTokens)
                 cachedKVState = cached
             }
 
@@ -235,7 +235,10 @@ public final class ModelContainer: Sendable {
                 cache: nil,
                 tokenizer: resolvedTokenizer,
                 configuration: configuration,
-                cachedKVState: cachedKVState
+                cachedKVState: cachedKVState,
+                promptCache: promptCache,
+                promptCacheModelName: configuration.name,
+                inputTokens: inputTokens
             )
         }
 
