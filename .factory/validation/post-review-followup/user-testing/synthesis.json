@@ -1,0 +1,25 @@
+{
+  "milestone": "post-review-followup",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-FIX-010",
+    "VAL-FIX-011"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Recorded the exact post-review-followup targeted xcodebuild reruns and documented that a fresh DerivedData failure with errno=28 can be recovered by using validator-owned existing build products with xcodebuild test-without-building.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}
