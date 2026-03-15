@@ -763,14 +763,17 @@ public class BatchTokenIterator: @unchecked Sendable {
         // Shorter suffixes are right-padded to match the longest suffix.
         let suffixRightPadding = suffixLengths.map { maxSuffixLength - $0 }
 
-        // Determine per-layer cache types from the first layer of the first state.
-        let isRotating = selectedStates[0][0] is RotatingKVCache
-
         var batchCaches = [KVCache]()
         for l in 0 ..< numLayers {
             let layerCaches = selectedStates.map { $0[l] }
 
-            if isRotating {
+            // Per-layer type check: mixed-layer models (e.g. Gemma3) have
+            // KVCacheSimple for global layers and RotatingKVCache for
+            // sliding-window layers. Checking each layer individually
+            // ensures neither type's cached data is silently dropped.
+            let layerIsRotating = layerCaches[0] is RotatingKVCache
+
+            if layerIsRotating {
                 // Rotating cache path: use BatchRotatingKVCache.merge then
                 // prepare/finalize lifecycle for right-padding alignment.
                 let merged = BatchRotatingKVCache.merge(layerCaches)

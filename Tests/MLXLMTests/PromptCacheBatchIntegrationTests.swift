@@ -1227,6 +1227,114 @@ class PromptCacheBatchIntegrationTests: XCTestCase {
         )
     }
 
+    // MARK: - VAL-FIX-009: Mixed-Layer Cached Partial-Hit
+
+    /// Verify that a mixed-layer model (layer 0 = KVCacheSimple, layer 1 =
+    /// RotatingKVCache) preserves per-layer cache types through the cached
+    /// partial-hit path. Previously, processPartialCacheHits() used a blanket
+    /// first-layer type check that applied the same path to ALL layers,
+    /// silently dropping RotatingKVCache data when layer 0 was KVCacheSimple.
+    func testMixedLayerCachedPartialHitPreservesPerLayerCacheType() throws {
+        try skipIfMetalUnavailable()
+
+        let model = MockMixedLayerCacheModel(vocabSize: 32, maxKVSize: 64)
+
+        // 8-token prompt, 5 cached as mixed layers → suffix = [6, 7, 8]
+        let prompt = [1, 2, 3, 4, 5, 6, 7, 8]
+        let cachedKV = makeMockMixedLayerPromptCache(seqLen: 5, maxSize: 64, value: 1.0)
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        let uids = iterator.insert(
+            prompts: [prompt],
+            maxTokens: [2],
+            cachedKVStates: [cachedKV]
+        )
+
+        // Advance to trigger cached prefill
+        var tokensPerUID = [Int: [Int]]()
+        var loopCount = 0
+        while let responses = iterator.next(), !responses.isEmpty {
+            for r in responses {
+                tokensPerUID[r.uid, default: []].append(r.token)
+            }
+            loopCount += 1
+            if loopCount > 20 { break }
+        }
+
+        // Verify tokens were produced (cache data was not silently dropped)
+        XCTAssertEqual(
+            tokensPerUID[uids[0]]?.count, 2,
+            "Mixed-layer partial-hit should produce 2 tokens"
+        )
+
+        // Verify per-layer cache types in the active batch cache.
+        // After generation completes, verify the batch was created with correct types.
+        // We use a fresh iterator and inspect after one step to see the cache.
+        let model2 = MockMixedLayerCacheModel(vocabSize: 32, maxKVSize: 64)
+        let cachedKV2 = makeMockMixedLayerPromptCache(seqLen: 5, maxSize: 64, value: 1.0)
+
+        let iterator2 = BatchTokenIterator(
+            model: model2,
+            defaultSampler: ArgMaxSampler(),
+            completionBatchSize: 32,
+            prefillBatchSize: 8
+        )
+
+        _ = iterator2.insert(
+            prompts: [prompt],
+            maxTokens: [5],
+            cachedKVStates: [cachedKV2]
+        )
+
+        // One step triggers cached prefill and produces the first token.
+        let _ = iterator2.next()
+
+        let batchCache = iterator2.activeBatch?.cache
+        XCTAssertNotNil(batchCache, "Active batch should have a cache")
+        XCTAssertEqual(batchCache?.count, 2, "Should have 2 cache layers")
+
+        if let cache = batchCache {
+            XCTAssertTrue(
+                cache[0] is BatchKVCache,
+                "Layer 0 should be BatchKVCache (from KVCacheSimple), got \(type(of: cache[0]))"
+            )
+            XCTAssertTrue(
+                cache[1] is BatchRotatingKVCache,
+                "Layer 1 should be BatchRotatingKVCache (from RotatingKVCache), got \(type(of: cache[1]))"
+            )
+
+            // Verify neither layer has nil data (no silently dropped cache)
+            if let bkv = cache[0] as? BatchKVCache {
+                XCTAssertNotNil(bkv.keys, "Layer 0 BatchKVCache should have non-nil keys")
+                XCTAssertNotNil(bkv.values, "Layer 0 BatchKVCache should have non-nil values")
+            }
+            if let brkv = cache[1] as? BatchRotatingKVCache {
+                XCTAssertNotNil(brkv.keys, "Layer 1 BatchRotatingKVCache should have non-nil keys")
+                XCTAssertNotNil(
+                    brkv.values, "Layer 1 BatchRotatingKVCache should have non-nil values")
+            }
+        }
+    }
+
+    // MARK: - Helpers for Mixed-Layer Cache tests
+
+    /// Create a mixed-layer mock prompt cache: layer 0 = KVCacheSimple, layer 1 = RotatingKVCache.
+    private func makeMockMixedLayerPromptCache(
+        seqLen: Int, maxSize: Int, heads: Int = 2, headDim: Int = 4, value: Float = 1.0
+    ) -> [KVCache] {
+        let simpleCache = makeMockCache(
+            seqLen: seqLen, heads: heads, headDim: headDim, value: value)
+        let rotatingCache = makeMockRotatingCache(
+            seqLen: seqLen, maxSize: maxSize, heads: heads, headDim: headDim, value: value)
+        return [simpleCache, rotatingCache]
+    }
+
     // MARK: - Prepare/Finalize Lifecycle Tests
 
     /// Verify that BatchKVCache.prepare/finalize correctly rolls right-padding
@@ -1667,6 +1775,62 @@ private class MockRotatingCacheModel: Module, LanguageModel {
 
     func newCache(parameters: GenerateParameters?) -> [KVCache] {
         (0 ..< numLayers).map { _ in RotatingKVCache(maxSize: maxKVSize) }
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+}
+
+// MARK: - Mock Mixed-Layer Cache Model
+
+/// A mock model that returns mixed cache types per layer:
+/// layer 0 = KVCacheSimple (global attention), layer 1 = RotatingKVCache (sliding-window).
+/// Simulates models like Gemma3 that interleave global and sliding-window layers.
+private class MockMixedLayerCacheModel: Module, LanguageModel {
+    let vocabSize: Int
+    let maxKVSize: Int
+
+    var callCount = 0
+
+    init(vocabSize: Int = 32, maxKVSize: Int = 64) {
+        self.vocabSize = vocabSize
+        self.maxKVSize = maxKVSize
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        callCount += 1
+        let tokens = input.tokens
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+
+        var logitsFlat = [Float]()
+        for b in 0 ..< B {
+            for s in 0 ..< S {
+                let lastToken = tokens[b, s].item(Int32.self)
+                let predictedToken = (Int(lastToken) + 1) % vocabSize
+                var row = [Float](repeating: -100.0, count: vocabSize)
+                row[predictedToken] = 0.0
+                logitsFlat.append(contentsOf: row)
+            }
+        }
+
+        let logits = MLXArray(logitsFlat, [B, S, vocabSize])
+        return LMOutput(logits: logits)
+    }
+
+    /// Returns 2 layers: [KVCacheSimple, RotatingKVCache]
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        [
+            KVCacheSimple(),
+            RotatingKVCache(maxSize: maxKVSize),
+        ]
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
