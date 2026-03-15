@@ -777,6 +777,17 @@ public actor InferenceScheduler {
                     let uid = response.uid
                     guard let cont = await self?.getContinuation(uid: uid) else { continue }
 
+                    // Lazy-initialize streaming state for UIDs that joined
+                    // the batch after upgrade (3rd+ requests via
+                    // joinExistingBatch).
+                    if detokenizers[uid] == nil {
+                        detokenizers[uid] = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                        toolCallProcessors[uid] = ToolCallProcessor(format: format)
+                        starts[uid] = Date()
+                        promptTimes[uid] = 0
+                        tokenCounts[uid] = 0
+                    }
+
                     let token = response.token
 
                     // Track timing

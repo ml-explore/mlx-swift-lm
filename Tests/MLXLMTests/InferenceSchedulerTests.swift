@@ -853,42 +853,57 @@ class InferenceSchedulerTests: XCTestCase {
             "Should still be in batched state after third request")
 
         // All three should produce output
-        var results = [Int: Bool]()
+        // Collect per-stream results: chunk count and info
+        typealias StreamResult = (chunkCount: Int, info: GenerateCompletionInfo?)
 
-        await withTaskGroup(of: (Int, Bool).self) { group in
+        var results = [Int: StreamResult]()
+
+        await withTaskGroup(of: (Int, StreamResult).self) { group in
             group.addTask {
                 var count = 0
+                var info: GenerateCompletionInfo?
                 for await gen in stream1 {
                     if gen.chunk != nil { count += 1 }
+                    if let i = gen.info { info = i }
                 }
-                return (1, count > 0)
+                return (1, (count, info))
             }
             group.addTask {
                 var count = 0
+                var info: GenerateCompletionInfo?
                 for await gen in stream2 {
                     if gen.chunk != nil { count += 1 }
+                    if let i = gen.info { info = i }
                 }
-                return (2, count > 0)
+                return (2, (count, info))
             }
             group.addTask {
                 var count = 0
+                var info: GenerateCompletionInfo?
                 for await gen in stream3 {
                     if gen.chunk != nil { count += 1 }
+                    if let i = gen.info { info = i }
                 }
-                return (3, count > 0)
+                return (3, (count, info))
             }
 
-            for await (id, produced) in group {
-                results[id] = produced
+            for await (id, result) in group {
+                results[id] = result
             }
         }
 
-        // At least the third request should produce output (it joined an
-        // active batch). The first two depend on timing.
-        let anyProduced = results.values.contains(true)
-        XCTAssertTrue(
-            anyProduced,
-            "At least one of three staggered requests should produce output")
+        // Each stream must independently produce .chunk events
+        XCTAssertTrue(results[1]!.chunkCount > 0, "Stream 1 must produce .chunk")
+        XCTAssertTrue(results[2]!.chunkCount > 0, "Stream 2 must produce .chunk")
+        XCTAssertTrue(results[3]!.chunkCount > 0, "Stream 3 (joined) must produce .chunk")
+
+        // Stream 3's .info must have non-zero generationTokenCount
+        XCTAssertNotNil(results[3]!.info, "Stream 3 must receive .info")
+        if let info3 = results[3]!.info {
+            XCTAssertGreaterThan(
+                info3.generationTokenCount, 0,
+                "Stream 3 .info must have generationTokenCount > 0")
+        }
     }
 
     // MARK: - UpgradeFlag deposits live state correctly
