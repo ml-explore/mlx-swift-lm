@@ -960,6 +960,140 @@ class InferenceSchedulerTests: XCTestCase {
         }
     }
 
+    // MARK: - Third request has accurate promptTime (submit-to-first-token)
+
+    /// Verifies that the 3rd request joining an existing batch has a promptTime
+    /// reflecting the interval from submission to first decode token, not the
+    /// time the first decode token is produced in the batch loop.
+    func testThirdRequestHasAccuratePromptTime() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // First request
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
+        let params1 = GenerateParameters(maxTokens: 30, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Second request triggers upgrade
+        let input2 = LMInput(tokens: MLXArray([Int32(3), Int32(4)]))
+        let params2 = GenerateParameters(maxTokens: 20, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        var currentState = await scheduler.currentState
+        guard currentState == "batched" else {
+            // Fallback: first request already completed before upgrade.
+            for await _ in stream1 {}
+            for await _ in stream2 {}
+            return
+        }
+
+        // Third request joins the existing batch
+        let input3 = LMInput(tokens: MLXArray([Int32(7), Int32(8)]))
+        let params3 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream3 = try await scheduler.submit(
+            input: input3,
+            parameters: params3,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        currentState = await scheduler.currentState
+        XCTAssertEqual(
+            currentState, "batched",
+            "Should still be in batched state after third request")
+
+        // Collect .info events from all three streams
+        typealias InfoResult = GenerateCompletionInfo?
+
+        var info1: InfoResult = nil
+        var info2: InfoResult = nil
+        var info3: InfoResult = nil
+
+        await withTaskGroup(of: (Int, InfoResult).self) { group in
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream1 {
+                    if let i = gen.info { info = i }
+                }
+                return (1, info)
+            }
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream2 {
+                    if let i = gen.info { info = i }
+                }
+                return (2, info)
+            }
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream3 {
+                    if let i = gen.info { info = i }
+                }
+                return (3, info)
+            }
+
+            for await (id, result) in group {
+                if id == 1 {
+                    info1 = result
+                } else if id == 2 {
+                    info2 = result
+                } else {
+                    info3 = result
+                }
+            }
+        }
+
+        // Third request's promptTime must be > 0 — it was measured from
+        // submit time (stored in joinExistingBatch) to first decode token.
+        XCTAssertNotNil(info3, "Third request should receive .info")
+        if let info = info3 {
+            XCTAssertGreaterThan(
+                info.promptTime, 0,
+                "Third request's promptTime should be > 0 (submit-to-first-token), got \(info.promptTime)"
+            )
+            // Verify promptTokenCount is also correct for the 3rd request
+            XCTAssertEqual(
+                info.promptTokenCount, 2,
+                "Third request's promptTokenCount should match input token count (2), got \(info.promptTokenCount)"
+            )
+        }
+
+        // All three requests should have .info with promptTime > 0
+        if let info = info1 {
+            XCTAssertGreaterThan(
+                info.promptTime, 0,
+                "First request's promptTime should be > 0, got \(info.promptTime)")
+        }
+        if let info = info2 {
+            XCTAssertGreaterThan(
+                info.promptTime, 0,
+                "Second request's promptTime should be > 0, got \(info.promptTime)")
+        }
+    }
+
     // MARK: - UpgradeFlag deposits live state correctly
 
     /// Unit test for the UpgradeFlag cooperative mechanism in isolation.

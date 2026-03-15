@@ -233,6 +233,11 @@ public actor InferenceScheduler {
         /// Used by the batch loop to report correct promptTokenCount in .info.
         var promptTokenCounts: [Int: Int]
 
+        /// Mapping from UID -> submit timestamp for each request.
+        /// Used by the batch loop to compute accurate promptTime for requests
+        /// that join the batch after upgrade (3rd+ requests via joinExistingBatch).
+        var submitTimes: [Int: Date]
+
         /// The model being used.
         let model: any LanguageModel
 
@@ -826,7 +831,11 @@ public actor InferenceScheduler {
                     if detokenizers[uid] == nil {
                         detokenizers[uid] = NaiveStreamingDetokenizer(tokenizer: tokenizer)
                         toolCallProcessors[uid] = ToolCallProcessor(format: format)
-                        starts[uid] = Date()
+                        // Use the submit timestamp stored by joinExistingBatch
+                        // so promptTime reflects submission-to-first-token, not
+                        // first-decode-to-first-token.
+                        starts[uid] =
+                            await self?.getSubmitTime(uid: uid) ?? Date()
                         promptTimes[uid] = 0
                         tokenCounts[uid] = 0
                         // Fetch the prompt token count stored by joinExistingBatch.
@@ -916,6 +925,7 @@ public actor InferenceScheduler {
                     firstUID: firstPromptTokenCount,
                     secondUID: secondPromptTokenCount,
                 ],
+                submitTimes: [:],
                 model: model,
                 tokenizer: tokenizer,
                 configuration: configuration,
@@ -961,6 +971,7 @@ public actor InferenceScheduler {
 
         batchedState.continuations[uid] = continuation
         batchedState.promptTokenCounts[uid] = input.text.tokens.size
+        batchedState.submitTimes[uid] = Date()
 
         // Update state
         state = .batched(batchedState)
@@ -1004,6 +1015,14 @@ public actor InferenceScheduler {
     private func getPromptTokenCount(uid: Int) -> Int? {
         if case .batched(let batchedState) = state {
             return batchedState.promptTokenCounts[uid]
+        }
+        return nil
+    }
+
+    /// Get the submit timestamp for a UID from the batched state.
+    private func getSubmitTime(uid: Int) -> Date? {
+        if case .batched(let batchedState) = state {
+            return batchedState.submitTimes[uid]
         }
         return nil
     }
