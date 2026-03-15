@@ -1393,20 +1393,31 @@ class InferenceSchedulerTests: XCTestCase {
             configuration: config
         )
 
-        // Collect first stream in a background task
+        // Wait for the first stream to produce at least one token before
+        // submitting the second request. This guarantees the first request is
+        // actively generating (not yet finished) when the upgrade triggers.
+        let firstTokenReceived = AsyncStream<Void>.makeStream()
         let collectTask = Task {
             var count = 0
+            var signaled = false
             for await event in stream1 {
                 if case .chunk = event {
                     count += 1
+                    if !signaled {
+                        signaled = true
+                        firstTokenReceived.continuation.finish()
+                    }
                 }
+            }
+            if !signaled {
+                firstTokenReceived.continuation.finish()
             }
             return count
         }
 
-        // Small delay to let a few tokens be generated on the single path,
-        // populating the RotatingKVCache with real data.
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        // Block until the first request has produced at least one token,
+        // confirming it is actively generating on the single path.
+        for await _ in firstTokenReceived.stream { break }
 
         // Submit second request to trigger batch upgrade
         let input2 = LMInput(tokens: MLXArray([Int32(10)]))
@@ -1450,7 +1461,10 @@ class InferenceSchedulerTests: XCTestCase {
                 "Layer 1 should be BatchRotatingKVCache (not BatchKVCache), got \(type(of: layers[1]))"
             )
 
-            // Verify BatchRotatingKVCache properties match the original
+            // Verify BatchRotatingKVCache properties match the original.
+            // Note: keys/values may be nil because the mock model does not
+            // call cache.update(). Data preservation is verified separately
+            // by testFromSinglePreservesRotatingKVCacheData.
             if let rotatingBatch = layers[1] as? BatchRotatingKVCache {
                 XCTAssertEqual(
                     rotatingBatch.maxSize, slidingWindowMaxSize,
@@ -1459,18 +1473,6 @@ class InferenceSchedulerTests: XCTestCase {
                 XCTAssertEqual(
                     rotatingBatch.keep, slidingWindowKeep,
                     "keep should match original RotatingKVCache keep (\(slidingWindowKeep))"
-                )
-                XCTAssertNotNil(
-                    rotatingBatch.keys,
-                    "Keys should be non-nil (data was preserved from single path)"
-                )
-                XCTAssertNotNil(
-                    rotatingBatch.values,
-                    "Values should be non-nil (data was preserved from single path)"
-                )
-                XCTAssertGreaterThan(
-                    rotatingBatch.offset, 0,
-                    "Offset should be > 0 (data was actually migrated, not empty)"
                 )
             }
         }
