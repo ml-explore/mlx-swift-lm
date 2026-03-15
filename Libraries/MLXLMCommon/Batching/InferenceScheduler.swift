@@ -1045,4 +1045,15 @@ public actor InferenceScheduler {
         case .batched: return "batched"
         }
     }
+
+    /// The batch cache layers from the active batch, for testing/inspection.
+    ///
+    /// Returns the per-layer `[KVCache]` array from the batch iterator's active
+    /// batch when in batched state, or `nil` otherwise.
+    public var batchCacheLayers: [KVCache]? {
+        if case .batched(let batchedState) = state {
+            return batchedState.batchIterator.activeBatch?.cache
+        }
+        return nil
+    }
 }

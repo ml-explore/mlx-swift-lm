@@ -2,11 +2,10 @@
 
 import Foundation
 import MLX
+@preconcurrency @testable import MLXLMCommon
 import MLXNN
 import Tokenizers
 import XCTest
-
-@testable import MLXLMCommon
 
 // MARK: - Mock Model for Scheduler Tests
 
@@ -1037,7 +1036,6 @@ class InferenceSchedulerTests: XCTestCase {
         // This ensures the iterator has advanced to tokenCount == maxTokens.
         var firstChunks = [String]()
         var firstInfo: GenerateCompletionInfo?
-        var stream1Finished = false
 
         // We'll collect from stream1 in a task so we can also submit the
         // second request. We consume a few tokens, then trigger upgrade.
@@ -1174,15 +1172,17 @@ class InferenceSchedulerTests: XCTestCase {
     func testUpgradePreservesRotatingKVCacheState() async throws {
         try skipIfMetalUnavailable()
 
+        let slidingWindowMaxSize = 64
+        let slidingWindowKeep = 4
         let model = RotatingCacheMockModel(
-            slidingWindowMaxSize: 64,
-            slidingWindowKeep: 4
+            slidingWindowMaxSize: slidingWindowMaxSize,
+            slidingWindowKeep: slidingWindowKeep
         )
         let tokenizer = TestTokenizer()
         let config = ModelConfiguration(id: "test-model")
         let scheduler = InferenceScheduler()
 
-        // Submit first request with enough tokens to generate for a while
+        // Submit first request with enough tokens to populate the cache
         let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
         let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
 
@@ -1206,7 +1206,8 @@ class InferenceSchedulerTests: XCTestCase {
             return count
         }
 
-        // Small delay to let a few tokens be generated on the single path
+        // Small delay to let a few tokens be generated on the single path,
+        // populating the RotatingKVCache with real data.
         try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
 
         // Submit second request to trigger batch upgrade
@@ -1221,6 +1222,62 @@ class InferenceSchedulerTests: XCTestCase {
             tokenizer: tokenizer,
             configuration: config
         )
+
+        // --- Inspect batch cache layers immediately after upgrade ---
+        // At this point the scheduler is in .batched state. Inspect the
+        // batch cache to verify RotatingKVCache layers were preserved as
+        // BatchRotatingKVCache (not silently replaced with BatchKVCache).
+        let schedulerState = await scheduler.currentState
+        if schedulerState == "batched" {
+            let cacheLayers = await scheduler.batchCacheLayers
+
+            XCTAssertNotNil(cacheLayers, "Batch cache layers should exist in batched state")
+            if let layers = cacheLayers {
+                // The model returns [KVCacheSimple, RotatingKVCache],
+                // so after upgrade we expect [BatchKVCache, BatchRotatingKVCache].
+                XCTAssertEqual(layers.count, 2, "Should have 2 cache layers matching model")
+
+                // Layer 0: must be BatchKVCache (from KVCacheSimple)
+                XCTAssertTrue(
+                    layers[0] is BatchKVCache,
+                    "Layer 0 should be BatchKVCache, got \(type(of: layers[0]))"
+                )
+
+                // Layer 1: must be BatchRotatingKVCache (from RotatingKVCache)
+                XCTAssertTrue(
+                    layers[1] is BatchRotatingKVCache,
+                    "Layer 1 should be BatchRotatingKVCache (not BatchKVCache), got \(type(of: layers[1]))"
+                )
+
+                // Verify BatchRotatingKVCache properties match the original
+                if let rotatingBatch = layers[1] as? BatchRotatingKVCache {
+                    XCTAssertEqual(
+                        rotatingBatch.maxSize, slidingWindowMaxSize,
+                        "maxSize should match original RotatingKVCache maxSize (\(slidingWindowMaxSize))"
+                    )
+                    XCTAssertEqual(
+                        rotatingBatch.keep, slidingWindowKeep,
+                        "keep should match original RotatingKVCache keep (\(slidingWindowKeep))"
+                    )
+                    XCTAssertNotNil(
+                        rotatingBatch.keys,
+                        "Keys should be non-nil (data was preserved from single path)"
+                    )
+                    XCTAssertNotNil(
+                        rotatingBatch.values,
+                        "Values should be non-nil (data was preserved from single path)"
+                    )
+                    XCTAssertGreaterThan(
+                        rotatingBatch.offset, 0,
+                        "Offset should be > 0 (data was actually migrated, not empty)"
+                    )
+                }
+            }
+        } else {
+            // If scheduler already transitioned past batched (e.g. first
+            // request finished very fast), we can't inspect cache layers.
+            // Still verify both streams produced tokens as a fallback.
+        }
 
         // Consume both streams
         let firstTokenCount = await collectTask.value
@@ -1244,8 +1301,8 @@ class InferenceSchedulerTests: XCTestCase {
 
         // Verify the scheduler transitioned through batch mode.
         // After both streams complete, the scheduler should be idle.
-        let state = await scheduler.currentState
-        XCTAssertEqual(state, "idle", "Scheduler should be idle after both streams complete")
+        let finalState = await scheduler.currentState
+        XCTAssertEqual(finalState, "idle", "Scheduler should be idle after both streams complete")
     }
 
     // MARK: - VAL-FIX-005: Batched .info reports correct promptTokenCount
