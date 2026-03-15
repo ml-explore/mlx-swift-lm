@@ -1303,6 +1303,69 @@ class InferenceSchedulerTests: XCTestCase {
 
     // MARK: - VAL-FIX-004: Single-to-batch upgrade preserves RotatingKVCache state
 
+    /// Tests `BatchRotatingKVCache.fromSingle()` directly at the cache level
+    /// to verify that RotatingKVCache data is correctly converted to batch form.
+    /// This is deterministic — no scheduler timing involved.
+    func testFromSinglePreservesRotatingKVCacheData() throws {
+        try skipIfMetalUnavailable()
+
+        let slidingWindowMaxSize = 64
+        let slidingWindowKeep = 4
+        let H = 4
+        let D = 8
+
+        // 1. Create a RotatingKVCache with known data
+        let rotCache = RotatingKVCache(maxSize: slidingWindowMaxSize, keep: slidingWindowKeep)
+        let seqLen = 5
+        let keys = MLXArray.ones([1, H, seqLen, D]) * 3.0
+        let values = MLXArray.ones([1, H, seqLen, D]) * 7.0
+        _ = rotCache.update(keys: keys, values: values)
+
+        XCTAssertEqual(rotCache.offset, seqLen)
+
+        // 2. Convert via fromSingle()
+        let batchCache = BatchRotatingKVCache.fromSingle(rotCache)
+
+        // 3. Assert the result has correct properties
+        XCTAssertEqual(
+            batchCache.maxSize, slidingWindowMaxSize,
+            "maxSize should match original RotatingKVCache maxSize"
+        )
+        XCTAssertEqual(
+            batchCache.keep, slidingWindowKeep,
+            "keep should match original RotatingKVCache keep"
+        )
+        XCTAssertEqual(batchCache.batchSize, 1, "Should be batch size 1")
+        XCTAssertEqual(
+            batchCache.leftPadding[0].item(Int32.self), 0,
+            "leftPadding should be 0 for fromSingle()"
+        )
+        XCTAssertNotNil(batchCache.keys, "Keys should be non-nil (data preserved)")
+        XCTAssertNotNil(batchCache.values, "Values should be non-nil (data preserved)")
+        XCTAssertGreaterThan(
+            batchCache.offset, 0,
+            "Offset should be > 0 (data was actually migrated, not empty)"
+        )
+
+        // Verify the batch offset matches the original
+        XCTAssertEqual(
+            batchCache.batchOffset[0].item(Int32.self), Int32(seqLen),
+            "batchOffset should match the original cache offset"
+        )
+
+        // Verify data dimensions
+        if let bk = batchCache.keys {
+            XCTAssertEqual(bk.dim(0), 1, "Batch dim should be 1")
+            XCTAssertEqual(bk.dim(1), H, "Head dim should match")
+            XCTAssertEqual(bk.dim(2), seqLen, "Sequence dim should match")
+            XCTAssertEqual(bk.dim(3), D, "Head dim should match")
+        }
+    }
+
+    /// Tests the full upgrade path at the scheduler level, ensuring that
+    /// RotatingKVCache layers are converted to BatchRotatingKVCache (not
+    /// silently replaced with BatchKVCache). No fallback path — the test
+    /// always verifies cache types.
     func testUpgradePreservesRotatingKVCacheState() async throws {
         try skipIfMetalUnavailable()
 
@@ -1316,9 +1379,10 @@ class InferenceSchedulerTests: XCTestCase {
         let config = ModelConfiguration(id: "test-model")
         let scheduler = InferenceScheduler()
 
-        // Submit first request with enough tokens to populate the cache
+        // Submit first request with a large maxTokens to guarantee it's still
+        // running when the second request arrives.
         let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
-        let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
+        let params1 = GenerateParameters(maxTokens: 1000, temperature: 0)
 
         let stream1 = try await scheduler.submit(
             input: input1,
@@ -1357,60 +1421,58 @@ class InferenceSchedulerTests: XCTestCase {
             configuration: config
         )
 
-        // --- Inspect batch cache layers immediately after upgrade ---
-        // At this point the scheduler is in .batched state. Inspect the
-        // batch cache to verify RotatingKVCache layers were preserved as
-        // BatchRotatingKVCache (not silently replaced with BatchKVCache).
+        // --- Inspect batch cache layers after upgrade ---
+        // With maxTokens: 1000, the first request is guaranteed to still be
+        // active, so the scheduler MUST be in batched state.
         let schedulerState = await scheduler.currentState
-        if schedulerState == "batched" {
-            let cacheLayers = await scheduler.batchCacheLayers
+        XCTAssertEqual(
+            schedulerState, "batched",
+            "Scheduler must be in batched state (first request has maxTokens: 1000)"
+        )
 
-            XCTAssertNotNil(cacheLayers, "Batch cache layers should exist in batched state")
-            if let layers = cacheLayers {
-                // The model returns [KVCacheSimple, RotatingKVCache],
-                // so after upgrade we expect [BatchKVCache, BatchRotatingKVCache].
-                XCTAssertEqual(layers.count, 2, "Should have 2 cache layers matching model")
+        let cacheLayers = await scheduler.batchCacheLayers
 
-                // Layer 0: must be BatchKVCache (from KVCacheSimple)
-                XCTAssertTrue(
-                    layers[0] is BatchKVCache,
-                    "Layer 0 should be BatchKVCache, got \(type(of: layers[0]))"
+        XCTAssertNotNil(cacheLayers, "Batch cache layers should exist in batched state")
+        if let layers = cacheLayers {
+            // The model returns [KVCacheSimple, RotatingKVCache],
+            // so after upgrade we expect [BatchKVCache, BatchRotatingKVCache].
+            XCTAssertEqual(layers.count, 2, "Should have 2 cache layers matching model")
+
+            // Layer 0: must be BatchKVCache (from KVCacheSimple)
+            XCTAssertTrue(
+                layers[0] is BatchKVCache,
+                "Layer 0 should be BatchKVCache, got \(type(of: layers[0]))"
+            )
+
+            // Layer 1: must be BatchRotatingKVCache (from RotatingKVCache)
+            XCTAssertTrue(
+                layers[1] is BatchRotatingKVCache,
+                "Layer 1 should be BatchRotatingKVCache (not BatchKVCache), got \(type(of: layers[1]))"
+            )
+
+            // Verify BatchRotatingKVCache properties match the original
+            if let rotatingBatch = layers[1] as? BatchRotatingKVCache {
+                XCTAssertEqual(
+                    rotatingBatch.maxSize, slidingWindowMaxSize,
+                    "maxSize should match original RotatingKVCache maxSize (\(slidingWindowMaxSize))"
                 )
-
-                // Layer 1: must be BatchRotatingKVCache (from RotatingKVCache)
-                XCTAssertTrue(
-                    layers[1] is BatchRotatingKVCache,
-                    "Layer 1 should be BatchRotatingKVCache (not BatchKVCache), got \(type(of: layers[1]))"
+                XCTAssertEqual(
+                    rotatingBatch.keep, slidingWindowKeep,
+                    "keep should match original RotatingKVCache keep (\(slidingWindowKeep))"
                 )
-
-                // Verify BatchRotatingKVCache properties match the original
-                if let rotatingBatch = layers[1] as? BatchRotatingKVCache {
-                    XCTAssertEqual(
-                        rotatingBatch.maxSize, slidingWindowMaxSize,
-                        "maxSize should match original RotatingKVCache maxSize (\(slidingWindowMaxSize))"
-                    )
-                    XCTAssertEqual(
-                        rotatingBatch.keep, slidingWindowKeep,
-                        "keep should match original RotatingKVCache keep (\(slidingWindowKeep))"
-                    )
-                    XCTAssertNotNil(
-                        rotatingBatch.keys,
-                        "Keys should be non-nil (data was preserved from single path)"
-                    )
-                    XCTAssertNotNil(
-                        rotatingBatch.values,
-                        "Values should be non-nil (data was preserved from single path)"
-                    )
-                    XCTAssertGreaterThan(
-                        rotatingBatch.offset, 0,
-                        "Offset should be > 0 (data was actually migrated, not empty)"
-                    )
-                }
+                XCTAssertNotNil(
+                    rotatingBatch.keys,
+                    "Keys should be non-nil (data was preserved from single path)"
+                )
+                XCTAssertNotNil(
+                    rotatingBatch.values,
+                    "Values should be non-nil (data was preserved from single path)"
+                )
+                XCTAssertGreaterThan(
+                    rotatingBatch.offset, 0,
+                    "Offset should be > 0 (data was actually migrated, not empty)"
+                )
             }
-        } else {
-            // If scheduler already transitioned past batched (e.g. first
-            // request finished very fast), we can't inspect cache layers.
-            // Still verify both streams produced tokens as a fallback.
         }
 
         // Consume both streams
