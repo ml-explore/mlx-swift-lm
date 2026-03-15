@@ -1,0 +1,53 @@
+{
+  "milestone": "post-review-followup",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift test --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift build",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift-format lint --configuration .swift-format --recursive Libraries Tests",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "fix-mixed-depth-final-cache-extract-crash",
+      "severity": "non_blocking",
+      "description": "`Tests/MLXLMTests/PromptCacheBatchIntegrationTests.swift:1758` now mutates the observed cache before checking whether a cached prefix was preloaded, which weakens the neighboring `testMockModelObservesCacheState` assertion even though the mixed-depth final-cache regression itself is fixed."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skill:swift-batching-worker",
+      "suggestion": "Warn workers that the Execute wrapper can misclassify commands as interactive `pico` invocations when absolute paths contain the substring `Pico`, and suggest safer alternatives (for example, running scripts via an explicit interpreter or avoiding raw path-only Execute calls).",
+      "evidence": "The review for `fix-batchkvcache-mask-post-update-width` cites a documented procedure deviation during environment initialization because an Execute attempt for `/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.factory/init.sh` was treated as an interactive `pico` invocation solely due to the repo path containing `Pico`.",
+      "isSystemic": true
+    },
+    {
+      "target": "skill:swift-batching-worker",
+      "suggestion": "Add explicit guidance that batching and prompt-cache test doubles must mutate the provided caches during `callAsFunction`, not just return deterministic logits, when the test is meant to exercise cache replay, final-cache extraction, or cache-observation behavior.",
+      "evidence": "The review for `fix-mixed-depth-final-cache-extract-crash` found the feature had to strengthen its mock model to append synthetic KV data so `BatchTokenIterator.next()` exercised real final-cache extraction. The current skill example still shows logits-only mocks, which leaves this requirement implicit and contributed to a documented worker deviation.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
