@@ -1,6 +1,6 @@
 {
   "milestone": "post-review",
-  "round": 1,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -20,51 +20,41 @@
     }
   },
   "reviewsSummary": {
-    "total": 4,
+    "total": 3,
     "passed": 1,
-    "failed": 3,
+    "failed": 2,
     "failedFeatures": [
-      "fix-rotating-cache-batching",
-      "fix-batch-metadata-tracking",
-      "wire-prompt-cache-scheduler-path"
+      "fix-rotating-cache-test-vacuous",
+      "fix-prompt-cache-wiring-completeness"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-rotating-cache-batching",
+      "featureId": "fix-rotating-cache-test-vacuous",
       "severity": "blocking",
-      "description": "`testUpgradePreservesRotatingKVCacheState` is vacuous because `RotatingCacheMockModel.callAsFunction` ignores cache state, so the pre-fix broken upgrade path would still pass and VAL-FIX-004 is not actually verified."
+      "description": "`testUpgradePreservesRotatingKVCacheState` still gates its meaningful cache-preservation assertions behind a transient `scheduler.currentState == \"batched\"` snapshot and otherwise falls back to token-only checks, so the broken pre-fix migration path could still pass."
     },
     {
-      "featureId": "fix-batch-metadata-tracking",
+      "featureId": "fix-prompt-cache-wiring-completeness",
       "severity": "blocking",
-      "description": "Requests that join an existing batch after the initial upgrade still get incorrect `promptTime` metadata because joinExistingBatch stores `promptTokenCount` but not the submit timestamp, so 3rd+ batched requests report near-zero prompt latency."
-    },
-    {
-      "featureId": "wire-prompt-cache-scheduler-path",
-      "severity": "blocking",
-      "description": "`InferenceScheduler.submit()` ignores `cachedKVState` on the idle/single path, so repeated sequential prompts still fully re-prefill instead of reusing cached context."
-    },
-    {
-      "featureId": "wire-prompt-cache-scheduler-path",
-      "severity": "blocking",
-      "description": "`ModelContainer.generate()` fetches from `promptCache` but does not write back final KV state after scheduler-routed generation, leaving normal scheduler usage unable to seed future prompt-cache hits."
-    },
-    {
-      "featureId": "wire-prompt-cache-scheduler-path",
-      "severity": "blocking",
-      "description": "`ChatSession` stores migrated `.kvcache` state under a token sequence that does not match later full-history lookups, so follow-up requests cannot reliably reuse the preserved session cache."
+      "description": "Scheduler prompt-cache write-back still stores finished KV caches under the pre-generation `inputTokens` key even though the stored cache has advanced through generated tokens, so repeated prompts and ChatSession follow-ups can retrieve a cache whose depth does not match the matched trie key."
     }
   ],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "skill:swift-batching-worker",
-      "suggestion": "Strengthen cache-migration testing guidance so workers must either inspect migrated cache contents/types directly or use cache-sensitive mocks when validating cache-preservation fixes.",
-      "evidence": "The review for `fix-rotating-cache-batching` found that `.factory/skills/swift-batching-worker/SKILL.md` only gave generic deterministic mock-model guidance, and the added regression test used a mock model that ignored cache state, making `testUpgradePreservesRotatingKVCacheState` unable to distinguish preserved vs discarded rotating-cache state.",
+      "suggestion": "Strengthen scheduler-regression test guidance so workers must make upgrade/timing assertions deterministic: avoid gating critical checks on transient `InferenceScheduler.currentState` snapshots, and for prompt-time fixes assert meaningful lower bounds or use controlled delays instead of only `promptTime > 0`.",
+      "evidence": "The review for `fix-rotating-cache-test-vacuous` found the new cache assertions only run while a transient `.batched` actor state is still visible, and the review for `fix-joiner-prompt-time-and-metadata` found the new timing regression test only asserts `promptTime > 0` even though the prior bug was specifically near-zero latency for 3rd+ joiners.",
+      "isSystemic": true
+    },
+    {
+      "target": "skill:swift-batching-worker",
+      "suggestion": "Require prompt-cache write-back fixes to prove end-to-end reuse of the just-written cache on a second identical request or ChatSession turn, not merely that an entry was inserted into `LRUPromptCache`.",
+      "evidence": "The review for `fix-prompt-cache-wiring-completeness` found the new tests stop at insertion assertions, which allowed a key/cache-depth mismatch in scheduler write-back to persist even though cache entries were present.",
       "isSystemic": false
     }
   ],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/post-review/scrutiny/synthesis.round1.json"
 }

@@ -1,0 +1,21 @@
+{
+  "featureId": "fix-joiner-prompt-time-and-metadata",
+  "reviewedAt": "2026-03-15T15:50:22.434301Z",
+  "commitId": "e1aa5d0a42abddf43ba5362a88f7b14c8e57313e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the original failed fix (ca1c2628839054dc3b50da34edb926849916f06d) together with the follow-up fix (e1aa5d0a42abddf43ba5362a88f7b14c8e57313e). The combined implementation now preserves promptTokenCount for batched completions, keeps the first request's promptTime through upgrade, and records submit timestamps for joinExistingBatch so 3rd+ requests compute promptTime from submission to first decode token instead of first-decode to first-decode.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker guidance does not currently tell workers to make timing regressions observable with a controlled delay or meaningful lower-bound assertion. The added regression test for this fix only checks `promptTime > 0`, even though the prior blocked bug was specifically about near-zero prompt latency for 3rd+ joiners.",
+      "evidence": "Tests/MLXLMTests/InferenceSchedulerTests.swift:968-1093 adds `testThirdRequestHasAccuratePromptTime`, but its promptTime assertions at 1073-1093 only require values greater than zero. The prior synthesis at .factory/validation/post-review/scrutiny/synthesis.json records the blocked failure as '3rd+ batched requests report near-zero prompt latency.'"
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/post-review/scrutiny/reviews/fix-batch-metadata-tracking.json",
+  "summary": "Pass. The original ca1c262 change already fixed promptTokenCount metadata and first-request upgrade timing; e1aa5d0 closes the remaining gap by storing joiner submit timestamps in `BatchedState.submitTimes` (InferenceScheduler.swift:1062-1065) and using them when lazily initializing joined UIDs in the batch loop (InferenceScheduler.swift:894-901), so completed .info events now retain accurate promptTime and promptTokenCount for 3rd+ joiners as well. No blocking issues found; one shared-state observation notes that timing-regression test guidance could be stronger."
+}
