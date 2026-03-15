@@ -989,7 +989,9 @@ class InferenceSchedulerTests: XCTestCase {
             tokenCount: 7,
             maxTokens: 100,
             sampler: ArgMaxSampler(),
-            processor: nil
+            processor: nil,
+            promptTokenCount: 10,
+            promptTime: 0.05
         )
         flag.depositLiveState(liveState)
 
@@ -1244,5 +1246,186 @@ class InferenceSchedulerTests: XCTestCase {
         // After both streams complete, the scheduler should be idle.
         let state = await scheduler.currentState
         XCTAssertEqual(state, "idle", "Scheduler should be idle after both streams complete")
+    }
+
+    // MARK: - VAL-FIX-005: Batched .info reports correct promptTokenCount
+
+    /// Verifies that .info events for each batched request report the actual
+    /// prompt token count (matching the input token array length), not zero.
+    func testBatchedInfoReportsCorrectPromptTokenCount() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // First request with 3 prompt tokens
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
+        let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Second request with 5 prompt tokens — triggers batch upgrade
+        let input2 = LMInput(
+            tokens: MLXArray([Int32(10), Int32(11), Int32(12), Int32(13), Int32(14)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        let currentState = await scheduler.currentState
+        // If upgrade succeeded, we're in batched mode. If the first request
+        // finished before the handshake, fallback to single is also OK —
+        // but we primarily test the batched path.
+        guard currentState == "batched" else {
+            // Fallback: first request already completed before upgrade.
+            // Consume streams and skip batch-specific assertions.
+            for await _ in stream1 {}
+            for await _ in stream2 {}
+            return
+        }
+
+        // Collect .info events from both streams
+        typealias InfoResult = GenerateCompletionInfo?
+
+        var info1: InfoResult = nil
+        var info2: InfoResult = nil
+
+        await withTaskGroup(of: (Int, InfoResult).self) { group in
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream1 {
+                    if let i = gen.info { info = i }
+                }
+                return (1, info)
+            }
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream2 {
+                    if let i = gen.info { info = i }
+                }
+                return (2, info)
+            }
+
+            for await (id, result) in group {
+                if id == 1 { info1 = result } else { info2 = result }
+            }
+        }
+
+        // First request's .info must have promptTokenCount == 3 (its input token count)
+        XCTAssertNotNil(info1, "First request should receive .info")
+        if let info = info1 {
+            XCTAssertEqual(
+                info.promptTokenCount, 3,
+                "First request's .info promptTokenCount should match input token count (3), got \(info.promptTokenCount)"
+            )
+        }
+
+        // Second request's .info must have promptTokenCount == 5 (its input token count)
+        XCTAssertNotNil(info2, "Second request should receive .info")
+        if let info = info2 {
+            XCTAssertEqual(
+                info.promptTokenCount, 5,
+                "Second request's .info promptTokenCount should match input token count (5), got \(info.promptTokenCount)"
+            )
+        }
+    }
+
+    // MARK: - VAL-FIX-006: Prompt timing preserved across single-to-batch upgrade
+
+    /// Verifies that the first request's prompt processing time is preserved
+    /// through the single-to-batch upgrade and reported in its .info event
+    /// (not reset to zero).
+    func testFirstRequestPromptTimePreservedAfterUpgrade() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // First request with enough tokens to generate for a while
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
+        let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Small delay to let the first request produce a token and measure promptTime
+        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+
+        // Second request triggers upgrade
+        let input2 = LMInput(tokens: MLXArray([Int32(10), Int32(11)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        let currentState = await scheduler.currentState
+        guard currentState == "batched" else {
+            // Fallback: first request already completed before upgrade.
+            for await _ in stream1 {}
+            for await _ in stream2 {}
+            return
+        }
+
+        // Collect .info from the first request
+        typealias InfoResult = GenerateCompletionInfo?
+
+        var firstInfo: InfoResult = nil
+
+        await withTaskGroup(of: (Int, InfoResult).self) { group in
+            group.addTask {
+                var info: GenerateCompletionInfo?
+                for await gen in stream1 {
+                    if let i = gen.info { info = i }
+                }
+                return (1, info)
+            }
+            group.addTask {
+                for await _ in stream2 {}
+                return (2, nil)
+            }
+
+            for await (id, result) in group {
+                if id == 1 { firstInfo = result }
+            }
+        }
+
+        // The first request's promptTime must be > 0 — it was measured on the
+        // single path before upgrade and should be preserved through the handoff.
+        XCTAssertNotNil(firstInfo, "First request should receive .info after upgrade")
+        if let info = firstInfo {
+            XCTAssertGreaterThan(
+                info.promptTime, 0,
+                "First request's promptTime should be > 0 after upgrade, got \(info.promptTime)"
+            )
+        }
     }
 }

@@ -78,6 +78,12 @@ public actor InferenceScheduler {
 
         /// The logit processor.
         let processor: LogitProcessor?
+
+        /// The number of tokens in the original prompt input.
+        let promptTokenCount: Int
+
+        /// The time taken for prompt processing (prefill) on the single path.
+        let promptTime: TimeInterval
     }
 
     /// Shared mutable flag used to signal that a single request should be
@@ -207,6 +213,9 @@ public actor InferenceScheduler {
         /// Shared flag signaling that this request was upgraded to batch.
         /// When set, the single-request task must not finish the continuation.
         let upgradeFlag: UpgradeFlag
+
+        /// The number of tokens in the original prompt input.
+        let promptTokenCount: Int
     }
 
     /// State for batched generation.
@@ -219,6 +228,10 @@ public actor InferenceScheduler {
 
         /// Mapping from UID -> AsyncStream continuation for routing tokens.
         var continuations: [Int: AsyncStream<Generation>.Continuation]
+
+        /// Mapping from UID -> prompt token count for each request.
+        /// Used by the batch loop to report correct promptTokenCount in .info.
+        var promptTokenCounts: [Int: Int]
 
         /// The model being used.
         let model: any LanguageModel
@@ -479,7 +492,9 @@ public actor InferenceScheduler {
                         tokenCount: iter.tokenCount,
                         maxTokens: iter.maxTokens,
                         sampler: iter.sampler,
-                        processor: iter.processor
+                        processor: iter.processor,
+                        promptTokenCount: promptTokenCount,
+                        promptTime: promptTime + iter.promptPrefillTime
                     )
                     upgradeFlag.depositLiveState(liveState)
                     // The batch loop now owns the continuation. Exit without
@@ -556,7 +571,8 @@ public actor InferenceScheduler {
                 tokenizer: tokenizer,
                 configuration: configuration,
                 continuation: continuation,
-                upgradeFlag: upgradeFlag
+                upgradeFlag: upgradeFlag,
+                promptTokenCount: promptTokenCount
             ))
 
         return stream
@@ -682,9 +698,9 @@ public actor InferenceScheduler {
         if firstMaxTokens <= 0 {
             let firstContinuation = existingSingle.continuation
             let info = GenerateCompletionInfo(
-                promptTokenCount: 0,
+                promptTokenCount: liveState.promptTokenCount,
                 generationTokenCount: liveState.tokenCount,
-                promptTime: 0,
+                promptTime: liveState.promptTime,
                 generationTime: 0,
                 stopReason: .length
             )
@@ -755,6 +771,12 @@ public actor InferenceScheduler {
             }
         }
 
+        // Capture per-UID prompt token counts and first request's prompt time
+        // for use inside the batch loop Task.
+        let firstPromptTokenCount = liveState.promptTokenCount
+        let firstPromptTime = liveState.promptTime
+        let secondPromptTokenCount = newInput.text.tokens.size
+
         // Start the batch generation loop
         let task = Task { [weak self] in
             var detokenizers: [Int: NaiveStreamingDetokenizer] = [:]
@@ -763,6 +785,7 @@ public actor InferenceScheduler {
 
             var starts: [Int: Date] = [:]
             var promptTimes: [Int: TimeInterval] = [:]
+            var promptTokenCounts: [Int: Int] = [:]
             var tokenCounts: [Int: Int] = [:]
 
             let now = Date.timeIntervalSinceReferenceDate
@@ -773,6 +796,14 @@ public actor InferenceScheduler {
                 promptTimes[uid] = 0
                 tokenCounts[uid] = 0
             }
+
+            // Store per-UID prompt token counts.
+            promptTokenCounts[firstUID] = firstPromptTokenCount
+            promptTokenCounts[secondUID] = secondPromptTokenCount
+
+            // Preserve the first request's prompt time from the single path.
+            // It was already measured before the upgrade — don't reset to 0.
+            promptTimes[firstUID] = firstPromptTime
 
             while let responses = batchIterator.next(), !responses.isEmpty {
                 if Task.isCancelled { break }
@@ -790,6 +821,11 @@ public actor InferenceScheduler {
                         starts[uid] = Date()
                         promptTimes[uid] = 0
                         tokenCounts[uid] = 0
+                        // Fetch the prompt token count stored by joinExistingBatch.
+                        if promptTokenCounts[uid] == nil {
+                            promptTokenCounts[uid] =
+                                await self?.getPromptTokenCount(uid: uid) ?? 0
+                        }
                     }
 
                     let token = response.token
@@ -836,7 +872,7 @@ public actor InferenceScheduler {
                             Date.timeIntervalSinceReferenceDate
                             - (starts[uid]?.timeIntervalSinceReferenceDate ?? now)
                         let info = GenerateCompletionInfo(
-                            promptTokenCount: 0,
+                            promptTokenCount: promptTokenCounts[uid] ?? 0,
                             generationTokenCount: tokenCounts[uid] ?? 0,
                             promptTime: promptTimes[uid] ?? 0,
                             generationTime: generateTime,
@@ -868,6 +904,10 @@ public actor InferenceScheduler {
                 batchIterator: batchIterator,
                 task: task,
                 continuations: continuations,
+                promptTokenCounts: [
+                    firstUID: firstPromptTokenCount,
+                    secondUID: secondPromptTokenCount,
+                ],
                 model: model,
                 tokenizer: tokenizer,
                 configuration: configuration,
@@ -910,6 +950,7 @@ public actor InferenceScheduler {
         }
 
         batchedState.continuations[uid] = continuation
+        batchedState.promptTokenCounts[uid] = input.text.tokens.size
 
         // Update state
         state = .batched(batchedState)
@@ -947,6 +988,14 @@ public actor InferenceScheduler {
             batchedState.continuations.removeValue(forKey: uid)
             state = .batched(batchedState)
         }
+    }
+
+    /// Get the prompt token count for a UID from the batched state.
+    private func getPromptTokenCount(uid: Int) -> Int? {
+        if case .batched(let batchedState) = state {
+            return batchedState.promptTokenCounts[uid]
+        }
+        return nil
     }
 
     /// Finish all remaining continuations (e.g., on batch loop exit).
