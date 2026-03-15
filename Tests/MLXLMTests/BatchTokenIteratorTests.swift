@@ -78,6 +78,57 @@ private class MockBatchLanguageModel: Module, LanguageModel {
     }
 }
 
+/// Mock model returning a mix of RotatingKVCache and KVCacheSimple layers,
+/// simulating sliding-window models like Gemma3 or Mistral3.
+private class MixedCacheMockModel: Module, LanguageModel {
+    let vocabSize: Int
+    let slidingWindowMaxSize: Int
+    let slidingWindowKeep: Int
+
+    init(vocabSize: Int = 32, slidingWindowMaxSize: Int = 64, slidingWindowKeep: Int = 4) {
+        self.vocabSize = vocabSize
+        self.slidingWindowMaxSize = slidingWindowMaxSize
+        self.slidingWindowKeep = slidingWindowKeep
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let tokens = input.tokens
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+        var logitsFlat = [Float]()
+        for b in 0 ..< B {
+            for s in 0 ..< S {
+                let lastToken = tokens[b, s].item(Int32.self)
+                let predictedToken = (Int(lastToken) + 1) % vocabSize
+                var row = [Float](repeating: -100.0, count: vocabSize)
+                row[predictedToken] = 0.0
+                logitsFlat.append(contentsOf: row)
+            }
+        }
+        let logits = MLXArray(logitsFlat, [B, S, vocabSize])
+        return LMOutput(logits: logits)
+    }
+
+    /// Returns 3 layers: [KVCacheSimple, RotatingKVCache, KVCacheSimple]
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        [
+            KVCacheSimple(),
+            RotatingKVCache(maxSize: slidingWindowMaxSize, keep: slidingWindowKeep),
+            KVCacheSimple(),
+        ]
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+}
+
 // MARK: - Tests
 
 class BatchTokenIteratorTests: XCTestCase {
@@ -1299,5 +1350,61 @@ class BatchSamplingAndCorrectnessTests: XCTestCase {
             "With strong repetition penalty, tokens should diversify if didSample is working. "
                 + "Got all-same tokens: \(tokens)"
         )
+    }
+
+    // MARK: - VAL-FIX-003: makeBatchCache preserves RotatingKVCache type
+
+    func testMakeBatchCachePreservesRotatingKVCacheType() throws {
+        try skipIfMetalUnavailable()
+
+        // Use a model that returns mixed cache types:
+        // [KVCacheSimple, RotatingKVCache, KVCacheSimple]
+        let model = MixedCacheMockModel(
+            slidingWindowMaxSize: 64,
+            slidingWindowKeep: 4
+        )
+
+        let iterator = BatchTokenIterator(
+            model: model,
+            completionBatchSize: 4,
+            prefillBatchSize: 4
+        )
+
+        // Insert a prompt to trigger prefill which calls makeBatchCache internally.
+        _ = iterator.insert(prompts: [[1, 2, 3]], maxTokens: [2])
+
+        // Advance one step to trigger prefill and cache creation.
+        let responses = iterator.next()
+        XCTAssertNotNil(responses, "Should produce responses after prefill")
+
+        // Access the internal batch cache via the active batch.
+        // The batch's cache should have 3 layers matching the model's template:
+        // layer 0: BatchKVCache (from KVCacheSimple template)
+        // layer 1: BatchRotatingKVCache (from RotatingKVCache template)
+        // layer 2: BatchKVCache (from KVCacheSimple template)
+        let batchCache = iterator.activeBatch?.cache
+        XCTAssertNotNil(batchCache, "Active batch should have a cache")
+        XCTAssertEqual(batchCache?.count, 3, "Should have 3 cache layers")
+
+        if let cache = batchCache {
+            XCTAssertTrue(
+                cache[0] is BatchKVCache,
+                "Layer 0 should be BatchKVCache, got \(type(of: cache[0]))"
+            )
+            XCTAssertTrue(
+                cache[1] is BatchRotatingKVCache,
+                "Layer 1 should be BatchRotatingKVCache, got \(type(of: cache[1]))"
+            )
+            XCTAssertTrue(
+                cache[2] is BatchKVCache,
+                "Layer 2 should be BatchKVCache, got \(type(of: cache[2]))"
+            )
+
+            // Verify the rotating cache has correct maxSize and keep
+            if let rotatingBatch = cache[1] as? BatchRotatingKVCache {
+                XCTAssertEqual(rotatingBatch.maxSize, 64, "maxSize should match template")
+                XCTAssertEqual(rotatingBatch.keep, 4, "keep should match template")
+            }
+        }
     }
 }

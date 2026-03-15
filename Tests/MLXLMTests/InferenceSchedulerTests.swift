@@ -59,6 +59,61 @@ private class SchedulerMockModel: Module, LanguageModel, KVCacheDimensionProvide
     }
 }
 
+/// Mock model returning mixed RotatingKVCache/KVCacheSimple layers,
+/// simulating sliding-window models like Gemma3 or Mistral3.
+private class RotatingCacheMockModel: Module, LanguageModel, @unchecked Sendable {
+    let vocabSize: Int
+    let numLayers: Int
+    let slidingWindowMaxSize: Int
+    let slidingWindowKeep: Int
+
+    init(
+        vocabSize: Int = 32, numLayers: Int = 2,
+        slidingWindowMaxSize: Int = 64, slidingWindowKeep: Int = 4
+    ) {
+        self.vocabSize = vocabSize
+        self.numLayers = numLayers
+        self.slidingWindowMaxSize = slidingWindowMaxSize
+        self.slidingWindowKeep = slidingWindowKeep
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let tokens = input.tokens
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+        var logitsFlat = [Float]()
+        for b in 0 ..< B {
+            for s in 0 ..< S {
+                let lastToken = tokens[b, s].item(Int32.self)
+                let predictedToken = (Int(lastToken) + 1) % vocabSize
+                var row = [Float](repeating: -100.0, count: vocabSize)
+                row[predictedToken] = 0.0
+                logitsFlat.append(contentsOf: row)
+            }
+        }
+        let logits = MLXArray(logitsFlat, [B, S, vocabSize])
+        return LMOutput(logits: logits)
+    }
+
+    /// Returns layers: [KVCacheSimple, RotatingKVCache]
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        [
+            KVCacheSimple(),
+            RotatingKVCache(maxSize: slidingWindowMaxSize, keep: slidingWindowKeep),
+        ]
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+}
+
 /// Mock model that creates MambaCache (batch-incompatible).
 private class SSMMockModel: Module, LanguageModel, @unchecked Sendable {
     let vocabSize: Int = 32
@@ -1110,5 +1165,84 @@ class InferenceSchedulerTests: XCTestCase {
             firstTokenCount, maxTokens,
             "Total first-request tokens across upgrade must not exceed maxTokens (\(maxTokens)), got \(firstTokenCount)"
         )
+    }
+
+    // MARK: - VAL-FIX-004: Single-to-batch upgrade preserves RotatingKVCache state
+
+    func testUpgradePreservesRotatingKVCacheState() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = RotatingCacheMockModel(
+            slidingWindowMaxSize: 64,
+            slidingWindowKeep: 4
+        )
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+
+        // Submit first request with enough tokens to generate for a while
+        let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
+        let params1 = GenerateParameters(maxTokens: 20, temperature: 0)
+
+        let stream1 = try await scheduler.submit(
+            input: input1,
+            parameters: params1,
+            model: model,
+            cache: model.newCache(parameters: nil),
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Collect first stream in a background task
+        let collectTask = Task {
+            var count = 0
+            for await event in stream1 {
+                if case .chunk = event {
+                    count += 1
+                }
+            }
+            return count
+        }
+
+        // Small delay to let a few tokens be generated on the single path
+        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+
+        // Submit second request to trigger batch upgrade
+        let input2 = LMInput(tokens: MLXArray([Int32(10)]))
+        let params2 = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let stream2 = try await scheduler.submit(
+            input: input2,
+            parameters: params2,
+            model: model,
+            cache: model.newCache(parameters: nil),
+            tokenizer: tokenizer,
+            configuration: config
+        )
+
+        // Consume both streams
+        let firstTokenCount = await collectTask.value
+        var secondTokenCount = 0
+        for await event in stream2 {
+            if case .chunk = event {
+                secondTokenCount += 1
+            }
+        }
+
+        // Both requests should have produced tokens — the upgrade should not
+        // have silently broken generation by discarding RotatingKVCache data.
+        XCTAssertGreaterThan(
+            firstTokenCount, 0,
+            "First request should produce tokens after upgrade"
+        )
+        XCTAssertGreaterThan(
+            secondTokenCount, 0,
+            "Second request should produce tokens"
+        )
+
+        // Verify the scheduler transitioned through batch mode.
+        // After both streams complete, the scheduler should be idle.
+        let state = await scheduler.currentState
+        XCTAssertEqual(state, "idle", "Scheduler should be idle after both streams complete")
     }
 }

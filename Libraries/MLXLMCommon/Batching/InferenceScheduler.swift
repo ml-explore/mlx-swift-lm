@@ -655,10 +655,14 @@ public actor InferenceScheduler {
             defaultSampler: ArgMaxSampler()
         )
 
-        // Convert each layer's live KVCacheSimple into a batch-1 BatchKVCache.
+        // Convert each layer's live cache into the appropriate batch cache type.
+        // RotatingKVCache must be checked BEFORE KVCacheSimple since both inherit
+        // from BaseKVCache, and we need to preserve sliding-window semantics.
         var batchCaches = [KVCache]()
         for layerCache in liveState.cache {
-            if let simpleCache = layerCache as? KVCacheSimple {
+            if let rotatingCache = layerCache as? RotatingKVCache {
+                batchCaches.append(BatchRotatingKVCache.fromSingle(rotatingCache))
+            } else if let simpleCache = layerCache as? KVCacheSimple {
                 batchCaches.append(BatchKVCache.fromSingle(simpleCache))
             } else {
                 batchCaches.append(BatchKVCache(leftPadding: [0]))

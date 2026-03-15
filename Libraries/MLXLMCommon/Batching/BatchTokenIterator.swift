@@ -997,10 +997,24 @@ public class BatchTokenIterator: @unchecked Sendable {
     }
 
     /// Create a per-layer batch KV cache with the given left-padding.
+    ///
+    /// Inspects the template cache from `model.newCache(parameters: nil)` to determine
+    /// whether each layer uses a standard or rotating (sliding-window) cache, and creates
+    /// the corresponding batch cache type. This ensures models with sliding-window
+    /// attention (Gemma3, Mistral3, etc.) get `BatchRotatingKVCache` for the appropriate
+    /// layers instead of silently losing window semantics.
     private func makeBatchCache(leftPadding: [Int]) -> [KVCache] {
         let templateCache = model.newCache(parameters: nil)
-        return templateCache.map { _ in
-            BatchKVCache(leftPadding: leftPadding)
+        return templateCache.map { layer in
+            if let rotatingCache = layer as? RotatingKVCache {
+                return BatchRotatingKVCache(
+                    maxSize: rotatingCache.maxSize ?? 0,
+                    leftPadding: leftPadding,
+                    keep: rotatingCache.keep
+                )
+            } else {
+                return BatchKVCache(leftPadding: leftPadding)
+            }
         }
     }
 
