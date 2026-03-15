@@ -493,6 +493,7 @@ public actor InferenceScheduler {
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
             var tokenCount = 0
+            var generatedTokenIds = [Int]()
             var stopReason: GenerateStopReason?
 
             while let token = iter.next() {
@@ -513,6 +514,7 @@ public actor InferenceScheduler {
                 }
 
                 tokenCount += 1
+                generatedTokenIds.append(token)
 
                 // Detokenize and emit the token BEFORE checking the upgrade
                 // flag. This ensures the boundary token produced by this
@@ -599,12 +601,17 @@ public actor InferenceScheduler {
             _ = continuation.yield(.info(info))
 
             // Write back final KV cache to prompt cache for future reuse.
+            // Use the full token sequence (prompt + generated) as the key so
+            // the trie key depth matches the actual KV cache depth. This
+            // matches upstream mlx-lm behavior where the prompt cache stores
+            // the full context so prefix matches work correctly.
             if let promptCache, let modelName = promptCacheModelName,
                 let tokens = inputTokens, !tokens.isEmpty
             {
+                let fullTokenSequence = tokens + generatedTokenIds
                 promptCache.insertCache(
                     model: modelName,
-                    tokens: tokens,
+                    tokens: fullTokenSequence,
                     promptCache: iter.cache
                 )
             }
@@ -857,6 +864,7 @@ public actor InferenceScheduler {
             var promptTimes: [Int: TimeInterval] = [:]
             var promptTokenCounts: [Int: Int] = [:]
             var tokenCounts: [Int: Int] = [:]
+            var generatedTokenIds: [Int: [Int]] = [:]
 
             let now = Date.timeIntervalSinceReferenceDate
             for uid in [firstUID, secondUID] {
@@ -920,6 +928,7 @@ public actor InferenceScheduler {
                         // Don't emit stop tokens as chunks
                     } else {
                         tokenCounts[uid, default: 0] += 1
+                        generatedTokenIds[uid, default: []].append(token)
 
                         // Detokenize and emit
                         detokenizers[uid]?.append(token: token)
@@ -956,19 +965,22 @@ public actor InferenceScheduler {
                         cont.finish()
 
                         // Write back final KV cache for this request to prompt cache.
-                        // The cache was extracted by BatchTokenIterator.next() before
-                        // the batch was filtered, so it's always available for finished
-                        // sequences regardless of post-filter batch state.
+                        // Use the full token sequence (prompt + generated) as the key
+                        // so the trie key depth matches the actual KV cache depth.
+                        // This matches upstream mlx-lm behavior where the prompt cache
+                        // stores the full context so prefix matches work correctly.
                         if let finalCache = response.finalCache,
-                            let tokens = await self?.getInputTokens(uid: uid),
-                            !tokens.isEmpty
+                            let inputToks = await self?.getInputTokens(uid: uid),
+                            !inputToks.isEmpty
                         {
                             let (pCache, modelName) =
                                 await self?.getPromptCacheInfo() ?? (nil, nil)
                             if let pCache, let modelName {
+                                let fullTokenSequence =
+                                    inputToks + (generatedTokenIds[uid] ?? [])
                                 pCache.insertCache(
                                     model: modelName,
-                                    tokens: tokens,
+                                    tokens: fullTokenSequence,
                                     promptCache: finalCache
                                 )
                             }

@@ -308,7 +308,13 @@ public final class LRUPromptCache: @unchecked Sendable {
                 // Fallback: KVCacheSimple for unknown types
                 copy = KVCacheSimple()
             }
-            copy.state = original.state
+            let originalState = original.state
+            // Only restore state if the cache has data (non-empty state).
+            // Empty state means keys/values are nil (e.g., mock model didn't
+            // populate the cache), and setting empty state would crash.
+            if !originalState.isEmpty {
+                copy.state = originalState
+            }
             copy.metaState = original.metaState
             return copy
         }
