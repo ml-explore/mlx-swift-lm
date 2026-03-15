@@ -1,0 +1,34 @@
+{
+  "featureId": "fix-prompt-cache-writeback-key",
+  "reviewedAt": "2026-03-15T17:05:00Z",
+  "commitId": "85fd40616abcdd8b56b18c91dc8d97405bb86f2c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the original failed feature (`dbe2476c1cc874f1221845e815af065584b7938c`) together with the follow-up fix (`85fd40616abcdd8b56b18c91dc8d97405bb86f2c`). The new commit does correct pure single-path write-back and pure batch/new-request write-back to use `prompt + generated` keys, and the `LRUPromptCache` deep-copy guard is sound. However, the scheduler still loses tokens already emitted by the first request before a single→batch upgrade, so the upgraded request's final cache can still be stored under a key shorter than the KV depth. The new regression tests also miss that upgraded-first-request path, so the prior blocking key-depth problem is not fully resolved.",
+    "issues": [
+      {
+        "file": "Libraries/MLXLMCommon/Batching/InferenceScheduler.swift",
+        "line": 1011,
+        "severity": "blocking",
+        "description": "The upgraded first request still writes back under an incomplete token key. On the single path, emitted tokens are tracked only in the local `generatedTokenIds` array (`InferenceScheduler.swift:496-517`), but when an upgrade is requested the task deposits `liveState` and returns without preserving that token history (`InferenceScheduler.swift:541-556`). The batch loop then starts a fresh per-UID `generatedTokenIds` dictionary (`InferenceScheduler.swift:867`) and writes the first request's cache back using `inputToks + generatedTokenIds[uid]` (`InferenceScheduler.swift:972-985`), while `batchInputTokens[firstUID]` is seeded only from the original prompt tokens (`InferenceScheduler.swift:1010-1012`). Because `liveState.cache` already contains the tokens emitted before handoff, the final cache for the upgraded first request is still deeper than its trie key. That leaves the original prompt-cache key/depth mismatch unresolved for the core single→batch upgrade path." 
+      },
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 1882,
+        "severity": "non_blocking",
+        "description": "The new regression coverage does not exercise the failing upgraded-first-request scenario. `testBatchPathWriteBackToPromptCache` only asserts the second request's cache entry and exits early if the scheduler never reaches batched state (`InferenceSchedulerTests.swift:1914-1919, 1931-1941`). `testSamePromptTwiceGetsCacheHit` never submits a second request through the scheduler; it directly calls `promptCache.fetchNearestCache(...)` after the first run (`InferenceSchedulerTests.swift:2095-2105`). As a result, the tests do not prove that the first request's cache key remains correct across the single→batch handoff that caused the original review failure." 
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker guidance does not explicitly require prompt-cache write-back fixes to cover the first request across a single→batch upgrade. That gap allowed the worker to add tests for pure single path, direct cache lookup, and the second batched request while missing the upgraded-first-request key path.",
+      "evidence": "`.factory/skills/swift-batching-worker/SKILL.md` asks for deterministic regression tests and manual inspection, but it does not call out upgrade-handoff cache-key preservation. The resulting tests in `Tests/MLXLMTests/InferenceSchedulerTests.swift:1882-1941` and `2057-2105` stop short of asserting the first request's write-back key after upgrade."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/post-review/scrutiny/reviews/fix-prompt-cache-wiring-completeness.json",
+  "summary": "Fail. The fix corrects prompt-cache write-back for straight single and batch flows, but it still drops the first request's pre-upgrade generated tokens when the scheduler upgrades from single to batched mode. The added tests miss that path, so the prior blocking key/depth mismatch is not fully resolved."
+}

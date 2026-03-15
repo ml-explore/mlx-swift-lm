@@ -1,6 +1,6 @@
 {
   "milestone": "post-review",
-  "round": 2,
+  "round": 3,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -21,40 +21,52 @@
   },
   "reviewsSummary": {
     "total": 3,
-    "passed": 1,
-    "failed": 2,
+    "passed": 0,
+    "failed": 3,
     "failedFeatures": [
-      "fix-rotating-cache-test-vacuous",
-      "fix-prompt-cache-wiring-completeness"
+      "fix-rotating-cache-test-deterministic",
+      "fix-rotating-cache-test-flaky-timing",
+      "fix-prompt-cache-writeback-key"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-rotating-cache-test-vacuous",
+      "featureId": "fix-rotating-cache-test-deterministic",
       "severity": "blocking",
-      "description": "`testUpgradePreservesRotatingKVCacheState` still gates its meaningful cache-preservation assertions behind a transient `scheduler.currentState == \"batched\"` snapshot and otherwise falls back to token-only checks, so the broken pre-fix migration path could still pass."
+      "description": "The rereview still does not provide a deterministic, runtime-sound scheduler regression for rotating-cache migration: it relies on a fixed 50ms sleep and makes upgraded-cache assertions through `RotatingCacheMockModel`, whose `callAsFunction` never mutates cache state."
     },
     {
-      "featureId": "fix-prompt-cache-wiring-completeness",
+      "featureId": "fix-rotating-cache-test-flaky-timing",
       "severity": "blocking",
-      "description": "Scheduler prompt-cache write-back still stores finished KV caches under the pre-generation `inputTokens` key even though the stored cache has advanced through generated tokens, so repeated prompts and ChatSession follow-ups can retrieve a cache whose depth does not match the matched trie key."
+      "description": "The timing follow-up remains racy because the first request can still hit EOS before upgrade; with `TestTokenizer` treating token `0` as EOS/unknown and the mock model wrapping modulo 32, `maxTokens: 1000` is not a reliable liveness guarantee for exercising the upgraded batch path."
+    },
+    {
+      "featureId": "fix-prompt-cache-writeback-key",
+      "severity": "blocking",
+      "description": "Prompt-cache write-back still loses the upgraded first request's pre-handoff generated tokens, so the final trie key can remain shorter than the stored KV depth after a single→batch upgrade."
     }
   ],
-  "appliedUpdates": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Documented the scheduler-test liveness caveat in `.factory/library/user-testing.md`: `TestTokenizer` treats token `0` as EOS/unknown and common mock models wrap modulo 32, so `maxTokens` alone does not guarantee a request stays active long enough to trigger upgrade.",
+      "sourceFeature": "fix-rotating-cache-test-flaky-timing"
+    }
+  ],
   "suggestedGuidanceUpdates": [
     {
       "target": "skill:swift-batching-worker",
-      "suggestion": "Strengthen scheduler-regression test guidance so workers must make upgrade/timing assertions deterministic: avoid gating critical checks on transient `InferenceScheduler.currentState` snapshots, and for prompt-time fixes assert meaningful lower bounds or use controlled delays instead of only `promptTime > 0`.",
-      "evidence": "The review for `fix-rotating-cache-test-vacuous` found the new cache assertions only run while a transient `.batched` actor state is still visible, and the review for `fix-joiner-prompt-time-and-metadata` found the new timing regression test only asserts `promptTime > 0` even though the prior bug was specifically near-zero latency for 3rd+ joiners.",
+      "suggestion": "For MLX-backed scheduler/runtime fixes, require the feature-specified `xcodebuild` validation (or `.factory/services.yaml` runtime command) to be run and reported instead of relying on `swift build`/`swift test` alone.",
+      "evidence": "The review for `fix-rotating-cache-test-deterministic` found the worker handoff reported only `swift build`, `swift build --build-tests`, and `swift test --filter MLXLMTests` even though the feature verification in `features.json` required targeted `xcodebuild` coverage and `.factory/library/mlx-validation.md` already states SwiftPM runs are only baseline evidence for MLX-backed scheduler behavior.",
       "isSystemic": true
     },
     {
       "target": "skill:swift-batching-worker",
-      "suggestion": "Require prompt-cache write-back fixes to prove end-to-end reuse of the just-written cache on a second identical request or ChatSession turn, not merely that an entry was inserted into `LRUPromptCache`.",
-      "evidence": "The review for `fix-prompt-cache-wiring-completeness` found the new tests stop at insertion assertions, which allowed a key/cache-depth mismatch in scheduler write-back to persist even though cache entries were present.",
+      "suggestion": "Require prompt-cache write-back fixes to cover the upgraded first request across single→batch handoff, including preservation of pre-upgrade generated tokens in the final cache key, rather than only pure single-path or later-joiner scenarios.",
+      "evidence": "The review for `fix-prompt-cache-writeback-key` found the new tests in `InferenceSchedulerTests.swift` only covered pure single-path write-back, direct prompt-cache lookup, and the second batched request, leaving the first upgraded request's write-back key unverified while the original key/depth mismatch remained in `InferenceScheduler.submit()`/batch completion.",
       "isSystemic": false
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/post-review/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/post-review/scrutiny/synthesis.round2.json"
 }

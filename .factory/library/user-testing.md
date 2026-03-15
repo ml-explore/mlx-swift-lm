@@ -32,6 +32,7 @@ Primary testing tool: `swift test` (XCTest framework)
 - Mock models return deterministic outputs for verifiable behavior
 - KV cache tests use synthetic tensors with known values
 - Scheduler tests use MLX-backed mock models and the real scheduler path, with `skipIfMetalUnavailable()` guarding the MLX assertions that SwiftPM skips when the Metal library is unavailable
+- Scheduler-test liveness caveat: `Tests/MLXLMTests/TestTokenizer.swift` treats token `0` as EOS/unknown, and common scheduler mocks such as `RotatingCacheMockModel` advance tokens modulo 32. A high `maxTokens` value alone therefore does **not** guarantee a request stays active long enough to trigger single→batch upgrade; use explicit synchronization or a mock token schedule that cannot wrap to EOS during the setup window.
 - Existing tests must continue passing (regression safety)
 - `swift test` is still useful for fast smoke checks, but MLX-dependent tests may all skip under SPM because `MLXMetalGuard` detects the missing Metal library.
 - For milestone `batch-kv-cache`, direct user-validation evidence came from `xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MLXLMTests/<TestClass>`.

@@ -1,0 +1,34 @@
+{
+  "featureId": "fix-rotating-cache-test-deterministic",
+  "reviewedAt": "2026-03-15T16:33:16.701067Z",
+  "commitId": "a64c09a4dd0a5ca02aaf4c9fc5bf2736d27d18ce",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The rerun improves the original `ce3d80b` attempt by removing the explicit token-only fallback and by adding a direct `BatchRotatingKVCache.fromSingle()` unit test. But the scheduler-level regression is still not deterministic and still does not reliably prove real rotating-cache migration: it keeps a fixed `Task.sleep(50ms)` timing dependency, and its new cache-content assertions are made against `RotatingCacheMockModel`, whose `callAsFunction` never mutates cache state.",
+    "issues": [
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 1407,
+        "severity": "blocking",
+        "description": "`testUpgradePreservesRotatingKVCacheState` is still timing-based. The fix removes the old `if schedulerState == \"batched\"` fallback from `ce3d80b`, but it still relies on `Task.sleep(nanoseconds: 50_000_000)` at `Tests/MLXLMTests/InferenceSchedulerTests.swift:1407-1409` to hope the first request has populated cache state before the upgrade. The feature description explicitly called for a synchronization mechanism instead of transient timing. A fixed sleep is not deterministic across machines or load conditions, so the full upgrade-path regression remains flaky rather than guaranteed." 
+      },
+      {
+        "file": "Tests/MLXLMTests/InferenceSchedulerTests.swift",
+        "line": 1463,
+        "severity": "blocking",
+        "description": "The new scheduler-level cache-content assertions still do not give a sound runtime proof of rotating-cache migration. `testUpgradePreservesRotatingKVCacheState` asserts that `rotatingBatch.keys`, `rotatingBatch.values`, and `rotatingBatch.offset` are populated (`Tests/MLXLMTests/InferenceSchedulerTests.swift:1463-1473`), but the same file's `RotatingCacheMockModel.callAsFunction` only computes logits and never writes to the supplied caches (`Tests/MLXLMTests/InferenceSchedulerTests.swift:83-100`). So this test either fails under real MLX execution or proves the wrong thing. The added direct `testFromSinglePreservesRotatingKVCacheData` helps at the cache-conversion level, but the scheduler regression still does not deterministically verify that the live upgrade path preserves real rotating-cache state." 
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The batching worker guidance still makes it too easy to treat `swift build` + `swift test --filter MLXLMTests` as sufficient for MLX-dependent scheduler fixes, even when the feature's own verification steps require `xcodebuild` runtime coverage. That gap let this fix ship without exercising the new scheduler regression under the environment where MLX tests actually run.",
+      "evidence": "Mission feature `fix-rotating-cache-test-deterministic` requires `xcodebuild test -scheme mlx-swift-lm-Package ... -only-testing:MLXLMTests/InferenceSchedulerTests` in `features.json`. `.factory/library/environment.md` notes that Metal-dependent MLX tests are skipped in `swift test`, and `.factory/services.yaml` already defines `test-scheduler-runtime`. But the handoff for worker session `ede7db4f-0fe0-4aca-b3b1-ad561377a55d` reports only `swift build`, `swift build --build-tests`, and `swift test --filter MLXLMTests` — no runtime `xcodebuild` run." 
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/post-review/scrutiny/reviews/fix-rotating-cache-test-vacuous.json",
+  "summary": "Reviewed the prior failed feature `fix-rotating-cache-test-vacuous` (`ce3d80b`) together with the rereview fix `fix-rotating-cache-test-deterministic` (`a64c09a4dd0a5ca02aaf4c9fc5bf2736d27d18ce`), including both handoffs, the fix transcript skeleton, and both diffs. Status: fail. The rerun removes the old vacuous fallback and adds a useful direct `fromSingle()` unit test, but the scheduler-level regression still depends on a fixed sleep and still asserts migrated cache contents through a mock model that never populates caches, so it does not yet provide a deterministic, runtime-sound proof that rotating-cache state survives single-to-batch upgrade."
+}
