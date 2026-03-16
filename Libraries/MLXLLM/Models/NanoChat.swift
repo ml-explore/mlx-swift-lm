@@ -25,6 +25,41 @@ private func applySoftcap(_ logits: MLXArray, cap: Float) -> MLXArray {
     return scale * tanh(logits / scale)
 }
 
+private final class NanoChatRoPE: Module, OffsetLayer, ArrayOffsetLayer {
+    let dimensions: Int
+    private let freqs: MLXArray
+
+    init(dimensions: Int, freqs: MLXArray) {
+        self.dimensions = dimensions
+        self.freqs = freqs
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray {
+        MLXFast.RoPE(
+            x,
+            dimensions: dimensions,
+            traditional: false,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: freqs
+        )
+    }
+
+    func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        MLXFast.RoPE(
+            x,
+            dimensions: dimensions,
+            traditional: false,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: freqs
+        )
+    }
+}
+
 // MARK: - Attention
 
 final class NanoChatAttention: Module {
@@ -39,7 +74,7 @@ final class NanoChatAttention: Module {
     @ModuleInfo(key: "c_v") var wv: Linear
     @ModuleInfo(key: "c_proj") var wo: Linear
 
-    private let _ropeFreqs: MLXArray
+    let rope: RoPELayer
 
     init(_ config: NanoChatConfiguration) {
         self.config = config
@@ -58,7 +93,8 @@ final class NanoChatAttention: Module {
         let halfDim = headDim / 2
         let freqIndices = MLXArray(Array(0 ..< halfDim)).asType(.float32)
         let freqScale = Float(log(Double(config.ropeTheta)) / Double(halfDim))
-        self._ropeFreqs = -MLX.exp(freqIndices * freqScale)
+        let ropeFreqs = -MLX.exp(freqIndices * freqScale)
+        self.rope = NanoChatRoPE(dimensions: headDim, freqs: ropeFreqs)
     }
 
     func callAsFunction(
@@ -76,26 +112,8 @@ final class NanoChatAttention: Module {
         keys = keys.reshaped(batchSize, sequenceLength, numKVHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(batchSize, sequenceLength, numKVHeads, -1).transposed(0, 2, 1, 3)
 
-        let offset = cache?.offset ?? 0
-        let freqs = _ropeFreqs
-        queries = MLXFast.RoPE(
-            queries,
-            dimensions: headDim,
-            traditional: false,
-            base: nil,
-            scale: 1.0,
-            offset: offset,
-            freqs: freqs
-        )
-        keys = MLXFast.RoPE(
-            keys,
-            dimensions: headDim,
-            traditional: false,
-            base: nil,
-            scale: 1.0,
-            offset: offset,
-            freqs: freqs
-        )
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
         queries = functionalRMSNorm(queries, eps: config.rmsNormEps)
         keys = functionalRMSNorm(keys, eps: config.rmsNormEps)
