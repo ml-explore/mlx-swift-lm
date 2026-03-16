@@ -111,6 +111,35 @@ class ModelContainerIntegrationTests: XCTestCase {
         return container
     }
 
+    private func makeCallTrackingContainer(
+        scheduler: InferenceScheduler? = nil,
+        configurationID: String = "test-model"
+    ) -> (
+        container: ModelContainer,
+        model: CallTrackingModel,
+        promptCache: LRUPromptCache,
+        configuration: ModelConfiguration
+    ) {
+        let model = CallTrackingModel(vocabSize: 32, numLayers: 1)
+        let tokenizer = TestTokenizer()
+        let configuration = ModelConfiguration(id: configurationID)
+        let processor = MockInputProcessor(tokenizer: tokenizer, configuration: configuration)
+
+        let context = ModelContext(
+            configuration: configuration,
+            model: model,
+            processor: processor,
+            tokenizer: tokenizer
+        )
+
+        let promptCache = LRUPromptCache(maxSize: 10)
+        let container = ModelContainer(context: context)
+        container.scheduler = scheduler
+        container.promptCache = promptCache
+
+        return (container, model, promptCache, configuration)
+    }
+
     // MARK: - VAL-SCHED-009: ModelContainer without scheduler uses existing path
 
     func testModelContainerWithoutSchedulerUsesExistingPath() async throws {
@@ -444,17 +473,19 @@ class ModelContainerIntegrationTests: XCTestCase {
         try skipIfMetalUnavailable()
 
         let scheduler = InferenceScheduler()
-        let container = makeModelContainer(scheduler: scheduler)
+        let (container, _, promptCache, config) = makeCallTrackingContainer(scheduler: scheduler)
 
-        // VLM-like request with image (batch-incompatible)
-        let image = LMInput.ProcessedImage(pixels: MLXArray.zeros([1, 3, 224, 224]))
-        let input = LMInput(
-            text: .init(tokens: MLXArray([Int32(1), Int32(2)])),
-            image: image
+        let promptTokens = [1, 2, 3, 4, 5]
+        let fullSequence = [1, 2, 3, 4, 5, 6, 7]
+        let firstInput = LMInput(tokens: MLXArray(promptTokens.map(Int32.init)))
+        let params = GenerateParameters(
+            maxTokens: 2,
+            kvBits: 4,
+            quantizedKVStart: 1_000,
+            temperature: 0
         )
-        let params = GenerateParameters(maxTokens: 3, temperature: 0)
 
-        let stream = try await container.generate(input: input, parameters: params)
+        let stream = try await container.generate(input: firstInput, parameters: params)
 
         var chunks = [String]()
         for await generation in stream {
@@ -468,6 +499,28 @@ class ModelContainerIntegrationTests: XCTestCase {
             chunks.isEmpty,
             "Incompatible request should fall back to direct path and still produce output"
         )
+
+        let (exactCache, exactRemainder) = promptCache.fetchNearestCache(
+            model: config.name,
+            tokens: fullSequence
+        )
+        XCTAssertNotNil(
+            exactCache,
+            "Fallback request should write back its final cache using the full prompt+generation token key"
+        )
+        XCTAssertEqual(exactCache?.first?.offset, fullSequence.count)
+        XCTAssertEqual(exactRemainder, [])
+
+        let (trimmedCache, trimmedRemainder) = promptCache.fetchNearestCache(
+            model: config.name,
+            tokens: promptTokens
+        )
+        XCTAssertNotNil(
+            trimmedCache,
+            "Full-sequence fallback write-back should be reusable for the original prompt prefix"
+        )
+        XCTAssertEqual(trimmedCache?.first?.offset, promptTokens.count)
+        XCTAssertEqual(trimmedRemainder, [])
     }
 
     // MARK: - kvBits request falls back to direct path
@@ -476,15 +529,33 @@ class ModelContainerIntegrationTests: XCTestCase {
         try skipIfMetalUnavailable()
 
         let scheduler = InferenceScheduler()
-        let container = makeModelContainer(scheduler: scheduler)
+        let (container, model, promptCache, config) = makeCallTrackingContainer(
+            scheduler: scheduler)
 
-        let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
-        let params = GenerateParameters(maxTokens: 3, kvBits: 4, temperature: 0)
+        let promptTokens = [1, 2, 3, 4, 5]
+        let fullSequence = [1, 2, 3, 4, 5, 6, 7]
+        let firstInput = LMInput(tokens: MLXArray(promptTokens.map(Int32.init)))
+        let params = GenerateParameters(
+            maxTokens: 2,
+            kvBits: 4,
+            quantizedKVStart: 1_000,
+            temperature: 0
+        )
 
-        let stream = try await container.generate(input: input, parameters: params)
+        let firstStream = try await container.generate(input: firstInput, parameters: params)
+
+        for await _ in firstStream {}
+
+        let fullFallbackTokensProcessed = model.totalTokensProcessed
+        XCTAssertGreaterThan(fullFallbackTokensProcessed, promptTokens.count)
+
+        model.resetCounters()
+
+        let secondInput = LMInput(tokens: MLXArray(promptTokens.map(Int32.init)))
+        let secondStream = try await container.generate(input: secondInput, parameters: params)
 
         var chunks = [String]()
-        for await generation in stream {
+        for await generation in secondStream {
             if let chunk = generation.chunk {
                 chunks.append(chunk)
             }
@@ -495,6 +566,27 @@ class ModelContainerIntegrationTests: XCTestCase {
             chunks.isEmpty,
             "kvBits request should fall back to direct path"
         )
+
+        XCTAssertTrue(
+            model.sawPreloadedCache,
+            "Repeated kvBits fallback request should receive the cached KV state on the single-path fallback"
+        )
+        XCTAssertLessThan(
+            model.totalTokensProcessed,
+            fullFallbackTokensProcessed,
+            "Repeated kvBits fallback request should process fewer tokens when prompt cache is reused"
+        )
+
+        let (exactCache, exactRemainder) = promptCache.fetchNearestCache(
+            model: config.name,
+            tokens: fullSequence
+        )
+        XCTAssertNotNil(
+            exactCache,
+            "Fallback request should keep writing back the final cache after repeated kvBits requests"
+        )
+        XCTAssertEqual(exactCache?.first?.offset, fullSequence.count)
+        XCTAssertEqual(exactRemainder, [])
     }
 
     // MARK: - Scheduler property can be set and read
@@ -541,30 +633,15 @@ class ModelContainerIntegrationTests: XCTestCase {
     func testPromptCacheWiredIntoSchedulerPath() async throws {
         try skipIfMetalUnavailable()
 
-        // Use a model that tracks call counts
-        let model = CallTrackingModel(vocabSize: 32, numLayers: 1)
-        let tokenizer = TestTokenizer()
-        let config = ModelConfiguration(id: "test-model")
-        let processor = MockInputProcessor(tokenizer: tokenizer, configuration: config)
-
-        let context = ModelContext(
-            configuration: config,
-            model: model,
-            processor: processor,
-            tokenizer: tokenizer
-        )
-
         let scheduler = InferenceScheduler()
-        let promptCache = LRUPromptCache(maxSize: 10)
-
-        let container = ModelContainer(context: context)
-        container.scheduler = scheduler
-        container.promptCache = promptCache
+        let (container, model, promptCache, config) = makeCallTrackingContainer(
+            scheduler: scheduler)
 
         // First request — should process all tokens (no cache hit)
-        let tokens1 = MLXArray([Int32(1), Int32(2), Int32(3), Int32(4), Int32(5)])
+        let promptTokens = [1, 2, 3, 4, 5]
+        let tokens1 = MLXArray(promptTokens.map(Int32.init))
         let input1 = LMInput(tokens: tokens1)
-        let params1 = GenerateParameters(maxTokens: 3, temperature: 0)
+        let params1 = GenerateParameters(maxTokens: 2, temperature: 0)
 
         let stream1 = try await container.generate(input: input1, parameters: params1)
         for await _ in stream1 {}
@@ -572,49 +649,35 @@ class ModelContainerIntegrationTests: XCTestCase {
         // Wait for scheduler to return to idle
         try await Task.sleep(nanoseconds: 200_000_000)
 
-        // Record calls after first request
-        let callsAfterFirst = model.callCount
+        let firstTokensProcessed = model.totalTokensProcessed
+        XCTAssertGreaterThan(firstTokensProcessed, promptTokens.count)
 
-        // Manually insert the KV cache into the prompt cache to simulate
-        // what would happen after generation completes with cache extraction.
-        // In production, the BatchTokenIterator's processCachedPrompts path
-        // handles extraction, but we need to seed the cache for this test.
-        let cachedKV = (0 ..< model.numLayers).map { _ -> KVCache in
-            let cache = KVCacheSimple()
-            let k = MLXArray.ones([1, 4, 5, 8])
-            let v = MLXArray.ones([1, 4, 5, 8])
-            _ = cache.update(keys: k, values: v)
-            return cache
-        }
-        promptCache.insertCache(
+        let (cachedKV, remainder) = promptCache.fetchNearestCache(
             model: config.name,
-            tokens: [1, 2, 3, 4, 5],
-            promptCache: cachedKV
+            tokens: promptTokens
         )
+        XCTAssertNotNil(cachedKV, "First scheduler request should write back prompt cache state")
+        XCTAssertEqual(remainder, [], "Repeated prompt should be fully satisfied by cached prefix")
 
-        // Reset counters
         model.resetCounters()
 
         // Second request — same tokens, should get a cache hit
-        let tokens2 = MLXArray([Int32(1), Int32(2), Int32(3), Int32(4), Int32(5)])
+        let tokens2 = MLXArray(promptTokens.map(Int32.init))
         let input2 = LMInput(tokens: tokens2)
-        let params2 = GenerateParameters(maxTokens: 3, temperature: 0)
+        let params2 = GenerateParameters(maxTokens: 2, temperature: 0)
 
         let stream2 = try await container.generate(input: input2, parameters: params2)
         for await _ in stream2 {}
 
-        // The prompt cache should have provided cached KV state for the second request.
-        // Verify the cache was hit by checking the prompt cache count is still 1.
-        XCTAssertEqual(
-            promptCache.count, 1,
-            "Prompt cache should still have 1 entry after second request"
+        XCTAssertTrue(
+            model.sawPreloadedCache,
+            "Second scheduler request should receive cached KV state from the prompt cache"
         )
-
-        // Verify the prompt cache was consulted (the fetch would have been called
-        // during the second generate() call).
-        // The key verification is that the generate() method calls fetchNearestCache
-        // before submitting to the scheduler — this is verified by the code path
-        // and the fact that the cache entry exists.
+        XCTAssertLessThan(
+            model.totalTokensProcessed,
+            firstTokensProcessed,
+            "Prompt cache hit should reduce prompt processing work on the second request"
+        )
     }
 
     /// Verifies that prompt cache fetch is called with the correct model identifier.
@@ -732,6 +795,8 @@ private class CallTrackingModel: Module, LanguageModel, KVCacheDimensionProvider
 
     var callCount = 0
     var totalTokensProcessed = 0
+    var inputShapes = [[Int]]()
+    var sawPreloadedCache = false
 
     init(vocabSize: Int = 32, numLayers: Int = 1) {
         self.vocabSize = vocabSize
@@ -739,7 +804,19 @@ private class CallTrackingModel: Module, LanguageModel, KVCacheDimensionProvider
     }
 
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
-        .tokens(input.text)
+        let cachedLength = cache.first?.offset ?? 0
+        let promptLength = input.text.tokens.size
+
+        if cachedLength >= promptLength, promptLength > 0 {
+            _ = trimPromptCache(cache, numTokens: 1)
+            return .tokens(input.text[(promptLength - 1)...])
+        }
+
+        if cachedLength > 0 {
+            return .tokens(input.text[cachedLength...])
+        }
+
+        return .tokens(input.text)
     }
 
     func callAsFunction(
@@ -749,7 +826,17 @@ private class CallTrackingModel: Module, LanguageModel, KVCacheDimensionProvider
         let tokens = input.tokens
         let B = tokens.dim(0)
         let S = tokens.dim(1)
+        inputShapes.append([B, S])
         totalTokensProcessed += B * S
+
+        if let cache {
+            let hasPreloadedKeys = cache.contains { layer in
+                layer.innerState().first != nil
+            }
+            sawPreloadedCache = sawPreloadedCache || hasPreloadedKeys
+        }
+
+        appendSyntheticKV(to: cache, inputTokens: tokens, defaultHeads: 4, defaultHeadDim: 8)
 
         var logitsFlat = [Float]()
         for b in 0 ..< B {
@@ -770,8 +857,38 @@ private class CallTrackingModel: Module, LanguageModel, KVCacheDimensionProvider
         weights
     }
 
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        (0 ..< numLayers).map { _ in KVCacheSimple() }
+    }
+
     func resetCounters() {
         callCount = 0
         totalTokensProcessed = 0
+        inputShapes = []
+        sawPreloadedCache = false
+    }
+}
+
+private func appendSyntheticKV(
+    to caches: [KVCache]?, inputTokens: MLXArray, defaultHeads: Int = 2, defaultHeadDim: Int = 4
+) {
+    guard let caches else { return }
+
+    let batchSize = inputTokens.dim(0)
+    let seqLen = inputTokens.dim(1)
+
+    for (layerIndex, cache) in caches.enumerated() {
+        let state = cache.innerState()
+        let existingKeys = state.first
+        let existingValues = state.count > 1 ? state[1] : nil
+
+        let heads = existingKeys?.dim(1) ?? defaultHeads
+        let keyDim = existingKeys?.dim(3) ?? defaultHeadDim
+        let valueDim = existingValues?.dim(3) ?? keyDim
+
+        let baseValue = Float(layerIndex + 1)
+        let keys = MLXArray.ones([batchSize, heads, seqLen, keyDim]) * baseValue
+        let values = MLXArray.ones([batchSize, heads, seqLen, valueDim]) * (baseValue + 1)
+        _ = cache.update(keys: keys, values: values)
     }
 }

@@ -333,9 +333,12 @@ public actor InferenceScheduler {
                 input: input,
                 parameters: parameters,
                 model: model,
-                cache: cache,
+                cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens
             )
         }
 
@@ -384,7 +387,10 @@ public actor InferenceScheduler {
                 model: model,
                 cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens
             )
 
         case .batched(var batchedState):
@@ -663,7 +669,10 @@ public actor InferenceScheduler {
         model: any LanguageModel,
         cache: [KVCache]?,
         tokenizer: Tokenizer,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil
     ) throws -> AsyncStream<Generation> {
         let iterator = try TokenIterator(
             input: input,
@@ -672,12 +681,118 @@ public actor InferenceScheduler {
             parameters: parameters
         )
 
-        let (stream, _) = generateTask(
-            promptTokenCount: input.text.tokens.size,
-            modelConfiguration: configuration,
-            tokenizer: tokenizer,
-            iterator: iterator
+        let (stream, continuation) = AsyncStream<Generation>.makeStream()
+
+        let stopTokenIDs = Self.buildStopTokenIDs(
+            configuration: configuration,
+            tokenizer: tokenizer
         )
+        let unknownTokenId = tokenizer.unknownTokenId
+        let promptTokenCount = input.text.tokens.size
+        let toolCallFormat = configuration.toolCallFormat ?? .json
+        let tokenizerBox = SendableBox(tokenizer as AnyObject)
+        let iteratorBox = SendableBox(iterator)
+
+        let task = Task {
+            var iter = iteratorBox.consume()
+            let tok = tokenizerBox.consume() as! Tokenizer
+
+            var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
+            let toolCallProcessor = ToolCallProcessor(format: toolCallFormat)
+
+            var start = Date.timeIntervalSinceReferenceDate
+            var promptTime: TimeInterval = 0
+            var tokenCount = 0
+            var generatedTokenIds = [Int]()
+            var stopReason: GenerateStopReason?
+
+            while let token = iter.next() {
+                if Task.isCancelled {
+                    stopReason = .cancelled
+                    break
+                }
+
+                if promptTime == 0 {
+                    let now = Date.timeIntervalSinceReferenceDate
+                    promptTime = now - start
+                    start = now
+                }
+
+                if token == unknownTokenId || stopTokenIDs.contains(token) {
+                    stopReason = .stop
+                    break
+                }
+
+                tokenCount += 1
+                generatedTokenIds.append(token)
+
+                detokenizer.append(token: token)
+                if let chunk = detokenizer.next() {
+                    if let textToYield = toolCallProcessor.processChunk(chunk) {
+                        if case .terminated = continuation.yield(.chunk(textToYield)) {
+                            stopReason = .cancelled
+                            break
+                        }
+                    }
+                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
+                        if case .terminated = continuation.yield(.toolCall(toolCall)) {
+                            stopReason = .cancelled
+                            break
+                        }
+                    }
+                }
+            }
+
+            if stopReason == nil {
+                if Task.isCancelled {
+                    stopReason = .cancelled
+                } else if let maxTokens = iter.maxTokens, iter.tokenCount >= maxTokens {
+                    stopReason = .length
+                } else {
+                    stopReason = .cancelled
+                }
+            }
+
+            toolCallProcessor.processEOS()
+            for toolCall in toolCallProcessor.toolCalls {
+                if case .terminated = continuation.yield(.toolCall(toolCall)) {
+                    break
+                }
+            }
+
+            let now = Date.timeIntervalSinceReferenceDate
+            let generateTime = now - start
+
+            let info = GenerateCompletionInfo(
+                promptTokenCount: promptTokenCount,
+                generationTokenCount: tokenCount,
+                promptTime: promptTime + iter.promptPrefillTime,
+                generationTime: generateTime,
+                stopReason: stopReason ?? .cancelled
+            )
+            _ = continuation.yield(.info(info))
+
+            if let promptCache, let modelName = promptCacheModelName,
+                let tokens = inputTokens, !tokens.isEmpty
+            {
+                let fullTokenSequence = tokens + generatedTokenIds
+                promptCache.insertCache(
+                    model: modelName,
+                    tokens: fullTokenSequence,
+                    promptCache: iter.cache
+                )
+            }
+
+            Stream().synchronize()
+            continuation.finish()
+        }
+
+        continuation.onTermination = { termination in
+            if case .cancelled = termination {
+                task.cancel()
+            }
+        }
+
         return stream
     }
 
@@ -731,9 +846,12 @@ public actor InferenceScheduler {
                 input: newInput,
                 parameters: newParameters,
                 model: model,
-                cache: cache,
+                cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens
             )
         }
 

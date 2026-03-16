@@ -67,6 +67,9 @@ Batch rotating-cache cached-prefill uses a `prepare(... rightPadding:)` / `final
 ### BatchKVCache Cached-Prompt Prefill
 Plain `BatchKVCache` now uses the same `prepare(rightPadding:)` / `finalize()` lifecycle for mixed-depth cached-prefill. `processPartialCacheHits()` right-pads uncached suffix tokens, prefills the full aligned suffix, then `finalize()` rolls pad-derived KV entries back into left padding and updates offsets before decode. The first decode sample still trims/replays the last real prompt token after finalize so batching resumes from a clean left-padded layout.
 
+### Scheduler fallback paths must carry prompt-cache metadata
+`InferenceScheduler` has multiple places that run requests on a single-stream fallback (`!compatible`, `.upgrading`, and upgrade-abort fallbacks). Those paths must forward both the fetched `cachedKVState` and the prompt-cache write-back metadata (`promptCache`, model name, and full `inputTokens`). Otherwise scheduler-managed batch-incompatible requests (notably `kvBits`) bypass prompt-cache reuse and fail to write their final KV state back for later hits.
+
 ### Batching test doubles must mutate caches
 Mock `LanguageModel` implementations used to exercise batching or prompt-cache flows need to append synthetic K/V data into the provided caches during `callAsFunction`. `BatchTokenIterator` assumes real model forwards advance cache metadata during prefill/replay/decode; mocks that only return logits leave `_idx`/`batchOffsets` stuck at pre-replay values and can produce invalid final-cache extraction states that do not reflect production behavior.
 
