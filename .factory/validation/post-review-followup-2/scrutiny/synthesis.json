@@ -1,0 +1,47 @@
+{
+  "milestone": "post-review-followup-2",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift test --filter MLXLMTests",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift build",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cd \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" && swift-format lint --configuration .swift-format --recursive Libraries Tests",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "fix-prompt-cache-fallback-path",
+      "severity": "non_blocking",
+      "description": "`Tests/MLXLMTests/ModelContainerIntegrationTests.swift:580` still does not uniquely prove the second repeated `kvBits` fallback request performs its own final prompt-cache write-back, because the first request in the same test already created the same `fullSequence` key."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skill:swift-batching-worker",
+      "suggestion": "Add explicit guidance that scheduler fallback / prompt-cache regression tests may need cache-aware mock model behavior that mutates the provided caches, and that repeated-request tests should prove second-run write-back rather than only cache reuse.",
+      "evidence": "The review for `fix-prompt-cache-fallback-path` found the batching skill still under-specifies prompt-cache fallback test doubles: the handoff suggested cache-aware mock `LanguageModel.prepare(...)` behavior, while the reviewed test only proved second-run reuse and not uniquely second-run write-back. `.factory/library/architecture.md` now documents the cache-mutating mock requirement, but the worker skill still does not.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
