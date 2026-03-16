@@ -1,0 +1,70 @@
+{
+  "assertionIds": [
+    "VAL-FIX-012"
+  ],
+  "testedAt": "2026-03-15T17:18:43.614391-07:00",
+  "statusByAssertion": {
+    "VAL-FIX-012": {
+      "status": "pass",
+      "reason": "Targeted Metal-backed xcodebuild tests `testIncompatibleRequestWithSchedulerFallsBack` and `testKvBitsRequestFallsBackToDirectPath` both passed, directly exercising scheduler-managed incompatible fallback plus kvBits prompt-cache reuse/write-back behavior."
+    }
+  },
+  "overallStatus": "pass",
+  "commands": [
+    {
+      "command": "TMPDIR=\"/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/tmp\" xcodebuild test -workspace \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm/.swiftpm/xcode/package.xcworkspace\" -scheme mlx-swift-lm-Package -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/mlx-swift-lm-post-review-followup-2-runtime-regressions/DerivedData -only-testing:MLXLMTests/ModelContainerIntegrationTests/testKvBitsRequestFallsBackToDirectPath -only-testing:MLXLMTests/ModelContainerIntegrationTests/testIncompatibleRequestWithSchedulerFallsBack",
+      "exitCode": 0,
+      "summary": "Passed. xcodebuild reported both targeted ModelContainerIntegrationTests passed, executed 2 tests with 0 failures, and ended with ** TEST SUCCEEDED **. Output also included non-fatal Metal `flock failed to lock list file` warnings."
+    },
+    {
+      "command": "TMPDIR=\"/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/tmp\" swift test --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --scratch-path /tmp/mlx-swift-lm-post-review-followup-2-runtime-regressions/swiftpm-test --filter MLXLMTests",
+      "exitCode": 1,
+      "summary": "Blocked by filesystem exhaustion. SwiftPM began resolving/building dependencies, then failed repeatedly with `No space left on device` while writing diagnostics/index files under the validator scratch path."
+    },
+    {
+      "command": "TMPDIR=\"/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/tmp\" swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --scratch-path /tmp/mlx-swift-lm-post-review-followup-2-runtime-regressions/swiftpm-build",
+      "exitCode": 1,
+      "summary": "Blocked by filesystem exhaustion. SwiftPM failed cloning/checking out dependencies into the isolated scratch path with many `No space left on device` errors."
+    },
+    {
+      "command": "swift test --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\" --filter MLXLMTests",
+      "exitCode": 0,
+      "summary": "Passed after freeing validator-owned temporary build directories. SwiftPM reported 325 tests executed with 0 failures and 302 Metal-guarded skips in the SPM debug environment."
+    },
+    {
+      "command": "swift build --package-path \"/Users/ronaldmannak/Developer/Projects/Pico AI Homelab/mlx-swift-lm\"",
+      "exitCode": 0,
+      "summary": "Passed after freeing validator-owned temporary build directories. Swift build completed successfully for debugging in about 4 seconds."
+    }
+  ],
+  "toolsUsed": [
+    "xcodebuild",
+    "swift test",
+    "swift build"
+  ],
+  "frictions": [
+    {
+      "description": "The successful xcodebuild run emitted `flock failed to lock list file` warnings from `com.apple.metal` before the first targeted test, but the run still completed with `** TEST SUCCEEDED **`.",
+      "resolved": true,
+      "resolution": "Recorded as non-fatal per user-testing guidance because both targeted tests still passed.",
+      "affectedAssertions": [
+        "VAL-FIX-012"
+      ]
+    },
+    {
+      "description": "Initial isolated SwiftPM reruns failed with `No space left on device` until validator-owned temporary directories were deleted.",
+      "resolved": true,
+      "resolution": "Removed `/tmp/mlx-swift-lm-post-review-followup-2-runtime-regressions` and `/tmp/mlx-swift-lm-fallback-cache-followup`, then reran `swift test --filter MLXLMTests` and `swift build` successfully.",
+      "affectedAssertions": []
+    }
+  ],
+  "blockers": [],
+  "evidenceFiles": [
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/primary-xcodebuild-test.log",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/supplemental-swift-test.log",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/supplemental-swift-build.log",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/supplemental-swift-test-rerun.log",
+    "/Users/ronaldmannak/.factory/missions/20c6f901-8a2e-48ea-871b-77ea739adf9c/evidence/post-review-followup-2/runtime-regressions/supplemental-swift-build-rerun.log"
+  ],
+  "narrative": "VAL-FIX-012 passed on the primary real-user runtime surface. The targeted Metal-backed xcodebuild run directly exercised both the generic scheduler-managed incompatible fallback and the kvBits fallback path, and both tests passed, confirming prompt-cache reuse and final-cache write-back remain intact when batching is bypassed. Initial isolated SwiftPM reruns were temporarily blocked by disk exhaustion, but after clearing validator-owned temporary build directories both `swift test --filter MLXLMTests` and `swift build` completed successfully."
+}

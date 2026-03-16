@@ -1,0 +1,24 @@
+{
+  "milestone": "post-review-followup-2",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-FIX-012"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Recorded the exact post-review-followup-2 targeted xcodebuild tests that provide direct runtime evidence for VAL-FIX-012.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}
