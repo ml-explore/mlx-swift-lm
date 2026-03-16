@@ -8,6 +8,57 @@ import Tokenizers
 
 // Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma2.py
 
+private func alignAttentionMask(_ mask: MLXArray, to scores: MLXArray) -> MLXArray {
+    var mask = mask
+
+    if mask.ndim >= 4, scores.ndim > mask.ndim, mask.dim(0) == scores.dim(0) {
+        while mask.ndim < scores.ndim {
+            mask = expandedDimensions(mask, axis: 1)
+        }
+    } else {
+        while mask.ndim < scores.ndim {
+            mask = expandedDimensions(mask, axis: 0)
+        }
+    }
+
+    return mask
+}
+
+private func applyAttentionMask(
+    _ mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    to scores: MLXArray
+) -> MLXArray {
+    let maskedValue = MLXArray(-Float.greatestFiniteMagnitude, dtype: scores.dtype)
+
+    switch mask {
+    case .none:
+        return scores
+    case .causal:
+        let qLength = scores.dim(-2)
+        let kLength = scores.dim(-1)
+        let qIndices = MLXArray(0 ..< qLength) + MLXArray(kLength - qLength)
+        let kIndices = MLXArray(0 ..< kLength)
+        let causalMask =
+            expandedDimensions(qIndices, axis: -1) .>= expandedDimensions(kIndices, axis: -2)
+        return MLX.where(causalMask, scores, maskedValue)
+    case .array(let maskArray):
+        let alignedMask = alignAttentionMask(maskArray, to: scores)
+        if maskArray.dtype == .bool {
+            return MLX.where(alignedMask, scores, maskedValue)
+        }
+        return scores + alignedMask.asType(scores.dtype)
+    case .arrays(let maskArrays):
+        guard let firstMask = maskArrays.first else {
+            return scores
+        }
+        let alignedMask = alignAttentionMask(firstMask, to: scores)
+        if firstMask.dtype == .bool {
+            return MLX.where(alignedMask, scores, maskedValue)
+        }
+        return scores + alignedMask.asType(scores.dtype)
+    }
+}
+
 class Gemma2Attention: Module {
     let args: Gemma2Configuration
     let scale: Float
@@ -45,7 +96,7 @@ class Gemma2Attention: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXArray?, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
         var queries = wq(x)
@@ -72,10 +123,7 @@ class Gemma2Attention: Module {
 
         var scores = matmul(queries, keys.swappedAxes(-1, -2))
         scores = tanh(scores / logitSoftCap) * logitSoftCap
-
-        if let mask {
-            scores = scores + mask
-        }
+        scores = applyAttentionMask(mask, to: scores)
         scores = softmax(scores, axis: -1, precise: true)
         var output = matmul(scores, values)
         if repeats > 1 {
@@ -126,7 +174,7 @@ class Gemma2TransformerBlock: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXArray?, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + postAttentionLayerNorm(r)
@@ -164,8 +212,7 @@ public class Gemma2ModelInner: Module {
         var h = embedTokens(inputs)
         h = h * hiddenScale
 
-        // Gemma2 uses the older array-based mask pattern with manual application in attention
-        let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
+        let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
             h = layer(h, mask: mask, cache: cache?[i])

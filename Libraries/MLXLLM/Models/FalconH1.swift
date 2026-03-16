@@ -291,7 +291,11 @@ class FalconH1Attention: Module {
             maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+        cache: KVCache? = nil
+    ) -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x)
@@ -305,14 +309,11 @@ class FalconH1Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, cache: cache)
         keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
-
-        var output = MLXFast.scaledDotProductAttention(
+        var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )
@@ -576,7 +577,7 @@ class FalconH1DecoderLayer: Module {
     func callAsFunction(
         _ h: MLXArray,
         cache: CacheList?,
-        attnMask: MLXArray?,
+        attnMask: MLXFast.ScaledDotProductAttentionMaskMode,
         mambaMask: MLXArray?
     ) -> MLXArray {
         var residual = h
@@ -608,17 +609,6 @@ private func createSSMMask(h: MLXArray, cache: ArraysCache?) -> MLXArray? {
     return nil
 }
 
-private func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
-    let N = h.dim(1)
-    // If cache exists and can make masks, use it
-    // Otherwise for single token, no mask needed
-    // For multi-token, SDPA will handle causal mask internally when nil
-    if N == 1 {
-        return nil
-    }
-    return nil  // Will be handled by SDPA internally when nil
-}
-
 // MARK: - Model
 
 public class FalconH1ModelInner: Module {
@@ -647,7 +637,11 @@ public class FalconH1ModelInner: Module {
         _finalLayerNorm.wrappedValue = RMSNorm(dimensions: hiddenSize, eps: args.rmsNormEps)
     }
 
-    func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil, cache: [CacheList]? = nil)
+    func callAsFunction(
+        _ inputs: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+        cache: [CacheList]? = nil
+    )
         -> MLXArray
     {
         var h = embedTokens(inputs)
@@ -655,8 +649,14 @@ public class FalconH1ModelInner: Module {
         let cache: [CacheList?] = cache ?? Array(repeating: nil, count: layers.count)
 
         let mambaMask = createSSMMask(h: h, cache: cache[0]?[0] as? MambaCache)
-        let attnMask: MLXArray? = createAttentionMask(
-            h: h, cache: cache[0]?[1] != nil ? [cache[0]![1]] : nil)
+        let attnMask: MLXFast.ScaledDotProductAttentionMaskMode = {
+            switch mask {
+            case .none:
+                return createAttentionMask(h: h, cache: cache[0]?[1])
+            default:
+                return mask
+            }
+        }()
 
         for (layer, c) in zip(layers, cache) {
             h = layer(
