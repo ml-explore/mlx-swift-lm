@@ -217,7 +217,8 @@ class ModelContainerIntegrationTests: XCTestCase {
             var events = [WiredMemoryEvent]()
             for await event in eventStream {
                 events.append(event)
-                if events.filter({ $0.ticketID == ticket.id && $0.kind == .ticketEnded }).count >= 1 {
+                if events.filter({ $0.ticketID == ticket.id && $0.kind == .ticketEnded }).count >= 1
+                {
                     break
                 }
             }

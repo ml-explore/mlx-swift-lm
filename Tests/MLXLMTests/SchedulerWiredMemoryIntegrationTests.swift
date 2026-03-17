@@ -2,11 +2,10 @@
 
 import Foundation
 import MLX
+@preconcurrency @testable import MLXLMCommon
 import MLXNN
 import Tokenizers
 import XCTest
-
-@preconcurrency @testable import MLXLMCommon
 
 private final class WiredMemorySchedulerMockModel: Module, LanguageModel, KVCacheDimensionProvider,
     @unchecked Sendable
@@ -297,8 +296,10 @@ final class SchedulerWiredMemoryIntegrationTests: XCTestCase {
         await settleEvents()
 
         let events = await recorder.snapshot()
-        let firstEnd = try XCTUnwrap(ticketEvents(events, ticket: ticket1, kind: .ticketEnded).first)
-        let secondEnd = try XCTUnwrap(ticketEvents(events, ticket: ticket2, kind: .ticketEnded).first)
+        let firstEnd = try XCTUnwrap(
+            ticketEvents(events, ticket: ticket1, kind: .ticketEnded).first)
+        let secondEnd = try XCTUnwrap(
+            ticketEvents(events, ticket: ticket2, kind: .ticketEnded).first)
 
         XCTAssertEqual(ticketEvents(events, ticket: ticket1, kind: .ticketStarted).count, 1)
         XCTAssertEqual(ticketEvents(events, ticket: ticket2, kind: .ticketStarted).count, 1)
@@ -385,7 +386,8 @@ final class SchedulerWiredMemoryIntegrationTests: XCTestCase {
         let events = await recorder.snapshot()
         XCTAssertFalse(ticketEvents(events, ticket: secondTicket, kind: .admissionWait).isEmpty)
 
-        let firstEnd = try XCTUnwrap(ticketEvents(events, ticket: firstTicket, kind: .ticketEnded).first)
+        let firstEnd = try XCTUnwrap(
+            ticketEvents(events, ticket: firstTicket, kind: .ticketEnded).first)
         let secondStart = try XCTUnwrap(
             ticketEvents(events, ticket: secondTicket, kind: .ticketStarted).first)
         XCTAssertLessThan(firstEnd.sequence, secondStart.sequence)
@@ -551,8 +553,10 @@ final class SchedulerWiredMemoryIntegrationTests: XCTestCase {
         XCTAssertEqual(ticketEvents(events, ticket: ticket3, kind: .ticketStarted).count, 1)
         XCTAssertEqual(ticketEvents(events, ticket: ticket3, kind: .ticketEnded).count, 1)
 
-        let firstEnd = try XCTUnwrap(ticketEvents(events, ticket: ticket1, kind: .ticketEnded).first)
-        let secondEnd = try XCTUnwrap(ticketEvents(events, ticket: ticket2, kind: .ticketEnded).first)
+        let firstEnd = try XCTUnwrap(
+            ticketEvents(events, ticket: ticket1, kind: .ticketEnded).first)
+        let secondEnd = try XCTUnwrap(
+            ticketEvents(events, ticket: ticket2, kind: .ticketEnded).first)
         let thirdStart = try XCTUnwrap(
             ticketEvents(events, ticket: ticket3, kind: .ticketStarted).first)
         XCTAssertLessThan(max(firstEnd.sequence, secondEnd.sequence), thirdStart.sequence)
