@@ -198,6 +198,54 @@ class ModelContainerIntegrationTests: XCTestCase {
         XCTAssertFalse(chunks.isEmpty, "Should produce output via scheduler path")
     }
 
+    func testModelContainerWithSchedulerForwardsWiredMemoryTicket() async throws {
+        try skipIfMetalUnavailable()
+
+        let scheduler = InferenceScheduler()
+        let container = makeModelContainer(scheduler: scheduler)
+        let manager = WiredMemoryManager.makeForTesting(
+            configuration: .init(
+                policyOnlyWhenUnsupported: true,
+                baselineOverride: 0,
+                useRecommendedWorkingSetWhenUnsupported: false
+            )
+        )
+        let policy = WiredSumPolicy(cap: 1024)
+        let ticket = policy.ticket(size: 64, manager: manager, kind: .active)
+        let eventStream = await manager.events()
+        let eventsTask = Task { () -> [WiredMemoryEvent] in
+            var events = [WiredMemoryEvent]()
+            for await event in eventStream {
+                events.append(event)
+                if events.filter({ $0.ticketID == ticket.id && $0.kind == .ticketEnded }).count >= 1 {
+                    break
+                }
+            }
+            return events
+        }
+
+        let input = LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)]))
+        let params = GenerateParameters(maxTokens: 4, temperature: 0)
+
+        let stream = try await container.generate(
+            input: input,
+            parameters: params,
+            wiredMemoryTicket: ticket
+        )
+
+        for await _ in stream {}
+
+        let events = await eventsTask.value
+        XCTAssertEqual(
+            events.filter { $0.ticketID == ticket.id && $0.kind == .ticketStarted }.count,
+            1
+        )
+        XCTAssertEqual(
+            events.filter { $0.ticketID == ticket.id && $0.kind == .ticketEnded }.count,
+            1
+        )
+    }
+
     // MARK: - VAL-SCHED-011: Each request gets independent AsyncStream
 
     func testEachRequestGetsIndependentStream() async throws {

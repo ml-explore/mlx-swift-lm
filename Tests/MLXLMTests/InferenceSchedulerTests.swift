@@ -143,6 +143,18 @@ private class SSMMockModel: Module, LanguageModel, @unchecked Sendable {
     }
 }
 
+private actor AsyncFlag {
+    private var value = false
+
+    func mark() {
+        value = true
+    }
+
+    func isSet() -> Bool {
+        value
+    }
+}
+
 // MARK: - Tests
 
 class InferenceSchedulerTests: XCTestCase {
@@ -484,7 +496,7 @@ class InferenceSchedulerTests: XCTestCase {
         let input1 = LMInput(tokens: MLXArray([Int32(1), Int32(2)]))
         let params1 = GenerateParameters(maxTokens: 10, temperature: 0)
 
-        let _ = try await scheduler.submit(
+        let stream1 = try await scheduler.submit(
             input: input1,
             parameters: params1,
             model: model,
@@ -515,19 +527,33 @@ class InferenceSchedulerTests: XCTestCase {
             configuration: config
         )
 
-        // State should still be single (not batched) because the second request is incompatible
+        // The incompatible request must not enter any of the batching states.
+        // The first request may have already finished by the time we inspect,
+        // so `idle` is also acceptable here.
         currentState = await scheduler.currentState
-        XCTAssertEqual(
-            currentState, "single",
+        XCTAssertNotEqual(
+            currentState, "batched",
+            "Incompatible request should not trigger batch upgrade")
+        XCTAssertNotEqual(
+            currentState, "upgrading",
+            "Incompatible request should not trigger batch upgrade")
+        XCTAssertNotEqual(
+            currentState, "pendingUpgrade",
             "Incompatible request should not trigger batch upgrade")
 
-        // Consume second stream to verify it works
-        var chunks = [String]()
-        for await gen in stream2 {
-            if let chunk = gen.chunk {
-                chunks.append(chunk)
+        async let consume1: Void = { for await _ in stream1 {} }()
+        async let consume2: [String] = {
+            var chunks = [String]()
+            for await gen in stream2 {
+                if let chunk = gen.chunk {
+                    chunks.append(chunk)
+                }
             }
-        }
+            return chunks
+        }()
+
+        let (_, chunks) = await (consume1, consume2)
+        XCTAssertFalse(chunks.isEmpty, "Fallback incompatible request should still produce output")
     }
 
     // MARK: - QuantizedKVCache is incompatible
@@ -2319,7 +2345,379 @@ class InferenceSchedulerTests: XCTestCase {
         )
     }
 
+    func testSingleRequestWithWiredMemoryTicketStartsAndEndsTicket() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 1024)
+        let ticket = policy.ticket(size: 64, manager: manager, kind: .active)
+        let eventsTask = await startWiredEventCapture(from: manager) { events in
+            events.filter { $0.ticketID == ticket.id && $0.kind == .ticketEnded }.count >= 1
+        }
+
+        let stream = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(1), Int32(2), Int32(3)])),
+            parameters: GenerateParameters(maxTokens: 4, temperature: 0),
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket
+        )
+
+        for await _ in stream {}
+
+        let events = await eventsTask.value
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket.id, kind: .ticketEnded), 1)
+    }
+
+    func testIncompatibleSinglePathWithWiredMemoryTicketStartsAndEndsTicket() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 1024)
+        let ticket = policy.ticket(size: 64, manager: manager, kind: .active)
+        let eventsTask = await startWiredEventCapture(from: manager) { events in
+            events.filter { $0.ticketID == ticket.id && $0.kind == .ticketEnded }.count >= 1
+        }
+
+        let image = LMInput.ProcessedImage(pixels: MLXArray.zeros([1, 3, 224, 224]))
+        let stream = try await scheduler.submit(
+            input: LMInput(
+                text: .init(tokens: MLXArray([Int32(1), Int32(2)])),
+                image: image
+            ),
+            parameters: GenerateParameters(maxTokens: 3, temperature: 0),
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket
+        )
+
+        for await _ in stream {}
+
+        let events = await eventsTask.value
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket.id, kind: .ticketEnded), 1)
+    }
+
+    func testCancellingOneBatchedRequestEndsOnlyItsTicket() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 4096)
+        let ticket1 = policy.ticket(size: 64, manager: manager, kind: .active)
+        let ticket2 = policy.ticket(size: 96, manager: manager, kind: .active)
+        let trackedTicketIDs = Set([ticket1.id, ticket2.id])
+        let eventsTask = await startWiredEventCapture(from: manager) { events in
+            events.filter {
+                if let ticketID = $0.ticketID {
+                    return trackedTicketIDs.contains(ticketID) && $0.kind == .ticketEnded
+                }
+                return false
+            }.count >= 2
+        }
+
+        let params = GenerateParameters(maxTokens: 12, temperature: 0)
+        let stream1 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(1), Int32(2)])),
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket1
+        )
+        let stream2 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(10), Int32(20)])),
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket2
+        )
+
+        let cancelFirst = Task {
+            var seenChunks = 0
+            for await generation in stream1 {
+                if generation.chunk != nil {
+                    seenChunks += 1
+                    if seenChunks >= 2 {
+                        break
+                    }
+                }
+            }
+        }
+        let consumeSecond = Task { () -> Int in
+            var chunks = 0
+            for await generation in stream2 {
+                if generation.chunk != nil {
+                    chunks += 1
+                }
+            }
+            return chunks
+        }
+
+        _ = await cancelFirst.value
+        let secondChunkCount = await consumeSecond.value
+        let events = await eventsTask.value
+
+        XCTAssertGreaterThan(secondChunkCount, 0)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket1.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket1.id, kind: .ticketEnded), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket2.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket2.id, kind: .ticketEnded), 1)
+    }
+
+    func testUpgradeKeepsFirstTicketActiveUntilAfterSecondTicketStarts() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 4096)
+        let ticket1 = policy.ticket(size: 64, manager: manager, kind: .active)
+        let ticket2 = policy.ticket(size: 96, manager: manager, kind: .active)
+        let trackedTicketIDs = Set([ticket1.id, ticket2.id])
+        let eventsTask = await startWiredEventCapture(from: manager) { events in
+            events.filter {
+                if let ticketID = $0.ticketID {
+                    return trackedTicketIDs.contains(ticketID) && $0.kind == .ticketEnded
+                }
+                return false
+            }.count >= 2
+        }
+
+        let stream1 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(1), Int32(2)])),
+            parameters: GenerateParameters(maxTokens: 3, temperature: 0),
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket1
+        )
+        let stream2 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(10), Int32(20)])),
+            parameters: GenerateParameters(maxTokens: 8, temperature: 0),
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket2
+        )
+
+        async let consume1: Void = { for await _ in stream1 {} }()
+        async let consume2: Void = { for await _ in stream2 {} }()
+        _ = await (consume1, consume2)
+
+        let events = await eventsTask.value
+        let firstEnd = try XCTUnwrap(
+            events.first { $0.ticketID == ticket1.id && $0.kind == .ticketEnded }
+        )
+        let secondStart = try XCTUnwrap(
+            events.first { $0.ticketID == ticket2.id && $0.kind == .ticketStarted }
+        )
+
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket1.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket1.id, kind: .ticketEnded), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket2.id, kind: .ticketStarted), 1)
+        XCTAssertEqual(ticketEventCount(events, ticketID: ticket2.id, kind: .ticketEnded), 1)
+        XCTAssertGreaterThan(firstEnd.sequence, secondStart.sequence)
+    }
+
+    func testSecondRequestWaitingOnTicketDoesNotStallActiveSingleRequest() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 1)
+        let ticket1 = policy.ticket(size: 1, manager: manager, kind: .active)
+        let ticket2 = policy.ticket(size: 1, manager: manager, kind: .active)
+
+        let stream1 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(1), Int32(2)])),
+            parameters: GenerateParameters(maxTokens: 20, temperature: 0),
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket1
+        )
+
+        let secondReturned = AsyncFlag()
+        let secondTask = Task { () throws -> AsyncStream<Generation> in
+            let stream = try await scheduler.submit(
+                input: LMInput(tokens: MLXArray([Int32(10), Int32(20)])),
+                parameters: GenerateParameters(maxTokens: 6, temperature: 0),
+                model: model,
+                cache: nil,
+                tokenizer: tokenizer,
+                configuration: config,
+                wiredMemoryTicket: ticket2
+            )
+            await secondReturned.mark()
+            return stream
+        }
+
+        var firstChunkCount = 0
+        for await generation in stream1 {
+            if generation.chunk != nil {
+                firstChunkCount += 1
+                if firstChunkCount >= 2 {
+                    let didSecondReturn = await secondReturned.isSet()
+                    XCTAssertFalse(didSecondReturn)
+                    break
+                }
+            }
+        }
+
+        let stream2 = try await secondTask.value
+        var secondChunkCount = 0
+        for await generation in stream2 {
+            if generation.chunk != nil {
+                secondChunkCount += 1
+            }
+        }
+
+        XCTAssertGreaterThanOrEqual(firstChunkCount, 2)
+        XCTAssertGreaterThan(secondChunkCount, 0)
+    }
+
+    func testThirdRequestWaitingOnTicketDoesNotStallActiveBatch() async throws {
+        try skipIfMetalUnavailable()
+
+        let model = SchedulerMockModel()
+        let tokenizer = TestTokenizer()
+        let config = ModelConfiguration(id: "test-model")
+        let scheduler = InferenceScheduler()
+        let manager = makeWiredMemoryTestManager()
+        let policy = WiredSumPolicy(cap: 2)
+        let ticket1 = policy.ticket(size: 1, manager: manager, kind: .active)
+        let ticket2 = policy.ticket(size: 1, manager: manager, kind: .active)
+        let ticket3 = policy.ticket(size: 1, manager: manager, kind: .active)
+
+        let params = GenerateParameters(maxTokens: 20, temperature: 0)
+        let stream1 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(1), Int32(2)])),
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket1
+        )
+        let stream2 = try await scheduler.submit(
+            input: LMInput(tokens: MLXArray([Int32(10), Int32(20)])),
+            parameters: params,
+            model: model,
+            cache: nil,
+            tokenizer: tokenizer,
+            configuration: config,
+            wiredMemoryTicket: ticket2
+        )
+
+        let firstConsumer = Task {
+            for await _ in stream1 {}
+        }
+
+        let thirdReturned = AsyncFlag()
+        let thirdTask = Task { () throws -> AsyncStream<Generation> in
+            let stream = try await scheduler.submit(
+                input: LMInput(tokens: MLXArray([Int32(30), Int32(40)])),
+                parameters: GenerateParameters(maxTokens: 6, temperature: 0),
+                model: model,
+                cache: nil,
+                tokenizer: tokenizer,
+                configuration: config,
+                wiredMemoryTicket: ticket3
+            )
+            await thirdReturned.mark()
+            return stream
+        }
+
+        var secondChunkCount = 0
+        for await generation in stream2 {
+            if generation.chunk != nil {
+                secondChunkCount += 1
+                if secondChunkCount >= 2 {
+                    let didThirdReturn = await thirdReturned.isSet()
+                    XCTAssertFalse(didThirdReturn)
+                    break
+                }
+            }
+        }
+
+        let stream3 = try await thirdTask.value
+        var thirdChunkCount = 0
+        for await generation in stream3 {
+            if generation.chunk != nil {
+                thirdChunkCount += 1
+            }
+        }
+
+        _ = await firstConsumer.value
+
+        XCTAssertGreaterThanOrEqual(secondChunkCount, 2)
+        XCTAssertGreaterThan(thirdChunkCount, 0)
+    }
+
     // MARK: - Test Helpers
+
+    private func makeWiredMemoryTestManager() -> WiredMemoryManager {
+        WiredMemoryManager.makeForTesting(
+            configuration: .init(
+                policyOnlyWhenUnsupported: true,
+                baselineOverride: 0,
+                useRecommendedWorkingSetWhenUnsupported: false
+            )
+        )
+    }
+
+    private func startWiredEventCapture(
+        from manager: WiredMemoryManager,
+        until shouldStop: @escaping @Sendable ([WiredMemoryEvent]) -> Bool
+    ) async -> Task<[WiredMemoryEvent], Never> {
+        let stream = await manager.events()
+        return Task {
+            var events = [WiredMemoryEvent]()
+            for await event in stream {
+                events.append(event)
+                if shouldStop(events) {
+                    break
+                }
+            }
+            return events
+        }
+    }
+
+    private func ticketEventCount(
+        _ events: [WiredMemoryEvent],
+        ticketID: UUID,
+        kind: WiredMemoryEvent.Kind
+    ) -> Int {
+        events.filter { $0.ticketID == ticketID && $0.kind == kind }.count
+    }
 
     /// Helper to submit a request with prompt cache write-back parameters.
     /// Wrapped to avoid Droid-Shield false positives on parameter names.

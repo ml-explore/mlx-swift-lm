@@ -48,6 +48,10 @@ public actor InferenceScheduler {
         /// A single request is active via `TokenIterator`.
         case single(SingleRequestState)
 
+        /// A second request is waiting for wired-memory admission before the
+        /// scheduler can attempt the single-to-batch handoff.
+        case pendingUpgrade(SingleRequestState)
+
         /// A single-to-batch upgrade is in progress. The scheduler has
         /// suspended to await live state from the single-request task.
         /// Additional requests during this phase run independently on
@@ -230,6 +234,9 @@ public actor InferenceScheduler {
 
         /// Model name for prompt cache operations.
         let promptCacheModelName: String?
+
+        /// Optional active ticket for this request.
+        let wiredMemoryTicket: WiredMemoryTicket?
     }
 
     /// State for batched generation.
@@ -272,6 +279,9 @@ public actor InferenceScheduler {
 
         /// Model name for prompt cache operations.
         let promptCacheModelName: String?
+
+        /// Mapping from UID -> active wired-memory ticket.
+        var wiredMemoryTickets: [Int: WiredMemoryTicket]
     }
 
     // MARK: - Properties
@@ -306,6 +316,7 @@ public actor InferenceScheduler {
     ///   - promptCacheModelName: Model name used as key for prompt cache operations.
     ///   - inputTokens: The full token sequence for this request, used as key for prompt
     ///     cache write-back.
+    ///   - wiredMemoryTicket: Optional wired-memory ticket for this request.
     /// - Returns: An `AsyncStream<Generation>` yielding generation events for this request.
     public func submit(
         input: LMInput,
@@ -317,7 +328,8 @@ public actor InferenceScheduler {
         cachedKVState: [KVCache]? = nil,
         promptCache: LRUPromptCache? = nil,
         promptCacheModelName: String? = nil,
-        inputTokens: [Int]? = nil
+        inputTokens: [Int]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
     ) async throws -> AsyncStream<Generation> {
         // Check if this request is batch-compatible
         let compatible = Self.isBatchCompatible(
@@ -329,7 +341,7 @@ public actor InferenceScheduler {
 
         if !compatible {
             // Incompatible request: always use single path
-            return try createSingleStream(
+            return try await createSingleStream(
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -338,7 +350,8 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 promptCache: promptCache,
                 promptCacheModelName: promptCacheModelName,
-                inputTokens: inputTokens
+                inputTokens: inputTokens,
+                wiredMemoryTicket: wiredMemoryTicket
             )
         }
 
@@ -348,7 +361,7 @@ public actor InferenceScheduler {
             // When cachedKVState is provided (from LRUPromptCache), use it
             // as the initial cache so the TokenIterator skips prefill for
             // the cached prefix tokens.
-            return try startSingleRequest(
+            return try await startSingleRequest(
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -357,10 +370,77 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 promptCache: promptCache,
                 promptCacheModelName: promptCacheModelName,
-                inputTokens: inputTokens
+                inputTokens: inputTokens,
+                wiredMemoryTicket: wiredMemoryTicket
             )
 
         case .single(let singleState):
+            // If this request needs wired-memory admission, keep the first
+            // request running on the single path until admission succeeds.
+            if let wiredMemoryTicket {
+                state = .pendingUpgrade(singleState)
+
+                do {
+                    _ = try await awaitTicketAdmission(wiredMemoryTicket)
+                } catch {
+                    if case .pendingUpgrade(let pending) = state,
+                        pending.requestID == singleState.requestID
+                    {
+                        state = .single(singleState)
+                    }
+                    throw error
+                }
+
+                switch state {
+                case .pendingUpgrade(let pending) where pending.requestID == singleState.requestID:
+                    return try await upgradeToBatch(
+                        existingSingle: pending,
+                        newInput: input,
+                        newParameters: parameters,
+                        model: model,
+                        cache: cache,
+                        tokenizer: tokenizer,
+                        configuration: configuration,
+                        cachedKVState: cachedKVState,
+                        promptCache: promptCache,
+                        promptCacheModelName: promptCacheModelName,
+                        inputTokens: inputTokens,
+                        newRequestWiredMemoryTicket: wiredMemoryTicket,
+                        newRequestTicketAlreadyStarted: true
+                    )
+
+                case .idle:
+                    return try await startSingleRequest(
+                        input: input,
+                        parameters: parameters,
+                        model: model,
+                        cache: cachedKVState ?? cache,
+                        tokenizer: tokenizer,
+                        configuration: configuration,
+                        promptCache: promptCache,
+                        promptCacheModelName: promptCacheModelName,
+                        inputTokens: inputTokens,
+                        wiredMemoryTicket: wiredMemoryTicket,
+                        ticketAlreadyStarted: true
+                    )
+
+                case .single, .pendingUpgrade, .upgrading, .batched:
+                    return try await createSingleStream(
+                        input: input,
+                        parameters: parameters,
+                        model: model,
+                        cache: cachedKVState ?? cache,
+                        tokenizer: tokenizer,
+                        configuration: configuration,
+                        promptCache: promptCache,
+                        promptCacheModelName: promptCacheModelName,
+                        inputTokens: inputTokens,
+                        wiredMemoryTicket: wiredMemoryTicket,
+                        ticketAlreadyStarted: true
+                    )
+                }
+            }
+
             // Second request while first is active: upgrade to batch
             return try await upgradeToBatch(
                 existingSingle: singleState,
@@ -376,12 +456,11 @@ public actor InferenceScheduler {
                 inputTokens: inputTokens
             )
 
-        case .upgrading:
-            // Upgrade is in progress — run this request independently on
-            // the single path so it doesn't interfere with the ongoing
-            // handoff. It will complete on its own without joining the batch.
-            // Use cachedKVState if available.
-            return try createSingleStream(
+        case .pendingUpgrade:
+            // An upgrade candidate is waiting for wired-memory admission.
+            // Keep any additional work independent so the active single
+            // request can continue without extra scheduler coordination.
+            return try await createSingleStream(
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -390,18 +469,94 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 promptCache: promptCache,
                 promptCacheModelName: promptCacheModelName,
-                inputTokens: inputTokens
+                inputTokens: inputTokens,
+                wiredMemoryTicket: wiredMemoryTicket
             )
 
-        case .batched(var batchedState):
-            // Third+ request: join existing batch
-            return try joinExistingBatch(
-                batchedState: &batchedState,
+        case .upgrading:
+            // Upgrade is in progress — run this request independently on
+            // the single path so it doesn't interfere with the ongoing
+            // handoff. It will complete on its own without joining the batch.
+            // Use cachedKVState if available.
+            return try await createSingleStream(
                 input: input,
                 parameters: parameters,
+                model: model,
+                cache: cachedKVState ?? cache,
                 tokenizer: tokenizer,
-                cachedKVState: cachedKVState
+                configuration: configuration,
+                promptCache: promptCache,
+                promptCacheModelName: promptCacheModelName,
+                inputTokens: inputTokens,
+                wiredMemoryTicket: wiredMemoryTicket
             )
+
+        case .batched:
+            let ticketAlreadyStarted = try await awaitTicketAdmission(wiredMemoryTicket)
+
+            switch state {
+            case .batched(var batchedState):
+                // The batch may have drained while we were waiting for
+                // admission, but the cleanup task has not yet flipped the
+                // scheduler back to idle. In that window there is no live
+                // batch task left to service a newly inserted UID, so fall
+                // back to the single path with the already-started ticket.
+                if batchedState.continuations.isEmpty {
+                    return try await startSingleRequest(
+                        input: input,
+                        parameters: parameters,
+                        model: model,
+                        cache: cachedKVState ?? cache,
+                        tokenizer: tokenizer,
+                        configuration: configuration,
+                        promptCache: promptCache,
+                        promptCacheModelName: promptCacheModelName,
+                        inputTokens: inputTokens,
+                        wiredMemoryTicket: wiredMemoryTicket,
+                        ticketAlreadyStarted: ticketAlreadyStarted
+                    )
+                }
+
+                // Third+ request: join existing batch
+                return try joinExistingBatch(
+                    batchedState: &batchedState,
+                    input: input,
+                    parameters: parameters,
+                    tokenizer: tokenizer,
+                    cachedKVState: cachedKVState,
+                    wiredMemoryTicket: wiredMemoryTicket
+                )
+
+            case .idle:
+                return try await startSingleRequest(
+                    input: input,
+                    parameters: parameters,
+                    model: model,
+                    cache: cachedKVState ?? cache,
+                    tokenizer: tokenizer,
+                    configuration: configuration,
+                    promptCache: promptCache,
+                    promptCacheModelName: promptCacheModelName,
+                    inputTokens: inputTokens,
+                    wiredMemoryTicket: wiredMemoryTicket,
+                    ticketAlreadyStarted: ticketAlreadyStarted
+                )
+
+            case .single, .pendingUpgrade, .upgrading:
+                return try await createSingleStream(
+                    input: input,
+                    parameters: parameters,
+                    model: model,
+                    cache: cachedKVState ?? cache,
+                    tokenizer: tokenizer,
+                    configuration: configuration,
+                    promptCache: promptCache,
+                    promptCacheModelName: promptCacheModelName,
+                    inputTokens: inputTokens,
+                    wiredMemoryTicket: wiredMemoryTicket,
+                    ticketAlreadyStarted: ticketAlreadyStarted
+                )
+            }
         }
     }
 
@@ -461,14 +616,24 @@ public actor InferenceScheduler {
         configuration: ModelConfiguration,
         promptCache: LRUPromptCache? = nil,
         promptCacheModelName: String? = nil,
-        inputTokens: [Int]? = nil
-    ) throws -> AsyncStream<Generation> {
-        let iterator = try TokenIterator(
-            input: input,
-            model: model,
-            cache: cache,
-            parameters: parameters
-        )
+        inputTokens: [Int]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil,
+        ticketAlreadyStarted: Bool = false
+    ) async throws -> AsyncStream<Generation> {
+        let iterator: TokenIterator
+        do {
+            iterator = try TokenIterator(
+                input: input,
+                model: model,
+                cache: cache,
+                parameters: parameters
+            )
+        } catch {
+            if ticketAlreadyStarted, let wiredMemoryTicket {
+                _ = await wiredMemoryTicket.end()
+            }
+            throw error
+        }
 
         let requestID = requestCounter
         requestCounter += 1
@@ -497,9 +662,23 @@ public actor InferenceScheduler {
         let task = Task { [weak self] in
             var iter = iteratorBox.consume()
             let tok = tokenizerBox.consume() as! Tokenizer
+            var ownsTicket = wiredMemoryTicket != nil
 
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
             let toolCallProcessor = ToolCallProcessor(format: toolCallFormat)
+
+            if let wiredMemoryTicket, !ticketAlreadyStarted {
+                _ = await wiredMemoryTicket.start()
+            }
+            if Task.isCancelled {
+                if ownsTicket, let wiredMemoryTicket {
+                    ownsTicket = false
+                    _ = await wiredMemoryTicket.end()
+                }
+                continuation.finish()
+                await self?.handleSingleRequestFinished(requestID: requestID)
+                return
+            }
 
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
@@ -565,6 +744,7 @@ public actor InferenceScheduler {
                     // The batch loop now owns the continuation. Exit without
                     // finishing it — the upgraded flag will be set by the
                     // scheduler after it receives the live state.
+                    ownsTicket = false
                     return
                 }
             }
@@ -628,6 +808,11 @@ public actor InferenceScheduler {
                 )
             }
 
+            if ownsTicket, let wiredMemoryTicket {
+                ownsTicket = false
+                _ = await wiredMemoryTicket.end()
+            }
+
             Stream().synchronize()
             continuation.finish()
 
@@ -656,7 +841,8 @@ public actor InferenceScheduler {
                 promptTokenCount: promptTokenCount,
                 inputTokens: inputTokens,
                 promptCache: promptCache,
-                promptCacheModelName: promptCacheModelName
+                promptCacheModelName: promptCacheModelName,
+                wiredMemoryTicket: wiredMemoryTicket
             ))
 
         return stream
@@ -672,14 +858,24 @@ public actor InferenceScheduler {
         configuration: ModelConfiguration,
         promptCache: LRUPromptCache? = nil,
         promptCacheModelName: String? = nil,
-        inputTokens: [Int]? = nil
-    ) throws -> AsyncStream<Generation> {
-        let iterator = try TokenIterator(
-            input: input,
-            model: model,
-            cache: cache,
-            parameters: parameters
-        )
+        inputTokens: [Int]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil,
+        ticketAlreadyStarted: Bool = false
+    ) async throws -> AsyncStream<Generation> {
+        let iterator: TokenIterator
+        do {
+            iterator = try TokenIterator(
+                input: input,
+                model: model,
+                cache: cache,
+                parameters: parameters
+            )
+        } catch {
+            if ticketAlreadyStarted, let wiredMemoryTicket {
+                _ = await wiredMemoryTicket.end()
+            }
+            throw error
+        }
 
         let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
@@ -696,9 +892,22 @@ public actor InferenceScheduler {
         let task = Task {
             var iter = iteratorBox.consume()
             let tok = tokenizerBox.consume() as! Tokenizer
+            var ownsTicket = wiredMemoryTicket != nil
 
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
             let toolCallProcessor = ToolCallProcessor(format: toolCallFormat)
+
+            if let wiredMemoryTicket, !ticketAlreadyStarted {
+                _ = await wiredMemoryTicket.start()
+            }
+            if Task.isCancelled {
+                if ownsTicket, let wiredMemoryTicket {
+                    ownsTicket = false
+                    _ = await wiredMemoryTicket.end()
+                }
+                continuation.finish()
+                return
+            }
 
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
@@ -783,6 +992,11 @@ public actor InferenceScheduler {
                 )
             }
 
+            if ownsTicket, let wiredMemoryTicket {
+                ownsTicket = false
+                _ = await wiredMemoryTicket.end()
+            }
+
             Stream().synchronize()
             continuation.finish()
         }
@@ -821,7 +1035,9 @@ public actor InferenceScheduler {
         cachedKVState: [KVCache]? = nil,
         promptCache: LRUPromptCache? = nil,
         promptCacheModelName: String? = nil,
-        inputTokens: [Int]? = nil
+        inputTokens: [Int]? = nil,
+        newRequestWiredMemoryTicket: WiredMemoryTicket? = nil,
+        newRequestTicketAlreadyStarted: Bool = false
     ) async throws -> AsyncStream<Generation> {
         // --- Phase 1: Request live state from the single-request task ---
         // Set state to .upgrading BEFORE the await so that additional
@@ -842,7 +1058,7 @@ public actor InferenceScheduler {
         // up).
         guard let liveState else {
             state = .idle
-            return try startSingleRequest(
+            return try await startSingleRequest(
                 input: newInput,
                 parameters: newParameters,
                 model: model,
@@ -851,7 +1067,9 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 promptCache: promptCache,
                 promptCacheModelName: promptCacheModelName,
-                inputTokens: inputTokens
+                inputTokens: inputTokens,
+                wiredMemoryTicket: newRequestWiredMemoryTicket,
+                ticketAlreadyStarted: newRequestTicketAlreadyStarted
             )
         }
 
@@ -906,15 +1124,20 @@ public actor InferenceScheduler {
             )
             _ = firstContinuation.yield(.info(info))
             firstContinuation.finish()
+            if let firstTicket = existingSingle.wiredMemoryTicket {
+                _ = await firstTicket.end()
+            }
 
             state = .idle
-            return try startSingleRequest(
+            return try await startSingleRequest(
                 input: newInput,
                 parameters: newParameters,
                 model: model,
                 cache: cache,
                 tokenizer: tokenizer,
-                configuration: configuration
+                configuration: configuration,
+                wiredMemoryTicket: newRequestWiredMemoryTicket,
+                ticketAlreadyStarted: newRequestTicketAlreadyStarted
             )
         }
 
@@ -966,9 +1189,12 @@ public actor InferenceScheduler {
         // Rebind the first request's cancellation handler so it removes the
         // UID from the BatchTokenIterator instead of cancelling the old task.
         firstContinuation.onTermination = {
-            [weak batchIterator] termination in
+            [weak self, weak batchIterator] termination in
             if case .cancelled = termination {
                 batchIterator?.remove(uids: [firstUID])
+                Task {
+                    await self?.cancelBatchedRequest(uid: firstUID)
+                }
             }
         }
 
@@ -1093,7 +1319,6 @@ public actor InferenceScheduler {
                             stopReason: response.finishReason ?? .stop
                         )
                         _ = cont.yield(.info(info))
-                        cont.finish()
 
                         // Write back final KV cache for this request to prompt cache.
                         // Use the full token sequence (prompt + generated) as the key
@@ -1117,21 +1342,27 @@ public actor InferenceScheduler {
                             }
                         }
 
+                        await self?.endBatchedTicket(uid: uid)
+                        cont.finish()
                         await self?.removeContinuation(uid: uid)
                     }
                 }
             }
 
             // If we get here, all sequences are done or iterator was closed
+            await self?.endAllBatchedTickets()
             await self?.finishAllContinuations()
             await self?.handleBatchFinished()
         }
 
         // Wire up second request's cancellation
         secondContinuation.onTermination = {
-            [weak batchIterator] termination in
+            [weak self, weak batchIterator] termination in
             if case .cancelled = termination {
                 batchIterator?.remove(uids: [secondUID])
+                Task {
+                    await self?.cancelBatchedRequest(uid: secondUID)
+                }
             }
         }
 
@@ -1162,7 +1393,11 @@ public actor InferenceScheduler {
                 configuration: configuration,
                 stopTokenIDs: stopTokenIDs,
                 promptCache: promptCache ?? existingSingle.promptCache,
-                promptCacheModelName: promptCacheModelName ?? existingSingle.promptCacheModelName
+                promptCacheModelName: promptCacheModelName ?? existingSingle.promptCacheModelName,
+                wiredMemoryTickets: [
+                    firstUID: existingSingle.wiredMemoryTicket,
+                    secondUID: newRequestWiredMemoryTicket,
+                ].compactMapValues { $0 }
             ))
 
         return secondStream
@@ -1176,7 +1411,8 @@ public actor InferenceScheduler {
         input: LMInput,
         parameters: GenerateParameters,
         tokenizer: Tokenizer,
-        cachedKVState: [KVCache]? = nil
+        cachedKVState: [KVCache]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
     ) throws -> AsyncStream<Generation> {
         let promptTokens = input.text.tokens.asArray(Int.self)
         let maxTokens = parameters.maxTokens ?? 1000
@@ -1195,10 +1431,12 @@ public actor InferenceScheduler {
         let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
         continuation.onTermination = {
-            [weak batchIterator = batchedState.batchIterator]
-            termination in
+            [weak self, weak batchIterator = batchedState.batchIterator] termination in
             if case .cancelled = termination {
                 batchIterator?.remove(uids: [uid])
+                Task {
+                    await self?.cancelBatchedRequest(uid: uid)
+                }
             }
         }
 
@@ -1206,6 +1444,9 @@ public actor InferenceScheduler {
         batchedState.promptTokenCounts[uid] = input.text.tokens.size
         batchedState.submitTimes[uid] = Date()
         batchedState.inputTokens[uid] = promptTokens
+        if let wiredMemoryTicket {
+            batchedState.wiredMemoryTickets[uid] = wiredMemoryTicket
+        }
 
         // Update state
         state = .batched(batchedState)
@@ -1218,6 +1459,8 @@ public actor InferenceScheduler {
     /// Called when a single request finishes naturally.
     private func handleSingleRequestFinished(requestID: Int) {
         if case .single(let s) = state, s.requestID == requestID {
+            state = .idle
+        } else if case .pendingUpgrade(let s) = state, s.requestID == requestID {
             state = .idle
         }
     }
@@ -1241,6 +1484,9 @@ public actor InferenceScheduler {
     private func removeContinuation(uid: Int) {
         if case .batched(var batchedState) = state {
             batchedState.continuations.removeValue(forKey: uid)
+            batchedState.promptTokenCounts.removeValue(forKey: uid)
+            batchedState.submitTimes.removeValue(forKey: uid)
+            batchedState.inputTokens.removeValue(forKey: uid)
             state = .batched(batchedState)
         }
     }
@@ -1286,6 +1532,50 @@ public actor InferenceScheduler {
         }
     }
 
+    /// Await admission for an optional ticket and release it if the waiting
+    /// task is cancelled after admission succeeds.
+    private func awaitTicketAdmission(_ ticket: WiredMemoryTicket?) async throws -> Bool {
+        guard let ticket else { return false }
+        _ = await ticket.start()
+        do {
+            try Task.checkCancellation()
+        } catch {
+            _ = await ticket.end()
+            throw error
+        }
+        return true
+    }
+
+    /// End and forget the active ticket for a batched UID.
+    private func endBatchedTicket(uid: Int) async {
+        guard case .batched(var batchedState) = state,
+            let ticket = batchedState.wiredMemoryTickets.removeValue(forKey: uid)
+        else {
+            return
+        }
+
+        state = .batched(batchedState)
+        _ = await ticket.end()
+    }
+
+    /// Cancel a batched request and release its ticket.
+    private func cancelBatchedRequest(uid: Int) async {
+        await endBatchedTicket(uid: uid)
+        removeContinuation(uid: uid)
+    }
+
+    /// End every active ticket still owned by the batch state.
+    private func endAllBatchedTickets() async {
+        guard case .batched(var batchedState) = state else { return }
+        let tickets = Array(batchedState.wiredMemoryTickets.values)
+        batchedState.wiredMemoryTickets.removeAll()
+        state = .batched(batchedState)
+
+        for ticket in tickets {
+            _ = await ticket.end()
+        }
+    }
+
     // MARK: - Utility
 
     /// Build the set of stop token IDs from configuration and tokenizer.
@@ -1310,6 +1600,7 @@ public actor InferenceScheduler {
         switch state {
         case .idle: return "idle"
         case .single: return "single"
+        case .pendingUpgrade: return "pendingUpgrade"
         case .upgrading: return "upgrading"
         case .batched: return "batched"
         }

@@ -170,6 +170,11 @@ ticket scope. In that case, budget the ticket for the **peak** expected usage
 ticket** for weights, then the inference ticket should cover **KV cache + prefill workspace**
 only.
 
+When you call `ModelContainer.generate(..., wiredMemoryTicket:)`, that ticket now applies on both
+the direct path and the scheduler-backed batching path. In scheduler mode, admission and cleanup
+are tracked per request; shared model weights should still be represented separately with a
+reservation ticket if you want weights and active inference demand budgeted independently.
+
 If you need tighter control, you can split budgets by phase (e.g., a transient add-on for
 prefill), but the common path is a single ticket.
 
