@@ -2,9 +2,10 @@
 
 import Foundation
 import MLX
-@testable import MLXLLM
 @preconcurrency @testable import MLXLMCommon
 import XCTest
+
+@testable import MLXLLM
 
 final class Gemma2FalconH1BatchMaskTests: XCTestCase {
 
@@ -246,7 +247,8 @@ final class Gemma2FalconH1BatchMaskTests: XCTestCase {
     ) throws {
         let singleCaches: [KVCacheSimple] = promptLengths.enumerated().map { index, length in
             let cache = KVCacheSimple()
-            let hidden = makeHiddenStates(length: length, hiddenSize: hiddenSize, base: Float(index + 1))
+            let hidden = makeHiddenStates(
+                length: length, hiddenSize: hiddenSize, base: Float(index + 1))
             let mask = createAttentionMask(h: hidden, cache: cache)
             let output = attention(hidden, mask: mask, cache: cache)
             materialize(arrays: [output], cache: [cache])
