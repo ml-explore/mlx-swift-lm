@@ -508,12 +508,21 @@ public final class ChatSession {
         guard let kvCache = await currentCache() else {
             throw ChatSessionError.noCacheAvailable
         }
+        // savePromptCache is called outside the lock intentionally: holding the read
+        // lock during synchronous file I/O would block other cache readers for the
+        // duration of the write. ChatSession is not thread-safe (callers own the
+        // serialization), so a concurrent clear() between currentCache() and here
+        // is caller error, not a library concern.
         try savePromptCache(url: url, cache: kvCache)
     }
 }
 
 /// Errors thrown by ``ChatSession``.
-public enum ChatSessionError: Error {
+public enum ChatSessionError: LocalizedError {
     /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
     case noCacheAvailable
+
+    public var errorDescription: String? {
+        "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+    }
 }
