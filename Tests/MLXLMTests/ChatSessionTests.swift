@@ -153,6 +153,66 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertGreaterThan(result.count, targetLength, result)
     }
 
+    // MARK: - KV Cache
+
+    func testCurrentCacheNilBeforeGeneration() async throws {
+        let session = ChatSession(model())
+        let cache = await session.currentCache()
+        XCTAssertNil(cache)
+    }
+
+    func testCurrentCacheAfterGeneration() async throws {
+        let session = ChatSession(model())
+        _ = try await session.respond(to: "hello")
+        let cache = await session.currentCache()
+        XCTAssertNotNil(cache)
+    }
+
+    func testInitWithKVCache() async throws {
+        // build a cache from an initial session
+        let ctx = model()
+        let initial = ChatSession(ctx)
+        _ = try await initial.respond(to: "hello")
+        guard let cache = await initial.currentCache() else {
+            XCTFail("expected cache after generation")
+            return
+        }
+
+        // restore the cache into a new session and verify generation continues
+        let restored = ChatSession(ctx, cache: cache)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testSaveCacheThrowsBeforeGeneration() async throws {
+        let session = ChatSession(model())
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        do {
+            try await session.saveCache(to: url)
+            XCTFail("expected ChatSessionError.noCacheAvailable")
+        } catch ChatSessionError.noCacheAvailable {
+            // expected
+        }
+    }
+
+    func testSaveAndRestoreCache() async throws {
+        let ctx = model()
+        let initial = ChatSession(ctx)
+        _ = try await initial.respond(to: "hello")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        try await initial.saveCache(to: url)
+
+        let (loadedCache, _) = try loadPromptCache(url: url)
+        let restored = ChatSession(ctx, cache: loadedCache)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
     /// something that looks like a view model
     @MainActor class ChatModel {
         let session: ChatSession

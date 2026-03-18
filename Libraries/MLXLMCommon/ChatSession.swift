@@ -158,6 +158,78 @@ public final class ChatSession {
         self.additionalContext = additionalContext
     }
 
+    /// Initialize the `ChatSession` with a pre-built KV cache.
+    ///
+    /// This enables prefix caching: build a KV cache from a long shared context (e.g. a
+    /// system prompt and document) once, save it via ``saveCache(to:)``, and restore it
+    /// across multiple sessions to avoid re-prefilling the same tokens each time.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContainer``
+    ///   - cache: a ``[KVCache]`` previously obtained from ``saveCache(to:)`` or
+    ///     ``currentCache()``
+    ///   - instructions: optional system instructions for the session
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
+    ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
+    ///   - additionalContext: optional model-specific context
+    public init(
+        _ model: ModelContainer,
+        cache: [KVCache],
+        instructions: String? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.model = model
+        self.instructions = instructions
+        self.cache = .init(.kvcache(cache))
+        self.processing = processing
+        self.generateParameters = generateParameters
+        self.tools = tools
+        self.toolDispatch = toolDispatch
+        self.additionalContext = additionalContext
+    }
+
+    /// Initialize the `ChatSession` with a pre-built KV cache.
+    ///
+    /// This enables prefix caching: build a KV cache from a long shared context (e.g. a
+    /// system prompt and document) once, save it via ``saveCache(to:)``, and restore it
+    /// across multiple sessions to avoid re-prefilling the same tokens each time.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContext``
+    ///   - cache: a ``[KVCache]`` previously obtained from ``saveCache(to:)`` or
+    ///     ``currentCache()``
+    ///   - instructions: optional system instructions for the session
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
+    ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
+    ///   - additionalContext: optional model-specific context
+    public init(
+        _ model: ModelContext,
+        cache: [KVCache],
+        instructions: String? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.model = ModelContainer(context: model)
+        self.instructions = instructions
+        self.cache = .init(.kvcache(cache))
+        self.processing = processing
+        self.generateParameters = generateParameters
+        self.tools = tools
+        self.toolDispatch = toolDispatch
+        self.additionalContext = additionalContext
+    }
+
     /// Produces a response to a prompt.
     ///
     /// - Parameters:
@@ -406,4 +478,42 @@ public final class ChatSession {
     public func synchronize() async {
         await cache.read { _ in }
     }
+
+    /// Returns the current KV cache, if one has been built.
+    ///
+    /// Returns `nil` if no generation has occurred yet (cache is still empty) or if the
+    /// session is in history-rehydration mode and generation has not started.
+    ///
+    /// The returned array holds references to the live cache objects. To persist the cache
+    /// across process launches, use ``saveCache(to:)`` instead.
+    public func currentCache() async -> [KVCache]? {
+        var result: [KVCache]?
+        await cache.read { cache in
+            if case .kvcache(let array) = cache {
+                result = array
+            }
+        }
+        return result
+    }
+
+    /// Saves the current KV cache to disk.
+    ///
+    /// Use ``init(_:cache:instructions:generateParameters:processing:additionalContext:tools:toolDispatch:)``
+    /// to restore the saved cache in a future session.
+    ///
+    /// - Parameter url: the file URL to write the cache to
+    /// - Throws: ``ChatSessionError/noCacheAvailable`` if no generation has occurred yet,
+    ///   or any error thrown by the underlying file write
+    public func saveCache(to url: URL) async throws {
+        guard let kvCache = await currentCache() else {
+            throw ChatSessionError.noCacheAvailable
+        }
+        try savePromptCache(url: url, cache: kvCache)
+    }
+}
+
+/// Errors thrown by ``ChatSession``.
+public enum ChatSessionError: Error {
+    /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
+    case noCacheAvailable
 }
