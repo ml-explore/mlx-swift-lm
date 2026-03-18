@@ -1639,10 +1639,12 @@ public func maybeQuantizeKVCache(
     kvGroupSize: Int = 64,
     quantizedKVStart: Int = 0
 ) {
-    guard let kvBits = kvBits,
-        !cache.isEmpty,
-        !(cache[0] is QuantizedKVCache),
-        cache[0].offset > quantizedKVStart
+    guard let kvBits = kvBits, !cache.isEmpty else { return }
+
+    // Find the first quantizable (non-Mamba, non-already-quantized) cache entry
+    guard let firstQuantizable = cache.first(where: { $0 is KVCacheSimple }),
+        !(firstQuantizable is QuantizedKVCache),
+        firstQuantizable.offset > quantizedKVStart
     else {
         return
     }
