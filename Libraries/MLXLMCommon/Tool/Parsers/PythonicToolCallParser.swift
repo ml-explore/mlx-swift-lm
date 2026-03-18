@@ -27,28 +27,37 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
 
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Pattern: [function_name(args...)] or function_name(args...)
-        // Also handle multiple calls: [func1(args), func2(args)]
-        let pattern = #"\[?(\w+)\((.*?)\)\]?"#
+        let funcName: String
+        let argsString: String
 
-        guard
-            let regex = try? NSRegularExpression(
-                pattern: pattern, options: [.dotMatchesLineSeparators]),
+        // Required brackets pattern (matches Python reference: r"\[(\w+)\((.*?)\)\]")
+        // The required \] forces .*? to backtrack past nested ) inside argument values.
+        let bracketPattern = #"\[(\w+)\((.*?)\)\]"#
+        if let regex = try? NSRegularExpression(
+            pattern: bracketPattern, options: [.dotMatchesLineSeparators]),
             let match = regex.firstMatch(
-                in: text, options: [], range: NSRange(text.startIndex..., in: text))
-        else { return nil }
+                in: text, options: [], range: NSRange(text.startIndex..., in: text)),
+            let nameRange = Range(match.range(at: 1), in: text),
+            let argsRange = Range(match.range(at: 2), in: text)
+        {
+            funcName = String(text[nameRange])
+            argsString = String(text[argsRange])
+        } else {
+            // Fallback for without-brackets case: use string indices to find the
+            // outermost parentheses, avoiding the greedy/non-greedy regex pitfall.
+            guard let openParen = text.firstIndex(of: "("),
+                let closeParen = text.lastIndex(of: ")")
+            else { return nil }
 
-        // Extract function name
-        guard let nameRange = Range(match.range(at: 1), in: text) else { return nil }
-        let funcName = String(text[nameRange])
+            let name = text[text.startIndex ..< openParen]
+            guard !name.isEmpty, name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
+            else { return nil }
 
-        // Extract arguments string
-        guard let argsRange = Range(match.range(at: 2), in: text) else { return nil }
-        let argsString = String(text[argsRange])
+            funcName = String(name)
+            argsString = String(text[text.index(after: openParen) ..< closeParen])
+        }
 
-        // Parse arguments
         let arguments = parseArguments(argsString, funcName: funcName, tools: tools)
-
         return ToolCall(function: .init(name: funcName, arguments: arguments))
     }
 

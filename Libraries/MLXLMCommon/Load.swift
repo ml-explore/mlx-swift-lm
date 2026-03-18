@@ -27,7 +27,7 @@ public func downloadModel(
         case .id(let id, let revision):
             // download the model weights
             let repo = Hub.Repo(id: id)
-            let modelFiles = ["*.safetensors", "*.json"]
+            let modelFiles = ["*.safetensors", "*.json", "*.jinja"]
             return try await hub.snapshot(
                 from: repo,
                 revision: revision,

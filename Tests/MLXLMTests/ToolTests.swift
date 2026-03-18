@@ -155,6 +155,34 @@ struct ToolTests {
         #expect(toolCall.function.arguments["timezone"] == .string("UTC"))
     }
 
+    @Test("Test Pythonic Tool Call Parser - Nested Parentheses in Argument Value")
+    func testPythonicParserNestedParentheses() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>[run_script(code=\"response = requests.get('https://api.example.com/data')\")] <|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "run_script")
+        #expect(
+            toolCall.function.arguments["code"]
+                == .string("response = requests.get('https://api.example.com/data')"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Nested Parentheses Without Brackets")
+    func testPythonicParserNestedParenthesesNoBrackets() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            "<|tool_call_start|>run_script(code=\"print('hello')\")<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "run_script")
+        #expect(toolCall.function.arguments["code"] == .string("print('hello')"))
+    }
+
     @Test("Test Pythonic Tool Call Parser - No Arguments")
     func testPythonicParserNoArguments() throws {
         let parser = PythonicToolCallParser(
