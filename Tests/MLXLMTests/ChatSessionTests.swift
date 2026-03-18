@@ -213,6 +213,34 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertGreaterThan(result.count, targetLength, result)
     }
 
+    func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {
+        // .history state should behave like .empty: no cache until first generation
+        let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
+        let session = ChatSession(model(), history: history)
+        let cache = await session.currentCache()
+        XCTAssertNil(cache)
+    }
+
+    func testCurrentCacheNonNilForHistorySessionAfterGeneration() async throws {
+        // after generation from .history state, cache transitions to .kvcache
+        let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
+        let session = ChatSession(model(), history: history)
+        _ = try await session.respond(to: "hello again")
+        let cache = await session.currentCache()
+        XCTAssertNotNil(cache)
+    }
+
+    func testCurrentCacheNilAfterClear() async throws {
+        // clear() resets to .empty; currentCache() should return nil again
+        let session = ChatSession(model())
+        _ = try await session.respond(to: "hello")
+        let cacheBeforeClear = await session.currentCache()
+        XCTAssertNotNil(cacheBeforeClear)
+        await session.clear()
+        let cacheAfterClear = await session.currentCache()
+        XCTAssertNil(cacheAfterClear)
+    }
+
     /// something that looks like a view model
     @MainActor class ChatModel {
         let session: ChatSession
