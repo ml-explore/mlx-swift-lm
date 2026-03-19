@@ -306,15 +306,19 @@ public class BertModel: Module, EmbeddingModel {
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
         }
+        let embeddings = embedder(inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds)
         var mask = attentionMask
         if mask != nil {
-            mask = mask!.asType(embedder.wordEmbeddings.weight.dtype).expandedDimensions(axes: [
+            // Cast mask to the same dtype as the embeddings output so it is
+            // compatible with scaled_dot_product_attention's type promotion
+            // rules. Using the embedding weight dtype can produce a mismatch
+            // when Linear layers are quantized to float16 but Embedding
+            // weights remain float32.
+            mask = mask!.asType(embeddings.dtype).expandedDimensions(axes: [
                 1, 2,
             ]).log()
         }
-        let outputs = encoder(
-            embedder(inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds),
-            attentionMask: mask)
+        let outputs = encoder(embeddings, attentionMask: mask)
         if let lmHead {
             return EmbeddingModelOutput(hiddenStates: lmHead(outputs), pooledOutput: nil)
         } else {
