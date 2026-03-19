@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(curl:*)",
+      "Bash(for file in apertus.py baichuan_m1.py deepseek_v3.py gpt_oss.py jamba.py lfm2.py lille130m.py mimo.py openelm.py phi3.py ssm.py)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(done)",
+      "Bash(for dir in idefics3 qwen2_vl qwen3_vl)",
+      "Bash(ls:*)",
+      "Bash(xargs basename:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh pr view:*)",
+      "Bash(grep:*)",
+      "Bash(# Check what type cache.offset returns - MLXArray or Int grep -n \"\"var offset\\\\|let offset\\\\|func offset\\\\|offset:\"\" /Users/dkoski/Developer/mlx-swift-lm/Libraries/MLXLMCommon/KVCache.swift)",
+      "Bash(python3:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh auth:*)",
+      "Bash(gh:*)",
+      "Bash(env:*)",
+      "WebFetch(domain:patch-diff.githubusercontent.com)",
+      "Bash(swift build:*)"
+    ]
+  }
+}
