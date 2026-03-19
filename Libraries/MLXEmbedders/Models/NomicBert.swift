@@ -671,7 +671,7 @@ public class NomicBertModel: Module, EmbeddingModel {
 
     /// The optional pooler layer.
     /// Used to extract a single vector representation for the whole sequence (usually from the [CLS] token).
-    let pooler: Linear?
+    @ModuleInfo var pooler: Linear?
 
     /// The stack of Transformer blocks.
     fileprivate let encoder: Encoder
@@ -696,9 +696,9 @@ public class NomicBertModel: Module, EmbeddingModel {
 
         // Initialize Pooler (for sentence embeddings)
         if pooler {
-            self.pooler = Linear(config.embedDim, config.embedDim, bias: false)
+            _pooler.wrappedValue = Linear(config.embedDim, config.embedDim, bias: false)
         } else {
-            self.pooler = nil
+            _pooler.wrappedValue = nil
         }
 
         // Initialize LM Head (for training/masked prediction)

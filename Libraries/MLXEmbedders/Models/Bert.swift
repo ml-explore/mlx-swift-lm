@@ -259,7 +259,7 @@ public class BertModel: Module, EmbeddingModel {
     @ModuleInfo(key: "embeddings") fileprivate var embedder: BertEmbedding
 
     /// A linear layer used to "pool" the [CLS] token into a single sentence vector.
-    let pooler: Linear?
+    @ModuleInfo var pooler: Linear?
 
     /// The stack of Transformer layers.
     fileprivate let encoder: Encoder
@@ -280,10 +280,10 @@ public class BertModel: Module, EmbeddingModel {
 
         if lmHead {
             _lmHead.wrappedValue = LMHead(config)
-            self.pooler = nil
+            _pooler.wrappedValue = nil
         } else {
             // Pooler projects the [CLS] token to a hidden state of the same size
-            pooler = Linear(config.embedDim, config.embedDim)
+            _pooler.wrappedValue = Linear(config.embedDim, config.embedDim)
             _lmHead.wrappedValue = nil
         }
     }
