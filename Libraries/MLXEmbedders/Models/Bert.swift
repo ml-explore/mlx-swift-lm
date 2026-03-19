@@ -253,7 +253,7 @@ public class BertModel: Module, EmbeddingModel {
     @ModuleInfo(key: "embeddings") fileprivate var embedder: BertEmbedding
 
     /// A linear layer used to "pool" the [CLS] token into a single sentence vector.
-    let pooler: Linear?
+    @ModuleInfo var pooler: Linear?
 
     /// The stack of Transformer layers.
     fileprivate let encoder: Encoder
@@ -274,10 +274,10 @@ public class BertModel: Module, EmbeddingModel {
 
         if lmHead {
             _lmHead.wrappedValue = LMHead(config)
-            self.pooler = nil
+            _pooler.wrappedValue = nil
         } else {
             // Pooler projects the [CLS] token to a hidden state of the same size
-            pooler = Linear(config.embedDim, config.embedDim)
+            _pooler.wrappedValue = Linear(config.embedDim, config.embedDim)
             _lmHead.wrappedValue = nil
         }
     }
@@ -300,15 +300,19 @@ public class BertModel: Module, EmbeddingModel {
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
         }
+        let embeddings = embedder(inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds)
         var mask = attentionMask
         if mask != nil {
-            mask = mask!.asType(embedder.wordEmbeddings.weight.dtype).expandedDimensions(axes: [
+            // Cast mask to the same dtype as the embeddings output so it is
+            // compatible with scaled_dot_product_attention's type promotion
+            // rules. Using the embedding weight dtype can produce a mismatch
+            // when Linear layers are quantized to float16 but Embedding
+            // weights remain float32.
+            mask = mask!.asType(embeddings.dtype).expandedDimensions(axes: [
                 1, 2,
             ]).log()
         }
-        let outputs = encoder(
-            embedder(inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds),
-            attentionMask: mask)
+        let outputs = encoder(embeddings, attentionMask: mask)
         if let lmHead {
             return EmbeddingModelOutput(hiddenStates: lmHead(outputs), pooledOutput: nil)
         } else {
