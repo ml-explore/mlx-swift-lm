@@ -215,9 +215,9 @@ public actor InferenceScheduler {
         /// The model configuration.
         let configuration: ModelConfiguration
 
-        /// The AsyncStream continuation for the first request's stream.
-        /// Stored so it can be reused during upgrade to batch mode.
-        let continuation: AsyncStream<Generation>.Continuation
+        /// The token handler for this request's output stream.
+        /// Stored so it can be transferred during upgrade to batch mode.
+        let handler: SchedulerTokenHandler
 
         /// Shared flag signaling that this request was upgraded to batch.
         /// When set, the single-request task must not finish the continuation.
@@ -247,8 +247,8 @@ public actor InferenceScheduler {
         /// The driving task that runs the batch generation loop.
         let task: Task<Void, Never>
 
-        /// Mapping from UID -> AsyncStream continuation for routing tokens.
-        var continuations: [Int: AsyncStream<Generation>.Continuation]
+        /// Mapping from UID -> token handler for routing tokens.
+        var handlers: [Int: SchedulerTokenHandler]
 
         /// Mapping from UID -> prompt token count for each request.
         /// Used by the batch loop to report correct promptTokenCount in .info.
@@ -331,6 +331,111 @@ public actor InferenceScheduler {
         inputTokens: [Int]? = nil,
         wiredMemoryTicket: WiredMemoryTicket? = nil
     ) async throws -> AsyncStream<Generation> {
+        let toolCallFormat = configuration.toolCallFormat ?? .json
+        let (stream, continuation) = AsyncStream<Generation>.makeStream()
+        let handler = SchedulerTokenHandler.text(
+            continuation: continuation,
+            tokenizer: tokenizer,
+            toolCallFormat: toolCallFormat
+        )
+
+        try await routeThroughStateMachine(
+            handler: handler,
+            input: input,
+            parameters: parameters,
+            model: model,
+            cache: cache,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            cachedKVState: cachedKVState,
+            promptCache: promptCache,
+            promptCacheModelName: promptCacheModelName,
+            inputTokens: inputTokens,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+
+        return stream
+    }
+
+    /// Submit an inference request for raw token IDs, returning an `AsyncStream<TokenGeneration>`.
+    ///
+    /// This is the raw-token counterpart of `submit()`. Instead of decoded text chunks and
+    /// tool calls, the returned stream yields `.token(Int)` for each generated token ID and
+    /// `.info(GenerateCompletionInfo)` at the end.
+    ///
+    /// - Parameters:
+    ///   - input: The prepared language model input.
+    ///   - parameters: Generation parameters.
+    ///   - model: The language model.
+    ///   - cache: Optional pre-existing KV cache.
+    ///   - tokenizer: The tokenizer (needed for stop-token detection).
+    ///   - configuration: The model configuration (EOS tokens, etc.).
+    ///   - includeStopToken: When `true`, the terminating EOS/unknown token is yielded
+    ///     before finishing. Defaults to `false`.
+    ///   - cachedKVState: Optional cached KV state from `LRUPromptCache`.
+    ///   - promptCache: Optional `LRUPromptCache` for writing back final KV state.
+    ///   - promptCacheModelName: Model name used as key for prompt cache operations.
+    ///   - inputTokens: The full token sequence for prompt cache write-back.
+    ///   - wiredMemoryTicket: Optional wired-memory ticket for this request.
+    /// - Returns: An `AsyncStream<TokenGeneration>` yielding raw token events.
+    public func submitTokens(
+        input: LMInput,
+        parameters: GenerateParameters,
+        model: any LanguageModel,
+        cache: [KVCache]?,
+        tokenizer: Tokenizer,
+        configuration: ModelConfiguration,
+        includeStopToken: Bool = false,
+        cachedKVState: [KVCache]? = nil,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
+    ) async throws -> AsyncStream<TokenGeneration> {
+        let (stream, continuation) = AsyncStream<TokenGeneration>.makeStream()
+        let handler = SchedulerTokenHandler.rawToken(
+            continuation: continuation,
+            includeStopToken: includeStopToken
+        )
+
+        try await routeThroughStateMachine(
+            handler: handler,
+            input: input,
+            parameters: parameters,
+            model: model,
+            cache: cache,
+            tokenizer: tokenizer,
+            configuration: configuration,
+            cachedKVState: cachedKVState,
+            promptCache: promptCache,
+            promptCacheModelName: promptCacheModelName,
+            inputTokens: inputTokens,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+
+        return stream
+    }
+
+    // MARK: - State Machine Routing
+
+    /// Route a request through the scheduler state machine.
+    ///
+    /// This is the shared core for both `submit()` and `submitTokens()`. The handler
+    /// encapsulates all output-mode-specific logic (detokenization vs raw tokens).
+    private func routeThroughStateMachine(
+        handler: SchedulerTokenHandler,
+        input: LMInput,
+        parameters: GenerateParameters,
+        model: any LanguageModel,
+        cache: [KVCache]?,
+        tokenizer: Tokenizer,
+        configuration: ModelConfiguration,
+        cachedKVState: [KVCache]? = nil,
+        promptCache: LRUPromptCache? = nil,
+        promptCacheModelName: String? = nil,
+        inputTokens: [Int]? = nil,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
+    ) async throws {
         // Check if this request is batch-compatible
         let compatible = Self.isBatchCompatible(
             input: input,
@@ -342,6 +447,7 @@ public actor InferenceScheduler {
         if !compatible {
             // Incompatible request: always use single path
             return try await createSingleStream(
+                handler: handler,
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -358,10 +464,8 @@ public actor InferenceScheduler {
         switch state {
         case .idle:
             // First request: use single path (TokenIterator).
-            // When cachedKVState is provided (from LRUPromptCache), use it
-            // as the initial cache so the TokenIterator skips prefill for
-            // the cached prefix tokens.
             return try await startSingleRequest(
+                handler: handler,
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -395,6 +499,7 @@ public actor InferenceScheduler {
                 case .pendingUpgrade(let pending) where pending.requestID == singleState.requestID:
                     return try await upgradeToBatch(
                         existingSingle: pending,
+                        newHandler: handler,
                         newInput: input,
                         newParameters: parameters,
                         model: model,
@@ -411,6 +516,7 @@ public actor InferenceScheduler {
 
                 case .idle:
                     return try await startSingleRequest(
+                        handler: handler,
                         input: input,
                         parameters: parameters,
                         model: model,
@@ -426,6 +532,7 @@ public actor InferenceScheduler {
 
                 case .single, .pendingUpgrade, .upgrading, .batched:
                     return try await createSingleStream(
+                        handler: handler,
                         input: input,
                         parameters: parameters,
                         model: model,
@@ -444,6 +551,7 @@ public actor InferenceScheduler {
             // Second request while first is active: upgrade to batch
             return try await upgradeToBatch(
                 existingSingle: singleState,
+                newHandler: handler,
                 newInput: input,
                 newParameters: parameters,
                 model: model,
@@ -458,9 +566,8 @@ public actor InferenceScheduler {
 
         case .pendingUpgrade:
             // An upgrade candidate is waiting for wired-memory admission.
-            // Keep any additional work independent so the active single
-            // request can continue without extra scheduler coordination.
             return try await createSingleStream(
+                handler: handler,
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -474,11 +581,9 @@ public actor InferenceScheduler {
             )
 
         case .upgrading:
-            // Upgrade is in progress — run this request independently on
-            // the single path so it doesn't interfere with the ongoing
-            // handoff. It will complete on its own without joining the batch.
-            // Use cachedKVState if available.
+            // Upgrade is in progress — run independently on single path.
             return try await createSingleStream(
+                handler: handler,
                 input: input,
                 parameters: parameters,
                 model: model,
@@ -496,13 +601,9 @@ public actor InferenceScheduler {
 
             switch state {
             case .batched(var batchedState):
-                // The batch may have drained while we were waiting for
-                // admission, but the cleanup task has not yet flipped the
-                // scheduler back to idle. In that window there is no live
-                // batch task left to service a newly inserted UID, so fall
-                // back to the single path with the already-started ticket.
-                if batchedState.continuations.isEmpty {
+                if batchedState.handlers.isEmpty {
                     return try await startSingleRequest(
+                        handler: handler,
                         input: input,
                         parameters: parameters,
                         model: model,
@@ -519,6 +620,7 @@ public actor InferenceScheduler {
 
                 // Third+ request: join existing batch
                 return try joinExistingBatch(
+                    handler: handler,
                     batchedState: &batchedState,
                     input: input,
                     parameters: parameters,
@@ -529,6 +631,7 @@ public actor InferenceScheduler {
 
             case .idle:
                 return try await startSingleRequest(
+                    handler: handler,
                     input: input,
                     parameters: parameters,
                     model: model,
@@ -544,6 +647,7 @@ public actor InferenceScheduler {
 
             case .single, .pendingUpgrade, .upgrading:
                 return try await createSingleStream(
+                    handler: handler,
                     input: input,
                     parameters: parameters,
                     model: model,
@@ -608,6 +712,7 @@ public actor InferenceScheduler {
 
     /// Start a single request using `TokenIterator` — the existing fast path.
     private func startSingleRequest(
+        handler: SchedulerTokenHandler,
         input: LMInput,
         parameters: GenerateParameters,
         model: any LanguageModel,
@@ -619,7 +724,7 @@ public actor InferenceScheduler {
         inputTokens: [Int]? = nil,
         wiredMemoryTicket: WiredMemoryTicket? = nil,
         ticketAlreadyStarted: Bool = false
-    ) async throws -> AsyncStream<Generation> {
+    ) async throws {
         let iterator: TokenIterator
         do {
             iterator = try TokenIterator(
@@ -638,8 +743,6 @@ public actor InferenceScheduler {
         let requestID = requestCounter
         requestCounter += 1
 
-        let (stream, continuation) = AsyncStream<Generation>.makeStream()
-
         // Store the cache reference from the iterator for potential migration
         let iteratorCache = iterator.cache
 
@@ -651,21 +754,15 @@ public actor InferenceScheduler {
         )
         let unknownTokenId = tokenizer.unknownTokenId
         let promptTokenCount = input.text.tokens.size
-        let toolCallFormat = configuration.toolCallFormat ?? .json
-        let tokenizerBox = SendableBox(tokenizer as AnyObject)
 
         // Shared flag: when set by upgradeToBatch(), the task must not
-        // finish the continuation — the batch loop now owns it.
+        // finish the handler — the batch loop now owns it.
         let upgradeFlag = UpgradeFlag()
 
         let iteratorBox = SendableBox(iterator)
         let task = Task { [weak self] in
             var iter = iteratorBox.consume()
-            let tok = tokenizerBox.consume() as! Tokenizer
             var ownsTicket = wiredMemoryTicket != nil
-
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
-            let toolCallProcessor = ToolCallProcessor(format: toolCallFormat)
 
             if let wiredMemoryTicket, !ticketAlreadyStarted {
                 _ = await wiredMemoryTicket.start()
@@ -675,7 +772,7 @@ public actor InferenceScheduler {
                     ownsTicket = false
                     _ = await wiredMemoryTicket.end()
                 }
-                continuation.finish()
+                handler.finish()
                 await self?.handleSingleRequestFinished(requestID: requestID)
                 return
             }
@@ -699,6 +796,8 @@ public actor InferenceScheduler {
                 }
 
                 if token == unknownTokenId || stopTokenIDs.contains(token) {
+                    // For raw-token mode, emit stop token if requested
+                    _ = handler.processStopToken(token)
                     stopReason = .stop
                     break
                 }
@@ -706,23 +805,12 @@ public actor InferenceScheduler {
                 tokenCount += 1
                 generatedTokenIds.append(token)
 
-                // Detokenize and emit the token BEFORE checking the upgrade
+                // Emit the token via the handler BEFORE checking the upgrade
                 // flag. This ensures the boundary token produced by this
                 // iteration is not dropped during handoff.
-                detokenizer.append(token: token)
-                if let chunk = detokenizer.next() {
-                    if let textToYield = toolCallProcessor.processChunk(chunk) {
-                        if case .terminated = continuation.yield(.chunk(textToYield)) {
-                            stopReason = .cancelled
-                            break
-                        }
-                    }
-                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                        if case .terminated = continuation.yield(.toolCall(toolCall)) {
-                            stopReason = .cancelled
-                            break
-                        }
-                    }
+                if !handler.processToken(token) {
+                    stopReason = .cancelled
+                    break
                 }
 
                 // Check for upgrade request AFTER yielding the token.
@@ -741,7 +829,7 @@ public actor InferenceScheduler {
                         generatedTokenIds: generatedTokenIds
                     )
                     upgradeFlag.depositLiveState(liveState)
-                    // The batch loop now owns the continuation. Exit without
+                    // The batch loop now owns the handler. Exit without
                     // finishing it — the upgraded flag will be set by the
                     // scheduler after it receives the live state.
                     ownsTicket = false
@@ -757,7 +845,7 @@ public actor InferenceScheduler {
             upgradeFlag.markTaskFinished()
 
             // If we were upgraded to batch mode, the batch loop now owns the
-            // continuation. Do not emit completion info or finish it.
+            // handler. Do not emit completion info or finish it.
             if upgradeFlag.upgraded {
                 return
             }
@@ -772,13 +860,8 @@ public actor InferenceScheduler {
                 }
             }
 
-            // Emit any remaining tool calls
-            toolCallProcessor.processEOS()
-            for toolCall in toolCallProcessor.toolCalls {
-                if case .terminated = continuation.yield(.toolCall(toolCall)) {
-                    break
-                }
-            }
+            // Flush end-of-sequence state (e.g. pending tool calls for text mode)
+            handler.processEndOfSequence()
 
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
@@ -790,13 +873,9 @@ public actor InferenceScheduler {
                 generationTime: generateTime,
                 stopReason: stopReason ?? .cancelled
             )
-            _ = continuation.yield(.info(info))
+            handler.yieldInfo(info)
 
             // Write back final KV cache to prompt cache for future reuse.
-            // Use the full token sequence (prompt + generated) as the key so
-            // the trie key depth matches the actual KV cache depth. This
-            // matches upstream mlx-lm behavior where the prompt cache stores
-            // the full context so prefix matches work correctly.
             if let promptCache, let modelName = promptCacheModelName,
                 let tokens = inputTokens, !tokens.isEmpty
             {
@@ -814,16 +893,14 @@ public actor InferenceScheduler {
             }
 
             Stream().synchronize()
-            continuation.finish()
+            handler.finish()
 
             // Clean up state when single request finishes
             await self?.handleSingleRequestFinished(requestID: requestID)
         }
 
-        continuation.onTermination = { termination in
-            if case .cancelled = termination {
-                task.cancel()
-            }
+        handler.onCancellation {
+            task.cancel()
         }
 
         state = .single(
@@ -836,7 +913,7 @@ public actor InferenceScheduler {
                 model: model,
                 tokenizer: tokenizer,
                 configuration: configuration,
-                continuation: continuation,
+                handler: handler,
                 upgradeFlag: upgradeFlag,
                 promptTokenCount: promptTokenCount,
                 inputTokens: inputTokens,
@@ -844,12 +921,11 @@ public actor InferenceScheduler {
                 promptCacheModelName: promptCacheModelName,
                 wiredMemoryTicket: wiredMemoryTicket
             ))
-
-        return stream
     }
 
     /// Create a single-path stream for incompatible requests (doesn't modify scheduler state).
     private func createSingleStream(
+        handler: SchedulerTokenHandler,
         input: LMInput,
         parameters: GenerateParameters,
         model: any LanguageModel,
@@ -861,7 +937,7 @@ public actor InferenceScheduler {
         inputTokens: [Int]? = nil,
         wiredMemoryTicket: WiredMemoryTicket? = nil,
         ticketAlreadyStarted: Bool = false
-    ) async throws -> AsyncStream<Generation> {
+    ) async throws {
         let iterator: TokenIterator
         do {
             iterator = try TokenIterator(
@@ -877,25 +953,17 @@ public actor InferenceScheduler {
             throw error
         }
 
-        let (stream, continuation) = AsyncStream<Generation>.makeStream()
-
         let stopTokenIDs = Self.buildStopTokenIDs(
             configuration: configuration,
             tokenizer: tokenizer
         )
         let unknownTokenId = tokenizer.unknownTokenId
         let promptTokenCount = input.text.tokens.size
-        let toolCallFormat = configuration.toolCallFormat ?? .json
-        let tokenizerBox = SendableBox(tokenizer as AnyObject)
         let iteratorBox = SendableBox(iterator)
 
         let task = Task {
             var iter = iteratorBox.consume()
-            let tok = tokenizerBox.consume() as! Tokenizer
             var ownsTicket = wiredMemoryTicket != nil
-
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: tok)
-            let toolCallProcessor = ToolCallProcessor(format: toolCallFormat)
 
             if let wiredMemoryTicket, !ticketAlreadyStarted {
                 _ = await wiredMemoryTicket.start()
@@ -905,7 +973,7 @@ public actor InferenceScheduler {
                     ownsTicket = false
                     _ = await wiredMemoryTicket.end()
                 }
-                continuation.finish()
+                handler.finish()
                 return
             }
 
@@ -928,6 +996,7 @@ public actor InferenceScheduler {
                 }
 
                 if token == unknownTokenId || stopTokenIDs.contains(token) {
+                    _ = handler.processStopToken(token)
                     stopReason = .stop
                     break
                 }
@@ -935,20 +1004,9 @@ public actor InferenceScheduler {
                 tokenCount += 1
                 generatedTokenIds.append(token)
 
-                detokenizer.append(token: token)
-                if let chunk = detokenizer.next() {
-                    if let textToYield = toolCallProcessor.processChunk(chunk) {
-                        if case .terminated = continuation.yield(.chunk(textToYield)) {
-                            stopReason = .cancelled
-                            break
-                        }
-                    }
-                    if let toolCall = toolCallProcessor.toolCalls.popLast() {
-                        if case .terminated = continuation.yield(.toolCall(toolCall)) {
-                            stopReason = .cancelled
-                            break
-                        }
-                    }
+                if !handler.processToken(token) {
+                    stopReason = .cancelled
+                    break
                 }
             }
 
@@ -962,12 +1020,7 @@ public actor InferenceScheduler {
                 }
             }
 
-            toolCallProcessor.processEOS()
-            for toolCall in toolCallProcessor.toolCalls {
-                if case .terminated = continuation.yield(.toolCall(toolCall)) {
-                    break
-                }
-            }
+            handler.processEndOfSequence()
 
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
@@ -979,7 +1032,7 @@ public actor InferenceScheduler {
                 generationTime: generateTime,
                 stopReason: stopReason ?? .cancelled
             )
-            _ = continuation.yield(.info(info))
+            handler.yieldInfo(info)
 
             if let promptCache, let modelName = promptCacheModelName,
                 let tokens = inputTokens, !tokens.isEmpty
@@ -998,16 +1051,12 @@ public actor InferenceScheduler {
             }
 
             Stream().synchronize()
-            continuation.finish()
+            handler.finish()
         }
 
-        continuation.onTermination = { termination in
-            if case .cancelled = termination {
-                task.cancel()
-            }
+        handler.onCancellation {
+            task.cancel()
         }
-
-        return stream
     }
 
     // MARK: - Upgrade to Batch
@@ -1026,6 +1075,7 @@ public actor InferenceScheduler {
     ///    cancelling the defunct single-request task.
     private func upgradeToBatch(
         existingSingle: SingleRequestState,
+        newHandler: SchedulerTokenHandler,
         newInput: LMInput,
         newParameters: GenerateParameters,
         model: any LanguageModel,
@@ -1038,7 +1088,7 @@ public actor InferenceScheduler {
         inputTokens: [Int]? = nil,
         newRequestWiredMemoryTicket: WiredMemoryTicket? = nil,
         newRequestTicketAlreadyStarted: Bool = false
-    ) async throws -> AsyncStream<Generation> {
+    ) async throws {
         // --- Phase 1: Request live state from the single-request task ---
         // Set state to .upgrading BEFORE the await so that additional
         // requests arriving during the suspension run independently
@@ -1059,6 +1109,7 @@ public actor InferenceScheduler {
         guard let liveState else {
             state = .idle
             return try await startSingleRequest(
+                handler: newHandler,
                 input: newInput,
                 parameters: newParameters,
                 model: model,
@@ -1114,7 +1165,7 @@ public actor InferenceScheduler {
         // This avoids reinserting a zero-budget entry into the batch engine
         // which would overrun maxTokens by 1.
         if firstMaxTokens <= 0 {
-            let firstContinuation = existingSingle.continuation
+            let firstHandler = existingSingle.handler
             let info = GenerateCompletionInfo(
                 promptTokenCount: liveState.promptTokenCount,
                 generationTokenCount: liveState.tokenCount,
@@ -1122,14 +1173,15 @@ public actor InferenceScheduler {
                 generationTime: 0,
                 stopReason: .length
             )
-            _ = firstContinuation.yield(.info(info))
-            firstContinuation.finish()
+            firstHandler.yieldInfo(info)
+            firstHandler.finish()
             if let firstTicket = existingSingle.wiredMemoryTicket {
                 _ = await firstTicket.end()
             }
 
             state = .idle
             return try await startSingleRequest(
+                handler: newHandler,
                 input: newInput,
                 parameters: newParameters,
                 model: model,
@@ -1174,27 +1226,23 @@ public actor InferenceScheduler {
         )
         let secondUID = secondUIDs[0]
 
-        // --- Phase 3: Set up continuations and cancellation ---
-        // Reuse the original first-request continuation (preserving stream continuity).
-        let firstContinuation = existingSingle.continuation
-        let (secondStream, secondContinuation) = AsyncStream<Generation>.makeStream()
+        // --- Phase 3: Set up handlers and cancellation ---
+        // Reuse the original first-request handler (preserving stream continuity).
+        let firstHandler = existingSingle.handler
 
-        let continuations: [Int: AsyncStream<Generation>.Continuation] = [
-            firstUID: firstContinuation,
-            secondUID: secondContinuation,
+        let handlers: [Int: SchedulerTokenHandler] = [
+            firstUID: firstHandler,
+            secondUID: newHandler,
         ]
 
         requestCounter += 1
 
         // Rebind the first request's cancellation handler so it removes the
         // UID from the BatchTokenIterator instead of cancelling the old task.
-        firstContinuation.onTermination = {
-            [weak self, weak batchIterator] termination in
-            if case .cancelled = termination {
-                batchIterator?.remove(uids: [firstUID])
-                Task {
-                    await self?.cancelBatchedRequest(uid: firstUID)
-                }
+        firstHandler.onCancellation { [weak self, weak batchIterator] in
+            batchIterator?.remove(uids: [firstUID])
+            Task {
+                await self?.cancelBatchedRequest(uid: firstUID)
             }
         }
 
@@ -1207,20 +1255,17 @@ public actor InferenceScheduler {
 
         // Start the batch generation loop
         let task = Task { [weak self] in
-            var detokenizers: [Int: NaiveStreamingDetokenizer] = [:]
-            var toolCallProcessors: [Int: ToolCallProcessor] = [:]
-            let format = configuration.toolCallFormat ?? .json
-
             var starts: [Int: Date] = [:]
             var promptTimes: [Int: TimeInterval] = [:]
             var promptTokenCounts: [Int: Int] = [:]
             var tokenCounts: [Int: Int] = [:]
             var generatedTokenIds: [Int: [Int]] = [:]
+            // Track which UIDs have been seen (for lazy init of 3rd+ requests)
+            var initializedUIDs: Set<Int> = []
 
             let now = Date.timeIntervalSinceReferenceDate
             for uid in [firstUID, secondUID] {
-                detokenizers[uid] = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-                toolCallProcessors[uid] = ToolCallProcessor(format: format)
+                initializedUIDs.insert(uid)
                 starts[uid] = Date(timeIntervalSinceReferenceDate: now)
                 promptTimes[uid] = 0
                 tokenCounts[uid] = 0
@@ -1245,14 +1290,13 @@ public actor InferenceScheduler {
 
                 for response in responses {
                     let uid = response.uid
-                    guard let cont = await self?.getContinuation(uid: uid) else { continue }
+                    guard let handler = await self?.getHandler(uid: uid) else { continue }
 
-                    // Lazy-initialize streaming state for UIDs that joined
+                    // Lazy-initialize timing state for UIDs that joined
                     // the batch after upgrade (3rd+ requests via
                     // joinExistingBatch).
-                    if detokenizers[uid] == nil {
-                        detokenizers[uid] = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-                        toolCallProcessors[uid] = ToolCallProcessor(format: format)
+                    if !initializedUIDs.contains(uid) {
+                        initializedUIDs.insert(uid)
                         // Use the submit timestamp stored by joinExistingBatch
                         // so promptTime reflects submission-to-first-token, not
                         // first-decode-to-first-token.
@@ -1282,31 +1326,19 @@ public actor InferenceScheduler {
                     if stopTokenIDs.contains(token)
                         || token == tokenizer.unknownTokenId
                     {
-                        // Don't emit stop tokens as chunks
+                        // For raw-token mode, emit stop token if requested
+                        _ = handler.processStopToken(token)
                     } else {
                         tokenCounts[uid, default: 0] += 1
                         generatedTokenIds[uid, default: []].append(token)
 
-                        // Detokenize and emit
-                        detokenizers[uid]?.append(token: token)
-                        if let chunk = detokenizers[uid]?.next() {
-                            if let textToYield = toolCallProcessors[uid]?.processChunk(chunk) {
-                                _ = cont.yield(.chunk(textToYield))
-                            }
-                            if let toolCall = toolCallProcessors[uid]?.toolCalls.popLast() {
-                                _ = cont.yield(.toolCall(toolCall))
-                            }
-                        }
+                        // Emit via handler (detokenize for text, raw for tokens)
+                        _ = handler.processToken(token)
                     }
 
                     if response.finishReason != nil {
-                        // Emit final info
-                        toolCallProcessors[uid]?.processEOS()
-                        if let toolCalls = toolCallProcessors[uid]?.toolCalls {
-                            for toolCall in toolCalls {
-                                _ = cont.yield(.toolCall(toolCall))
-                            }
-                        }
+                        // Flush end-of-sequence state
+                        handler.processEndOfSequence()
 
                         let generateTime =
                             Date.timeIntervalSinceReferenceDate
@@ -1318,13 +1350,9 @@ public actor InferenceScheduler {
                             generationTime: generateTime,
                             stopReason: response.finishReason ?? .stop
                         )
-                        _ = cont.yield(.info(info))
+                        handler.yieldInfo(info)
 
                         // Write back final KV cache for this request to prompt cache.
-                        // Use the full token sequence (prompt + generated) as the key
-                        // so the trie key depth matches the actual KV cache depth.
-                        // This matches upstream mlx-lm behavior where the prompt cache
-                        // stores the full context so prefix matches work correctly.
                         if let finalCache = response.finalCache,
                             let inputToks = await self?.getInputTokens(uid: uid),
                             !inputToks.isEmpty
@@ -1343,26 +1371,23 @@ public actor InferenceScheduler {
                         }
 
                         await self?.endBatchedTicket(uid: uid)
-                        cont.finish()
-                        await self?.removeContinuation(uid: uid)
+                        handler.finish()
+                        await self?.removeHandler(uid: uid)
                     }
                 }
             }
 
             // If we get here, all sequences are done or iterator was closed
             await self?.endAllBatchedTickets()
-            await self?.finishAllContinuations()
+            await self?.finishAllHandlers()
             await self?.handleBatchFinished()
         }
 
         // Wire up second request's cancellation
-        secondContinuation.onTermination = {
-            [weak self, weak batchIterator] termination in
-            if case .cancelled = termination {
-                batchIterator?.remove(uids: [secondUID])
-                Task {
-                    await self?.cancelBatchedRequest(uid: secondUID)
-                }
+        newHandler.onCancellation { [weak self, weak batchIterator] in
+            batchIterator?.remove(uids: [secondUID])
+            Task {
+                await self?.cancelBatchedRequest(uid: secondUID)
             }
         }
 
@@ -1381,7 +1406,7 @@ public actor InferenceScheduler {
             BatchedState(
                 batchIterator: batchIterator,
                 task: task,
-                continuations: continuations,
+                handlers: handlers,
                 promptTokenCounts: [
                     firstUID: firstPromptTokenCount,
                     secondUID: secondPromptTokenCount,
@@ -1399,21 +1424,20 @@ public actor InferenceScheduler {
                     secondUID: newRequestWiredMemoryTicket,
                 ].compactMapValues { $0 }
             ))
-
-        return secondStream
     }
 
     // MARK: - Join Existing Batch
 
     /// Add a new request to the existing batch.
     private func joinExistingBatch(
+        handler: SchedulerTokenHandler,
         batchedState: inout BatchedState,
         input: LMInput,
         parameters: GenerateParameters,
         tokenizer: Tokenizer,
         cachedKVState: [KVCache]? = nil,
         wiredMemoryTicket: WiredMemoryTicket? = nil
-    ) throws -> AsyncStream<Generation> {
+    ) throws {
         let promptTokens = input.text.tokens.asArray(Int.self)
         let maxTokens = parameters.maxTokens ?? 1000
         let sampler = parameters.sampler()
@@ -1428,19 +1452,16 @@ public actor InferenceScheduler {
         )
 
         let uid = uids[0]
-        let (stream, continuation) = AsyncStream<Generation>.makeStream()
 
-        continuation.onTermination = {
-            [weak self, weak batchIterator = batchedState.batchIterator] termination in
-            if case .cancelled = termination {
-                batchIterator?.remove(uids: [uid])
-                Task {
-                    await self?.cancelBatchedRequest(uid: uid)
-                }
+        handler.onCancellation {
+            [weak self, weak batchIterator = batchedState.batchIterator] in
+            batchIterator?.remove(uids: [uid])
+            Task {
+                await self?.cancelBatchedRequest(uid: uid)
             }
         }
 
-        batchedState.continuations[uid] = continuation
+        batchedState.handlers[uid] = handler
         batchedState.promptTokenCounts[uid] = input.text.tokens.size
         batchedState.submitTimes[uid] = Date()
         batchedState.inputTokens[uid] = promptTokens
@@ -1450,8 +1471,6 @@ public actor InferenceScheduler {
 
         // Update state
         state = .batched(batchedState)
-
-        return stream
     }
 
     // MARK: - State Management Helpers
@@ -1472,18 +1491,18 @@ public actor InferenceScheduler {
         }
     }
 
-    /// Get a continuation for a UID from the batched state.
-    private func getContinuation(uid: Int) -> AsyncStream<Generation>.Continuation? {
+    /// Get a handler for a UID from the batched state.
+    private func getHandler(uid: Int) -> SchedulerTokenHandler? {
         if case .batched(let batchedState) = state {
-            return batchedState.continuations[uid]
+            return batchedState.handlers[uid]
         }
         return nil
     }
 
-    /// Remove a continuation for a finished UID.
-    private func removeContinuation(uid: Int) {
+    /// Remove a handler for a finished UID.
+    private func removeHandler(uid: Int) {
         if case .batched(var batchedState) = state {
-            batchedState.continuations.removeValue(forKey: uid)
+            batchedState.handlers.removeValue(forKey: uid)
             batchedState.promptTokenCounts.removeValue(forKey: uid)
             batchedState.submitTimes.removeValue(forKey: uid)
             batchedState.inputTokens.removeValue(forKey: uid)
@@ -1523,11 +1542,11 @@ public actor InferenceScheduler {
         return (nil, nil)
     }
 
-    /// Finish all remaining continuations (e.g., on batch loop exit).
-    private func finishAllContinuations() {
+    /// Finish all remaining handlers (e.g., on batch loop exit).
+    private func finishAllHandlers() {
         if case .batched(let batchedState) = state {
-            for (_, continuation) in batchedState.continuations {
-                continuation.finish()
+            for (_, handler) in batchedState.handlers {
+                handler.finish()
             }
         }
     }
@@ -1561,7 +1580,7 @@ public actor InferenceScheduler {
     /// Cancel a batched request and release its ticket.
     private func cancelBatchedRequest(uid: Int) async {
         await endBatchedTicket(uid: uid)
-        removeContinuation(uid: uid)
+        removeHandler(uid: uid)
     }
 
     /// End every active ticket still owned by the batch state.
