@@ -796,6 +796,10 @@ public actor InferenceScheduler {
                 }
 
                 if token == unknownTokenId || stopTokenIDs.contains(token) {
+                    if case .rawTokens(includeStopToken: true) = handler.mode {
+                        tokenCount += 1
+                        generatedTokenIds.append(token)
+                    }
                     // For raw-token mode, emit stop token if requested
                     _ = handler.processStopToken(token)
                     stopReason = .stop
@@ -996,6 +1000,10 @@ public actor InferenceScheduler {
                 }
 
                 if token == unknownTokenId || stopTokenIDs.contains(token) {
+                    if case .rawTokens(includeStopToken: true) = handler.mode {
+                        tokenCount += 1
+                        generatedTokenIds.append(token)
+                    }
                     _ = handler.processStopToken(token)
                     stopReason = .stop
                     break
@@ -1326,6 +1334,10 @@ public actor InferenceScheduler {
                     if stopTokenIDs.contains(token)
                         || token == tokenizer.unknownTokenId
                     {
+                        if case .rawTokens(includeStopToken: true) = handler.mode {
+                            tokenCounts[uid, default: 0] += 1
+                            generatedTokenIds[uid, default: []].append(token)
+                        }
                         // For raw-token mode, emit stop token if requested
                         _ = handler.processStopToken(token)
                     } else {

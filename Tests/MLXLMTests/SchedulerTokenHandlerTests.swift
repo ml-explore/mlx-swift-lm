@@ -220,6 +220,77 @@ class SchedulerTokenHandlerTests: XCTestCase {
         }
     }
 
+    // MARK: - Stop Token Accounting
+
+    /// Verifies that when `includeStopToken: true`, the stop token is included
+    /// in the stream output count — matching the accounting fix in
+    /// InferenceScheduler where tokenCount/generatedTokenIds must include it.
+    func testRawTokenHandlerIncludeStopTokenCountsInOutput() async {
+        let (stream, continuation) = AsyncStream<TokenGeneration>.makeStream()
+
+        let handler = SchedulerTokenHandler.rawToken(
+            continuation: continuation,
+            includeStopToken: true
+        )
+
+        // Verify mode allows the scheduler to gate on it
+        if case .rawTokens(let includeStop) = handler.mode {
+            XCTAssertTrue(includeStop)
+        } else {
+            XCTFail("Expected .rawTokens mode")
+        }
+
+        XCTAssertTrue(handler.processToken(10))
+        XCTAssertTrue(handler.processToken(20))
+        // Stop token should be emitted and counted
+        XCTAssertTrue(handler.processStopToken(0))
+        handler.finish()
+
+        var allTokens = [Int]()
+        for await gen in stream {
+            if case .token(let id) = gen {
+                allTokens.append(id)
+            }
+        }
+
+        // 2 regular tokens + 1 stop token = 3 total
+        XCTAssertEqual(allTokens, [10, 20, 0])
+        XCTAssertEqual(allTokens.count, 3, "Stop token must be counted in output")
+    }
+
+    /// Verifies that when `includeStopToken: false`, the stop token is NOT in
+    /// the stream — the scheduler should not count it in tokenCount either.
+    func testRawTokenHandlerExcludeStopTokenOmitsFromOutput() async {
+        let (stream, continuation) = AsyncStream<TokenGeneration>.makeStream()
+
+        let handler = SchedulerTokenHandler.rawToken(
+            continuation: continuation,
+            includeStopToken: false
+        )
+
+        if case .rawTokens(let includeStop) = handler.mode {
+            XCTAssertFalse(includeStop)
+        } else {
+            XCTFail("Expected .rawTokens mode")
+        }
+
+        XCTAssertTrue(handler.processToken(10))
+        XCTAssertTrue(handler.processToken(20))
+        XCTAssertTrue(handler.processStopToken(0))
+        handler.finish()
+
+        var allTokens = [Int]()
+        for await gen in stream {
+            if case .token(let id) = gen {
+                allTokens.append(id)
+            }
+        }
+
+        // Only 2 regular tokens, stop token omitted
+        XCTAssertEqual(allTokens, [10, 20])
+        XCTAssertEqual(allTokens.count, 2, "Stop token must NOT be counted in output")
+    }
+
     // MARK: - Cancellation
 
     func testOnCancellationCallbackFires() async {
@@ -236,12 +307,12 @@ class SchedulerTokenHandlerTests: XCTestCase {
             expectation.fulfill()
         }
 
-        // Trigger cancellation by dropping the stream consumer
-        // (this calls finish which triggers onTermination)
-        continuation.finish()
+        // Start a consumer task then cancel it — this triggers .cancelled
+        let task = Task {
+            for await _ in stream {}
+        }
+        task.cancel()
 
-        // The stream should complete; the onTermination is only triggered on
-        // .cancelled, not .finished. So we just verify it doesn't crash.
-        for await _ in stream {}
+        await fulfillment(of: [expectation], timeout: 2.0)
     }
 }
