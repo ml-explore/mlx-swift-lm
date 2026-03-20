@@ -68,15 +68,18 @@ public struct ModelContext {
     public var model: any LanguageModel
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
+    public var loadedAsVLM: Bool
 
     public init(
         configuration: ModelConfiguration, model: any LanguageModel,
-        processor: any UserInputProcessor, tokenizer: any Tokenizer
+        processor: any UserInputProcessor, tokenizer: any Tokenizer,
+        loadedAsVLM: Bool = false
     ) {
         self.configuration = configuration
         self.model = model
         self.processor = processor
         self.tokenizer = tokenizer
+        self.loadedAsVLM = loadedAsVLM
     }
 }
 
@@ -364,11 +367,11 @@ final public class ModelFactoryRegistry: @unchecked Sendable {
     private init() {
         self.trampolines = [
             {
-                (NSClassFromString("MLXVLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
+                (NSClassFromString("MLXLLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
                     .modelFactory()
             },
             {
-                (NSClassFromString("MLXLLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
+                (NSClassFromString("MLXVLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
                     .modelFactory()
             },
         ]

@@ -377,7 +377,7 @@ public final class VLMModelFactory: ModelFactory {
 
         return .init(
             configuration: mutableConfiguration, model: model, processor: processor,
-            tokenizer: tokenizer)
+            tokenizer: tokenizer, loadedAsVLM: true)
     }
 
 }

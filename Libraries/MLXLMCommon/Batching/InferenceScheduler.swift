@@ -565,7 +565,7 @@ public actor InferenceScheduler {
     /// Check if a request is compatible with batch generation.
     ///
     /// Returns `false` for:
-    /// - VLMs (input contains images or video)
+    /// - Multimodal inputs (images or video)
     /// - Hybrid SSM models (cache contains `MambaCache` or `CacheList`)
     /// - Requests with `kvBits` set (QuantizedKVCache incompatible)
     /// - Caches containing `QuantizedKVCache`
@@ -578,7 +578,7 @@ public actor InferenceScheduler {
         cache: [KVCache]?,
         model: any LanguageModel
     ) -> Bool {
-        // VLM check: images or video present
+        // Multimodal check: images or video present
         if input.image != nil || input.video != nil {
             return false
         }
