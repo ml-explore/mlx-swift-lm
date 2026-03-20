@@ -13,8 +13,14 @@ The KV (Key-Value) cache stores attention key and value tensors from previous to
 | `QuantizedKVCache` | Memory-constrained | 4-8x less | Unlimited |
 | `ChunkedKVCache` | Large prompt processing | Controlled | Chunked |
 | `MambaCache` | Mamba/SSM models | Fixed state | N/A |
+| `BatchKVCache` | Batched inference | `B * seqLen` | Unlimited |
+| `BatchRotatingKVCache` | Batched sliding window | `B * maxKVSize` | `maxKVSize` |
 
-**File:** `Libraries/MLXLMCommon/KVCache.swift`
+**Files:**
+- `Libraries/MLXLMCommon/KVCache.swift`
+- `Libraries/MLXLMCommon/Batching/BatchKVCache.swift`
+- `Libraries/MLXLMCommon/Batching/BatchRotatingKVCache.swift`
+- `Libraries/MLXLMCommon/Batching/BatchPositionedCache.swift`
 
 ## Cache Types
 
@@ -263,6 +269,52 @@ let cache = CacheList(kvCache, mambaCache)
 let kv = cache[0] as! KVCacheSimple
 let mamba = cache[1] as! MambaCache
 ```
+
+## Batch Cache Types
+
+For batched inference, batch-aware cache types store KV state for multiple sequences simultaneously.
+
+### BatchKVCache
+
+Stores keys/values in `[B, nHeads, seqLen, headDim]` layout with left-padding:
+
+```swift
+let batchCache = BatchKVCache(leftPadding: [0, 5, 3])
+batchCache.batchSize     // 3
+batchCache.batchOffset   // Per-sequence offsets [B]
+batchCache.filter(batchIndices: [0, 2])  // Remove completed sequences
+batchCache.extract(idx: 1)              // Extract single KVCacheSimple
+```
+
+### BatchRotatingKVCache
+
+Sliding-window variant for batched inference:
+
+```swift
+let batchCache = BatchRotatingKVCache(maxSize: 4096, leftPadding: [0, 5], keep: 4)
+```
+
+### BatchPositionedKVCache Protocol
+
+Both batch cache types conform to this protocol:
+
+```swift
+public protocol BatchPositionedKVCache: KVCache {
+    var batchOffset: MLXArray { get }  // [B] per-sequence offsets
+}
+```
+
+### applyRotaryPosition Helper
+
+Use in model implementations for batch-safe RoPE:
+
+```swift
+// Replaces: rope(x, offset: cache.offset)
+queries = applyRotaryPosition(rope, to: queries, cache: cache)
+keys = applyRotaryPosition(rope, to: keys, cache: cache)
+```
+
+See [batching.md](batching.md) for full batching API details.
 
 ## Deprecated Patterns
 

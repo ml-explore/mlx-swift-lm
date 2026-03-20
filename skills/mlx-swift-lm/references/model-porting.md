@@ -159,13 +159,9 @@ final class YourModelAttention: Module {
         keys = keys.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
-        if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
-        } else {
-            queries = rope(queries)
-            keys = rope(keys)
-        }
+        // Use applyRotaryPosition for batch-compatible RoPE
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
         let output = attentionWithCacheUpdate(
             queries: queries,
@@ -342,6 +338,28 @@ If you need custom keys, override `loraDefaultKeys`.
 
 2. Optional: add a `ModelConfiguration` in `LLMRegistry` (also in `MLXLLM/LLMModelFactory.swift`). If that registry exposes a list (e.g., `all()`), include the new configuration there.
 
+## Batch Compatibility
+
+For models to work with the `InferenceScheduler` batching system:
+
+1. **Use `applyRotaryPosition()`** instead of `rope(x, offset: cache.offset)`:
+   ```swift
+   queries = applyRotaryPosition(rope, to: queries, cache: cache)
+   keys = applyRotaryPosition(rope, to: keys, cache: cache)
+   ```
+
+2. **Use cache-driven attention masks** via `cache.makeMask(n:windowSize:returnArray:)`:
+   ```swift
+   let mask: MLXFast.ScaledDotProductAttentionMaskMode
+   if let cache = cache?.first {
+       mask = cache.makeMask(n: h.dim(1), windowSize: nil, returnArray: false)
+   } else {
+       mask = .causal
+   }
+   ```
+
+3. **Avoid deprecated `createAttentionMask(h:cache:[KVCache]?)`** — it returns `nil` for single-token decode, which is wrong for batch caches.
+
 ## Common pitfalls
 
 - Weight keys do not always match Python attribute names; verify `.safetensors` keys.
@@ -349,6 +367,7 @@ If you need custom keys, override `loraDefaultKeys`.
 - Bias flags are model-specific (check config and Python implementation).
 - GQA models require `kvHeads` distinct from `attentionHeads`.
 - Sliding-window or special caches may require overriding `newCache` or `prepare`.
+- Using scalar `cache.offset` for RoPE breaks batch inference; use `applyRotaryPosition()` instead.
 
 ## Minimal checklist
 
@@ -359,6 +378,8 @@ If you need custom keys, override `loraDefaultKeys`.
 - `LoRAModel` conformance (`loraLayers`)
 - `LLMTypeRegistry` registration
 - Optional `ModelConfiguration` added to `LLMRegistry`
+- RoPE uses `applyRotaryPosition()` for batch compatibility
+- Attention mask uses `cache.makeMask()` (not deprecated array overload)
 - Smoke test with at least one model ID
 
 ## Testing

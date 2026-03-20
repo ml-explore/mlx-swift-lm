@@ -1,6 +1,6 @@
 ---
 name: swift-mlx-lm
-description: MLX Swift LM - Run LLMs and VLMs on Apple Silicon using MLX. Covers local inference, streaming, wired memory coordination, tool calling, LoRA fine-tuning, embeddings, and model porting.
+description: MLX Swift LM - Run LLMs and VLMs on Apple Silicon using MLX. Covers local inference, streaming, batched inference, wired memory coordination, tool calling, LoRA fine-tuning, embeddings, and model porting.
 triggers:
   - mlx
   - mlx-swift
@@ -14,18 +14,25 @@ triggers:
   - wired memory ticket
   - model porting
   - add model support
+  - batching
+  - batch inference
+  - continuous batching
+  - inference scheduler
+  - prompt cache
 ---
 
 # mlx-swift-lm Skill
 
 ## 1. Overview & Triggers
 
-mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vision-Language Models (VLMs) on Apple Silicon using MLX. It supports local inference, streaming generation, wired-memory coordination, tool calling, LoRA/DoRA fine-tuning, and embeddings.
+mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vision-Language Models (VLMs) on Apple Silicon using MLX. It supports local inference, streaming generation, continuous batching (multiple concurrent requests), wired-memory coordination, prompt caching, tool calling, LoRA/DoRA fine-tuning, and embeddings.
 
 ### When to Use This Skill
 - Running LLM/VLM inference on macOS/iOS with Apple Silicon
 - Streaming text generation from local models
+- Batching multiple concurrent inference requests for throughput
 - Coordinating concurrent inference with wired-memory policies and tickets
+- Caching prompt prefill KV state across requests
 - Tool calling / function calling with models
 - LoRA adapter training and fine-tuning
 - Text embeddings for RAG/semantic search
@@ -33,7 +40,8 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 
 ### Architecture Overview
 ```
-MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, wired memory helpers)
+MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, Batching, wired memory helpers)
+  Batching/     - InferenceScheduler, BatchKVCache, BatchTokenIterator, LRUPromptCache
 MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc.)
 MLXVLM          - Vision-Language Models (Qwen-VL, PaliGemma, Gemma3, etc.)
 MLXEmbedders    - Embedding models and pooling utilities
@@ -47,6 +55,11 @@ MLXEmbedders    - Embedding models and pooling utilities
 | Simplified chat API | `Libraries/MLXLMCommon/ChatSession.swift` |
 | Generation & streaming APIs | `Libraries/MLXLMCommon/Evaluate.swift` |
 | KV cache types | `Libraries/MLXLMCommon/KVCache.swift` |
+| Batch inference scheduler | `Libraries/MLXLMCommon/Batching/InferenceScheduler.swift` |
+| Batch KV caches | `Libraries/MLXLMCommon/Batching/BatchKVCache.swift`, `BatchRotatingKVCache.swift` |
+| Batch token engine | `Libraries/MLXLMCommon/Batching/BatchTokenIterator.swift` |
+| Batch-aware RoPE helper | `Libraries/MLXLMCommon/Batching/BatchPositionedCache.swift` |
+| Prompt cache (LRU) | `Libraries/MLXLMCommon/Batching/LRUPromptCache.swift` |
 | Wired-memory policies | `Libraries/MLXLMCommon/WiredMemoryPolicies.swift` |
 | Wired-memory measurement helpers | `Libraries/MLXLMCommon/WiredMemoryUtils.swift` |
 | Model configuration | `Libraries/MLXLMCommon/ModelConfiguration.swift` |
@@ -224,8 +237,14 @@ let params = GenerateParameters(
     quantizedKVStart: 0,        // Token index to start KV quantization
     temperature: 0.7,           // 0 = greedy / argmax
     topP: 0.9,                  // Nucleus sampling
+    topK: 40,                   // Top-K sampling (0 disables)
+    minP: 0.05,                 // Min-P threshold relative to max prob (0 disables)
     repetitionPenalty: 1.1,     // Penalize repeats
     repetitionContextSize: 20,  // Penalty window
+    presencePenalty: 0.0,       // Additive penalty for tokens in recent context
+    presenceContextSize: 20,    // Presence penalty window
+    frequencyPenalty: 0.0,      // Additive penalty scaling with token frequency
+    frequencyContextSize: 20,   // Frequency penalty window
     prefillStepSize: 512        // Prompt prefill chunk size
 )
 ```
@@ -255,6 +274,46 @@ for await generation in stream {
 ```
 
 For policy selection, reservations, and measurement-based budgeting, see [references/wired-memory.md](references/wired-memory.md).
+
+### Batched Inference (Continuous Batching)
+
+Enable transparent batching to serve multiple concurrent requests through a single model:
+
+```swift
+let scheduler = InferenceScheduler()
+let promptCache = LRUPromptCache(maxSize: 10)
+
+let container = try await LLMModelFactory.shared.loadContainer(
+    configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
+)
+container.scheduler = scheduler
+container.promptCache = promptCache
+
+// Multiple concurrent requests are automatically batched
+async let r1 = container.generate(input: input1, parameters: params)
+async let r2 = container.generate(input: input2, parameters: params)
+```
+
+The scheduler uses a single-first upgrade strategy:
+- First request runs via fast `TokenIterator` path (zero batch overhead)
+- When a second request arrives, the scheduler upgrades to `BatchTokenIterator` by migrating KV caches
+- State machine: `.idle` → `.single` → `.batched`
+
+Raw token batching is also supported:
+```swift
+let tokenStream = try await container.generateTokens(
+    input: lmInput,
+    parameters: params
+)
+for await event in tokenStream {
+    switch event {
+    case .token(let tokenID): print(tokenID)
+    case .info(let info): print("stop=\(info.stopReason)")
+    }
+}
+```
+
+See [references/batching.md](references/batching.md) for full API details.
 
 ### Prompt Caching / History Re-hydration
 
@@ -331,6 +390,14 @@ await task.value
 // DO: Use wired tickets when coordinating concurrent workloads
 let ticket = WiredSumPolicy().ticket(size: estimatedBytes)
 let _ = try await modelContainer.generate(input: lmInput, parameters: params, wiredMemoryTicket: ticket)
+
+// DO: Enable batching for multi-user/multi-request scenarios
+container.scheduler = InferenceScheduler()
+container.promptCache = LRUPromptCache(maxSize: 10)
+
+// DO: Use applyRotaryPosition() in model implementations for batch compatibility
+queries = applyRotaryPosition(rope, to: queries, cache: cache)
+keys = applyRotaryPosition(rope, to: keys, cache: cache)
 ```
 
 ### DON'T
@@ -348,6 +415,13 @@ for await item in stream {
     if shouldStop { break }
 }
 // await task.value is required for deterministic cleanup
+
+// DON'T: Use scalar rope(x, offset: cache.offset) in models.
+// Use applyRotaryPosition(rope, to: x, cache: cache) instead.
+// Scalar offset breaks RoPE for left-padded batch sequences.
+
+// DON'T: Use deprecated createAttentionMask(h:cache:[KVCache]?)
+// Use cache.makeMask(n:windowSize:returnArray:) or the single-cache overload
 ```
 
 ### Thread Safety
@@ -370,6 +444,7 @@ await session.clear()
 |-----------|-------------|
 | [references/model-container.md](references/model-container.md) | Loading models, ModelContainer API, ModelConfiguration |
 | [references/generation.md](references/generation.md) | `generate`, `generateTask`, raw token streaming APIs |
+| [references/batching.md](references/batching.md) | InferenceScheduler, BatchKVCache, BatchTokenIterator, LRUPromptCache |
 | [references/wired-memory.md](references/wired-memory.md) | Wired tickets, policies, budgeting, reservations |
 | [references/kv-cache.md](references/kv-cache.md) | Cache types, memory optimization, cache serialization |
 | [references/concurrency.md](references/concurrency.md) | Thread safety, SerialAccessContainer, async patterns |
@@ -389,7 +464,8 @@ await session.clear()
 | `perform { model, tokenizer in }` | `perform { context in }` |
 | `TokenIterator(prompt: MLXArray)` | `TokenIterator(input: LMInput)` |
 | `ModelRegistry` typealias | `LLMRegistry` or `VLMRegistry` |
-| `createAttentionMask(h:cache:[KVCache]?)` | `createAttentionMask(h:cache:KVCache?)` |
+| `createAttentionMask(h:cache:[KVCache]?)` | `createAttentionMask(h:cache:KVCache?)` or `cache.makeMask(n:windowSize:returnArray:)` |
+| `rope(x, offset: cache.offset)` (scalar) | `applyRotaryPosition(rope, to: x, cache: cache)` (batch-safe) |
 
 ## 9. Automatic vs Manual Configuration
 
@@ -415,5 +491,9 @@ await session.clear()
 | `toolCallFormat` | Override auto-detected tool parser format |
 | `maxKVSize` | Enable sliding window cache |
 | `kvBits`, `kvGroupSize`, `quantizedKVStart` | Enable and tune KV quantization |
+| `topK`, `minP` | Enable top-K / min-P sampling filters |
+| `presencePenalty`, `frequencyPenalty` | Penalize repeated tokens by presence/frequency |
 | `prefillStepSize` | Tune prompt prefill chunking/perf tradeoff |
 | `wiredMemoryTicket` | Coordinate policy-based wired-memory limits |
+| `container.scheduler` | Enable continuous batching for concurrent requests |
+| `container.promptCache` | Enable LRU prompt cache across requests |

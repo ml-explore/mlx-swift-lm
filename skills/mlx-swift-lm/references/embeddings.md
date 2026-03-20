@@ -279,6 +279,7 @@ await ModelConfiguration.register(configurations: [myConfig])
 | BERT | `bert` |
 | Nomic BERT | `nomic_bert` |
 | Qwen3 | `qwen3` |
+| Gemma 3 | `gemma3`, `gemma3_text`, `gemma3n` |
 
 ## Memory Considerations
 

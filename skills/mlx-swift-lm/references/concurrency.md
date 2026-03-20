@@ -14,6 +14,7 @@ mlx-swift-lm uses Swift concurrency with specialized utilities to handle the uni
 | `AsyncMutex` | Lock that works with async blocks |
 | `SendableBox<T>` | Transfer non-Sendable values across isolation |
 | `ModelContainer` | Thread-safe model wrapper (uses SerialAccessContainer) |
+| `InferenceScheduler` | Actor managing concurrent request batching |
 | `ChatSession` | NOT thread-safe (single task only) |
 
 ## SerialAccessContainer
@@ -142,6 +143,27 @@ Task {
     }
 }
 ```
+
+## InferenceScheduler Concurrency
+
+`InferenceScheduler` is a Swift actor that manages concurrent inference requests:
+
+```swift
+// Multiple tasks can submit concurrently — the actor serializes state transitions
+let scheduler = InferenceScheduler()
+
+Task {
+    let stream1 = try await scheduler.submit(input: input1, ...)
+    for await event in stream1 { ... }
+}
+
+Task {
+    let stream2 = try await scheduler.submit(input: input2, ...)
+    for await event in stream2 { ... }
+}
+```
+
+The scheduler handles upgrade coordination internally using an `UpgradeFlag` that safely transfers live `TokenIterator` state from the single-request task to the batch path.
 
 ## ChatSession Thread Safety
 

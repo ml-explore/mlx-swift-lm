@@ -67,6 +67,21 @@ let result = try await container.perform { context in
 }
 ```
 
+### Enabling Batching
+
+```swift
+// Set scheduler for transparent continuous batching
+container.scheduler = InferenceScheduler()
+
+// Optional: enable LRU prompt caching
+container.promptCache = LRUPromptCache(maxSize: 10)
+
+// When scheduler is set:
+// - generate() routes through InferenceScheduler.submit()
+// - generateTokens() routes through InferenceScheduler.submitTokens()
+// - VLM models bypass the scheduler (not yet batch-compatible)
+```
+
 ### Convenience Methods
 
 ```swift
@@ -81,6 +96,14 @@ let ticket = WiredSumPolicy().ticket(size: estimatedBytes, kind: .active)
 let streamWithTicket = try await container.generate(
     input: lmInput,
     parameters: params,
+    wiredMemoryTicket: ticket
+)
+
+// Raw token generation (routes through scheduler when set)
+let tokenStream = try await container.generateTokens(
+    input: lmInput,
+    parameters: params,
+    includeStopToken: false,
     wiredMemoryTicket: ticket
 )
 

@@ -11,6 +11,8 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 
 ## API Matrix
 
+### Free Functions (Evaluate.swift)
+
 | API | Output | Task Handle | wiredMemoryTicket | Typical Use |
 |-----|--------|-------------|-------------------|-------------|
 | `generate(input:cache:parameters:context:)` | `AsyncStream<Generation>` | No | Yes | Standard decoded streaming |
@@ -18,6 +20,20 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 | `generateTokens(input:cache:parameters:context:includeStopToken:)` | `AsyncStream<TokenGeneration>` | No | Yes | Raw token parsers |
 | `generateTokensTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Yes | Raw token parsing with cleanup control |
 | `generateTokenTask(...)` | `AsyncStream<TokenGeneration>` | Yes | Yes | Low-level custom iterator pipelines |
+
+### ModelContainer Methods
+
+| API | Output | Routes Through Scheduler | Typical Use |
+|-----|--------|--------------------------|-------------|
+| `container.generate(input:parameters:wiredMemoryTicket:)` | `AsyncStream<Generation>` | Yes (when scheduler set) | High-level decoded streaming |
+| `container.generateTokens(input:parameters:includeStopToken:wiredMemoryTicket:)` | `AsyncStream<TokenGeneration>` | Yes (when scheduler set) | High-level raw token streaming |
+
+### InferenceScheduler Methods
+
+| API | Output | Typical Use |
+|-----|--------|-------------|
+| `scheduler.submit(input:parameters:model:cache:tokenizer:configuration:...)` | `AsyncStream<Generation>` | Batched decoded streaming |
+| `scheduler.submitTokens(input:parameters:model:cache:tokenizer:configuration:...)` | `AsyncStream<TokenGeneration>` | Batched raw token streaming |
 
 ## Decoded Text/Tool Streaming
 
@@ -126,8 +142,40 @@ let (tokenStream, tokenTask) = try generateTokensTask(
 - Iteration over returned `AsyncStream` is non-throwing.
 - `ChatSession.streamResponse(...)` is different: it returns `AsyncThrowingStream` and requires `for try await`.
 
+## Batched Generation
+
+When `ModelContainer.scheduler` is set, both `generate()` and `generateTokens()` transparently route through the `InferenceScheduler`, enabling continuous batching of concurrent requests.
+
+```swift
+// Enable batching on the container
+container.scheduler = InferenceScheduler()
+container.promptCache = LRUPromptCache(maxSize: 10)
+
+// Multiple concurrent requests are automatically batched
+async let stream1 = container.generate(input: input1, parameters: params)
+async let stream2 = container.generate(input: input2, parameters: params)
+
+// Raw token batching also supported
+async let tokens1 = container.generateTokens(input: input1, parameters: params)
+async let tokens2 = container.generateTokens(input: input2, parameters: params)
+```
+
+The scheduler can also be used directly:
+
+```swift
+let scheduler = InferenceScheduler()
+let stream = try await scheduler.submit(
+    input: lmInput, parameters: params,
+    model: model, cache: nil,
+    tokenizer: tokenizer, configuration: config
+)
+```
+
+See [batching.md](batching.md) for full details on the scheduler state machine, batch caches, and prompt caching.
+
 ## Practical Defaults
 
 - Prefer `ChatSession` for standard chat UX.
 - Prefer `generateTask`/`generateTokensTask` when consumers may stop early.
 - Use raw token APIs only when you need token IDs directly.
+- Set `container.scheduler` when serving multiple concurrent users/requests.
