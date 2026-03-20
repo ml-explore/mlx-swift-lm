@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import Tokenizers
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
@@ -31,7 +32,7 @@ public protocol LogitSampler {
 /// ```
 ///
 /// See also: ``LogitSampler``
-public protocol LogitProcessor: Sendable {
+public protocol LogitProcessor {
 
     /// called before token generation starts with the text tokens of the prompt
     mutating func prompt(_ prompt: MLXArray)
@@ -207,13 +208,16 @@ public struct ArgMaxSampler: LogitSampler {
 /// Sampler that uses probability filters (`topP`, `topK`, `minP`) and `temperature`
 /// to sample the logits.
 ///
-/// When `topK` is set, uses `argPartition` (O(V)) instead of full `argSort` (O(V log V))
-/// to find the top-K candidates, then sorts only those K elements for cumulative filtering.
+/// Filters are applied in the same order as Python mlx-lm: top_p → min_p → top_k.
+/// Each filter operates on the full vocabulary in original token order, masking
+/// rejected tokens with `-inf`. This matches the composable filter chain in
+/// `mlx_lm.sample_utils.make_sampler`.
 public struct TopPSampler: LogitSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
     let minP: MLXArray?
+    let negInf: MLXArray
     let randomState: MLXRandom.RandomState
 
     public init(temperature: Float, topP: Float = 1.0, topK: Int = 0, minP: Float = 0.0) {
@@ -225,6 +229,7 @@ public struct TopPSampler: LogitSampler {
         }
         self.topK = topK > 0 ? topK : nil
         self.minP = minP > 0 ? MLXArray(minP) : nil
+        self.negInf = MLXArray(-Float.infinity)
         self.randomState = MLXRandom.RandomState()
     }
 
@@ -235,83 +240,56 @@ public struct TopPSampler: LogitSampler {
         }
 
         return withRandomState(randomState) {
-            // Match mlx-lm Python behavior:
-            // apply filtering on the base distribution, then apply temperature at sampling time.
-            let probs = softmax(logits, axis: -1)
-            let vocabularySize = probs.dim(-1)
+            var logprobs = logSoftmax(logits)
 
-            // Fast path: when topK is set and much smaller than vocab, use argPartition
-            // to find top-K candidates in O(V) instead of sorting entire vocab in O(V log V).
-            if let topK, topK < vocabularySize {
-                let kth = vocabularySize - topK
-
-                // O(V) partition: elements at indices >= kth are the top-K largest.
-                // argPartition returns same shape as input: [B, V].
-                let partIndices = argPartition(probs, kth: kth, axis: -1)
-                // Slice to keep only the top-K indices: [B, K]
-                let topKIndices = partIndices[0..., kth...]
-                // Gather the corresponding probabilities: [B, K]
-                let topKProbs = takeAlong(probs, topKIndices, axis: -1)
-
-                if topP != nil || minP != nil {
-                    // Need sorted order within top-K for cumulative filtering.
-                    // O(K log K) sort on K elements instead of O(V log V) on full vocab.
-                    let localSort = argSort(topKProbs, axis: -1)
-                    let sortedProbs = takeAlong(topKProbs, localSort, axis: -1)
-                    let sortedIndices = takeAlong(topKIndices, localSort, axis: -1)
-
-                    var filteredProbs = sortedProbs
-
-                    if let topP {
-                        let cumulativeProbs = cumsum(sortedProbs, axis: -1)
-                        filteredProbs = MLX.where(
-                            cumulativeProbs .> (1 - topP), filteredProbs,
-                            zeros(like: filteredProbs))
-                    }
-
-                    if let minP {
-                        let maxProbs = sortedProbs[0..., -1].expandedDimensions(axis: -1)
-                        let keepMask = sortedProbs .>= (maxProbs * minP)
-                        filteredProbs = MLX.where(
-                            keepMask, filteredProbs, zeros(like: filteredProbs))
-                    }
-
-                    // Always keep the max-probability token as a valid sampling candidate.
-                    filteredProbs[0..., -1] = sortedProbs[0..., -1]
-
-                    let sampledLocal = categorical(log(filteredProbs) * (1 / temp))
-                    return sortedIndices.squeezed(axis: 0)[sampledLocal]
-                } else {
-                    // topK-only: sample directly from top-K probs, no sort needed.
-                    let sampledLocal = categorical(log(topKProbs) * (1 / temp))
-                    return topKIndices.squeezed(axis: 0)[sampledLocal]
-                }
-            }
-
-            // Fallback: full sort for topP/minP without topK.
-            let sortedIndices = argSort(probs, axis: -1)
-            let sortedProbs = takeAlong(probs, sortedIndices, axis: -1)
-
-            var filteredProbs = sortedProbs
-
+            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
             if let topP {
-                let cumulativeProbs = cumsum(sortedProbs, axis: -1)
-                filteredProbs = MLX.where(
-                    cumulativeProbs .> (1 - topP), filteredProbs, zeros(like: filteredProbs))
+                logprobs = applyTopP(logprobs, topP: topP)
             }
-
             if let minP {
-                let maxProbs = sortedProbs[0..., -1].expandedDimensions(axis: -1)
-                let keepMask = sortedProbs .>= (maxProbs * minP)
-                filteredProbs = MLX.where(keepMask, filteredProbs, zeros(like: filteredProbs))
+                logprobs = applyMinP(logprobs, minP: minP)
+            }
+            if let topK {
+                logprobs = applyTopK(logprobs, topK: topK)
             }
 
-            // Always keep the maximum-probability token so sampling always has a valid candidate.
-            filteredProbs[0..., -1] = sortedProbs[0..., -1]
-
-            let sortedToken = categorical(log(filteredProbs) * (1 / temp))
-            return sortedIndices.squeezed(axis: 0)[sortedToken]
+            return categorical(logprobs * (1 / temp))
         }
+    }
+
+    /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
+    /// Matches `apply_top_p` from `mlx_lm/sample_utils.py`.
+    private func applyTopP(_ logprobs: MLXArray, topP: MLXArray) -> MLXArray {
+        let sortedIndices = argSort(logprobs, axis: -1)
+        let sortedLogprobs = takeAlong(logprobs, sortedIndices, axis: -1)
+        let sortedProbs = exp(sortedLogprobs)
+        let cumulativeProbs = cumsum(sortedProbs, axis: -1)
+
+        // Mask low-probability tail in sorted order, scatter back to original vocab order.
+        let filtered = MLX.where(cumulativeProbs .> (1 - topP), sortedLogprobs, negInf)
+        return putAlong(logprobs, sortedIndices, values: filtered, axis: -1)
+    }
+
+    /// Keep tokens with probability >= maxProb * minP.
+    /// Matches `apply_min_p` from `mlx_lm/sample_utils.py`.
+    private func applyMinP(_ logprobs: MLXArray, minP: MLXArray) -> MLXArray {
+        // threshold in log-space: log(maxProb * minP) = maxLogprob + log(minP)
+        let maxLogprob = logprobs.max(axis: -1, keepDims: true)
+        let threshold = maxLogprob + log(minP)
+        return MLX.where(logprobs .>= threshold, logprobs, negInf)
+    }
+
+    /// Keep only the top-k highest-probability tokens.
+    /// Matches `apply_top_k` from `mlx_lm/sample_utils.py`.
+    private func applyTopK(_ logprobs: MLXArray, topK: Int) -> MLXArray {
+        let vocabularySize = logprobs.dim(-1)
+        guard topK < vocabularySize else { return logprobs }
+        // O(V) partition: the element at position kth is the top-K boundary.
+        let kth = vocabularySize - topK
+        let partitioned = argPartition(logprobs, kth: kth, axis: -1)
+        let thresholdIdx = partitioned[0..., kth ..< (kth + 1)]
+        let threshold = takeAlong(logprobs, thresholdIdx, axis: -1)
+        return MLX.where(logprobs .>= threshold, logprobs, negInf)
     }
 }
 
@@ -332,53 +310,76 @@ public struct CategoricalSampler: LogitSampler {
     }
 }
 
-/// Processor that implements a `repetitionPenalty`.
+/// GPU-resident ring buffer of recent token IDs.
 ///
-/// Token history is kept as a GPU-resident ring buffer to avoid CPU←GPU
-/// synchronization in `didSample()`. This preserves `asyncEval()` pipelining
-/// in `TokenIterator`.
-public struct RepetitionContext: LogitProcessor {
-    /// GPU-resident ring buffer of recent token IDs.
-    var tokenRing: MLXArray
-    var count = 0
-    var writeIndex = 0
+/// Shared by penalty processors to avoid duplicating ring buffer logic.
+/// Uses `MLX.where` mask operations for GPU-only updates (no CPU←GPU sync),
+/// preserving `asyncEval()` pipelining in `TokenIterator`.
+struct TokenRing {
+    private(set) var buffer: MLXArray
+    private(set) var count = 0
+    private var writeIndex = 0
+    let capacity: Int
+    private let positions: MLXArray
 
-    let repetitionPenalty: Float
-    let repetitionContextSize: Int
-
-    public init(repetitionPenalty: Float, repetitionContextSize: Int) {
-        precondition(repetitionContextSize > 0)
-        self.repetitionPenalty = repetitionPenalty
-        self.repetitionContextSize = repetitionContextSize
-        self.tokenRing = MLXArray.zeros([repetitionContextSize], type: Int32.self)
+    init(capacity: Int) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+        self.buffer = MLXArray.zeros([capacity], type: Int32.self)
+        self.positions = MLXArray.arange(capacity)
     }
 
-    mutating public func prompt(_ prompt: MLXArray) {
+    /// The valid portion of the ring (all of it once full), or `nil` if empty.
+    var validTokens: MLXArray? {
+        guard count > 0 else { return nil }
+        return count < capacity ? buffer[..<count] : buffer
+    }
+
+    /// Bulk-load from a prompt. Keeps the last `capacity` tokens.
+    mutating func loadPrompt(_ prompt: MLXArray) {
         let n = prompt.dim(0)
         let promptTokens = prompt.asType(.int32)
-        if n <= repetitionContextSize {
-            if n < repetitionContextSize {
-                let padding = MLXArray.zeros([repetitionContextSize - n], type: Int32.self)
-                tokenRing = concatenated([promptTokens.reshaped(-1), padding])
+        if n <= capacity {
+            if n < capacity {
+                let padding = MLXArray.zeros([capacity - n], type: Int32.self)
+                buffer = concatenated([promptTokens.reshaped(-1), padding])
             } else {
-                tokenRing = promptTokens.reshaped(-1)
+                buffer = promptTokens.reshaped(-1)
             }
             count = n
-            writeIndex = n % repetitionContextSize
+            writeIndex = n % capacity
         } else {
-            tokenRing = promptTokens[(-repetitionContextSize)...].reshaped(-1)
-            count = repetitionContextSize
+            buffer = promptTokens[(-capacity)...].reshaped(-1)
+            count = capacity
             writeIndex = 0
         }
     }
 
-    public func process(logits: MLXArray) -> MLXArray {
-        guard count > 0 else { return logits }
+    /// Append a single token using GPU-only mask write (no CPU←GPU sync).
+    mutating func append(_ token: MLXArray) {
+        let mask = positions .== Int32(writeIndex)
+        buffer = MLX.where(mask, token.asType(.int32), buffer)
+        writeIndex = (writeIndex + 1) % capacity
+        count = min(count + 1, capacity)
+    }
+}
 
-        let validTokens =
-            count < repetitionContextSize
-            ? tokenRing[..<count] : tokenRing
-        let indices = validTokens.asType(.uint32)
+/// Processor that implements a `repetitionPenalty`.
+public struct RepetitionContext: LogitProcessor {
+    private var ring: TokenRing
+    let repetitionPenalty: Float
+
+    public init(repetitionPenalty: Float, repetitionContextSize: Int) {
+        self.repetitionPenalty = repetitionPenalty
+        self.ring = TokenRing(capacity: repetitionContextSize)
+    }
+
+    mutating public func prompt(_ prompt: MLXArray) {
+        ring.loadPrompt(prompt)
+    }
+
+    public func process(logits: MLXArray) -> MLXArray {
+        guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
         var selectedLogits = logits[0..., indices]
 
         selectedLogits = MLX.where(
@@ -390,74 +391,35 @@ public struct RepetitionContext: LogitProcessor {
     }
 
     mutating public func didSample(token: MLXArray) {
-        // GPU-only: update ring buffer position without CPU←GPU sync.
-        // writeIndex is a CPU-side counter (just an integer position, not a token value).
-        let positions = MLXArray(0 ..< Int32(repetitionContextSize))
-        let mask = positions .== Int32(writeIndex)
-        tokenRing = MLX.where(mask, token.asType(.int32), tokenRing)
-        writeIndex = (writeIndex + 1) % repetitionContextSize
-        count = min(count + 1, repetitionContextSize)
+        ring.append(token)
     }
 }
 
 /// Processor that applies an additive presence penalty to tokens in a recent context window.
 ///
-/// Token history is kept as a GPU-resident ring buffer. The penalty is applied
-/// once per unique token via scatter-write (writing the same value to the same
-/// index multiple times is idempotent).
+/// The penalty is applied once per unique token via scatter-write (writing the
+/// same value to the same index multiple times is idempotent).
 public struct PresencePenaltyContext: LogitProcessor {
-    var tokenRing: MLXArray
-    var count = 0
-    var writeIndex = 0
-
+    private var ring: TokenRing
     let presencePenalty: Float
-    let presenceContextSize: Int
 
     public init(presencePenalty: Float, presenceContextSize: Int) {
-        precondition(presenceContextSize > 0)
         self.presencePenalty = presencePenalty
-        self.presenceContextSize = presenceContextSize
-        self.tokenRing = MLXArray.zeros([presenceContextSize], type: Int32.self)
+        self.ring = TokenRing(capacity: presenceContextSize)
     }
 
     mutating public func prompt(_ prompt: MLXArray) {
-        let n = prompt.dim(0)
-        let promptTokens = prompt.asType(.int32)
-        if n <= presenceContextSize {
-            if n < presenceContextSize {
-                let padding = MLXArray.zeros([presenceContextSize - n], type: Int32.self)
-                tokenRing = concatenated([promptTokens.reshaped(-1), padding])
-            } else {
-                tokenRing = promptTokens.reshaped(-1)
-            }
-            count = n
-            writeIndex = n % presenceContextSize
-        } else {
-            tokenRing = promptTokens[(-presenceContextSize)...].reshaped(-1)
-            count = presenceContextSize
-            writeIndex = 0
-        }
+        ring.loadPrompt(prompt)
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        guard count > 0 else { return logits }
-
-        let validTokens =
-            count < presenceContextSize
-            ? tokenRing[..<count] : tokenRing
-        let indices = validTokens.asType(.uint32)
-        // Scatter-write of (logit - penalty) is idempotent for duplicate indices:
-        // the same subtracted value overwrites itself, producing correct presence semantics.
+        guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
         logits[0..., indices] = logits[0..., indices] - presencePenalty
         return logits
     }
 
     mutating public func didSample(token: MLXArray) {
-        let positions = MLXArray(0 ..< Int32(presenceContextSize))
-        let mask = positions .== Int32(writeIndex)
-        tokenRing = MLX.where(mask, token.asType(.int32), tokenRing)
-        writeIndex = (writeIndex + 1) % presenceContextSize
-        count = min(count + 1, presenceContextSize)
+        ring.append(token)
     }
 }
 
@@ -466,64 +428,31 @@ public struct PresencePenaltyContext: LogitProcessor {
 /// Frequency counting is performed on GPU via `scatter_add` to build a histogram
 /// of token occurrences, avoiding CPU←GPU synchronization.
 public struct FrequencyPenaltyContext: LogitProcessor {
-    var tokenRing: MLXArray
-    var count = 0
-    var writeIndex = 0
-
+    private var ring: TokenRing
     let frequencyPenalty: Float
-    let frequencyContextSize: Int
 
     public init(frequencyPenalty: Float, frequencyContextSize: Int) {
-        precondition(frequencyContextSize > 0)
         self.frequencyPenalty = frequencyPenalty
-        self.frequencyContextSize = frequencyContextSize
-        self.tokenRing = MLXArray.zeros([frequencyContextSize], type: Int32.self)
+        self.ring = TokenRing(capacity: frequencyContextSize)
     }
 
     mutating public func prompt(_ prompt: MLXArray) {
-        let n = prompt.dim(0)
-        let promptTokens = prompt.asType(.int32)
-        if n <= frequencyContextSize {
-            if n < frequencyContextSize {
-                let padding = MLXArray.zeros([frequencyContextSize - n], type: Int32.self)
-                tokenRing = concatenated([promptTokens.reshaped(-1), padding])
-            } else {
-                tokenRing = promptTokens.reshaped(-1)
-            }
-            count = n
-            writeIndex = n % frequencyContextSize
-        } else {
-            tokenRing = promptTokens[(-frequencyContextSize)...].reshaped(-1)
-            count = frequencyContextSize
-            writeIndex = 0
-        }
+        ring.loadPrompt(prompt)
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        guard count > 0 else { return logits }
+        guard let validTokens = ring.validTokens else { return logits }
 
-        let validTokens =
-            count < frequencyContextSize
-            ? tokenRing[..<count] : tokenRing
-
-        // Build frequency histogram on GPU via scatter_add.
-        // Each token ID in the window increments its bin by 1.
         let vocabSize = logits.dim(-1)
         let ones = MLXArray.ones([validTokens.dim(0)], type: Float32.self)
         let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
             .at[validTokens.asType(.int32)].add(ones)
 
-        // Subtract frequency-scaled penalty across entire vocab.
-        // Positions with zero count are unaffected (0 * penalty = 0).
         return logits - (histogram * frequencyPenalty).reshaped(1, -1)
     }
 
     mutating public func didSample(token: MLXArray) {
-        let positions = MLXArray(0 ..< Int32(frequencyContextSize))
-        let mask = positions .== Int32(writeIndex)
-        tokenRing = MLX.where(mask, token.asType(.int32), tokenRing)
-        writeIndex = (writeIndex + 1) % frequencyContextSize
-        count = min(count + 1, frequencyContextSize)
+        ring.append(token)
     }
 }
 
