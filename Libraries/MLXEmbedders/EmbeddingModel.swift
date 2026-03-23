@@ -56,7 +56,7 @@ public actor ModelContainer {
 
         self.model = try loadSynchronous(
             modelDirectory: modelDirectory, modelName: configuration.name)
-        self.pooler = loadPooling(modelDirectory: modelDirectory)
+        self.pooler = loadPooling(modelDirectory: modelDirectory, model: model)
 
         let (tokenizerConfig, tokenizerData) = try await tokenizerConfigTask
         self.tokenizer = try PreTrainedTokenizer(
@@ -100,6 +100,7 @@ public struct EmbeddingModelOutput {
 
 public protocol EmbeddingModel: Module {
     var vocabularySize: Int { get }
+    var poolingStrategy: Pooling.Strategy? { get }
 
     func callAsFunction(
         _ inputs: MLXArray,
@@ -113,6 +114,10 @@ public protocol EmbeddingModel: Module {
 }
 
 extension EmbeddingModel {
+    public var poolingStrategy: Pooling.Strategy? {
+        nil
+    }
+
     func callAsFunction(
         _ inputs: MLXArray,
         positionIds: MLXArray? = nil,
