@@ -1,7 +1,37 @@
-// swift-tools-version: 5.12
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+
+#if HuggingFace && DePasquale
+#error("Exactly one back end can be specified")
+#endif
+
+var extras = [PackageDescription.Package.Dependency]()
+
+#if SDKTest
+extras.append(
+    .package(
+        path: "SDKTest"
+    ),
+)
+#endif
+
+#if HuggingFace
+extras.append(
+    .package(
+        path: "integration/huggingface"
+    ),
+)
+#endif
+
+#if DePasquale
+extras.append(
+    .package(
+        path: "integration/depasquale"
+    ),
+)
+#endif
 
 let package = Package(
     name: "mlx-swift-lm",
@@ -25,12 +55,13 @@ let package = Package(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
     ],
-    dependencies: [
+    traits: [
+        .trait(name: "SDKTest"),
+        .trait(name: "HuggingFace"),
+        .trait(name: "DePasquale"),
+    ],
+    dependencies: extras + [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
-        .package(
-            url: "https://github.com/huggingface/swift-transformers",
-            .upToNextMinor(from: "1.2.0")
-        ),
     ],
     targets: [
         .target(
@@ -40,7 +71,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -57,7 +88,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -73,7 +104,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -88,7 +119,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
                 .target(name: "MLXLMCommon"),
             ],
             path: "Libraries/MLXEmbedders",
@@ -105,7 +136,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
@@ -126,7 +157,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
+//                .product(name: "Transformers", package: "swift-transformers"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
