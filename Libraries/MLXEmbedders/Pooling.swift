@@ -152,12 +152,14 @@ public class Pooling: Module {
             pooled = inputs.hiddenStates![0..., 0, 0...]
         case .last:
             let hiddenStates = inputs.hiddenStates!
-            let tokenCounts = sum(_mask.asType(.int32), axis: -1).asArray(Int32.self)
-            pooled = stacked(
-                tokenCounts.enumerated().map { batchIndex, count in
-                    let tokenIndex = max(Int(count) - 1, 0)
-                    return hiddenStates[batchIndex, tokenIndex, 0...]
-                })
+            let tokenCounts = sum(_mask.asType(.int32), axis: -1)
+            let tokenIndices = MLX.maximum(
+                tokenCounts - MLXArray(Int32(1)),
+                MLXArray(Int32(0))
+            )
+            let indices = tokenIndices.expandedDimensions(axes: [1, 2])
+            let gathered = MLX.takeAlong(hiddenStates, indices, axis: 1)
+            pooled = MLX.squeezed(gathered, axis: 1)
         case .cls:
             pooled =
                 inputs.pooledOutput
