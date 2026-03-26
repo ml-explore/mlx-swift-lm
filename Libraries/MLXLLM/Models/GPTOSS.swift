@@ -224,48 +224,23 @@ class AttentionBlock: Module {
                 return active
             }()
 
-        // Quantized cache path
-        if let qcache = cache as? QuantizedKVCacheProtocol {
-            if sinksActive {
-                fatalError("Quantized attention does not support non-zero sinks.")
-            }
-            if qcache.offset == 0 {
-                q = rope(q)
-                k = rope(k)
-            } else {
-                q = rope(q, offset: qcache.offset)
-                k = rope(k, offset: qcache.offset)
-            }
-
-            let (qKeys, qValues) = qcache.updateQuantized(keys: k, values: v)
-            let vHat = quantizedScaledDotProductAttention(
-                queries: q,
-                quantizedKeys: qKeys,
-                quantizedValues: qValues,
-                scale: smScale,
-                mask: mask,
-                groupSize: qcache.groupSize,
-                bits: qcache.bits,
-                mode: qcache.mode
-            )
-
-            return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
-        }
-
         if let cache {
             q = rope(q, offset: cache.offset)
             k = rope(k, offset: cache.offset)
-            (k, v) = cache.update(keys: k, values: v)
         } else {
             q = rope(q)
             k = rope(k)
         }
 
-        let vHat = MLXFast.scaledDotProductAttention(
-            queries: q, keys: k, values: v,
+        let vHat = attentionWithCacheUpdate(
+            queries: q,
+            keys: k,
+            values: v,
+            cache: cache,
             scale: smScale,
             mask: mask,
-            sinks: sinksActive ? sinks : nil)
+            sinks: sinksActive ? sinks : nil
+        )
 
         return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
     }

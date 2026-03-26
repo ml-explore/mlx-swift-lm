@@ -135,11 +135,6 @@ class BaichuanM1Attention: Module {
         keys = rope(keys, offset: offset)
 
         if let cache = cache as? CacheList {
-            let kvCache = cache[1]
-            let (cachedKeys, cachedValues) = kvCache.update(keys: keys, values: values)
-            keys = cachedKeys
-            values = cachedValues
-
             if L > 0 {
                 let convCache = cache[0] as! MambaCache
                 convCache[0] = kInit[0..., 0..., (L - 1)..., 0...]
@@ -147,8 +142,13 @@ class BaichuanM1Attention: Module {
             }
         }
 
-        let out = MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: values, scale: scale, mask: mask
+        let out = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: (cache as? CacheList)?[1],
+            scale: scale,
+            mask: mask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)

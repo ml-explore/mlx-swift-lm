@@ -227,21 +227,17 @@ private class ApertusAttention: Module {
         if let cache = cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
-
-            // Update cache (expects [B, H, L, D])
-            let (k, v) = cache.update(keys: keys, values: values)
-            keys = k
-            values = v
         } else {
             queries = rope(queries, offset: 0)
             keys = rope(keys, offset: 0)
         }
 
         // 5. Attention (SDPA expects [B, H, L, D])
-        let output = MLXFast.scaledDotProductAttention(
+        let output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )

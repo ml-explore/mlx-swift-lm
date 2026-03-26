@@ -1100,7 +1100,7 @@ public class MambaCache: ArraysCache {
 
 /// Composite cache that manages multiple sub-caches
 public class CacheList: BaseKVCache {
-    private var caches: [KVCache]
+    fileprivate var caches: [KVCache]
 
     public init(_ caches: KVCache...) {
         self.caches = caches
@@ -1111,8 +1111,13 @@ public class CacheList: BaseKVCache {
         caches.flatMap { $0.innerState() }
     }
 
+    public var count: Int {
+        caches.count
+    }
+
     public subscript(index: Int) -> KVCache {
-        return caches[index]
+        get { caches[index] }
+        set { caches[index] = newValue }
     }
 
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -1178,6 +1183,8 @@ public func savePromptCache(
             return "RotatingKVCache"
         case is QuantizedKVCache:
             return "QuantizedKVCache"
+        case is TurboQuantKVCache:
+            return "TurboQuantKVCache"
         case is MambaCache:
             return "MambaCache"  // Must precede ArraysCache because of inheritance
         case is ArraysCache:
@@ -1278,6 +1285,8 @@ public func loadPromptCache(
             cache = RotatingKVCache(maxSize: maxSize)  // Create with parsed maxSize
         case "QuantizedKVCache":
             cache = QuantizedKVCache()
+        case "TurboQuantKVCache":
+            cache = TurboQuantKVCache()
         case "ChunkedKVCache":
             cache = ChunkedKVCache()
         case "MambaCache":
@@ -1296,10 +1305,10 @@ public func loadPromptCache(
             throw KVCacheError(message: "Unknown cache class: \(className)")
         }
 
-        cache.state = cacheData[i]
         if i < cacheInfo.count {
             cache.metaState = cacheInfo[i]
         }
+        cache.state = cacheData[i]
         caches.append(cache)
     }
 
@@ -1550,29 +1559,68 @@ public func quantizedScaledDotProductAttention(
 /// - Parameters:
 ///   - cache: Array of KV caches to potentially quantize
 ///   - kvBits: Number of bits for quantization (nil = no quantization)
-///   - kvGroupSize: Group size for quantization
+///   - kvGroupSize: Group size for uniform quantization
+///   - kvQuantizationScheme: Explicit cache quantization scheme
 ///   - quantizedKVStart: Token count threshold to begin quantizing
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
-    kvBits: Int?,
+    kvBits: Float?,
     kvGroupSize: Int = 64,
+    kvQuantizationScheme: KVQuantizationScheme = .uniform,
     quantizedKVStart: Int = 0
 ) {
-    guard let kvBits = kvBits,
-        !cache.isEmpty,
-        !(cache[0] is QuantizedKVCache),
-        cache[0].offset > quantizedKVStart
-    else {
-        return
-    }
+    guard kvBits != nil, !cache.isEmpty else { return }
 
     for i in 0 ..< cache.count {
-        // Handle cache types that support quantization
-        if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+        maybeQuantizeSingleKVCache(
+            cache: &cache[i],
+            kvBits: kvBits,
+            kvGroupSize: kvGroupSize,
+            kvQuantizationScheme: kvQuantizationScheme,
+            quantizedKVStart: quantizedKVStart
+        )
+    }
+}
+
+private func maybeQuantizeSingleKVCache(
+    cache: inout KVCache,
+    kvBits: Float?,
+    kvGroupSize: Int,
+    kvQuantizationScheme: KVQuantizationScheme,
+    quantizedKVStart: Int
+) {
+    guard let kvBits else { return }
+
+    switch cache {
+    case is QuantizedKVCacheProtocol, is TurboQuantKVCache, is RotatingKVCache, is MambaCache,
+        is ArraysCache:
+        return
+
+    case let cacheList as CacheList:
+        for index in 0 ..< cacheList.count {
+            var nestedCache = cacheList[index]
+            maybeQuantizeSingleKVCache(
+                cache: &nestedCache,
+                kvBits: kvBits,
+                kvGroupSize: kvGroupSize,
+                kvQuantizationScheme: kvQuantizationScheme,
+                quantizedKVStart: quantizedKVStart
+            )
+            cacheList[index] = nestedCache
         }
-        // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-        // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
-        // MambaCache and CacheList don't use traditional KV quantization
+
+    case let simpleCache as KVCacheSimple:
+        guard simpleCache.offset > quantizedKVStart else { return }
+        if turboquantEnabled(bits: kvBits, scheme: kvQuantizationScheme) {
+            cache = TurboQuantKVCache.fromCache(simpleCache, bits: kvBits)
+        } else {
+            cache = simpleCache.toQuantized(
+                groupSize: kvGroupSize,
+                bits: Int(round(kvBits))
+            )
+        }
+
+    default:
+        return
     }
 }

@@ -20,42 +20,15 @@ private func attentionWithCacheUpdateAndSinks(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
 ) -> MLXArray {
-    guard let cache else {
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
-        )
-    }
-
-    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
-        precondition(sinks == nil, "Quantized SDPA does not support attention sinks.")
-        let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
-            keys: keys, values: values)
-        return quantizedScaledDotProductAttention(
-            queries: queries,
-            quantizedKeys: quantizedKeys,
-            quantizedValues: quantizedValues,
-            scale: scale,
-            mask: mask,
-            groupSize: quantizedKVCache.groupSize,
-            bits: quantizedKVCache.bits,
-            mode: quantizedKVCache.mode
-        )
-    } else {
-        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: cachedKeys,
-            values: cachedValues,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
-        )
-    }
+    attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: cache,
+        scale: scale,
+        mask: mask,
+        sinks: sinks
+    )
 }
 
 private func groupExpertSelect(

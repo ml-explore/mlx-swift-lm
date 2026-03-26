@@ -40,18 +40,30 @@ public func attentionWithCacheUpdate(
     values: MLXArray,
     cache: KVCache?,
     scale: Float,
-    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
 ) -> MLXArray {
     guard let cache else {
-        return MLXFast.scaledDotProductAttention(
+        return scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    }
+    if let turboQuantCache = cache as? TurboQuantKVCache {
+        precondition(sinks == nil, "TurboQuant attention does not support attention sinks.")
+        return turboQuantCache.attention(
             queries: queries,
             keys: keys,
             values: values,
             scale: scale,
             mask: mask
         )
-    }
-    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
+    } else if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
+        precondition(sinks == nil, "Quantized attention does not support attention sinks.")
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
         return quantizedScaledDotProductAttention(
@@ -66,12 +78,111 @@ public func attentionWithCacheUpdate(
         )
     } else {
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return MLXFast.scaledDotProductAttention(
+        return scaledDotProductAttention(
             queries: queries,
             keys: cachedKeys,
             values: cachedValues,
             scale: scale,
-            mask: mask
+            mask: mask,
+            sinks: sinks
         )
     }
+}
+
+public func updateCacheAndReturnArrays(
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?
+) -> (MLXArray, MLXArray) {
+    guard let cache else {
+        return (keys, values)
+    }
+
+    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
+        let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
+            keys: keys,
+            values: values
+        )
+        return (
+            dequantized(
+                quantizedKeys.0,
+                scales: quantizedKeys.1,
+                biases: quantizedKeys.2,
+                groupSize: quantizedKVCache.groupSize,
+                bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode
+            ),
+            dequantized(
+                quantizedValues.0,
+                scales: quantizedValues.1,
+                biases: quantizedValues.2,
+                groupSize: quantizedKVCache.groupSize,
+                bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode
+            )
+        )
+    }
+
+    return cache.update(keys: keys, values: values)
+}
+
+public func dequantizedKVState(cache: KVCache) -> (MLXArray, MLXArray)? {
+    if let turboQuantCache = cache as? TurboQuantKVCache {
+        return turboQuantCache.dequantizedState()
+    }
+
+    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol,
+        let (quantizedKeys, quantizedValues) = quantizedKVCache.getQuantizedState()
+    {
+        return (
+            dequantized(
+                quantizedKeys.0,
+                scales: quantizedKeys.1,
+                biases: quantizedKeys.2,
+                groupSize: quantizedKVCache.groupSize,
+                bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode
+            ),
+            dequantized(
+                quantizedValues.0,
+                scales: quantizedValues.1,
+                biases: quantizedValues.2,
+                groupSize: quantizedKVCache.groupSize,
+                bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode
+            )
+        )
+    }
+
+    let state = cache.state
+    guard state.count >= 2 else { return nil }
+    return (state[0], state[1])
+}
+
+private func scaledDotProductAttention(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) -> MLXArray {
+    if let sinks {
+        return MLXFast.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    }
+
+    return MLXFast.scaledDotProductAttention(
+        queries: queries,
+        keys: keys,
+        values: values,
+        scale: scale,
+        mask: mask
+    )
 }

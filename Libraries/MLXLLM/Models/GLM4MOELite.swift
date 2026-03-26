@@ -268,19 +268,15 @@ class GLM4MoELiteAttention: Module {
         var keys = concatenated([kvLatent, kPe], axis: -1)
         var values = kvLatent  // Values are the compressed KV latent
 
-        // Update cache with compressed representation
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
-
         // Create queries
         let queries = concatenated([qNope, qPe], axis: -1)
 
         // Compute attention
-        var output = MLXFast.scaledDotProductAttention(
+        var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )

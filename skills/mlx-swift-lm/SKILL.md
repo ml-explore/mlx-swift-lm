@@ -219,8 +219,9 @@ See [references/tool-calling.md](references/tool-calling.md) for multi-turn tool
 let params = GenerateParameters(
     maxTokens: 1000,            // nil = unlimited
     maxKVSize: 4096,            // Sliding window (RotatingKVCache)
-    kvBits: 4,                  // Quantized cache (4 or 8)
-    kvGroupSize: 64,            // Quantization group size
+    kvBits: 3.5,                // Fractional bits auto-enable TurboQuant
+    kvGroupSize: 64,            // Uniform-quantization group size
+    kvQuantizationScheme: .uniform,  // .turboQuant forces TurboQuant for integer bits too
     quantizedKVStart: 0,        // Token index to start KV quantization
     temperature: 0.7,           // 0 = greedy / argmax
     topP: 0.9,                  // Nucleus sampling
@@ -361,6 +362,8 @@ for await item in stream {
 ```swift
 let slidingWindow = GenerateParameters(maxKVSize: 4096)
 let quantizedKV = GenerateParameters(kvBits: 4, kvGroupSize: 64)
+let turboQuantKV = GenerateParameters(kvBits: 3.5)
+let forcedTurboQuant = GenerateParameters(kvBits: 4, kvQuantizationScheme: .turboQuant)
 await session.clear()
 ```
 
@@ -403,7 +406,7 @@ await session.clear()
 | EOS detection | Stops generation when EOS encountered |
 | Chat template application | Applied by tokenizer / processor path |
 | Tool call format detection | Inferred from `model_type` in `config.json` |
-| Cache type selection | Driven by `GenerateParameters` (`maxKVSize`, `kvBits`) |
+| Cache type selection | Driven by `GenerateParameters` (`maxKVSize`, `kvBits`, `kvQuantizationScheme`) |
 | Tokenizer loading | Loaded automatically from model assets |
 | Model weight loading | Downloaded and loaded from Hugging Face/local directory |
 
@@ -414,6 +417,6 @@ await session.clear()
 | `extraEOSTokens` | Model has unlisted stop tokens |
 | `toolCallFormat` | Override auto-detected tool parser format |
 | `maxKVSize` | Enable sliding window cache |
-| `kvBits`, `kvGroupSize`, `quantizedKVStart` | Enable and tune KV quantization |
+| `kvBits`, `kvGroupSize`, `kvQuantizationScheme`, `quantizedKVStart` | Enable and tune KV quantization (`kvGroupSize` only applies to uniform quantization) |
 | `prefillStepSize` | Tune prompt prefill chunking/perf tradeoff |
 | `wiredMemoryTicket` | Coordinate policy-based wired-memory limits |

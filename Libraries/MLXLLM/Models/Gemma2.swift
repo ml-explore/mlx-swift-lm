@@ -58,7 +58,7 @@ class Gemma2Attention: Module {
         if let cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
-            (keys, values) = cache.update(keys: keys, values: values)
+            (keys, values) = updateCacheAndReturnArrays(keys: keys, values: values, cache: cache)
         } else {
             queries = rope(queries)
             keys = rope(keys)
