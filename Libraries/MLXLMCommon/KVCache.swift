@@ -431,7 +431,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         new.step = self.step
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         return new
     }
@@ -701,7 +701,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         let new = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step)
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         new.metaState = self.metaState
         return new
@@ -956,7 +956,7 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         let new = QuantizedKVCache(groupSize: groupSize, bits: bits, mode: mode)
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         new.metaState = self.metaState
         return new
@@ -1056,7 +1056,7 @@ public class ChunkedKVCache: KVCacheSimple {
         new.step = self.step
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         new.metaState = self.metaState
         return new
@@ -1114,7 +1114,7 @@ public class ArraysCache: BaseKVCache {
         let new = ArraysCache(size: cache.count)
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         new.offset = self.offset
         new.leftPadding = self.leftPadding
@@ -1160,7 +1160,7 @@ public class MambaCache: ArraysCache {
         let new = MambaCache()
         let s = self.state
         if !s.isEmpty {
-            new.state = s
+            new.state = s.map { $0[.ellipsis] }
         }
         new.offset = self.offset
         new.leftPadding = self.leftPadding
