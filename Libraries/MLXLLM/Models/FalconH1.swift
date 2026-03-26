@@ -310,7 +310,8 @@ class FalconH1Attention: Module {
             keys = rope(keys, offset: 0)
         }
 
-        let attentionMask = mask.map { MLXFast.ScaledDotProductAttentionMaskMode.array($0) } ?? .none
+        let attentionMask =
+            mask.map { MLXFast.ScaledDotProductAttentionMaskMode.array($0) } ?? .none
         var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,

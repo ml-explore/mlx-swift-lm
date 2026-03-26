@@ -157,7 +157,10 @@ private indirect enum TurboQuantState {
                         dtype: state.residualNorms.dtype
                     ),
                     qjlSigns: MLXArray.zeros(
-                        [state.qjlSigns.dim(0), state.qjlSigns.dim(1), length, state.qjlSigns.dim(3)],
+                        [
+                            state.qjlSigns.dim(0), state.qjlSigns.dim(1), length,
+                            state.qjlSigns.dim(3),
+                        ],
                         dtype: state.qjlSigns.dtype
                     )
                 ))
@@ -525,8 +528,11 @@ private func buildCodebook(dim: Int, bits: Int) -> MLXArray {
             var denominator: Float = 0
             for gridIndex in grid.indices {
                 let value = grid[gridIndex]
-                let upperInclusive = level == levels - 1 ? value <= boundaries[level + 1] : value
-                    < boundaries[level + 1]
+                let upperInclusive =
+                    level == levels - 1
+                    ? value <= boundaries[level + 1]
+                    : value
+                        < boundaries[level + 1]
                 if value >= boundaries[level] && upperInclusive {
                     numerator += weights[gridIndex] * value
                     denominator += weights[gridIndex]
@@ -564,45 +570,45 @@ private func makeMSEScoreKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto lane = thread_position_in_grid.x;
-        auto repeat_idx = thread_position_in_grid.y;
-        auto n = thread_position_in_grid.z;
+            auto lane = thread_position_in_grid.x;
+            auto repeat_idx = thread_position_in_grid.y;
+            auto n = thread_position_in_grid.z;
 
-        auto token_count = norms_shape[2];
-        auto kv_heads = norms_shape[1];
-        auto repeat_count = q_rot_shape[2];
-        if (repeat_idx >= repeat_count) {
-            return;
-        }
-
-        auto b = n / (kv_heads * token_count);
-        auto rem = n % (kv_heads * token_count);
-        auto h = rem / token_count;
-        auto t = rem % token_count;
-
-        auto q_ptr = q_rot + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
-        auto packed_ptr = packed + ((b * kv_heads + h) * token_count + t) * PackedWidth;
-
-        float acc = 0.0f;
-        for (int d = lane; d < Dim; d += 32) {
-            int bit_offset = d * Bits;
-            int word_idx = bit_offset / 32;
-            int offset = bit_offset % 32;
-            uint value = packed_ptr[word_idx] >> offset;
-            int spill = offset + Bits - 32;
-            if (spill > 0) {
-                value |= packed_ptr[word_idx + 1] << (Bits - spill);
+            auto token_count = norms_shape[2];
+            auto kv_heads = norms_shape[1];
+            auto repeat_count = q_rot_shape[2];
+            if (repeat_idx >= repeat_count) {
+                return;
             }
-            value &= ((1u << Bits) - 1u);
-            acc += static_cast<float>(q_ptr[d]) * codebook[value];
-        }
 
-        acc = simd_sum(acc);
-        if (thread_index_in_simdgroup == 0) {
-            out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
-                acc * static_cast<float>(norms[(b * kv_heads + h) * token_count + t]);
-        }
-    """#
+            auto b = n / (kv_heads * token_count);
+            auto rem = n % (kv_heads * token_count);
+            auto h = rem / token_count;
+            auto t = rem % token_count;
+
+            auto q_ptr = q_rot + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
+            auto packed_ptr = packed + ((b * kv_heads + h) * token_count + t) * PackedWidth;
+
+            float acc = 0.0f;
+            for (int d = lane; d < Dim; d += 32) {
+                int bit_offset = d * Bits;
+                int word_idx = bit_offset / 32;
+                int offset = bit_offset % 32;
+                uint value = packed_ptr[word_idx] >> offset;
+                int spill = offset + Bits - 32;
+                if (spill > 0) {
+                    value |= packed_ptr[word_idx + 1] << (Bits - spill);
+                }
+                value &= ((1u << Bits) - 1u);
+                acc += static_cast<float>(q_ptr[d]) * codebook[value];
+            }
+
+            acc = simd_sum(acc);
+            if (thread_index_in_simdgroup == 0) {
+                out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
+                    acc * static_cast<float>(norms[(b * kv_heads + h) * token_count + t]);
+            }
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_mse_score",
@@ -616,36 +622,36 @@ private func makePackLowBitKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto word = thread_position_in_grid.x;
-        auto row = thread_position_in_grid.y;
+            auto word = thread_position_in_grid.x;
+            auto row = thread_position_in_grid.y;
 
-        if (row >= values_shape[0] || word >= PackedWidth) {
-            return;
-        }
-
-        auto values_ptr = values + row * Length;
-        uint packed_word = 0u;
-        int start = max(0, (int(word) * 32 - (Bits - 1)) / Bits);
-        int end = min(Length, ((int(word) + 1) * 32 + (Bits - 1)) / Bits);
-
-        for (int idx = start; idx < end; ++idx) {
-            int bit_offset = idx * Bits;
-            int word_idx = bit_offset / 32;
-            int offset = bit_offset % 32;
-            uint value = values_ptr[idx] & ((1u << Bits) - 1u);
-            if (word_idx == word) {
-                packed_word |= value << offset;
+            if (row >= values_shape[0] || word >= PackedWidth) {
+                return;
             }
-            if (word_idx + 1 == word) {
-                int spill = offset + Bits - 32;
-                if (spill > 0) {
-                    packed_word |= value >> (Bits - spill);
+
+            auto values_ptr = values + row * Length;
+            uint packed_word = 0u;
+            int start = max(0, (int(word) * 32 - (Bits - 1)) / Bits);
+            int end = min(Length, ((int(word) + 1) * 32 + (Bits - 1)) / Bits);
+
+            for (int idx = start; idx < end; ++idx) {
+                int bit_offset = idx * Bits;
+                int word_idx = bit_offset / 32;
+                int offset = bit_offset % 32;
+                uint value = values_ptr[idx] & ((1u << Bits) - 1u);
+                if (word_idx == word) {
+                    packed_word |= value << offset;
+                }
+                if (word_idx + 1 == word) {
+                    int spill = offset + Bits - 32;
+                    if (spill > 0) {
+                        packed_word |= value >> (Bits - spill);
+                    }
                 }
             }
-        }
 
-        out[row * PackedWidth + word] = packed_word;
-    """#
+            out[row * PackedWidth + word] = packed_word;
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_pack_lowbit",
@@ -659,24 +665,24 @@ private func makeUnpackLowBitKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto idx = thread_position_in_grid.x;
-        auto row = thread_position_in_grid.y;
+            auto idx = thread_position_in_grid.x;
+            auto row = thread_position_in_grid.y;
 
-        if (row >= packed_shape[0] || idx >= Length) {
-            return;
-        }
+            if (row >= packed_shape[0] || idx >= Length) {
+                return;
+            }
 
-        auto packed_ptr = packed + row * PackedWidth;
-        int bit_offset = idx * Bits;
-        int word_idx = bit_offset / 32;
-        int offset = bit_offset % 32;
-        uint value = packed_ptr[word_idx] >> offset;
-        int spill = offset + Bits - 32;
-        if (spill > 0) {
-            value |= packed_ptr[word_idx + 1] << (Bits - spill);
-        }
-        out[row * Length + idx] = value & ((1u << Bits) - 1u);
-    """#
+            auto packed_ptr = packed + row * PackedWidth;
+            int bit_offset = idx * Bits;
+            int word_idx = bit_offset / 32;
+            int offset = bit_offset % 32;
+            uint value = packed_ptr[word_idx] >> offset;
+            int spill = offset + Bits - 32;
+            if (spill > 0) {
+                value |= packed_ptr[word_idx + 1] << (Bits - spill);
+            }
+            out[row * Length + idx] = value & ((1u << Bits) - 1u);
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_unpack_lowbit",
@@ -690,44 +696,44 @@ private func makeQJLScoreKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto lane = thread_position_in_grid.x;
-        auto repeat_idx = thread_position_in_grid.y;
-        auto n = thread_position_in_grid.z;
+            auto lane = thread_position_in_grid.x;
+            auto repeat_idx = thread_position_in_grid.y;
+            auto n = thread_position_in_grid.z;
 
-        auto token_count = norms_shape[2];
-        auto kv_heads = norms_shape[1];
-        auto repeat_count = q_proj_shape[2];
-        if (repeat_idx >= repeat_count) {
-            return;
-        }
+            auto token_count = norms_shape[2];
+            auto kv_heads = norms_shape[1];
+            auto repeat_count = q_proj_shape[2];
+            if (repeat_idx >= repeat_count) {
+                return;
+            }
 
-        auto b = n / (kv_heads * token_count);
-        auto rem = n % (kv_heads * token_count);
-        auto h = rem / token_count;
-        auto t = rem % token_count;
+            auto b = n / (kv_heads * token_count);
+            auto rem = n % (kv_heads * token_count);
+            auto h = rem / token_count;
+            auto t = rem % token_count;
 
-        auto q_ptr = q_proj + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
-        auto packed_ptr = signs + ((b * kv_heads + h) * token_count + t) * PackedWidth;
+            auto q_ptr = q_proj + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
+            auto packed_ptr = signs + ((b * kv_heads + h) * token_count + t) * PackedWidth;
 
-        float acc = 0.0f;
-        for (int d = lane; d < Dim; d += 32) {
-            int word_idx = d / 32;
-            int offset = d % 32;
-            uint bit = (packed_ptr[word_idx] >> offset) & 1u;
-            float sign = bit ? 1.0f : -1.0f;
-            acc += static_cast<float>(q_ptr[d]) * sign;
-        }
+            float acc = 0.0f;
+            for (int d = lane; d < Dim; d += 32) {
+                int word_idx = d / 32;
+                int offset = d % 32;
+                uint bit = (packed_ptr[word_idx] >> offset) & 1u;
+                float sign = bit ? 1.0f : -1.0f;
+                acc += static_cast<float>(q_ptr[d]) * sign;
+            }
 
-        acc = simd_sum(acc);
-        if (thread_index_in_simdgroup == 0) {
-            auto idx = (b * kv_heads + h) * token_count + t;
-            out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
-                acc
-                * static_cast<float>(norms[idx])
-                * static_cast<float>(residual_norms[idx])
-                * scale[0];
-        }
-    """#
+            acc = simd_sum(acc);
+            if (thread_index_in_simdgroup == 0) {
+                auto idx = (b * kv_heads + h) * token_count + t;
+                out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
+                    acc
+                    * static_cast<float>(norms[idx])
+                    * static_cast<float>(residual_norms[idx])
+                    * scale[0];
+            }
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_qjl_score",
@@ -741,59 +747,59 @@ private func makeProdScoreKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto lane = thread_position_in_grid.x;
-        auto repeat_idx = thread_position_in_grid.y;
-        auto n = thread_position_in_grid.z;
+            auto lane = thread_position_in_grid.x;
+            auto repeat_idx = thread_position_in_grid.y;
+            auto n = thread_position_in_grid.z;
 
-        auto token_count = norms_shape[2];
-        auto kv_heads = norms_shape[1];
-        auto repeat_count = q_rot_shape[2];
-        if (repeat_idx >= repeat_count) {
-            return;
-        }
-
-        auto b = n / (kv_heads * token_count);
-        auto rem = n % (kv_heads * token_count);
-        auto h = rem / token_count;
-        auto t = rem % token_count;
-
-        auto q_rot_ptr = q_rot + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
-        auto q_proj_ptr = q_proj + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
-        auto mse_ptr = mse_packed + ((b * kv_heads + h) * token_count + t) * MsePackedWidth;
-        auto sign_ptr = signs + ((b * kv_heads + h) * token_count + t) * SignPackedWidth;
-
-        float mse_acc = 0.0f;
-        float qjl_acc = 0.0f;
-        for (int d = lane; d < Dim; d += 32) {
-            int bit_offset = d * MseBits;
-            int word_idx = bit_offset / 32;
-            int offset = bit_offset % 32;
-            uint value = mse_ptr[word_idx] >> offset;
-            int spill = offset + MseBits - 32;
-            if (spill > 0) {
-                value |= mse_ptr[word_idx + 1] << (MseBits - spill);
+            auto token_count = norms_shape[2];
+            auto kv_heads = norms_shape[1];
+            auto repeat_count = q_rot_shape[2];
+            if (repeat_idx >= repeat_count) {
+                return;
             }
-            value &= ((1u << MseBits) - 1u);
-            mse_acc += static_cast<float>(q_rot_ptr[d]) * codebook[value];
 
-            int sign_word = d / 32;
-            int sign_offset = d % 32;
-            uint bit = (sign_ptr[sign_word] >> sign_offset) & 1u;
-            float sign = bit ? 1.0f : -1.0f;
-            qjl_acc += static_cast<float>(q_proj_ptr[d]) * sign;
-        }
+            auto b = n / (kv_heads * token_count);
+            auto rem = n % (kv_heads * token_count);
+            auto h = rem / token_count;
+            auto t = rem % token_count;
 
-        mse_acc = simd_sum(mse_acc);
-        qjl_acc = simd_sum(qjl_acc);
-        if (thread_index_in_simdgroup == 0) {
-            auto idx = (b * kv_heads + h) * token_count + t;
-            out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
-                static_cast<float>(norms[idx]) * (
-                    mse_acc
-                    + scale[0] * static_cast<float>(residual_norms[idx]) * qjl_acc
-                );
-        }
-    """#
+            auto q_rot_ptr = q_rot + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
+            auto q_proj_ptr = q_proj + ((b * kv_heads + h) * repeat_count + repeat_idx) * Dim;
+            auto mse_ptr = mse_packed + ((b * kv_heads + h) * token_count + t) * MsePackedWidth;
+            auto sign_ptr = signs + ((b * kv_heads + h) * token_count + t) * SignPackedWidth;
+
+            float mse_acc = 0.0f;
+            float qjl_acc = 0.0f;
+            for (int d = lane; d < Dim; d += 32) {
+                int bit_offset = d * MseBits;
+                int word_idx = bit_offset / 32;
+                int offset = bit_offset % 32;
+                uint value = mse_ptr[word_idx] >> offset;
+                int spill = offset + MseBits - 32;
+                if (spill > 0) {
+                    value |= mse_ptr[word_idx + 1] << (MseBits - spill);
+                }
+                value &= ((1u << MseBits) - 1u);
+                mse_acc += static_cast<float>(q_rot_ptr[d]) * codebook[value];
+
+                int sign_word = d / 32;
+                int sign_offset = d % 32;
+                uint bit = (sign_ptr[sign_word] >> sign_offset) & 1u;
+                float sign = bit ? 1.0f : -1.0f;
+                qjl_acc += static_cast<float>(q_proj_ptr[d]) * sign;
+            }
+
+            mse_acc = simd_sum(mse_acc);
+            qjl_acc = simd_sum(qjl_acc);
+            if (thread_index_in_simdgroup == 0) {
+                auto idx = (b * kv_heads + h) * token_count + t;
+                out[((b * kv_heads + h) * repeat_count + repeat_idx) * token_count + t] =
+                    static_cast<float>(norms[idx]) * (
+                        mse_acc
+                        + scale[0] * static_cast<float>(residual_norms[idx]) * qjl_acc
+                    );
+            }
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_prod_score",
@@ -810,48 +816,48 @@ private func makeMSEWeightedRotKernel() -> MLXFast.MLXFastKernel? {
     guard metalAvailable() else { return nil }
 
     let source = #"""
-        auto lane = thread_position_in_grid.x;
-        auto dim_idx = thread_position_in_grid.y;
-        auto n = thread_position_in_grid.z;
+            auto lane = thread_position_in_grid.x;
+            auto dim_idx = thread_position_in_grid.y;
+            auto n = thread_position_in_grid.z;
 
-        if (dim_idx >= Dim) {
-            return;
-        }
-
-        auto token_count = norms_shape[2];
-        auto kv_heads = norms_shape[1];
-        auto repeat_count = weights_shape[2];
-        auto b = n / (kv_heads * repeat_count);
-        auto rem = n % (kv_heads * repeat_count);
-        auto h = rem / repeat_count;
-        auto repeat_idx = rem % repeat_count;
-
-        auto weights_ptr = weights + ((b * kv_heads + h) * repeat_count + repeat_idx) * token_count;
-        auto norms_ptr = norms + (b * kv_heads + h) * token_count;
-        auto packed_ptr = packed + ((b * kv_heads + h) * token_count) * PackedWidth;
-
-        float acc = 0.0f;
-        for (int t = lane; t < token_count; t += 32) {
-            auto token_ptr = packed_ptr + t * PackedWidth;
-            int bit_offset = dim_idx * Bits;
-            int word_idx = bit_offset / 32;
-            int offset = bit_offset % 32;
-            uint value = token_ptr[word_idx] >> offset;
-            int spill = offset + Bits - 32;
-            if (spill > 0) {
-                value |= token_ptr[word_idx + 1] << (Bits - spill);
+            if (dim_idx >= Dim) {
+                return;
             }
-            value &= ((1u << Bits) - 1u);
-            acc += static_cast<float>(weights_ptr[t])
-                * static_cast<float>(norms_ptr[t])
-                * codebook[value];
-        }
 
-        acc = simd_sum(acc);
-        if (thread_index_in_simdgroup == 0) {
-            out[((b * kv_heads + h) * repeat_count + repeat_idx) * Dim + dim_idx] = acc;
-        }
-    """#
+            auto token_count = norms_shape[2];
+            auto kv_heads = norms_shape[1];
+            auto repeat_count = weights_shape[2];
+            auto b = n / (kv_heads * repeat_count);
+            auto rem = n % (kv_heads * repeat_count);
+            auto h = rem / repeat_count;
+            auto repeat_idx = rem % repeat_count;
+
+            auto weights_ptr = weights + ((b * kv_heads + h) * repeat_count + repeat_idx) * token_count;
+            auto norms_ptr = norms + (b * kv_heads + h) * token_count;
+            auto packed_ptr = packed + ((b * kv_heads + h) * token_count) * PackedWidth;
+
+            float acc = 0.0f;
+            for (int t = lane; t < token_count; t += 32) {
+                auto token_ptr = packed_ptr + t * PackedWidth;
+                int bit_offset = dim_idx * Bits;
+                int word_idx = bit_offset / 32;
+                int offset = bit_offset % 32;
+                uint value = token_ptr[word_idx] >> offset;
+                int spill = offset + Bits - 32;
+                if (spill > 0) {
+                    value |= token_ptr[word_idx + 1] << (Bits - spill);
+                }
+                value &= ((1u << Bits) - 1u);
+                acc += static_cast<float>(weights_ptr[t])
+                    * static_cast<float>(norms_ptr[t])
+                    * codebook[value];
+            }
+
+            acc = simd_sum(acc);
+            if (thread_index_in_simdgroup == 0) {
+                out[((b * kv_heads + h) * repeat_count + repeat_idx) * Dim + dim_idx] = acc;
+            }
+        """#
 
     return MLXFast.metalKernel(
         name: "turboquant_mse_weighted_rot",
@@ -907,7 +913,8 @@ private func packLowBit(_ values: MLXArray, bits: Int) -> MLXArray {
 
         let spill = offset + bits - 32
         if spill > 0 {
-            packed[0..., wordIndex + 1] = packed[0..., wordIndex + 1]
+            packed[0..., wordIndex + 1] =
+                packed[0..., wordIndex + 1]
                 | (flat[0..., index] >> (bits - spill))
         }
     }
@@ -986,14 +993,16 @@ private func unflattenTurboQuantState(
                     mseIndices: arrays[base + 1],
                     residualNorms: arrays[base + 2],
                     qjlSigns: arrays[base + 3]
-                )), 4)
+                )), 4
+        )
     case .split:
         guard let low = descriptor.low, let high = descriptor.high else {
             fatalError("TurboQuant split descriptor is missing child metadata.")
         }
         let (lowState, lowCount) = unflattenTurboQuantState(arrays, descriptor: low)
         let highStart = arrays.startIndex + lowCount
-        let (highState, highCount) = unflattenTurboQuantState(arrays[highStart...], descriptor: high)
+        let (highState, highCount) = unflattenTurboQuantState(
+            arrays[highStart...], descriptor: high)
         return (.split(.init(low: lowState, high: highState)), lowCount + highCount)
     }
 }
@@ -1040,7 +1049,9 @@ private func buildTurboQuantCodec(
     return TurboQuantSplitCodec(tensor: tensor, bits: roundedBits, mode: mode, seed: seed)
 }
 
-private func rebuildTurboQuantCodec(from descriptor: TurboQuantCodecDescriptor) -> any TurboQuantCodec {
+private func rebuildTurboQuantCodec(from descriptor: TurboQuantCodecDescriptor)
+    -> any TurboQuantCodec
+{
     switch descriptor.kind {
     case .mse:
         return TurboQuantMSECodec(
@@ -1119,7 +1130,9 @@ private final class TurboQuantMSECodec: TurboQuantCodec {
             fatalError("Expected TurboQuant MSE prepared queries and state.")
         }
 
-        if preparedQueries.dim(-2) == 1, let fastScores = metalMSEScore(preparedQueries, state: mseState) {
+        if preparedQueries.dim(-2) == 1,
+            let fastScores = metalMSEScore(preparedQueries, state: mseState)
+        {
             return fastScores
         }
 
@@ -1188,7 +1201,8 @@ private final class TurboQuantMSECodec: TurboQuantCodec {
         return matmul(rotated, rotation)
     }
 
-    private func metalMSEScore(_ preparedQueries: MLXArray, state: TurboQuantMSEState) -> MLXArray? {
+    private func metalMSEScore(_ preparedQueries: MLXArray, state: TurboQuantMSEState) -> MLXArray?
+    {
         guard let kernel = TurboQuantKernelManager.shared.mseScoreKernel, state.norms.dim(2) > 0
         else {
             return nil
@@ -1217,7 +1231,8 @@ private final class TurboQuantMSECodec: TurboQuantCodec {
     }
 
     private func metalMSEWeightedSum(_ weights: MLXArray, state: TurboQuantMSEState) -> MLXArray? {
-        guard let kernel = TurboQuantKernelManager.shared.mseWeightedRotKernel, state.norms.dim(2) > 0
+        guard let kernel = TurboQuantKernelManager.shared.mseWeightedRotKernel,
+            state.norms.dim(2) > 0
         else {
             return nil
         }
@@ -1313,7 +1328,8 @@ private final class TurboQuantProdCodec: TurboQuantCodec {
         let mseUnit = mseCodec.dequantizeUnit(prodState.mseIndices)
         let signBits = unpackLowBit(prodState.qjlSigns, bits: 1, length: dim).asType(.float32)
         let signs = signBits * 2 - 1
-        let qjlUnit = MLXArray(scale) * prodState.residualNorms[.ellipsis, .newAxis].asType(.float32)
+        let qjlUnit =
+            MLXArray(scale) * prodState.residualNorms[.ellipsis, .newAxis].asType(.float32)
             * matmul(signs, projection)
         return prodState.norms[.ellipsis, .newAxis].asType(.float32) * (mseUnit + qjlUnit)
     }
@@ -1364,7 +1380,8 @@ private final class TurboQuantProdCodec: TurboQuantCodec {
 
         let signBits = unpackLowBit(prodState.qjlSigns, bits: 1, length: dim).asType(.float32)
         let signs = signBits * 2 - 1
-        let qjlScore = scale
+        let qjlScore =
+            scale
             * prodState.residualNorms.asType(.float32)[0..., 0..., .newAxis, .newAxis, 0...]
             * einsum("bhmld,bhtd->bhmlt", projectionQueries, signs)
         let norms = prodState.norms.asType(.float32)[0..., 0..., .newAxis, .newAxis, 0...]
@@ -1469,7 +1486,10 @@ private func selectOutlierIndices(_ tensor: MLXArray, averageBits: Float) -> ([I
     let dim = tensor.dim(-1)
     let highCount = max(
         1,
-        min(dim - 1, Int(round((averageBits - Float(lowerBits)) * Float(dim) / Float(upperBits - lowerBits))))
+        min(
+            dim - 1,
+            Int(round((averageBits - Float(lowerBits)) * Float(dim) / Float(upperBits - lowerBits)))
+        )
     )
 
     let scores = abs(tensor.asType(.float32)).mean(axes: [0, 1, 2]).asArray(Float.self)
@@ -1527,7 +1547,8 @@ private final class TurboQuantSplitCodec: TurboQuantCodec {
         self.lowIndices = MLXArray(lowIndices).asType(.int32)
         self.highIndices = MLXArray(highIndices).asType(.int32)
         let concatenatedIndices = lowIndices + highIndices
-        let restoreOrder = concatenatedIndices.enumerated().sorted { $0.element < $1.element }.map(\.offset)
+        let restoreOrder = concatenatedIndices.enumerated().sorted { $0.element < $1.element }.map(
+            \.offset)
         self.restoreOrder = MLXArray(restoreOrder).asType(.int32)
         self.lowCodec = lowCodec
         self.highCodec = highCodec
@@ -1610,7 +1631,8 @@ private final class TurboQuantSplitCodec: TurboQuantCodec {
         }
         let (lowTensor, denominator, maxScores) = lowCodec.weightedSumStatsFromScores(
             scores, state: splitState.low)
-        let (highTensor, _, _) = highCodec.weightedSumStatsFromScores(scores, state: splitState.high)
+        let (highTensor, _, _) = highCodec.weightedSumStatsFromScores(
+            scores, state: splitState.high)
         let merged = concatenated([lowTensor, highTensor], axis: -1)
         return (take(merged, restoreOrder, axis: -1), denominator, maxScores)
     }
@@ -1642,7 +1664,9 @@ public final class TurboQuantKVCache: BaseKVCache {
         state
     }
 
-    private func updateTurboQuant(keys: MLXArray, values: MLXArray) -> (TurboQuantState, TurboQuantState) {
+    private func updateTurboQuant(keys: MLXArray, values: MLXArray) -> (
+        TurboQuantState, TurboQuantState
+    ) {
         ensureCodecs(keys: keys, values: values)
         guard let keyCodec, let valueCodec else {
             fatalError("TurboQuant codecs were not initialized.")
@@ -1762,20 +1786,23 @@ public final class TurboQuantKVCache: BaseKVCache {
                     totalTokens: totalTokens
                 )
 
-                let (chunkOutput, chunkDenominator, chunkMax) = valueCodec
+                let (chunkOutput, chunkDenominator, chunkMax) =
+                    valueCodec
                     .weightedSumStatsFromScores(scores, state: valueChunk)
                 let newMax = maximum(maxScore, chunkMax)
                 let previousScale = exp(maxScore - newMax)
                 let chunkScale = exp(chunkMax - newMax)
 
-                output = output * previousScale[.ellipsis, .newAxis]
+                output =
+                    output * previousScale[.ellipsis, .newAxis]
                     + chunkOutput * chunkScale[.ellipsis, .newAxis]
                 normalizer = normalizer * previousScale + chunkDenominator * chunkScale
                 maxScore = newMax
                 eval(output, normalizer, maxScore)
             }
 
-            let normalized = output / maximum(normalizer[.ellipsis, .newAxis], MLXArray(turboQuantEpsilon))
+            let normalized =
+                output / maximum(normalizer[.ellipsis, .newAxis], MLXArray(turboQuantEpsilon))
             outputs.append(normalized)
             eval(normalized)
         }
@@ -1791,7 +1818,8 @@ public final class TurboQuantKVCache: BaseKVCache {
         scale: Float = 1.0,
         mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
     ) -> MLXArray {
-        precondition(queries.dim(2) == 1, "TurboQuant decode attention expects a single query token.")
+        precondition(
+            queries.dim(2) == 1, "TurboQuant decode attention expects a single query token.")
 
         let keysState = keysState ?? keyState?.slice(end: offset)
         let valuesState = valuesState ?? valueState?.slice(end: offset)
@@ -1850,13 +1878,15 @@ public final class TurboQuantKVCache: BaseKVCache {
             let previousScale = exp(maxScore - newMax)
             let chunkScale = exp(chunkMax - newMax)
 
-            output = output * previousScale[.ellipsis, .newAxis]
+            output =
+                output * previousScale[.ellipsis, .newAxis]
                 + chunkOutput * chunkScale[.ellipsis, .newAxis]
             normalizer = normalizer * previousScale + chunkDenominator * chunkScale
             maxScore = newMax
         }
 
-        let normalized = output / maximum(normalizer[.ellipsis, .newAxis], MLXArray(turboQuantEpsilon))
+        let normalized =
+            output / maximum(normalizer[.ellipsis, .newAxis], MLXArray(turboQuantEpsilon))
         return normalized.reshaped([B, qHeads, L, valueCodec.dim]).asType(queries.dtype)
     }
 
@@ -1909,8 +1939,10 @@ public final class TurboQuantKVCache: BaseKVCache {
                 fatalError("TurboQuant codecs must be restored before setting state.")
             }
 
-            let (newKeyState, keyCount) = unflattenTurboQuantState(newValue[...], descriptor: keyCodec.descriptor)
-            let (newValueState, _) = unflattenTurboQuantState(newValue[keyCount...], descriptor: valueCodec.descriptor)
+            let (newKeyState, keyCount) = unflattenTurboQuantState(
+                newValue[...], descriptor: keyCodec.descriptor)
+            let (newValueState, _) = unflattenTurboQuantState(
+                newValue[keyCount...], descriptor: valueCodec.descriptor)
             keyState = newKeyState
             valueState = newValueState
             offset = newKeyState.length
@@ -2010,7 +2042,8 @@ public final class TurboQuantKVCache: BaseKVCache {
             return scores
         case .causal:
             let pastTokens = totalTokens - totalQueries
-            let queryIndices = MLXArray(Int32(pastTokens + queryStart) ..< Int32(pastTokens + queryEnd))
+            let queryIndices = MLXArray(
+                Int32(pastTokens + queryStart) ..< Int32(pastTokens + queryEnd))
             let keyIndices = MLXArray(Int32(keyStart) ..< Int32(keyEnd))
             var causalMask = queryIndices[0..., .newAxis] .>= keyIndices[.newAxis]
             causalMask = expandedDimensions(causalMask, axes: [0, 1, 2])
