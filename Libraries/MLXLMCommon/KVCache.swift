@@ -1519,6 +1519,7 @@ public func canTrimPromptCache(_ cache: [KVCache]) -> Bool {
 @discardableResult
 public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     guard canTrimPromptCache(cache), !cache.isEmpty else { return 0 }
+    cache.dropFirst().forEach { $0.trim(numTokens) }
     return cache.first?.trim(numTokens) ?? 0
 }
 
