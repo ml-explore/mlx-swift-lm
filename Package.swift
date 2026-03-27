@@ -1,4 +1,4 @@
-// swift-tools-version: 5.12
+// swift-tools-version: 6.1
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -45,9 +45,6 @@ let package = Package(
             path: "Libraries/MLXLLM",
             exclude: [
                 "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -62,9 +59,6 @@ let package = Package(
             path: "Libraries/MLXVLM",
             exclude: [
                 "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -78,9 +72,6 @@ let package = Package(
             path: "Libraries/MLXLMCommon",
             exclude: [
                 "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -94,9 +85,6 @@ let package = Package(
             path: "Libraries/MLXEmbedders",
             exclude: [
                 "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .testTarget(
@@ -115,10 +103,7 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
         ),
         .testTarget(
             name: "MLXLMIntegrationTests",
@@ -135,9 +120,6 @@ let package = Package(
             path: "Tests/MLXLMIntegrationTests",
             exclude: [
                 "README.md"
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .testTarget(
@@ -147,10 +129,7 @@ let package = Package(
                 "MLXVLM",
                 "MLXLMCommon",
             ],
-            path: "Tests/Benchmarks",
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            path: "Tests/Benchmarks"
         ),
     ]
 )

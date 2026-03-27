@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import Testing
 
-private let cacheCreators: [() -> any KVCache] = [
+private let cacheCreators: [@Sendable () -> any KVCache] = [
     { KVCacheSimple() },
     { RotatingKVCache(maxSize: 32) },
     { QuantizedKVCache() },
@@ -17,8 +17,9 @@ private let cacheCreators: [() -> any KVCache] = [
     arguments: cacheCreators)
 func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     let cache = (0 ..< 10).map { _ in creator() }
-    let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
-    let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
+    let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16).contiguous()
+    let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16).contiguous()
+    eval(keys, values)
     for item in cache {
         switch item {
         case let arrays as ArraysCache:

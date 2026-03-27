@@ -499,21 +499,19 @@ public final class ChatSession {
         await cache.read { _ in }
     }
 
-    /// Returns the current KV cache, if one has been built.
+    /// Visit the current cache value, if realized as a `[KVCache]`.
     ///
-    /// Returns `nil` if no generation has occurred yet (cache is still empty) or if the
-    /// session is in history-rehydration mode and generation has not started.
-    ///
-    /// The returned array holds references to the live cache objects — do not use them
-    /// concurrently with an active ``respond(to:role:images:videos:)`` or
-    /// ``streamResponse(_:)`` call on the same session. To persist the cache
-    /// across process launches, use ``saveCache(to:)`` instead.
-    public func currentCache() async -> [KVCache]? {
-        await cache.read { cache in
-            if case .kvcache(let array) = cache {
-                return array
+    /// This method is meant for test support.
+    func withCache<R: Sendable>(_ body: @Sendable ([KVCache]?) async throws -> R) async rethrows
+        -> R?
+    {
+        try await cache.read { cache in
+            switch cache {
+            case .kvcache(let cache):
+                return try await body(cache)
+            default:
+                return try await body(nil)
             }
-            return nil
         }
     }
 
@@ -526,10 +524,14 @@ public final class ChatSession {
     /// - Throws: ``ChatSessionError/noCacheAvailable`` if no generation has occurred yet,
     ///   or any error thrown by the underlying file write
     public func saveCache(to url: URL) async throws {
-        guard let kvCache = await currentCache() else {
-            throw ChatSessionError.noCacheAvailable
+        try await cache.read { cache in
+            switch cache {
+            case .kvcache(let cache):
+                try savePromptCache(url: url, cache: cache)
+            default:
+                throw ChatSessionError.noCacheAvailable
+            }
         }
-        try savePromptCache(url: url, cache: kvCache)
     }
 }
 

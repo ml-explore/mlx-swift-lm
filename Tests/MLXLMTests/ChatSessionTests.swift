@@ -3,11 +3,12 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
 import MLXNN
 import MLXOptimizers
 import Tokenizers
 import XCTest
+
+@testable import MLXLMCommon
 
 /// See also ChatSessionIntegrationTests
 public class ChatSessionTests: XCTestCase {
@@ -162,36 +163,43 @@ public class ChatSessionTests: XCTestCase {
     // MARK: - KV Cache
 
     func testCurrentCacheNilBeforeGeneration() async throws {
-        let session = ChatSession(model())
-        let cache = await session.currentCache()
-        XCTAssertNil(cache)
+        let session = ChatSession(model(), generateParameters: generationParameters)
+        await session.withCache { cache in
+            XCTAssertNil(cache)
+        }
     }
 
     func testCurrentCacheAfterGeneration() async throws {
-        let session = ChatSession(model())
+        let session = ChatSession(model(), generateParameters: generationParameters)
         _ = try await session.respond(to: "hello")
-        let cache = await session.currentCache()
-        XCTAssertNotNil(cache)
+        await session.withCache { cache in
+            XCTAssertNotNil(cache)
+        }
     }
 
     func testInitWithKVCache() async throws {
         // build a cache from an initial session
-        let ctx = model()
-        let initial = ChatSession(ctx)
+        let container = ModelContainer(context: model())
+        let initial = ChatSession(container, generateParameters: generationParameters)
         _ = try await initial.respond(to: "hello")
-        guard let cache = await initial.currentCache() else {
-            XCTFail("expected cache after generation")
-            return
-        }
 
-        // restore the cache into a new session and verify generation continues
-        let restored = ChatSession(ctx, cache: cache)
-        let result = try await restored.respond(to: "hello again")
-        XCTAssertGreaterThan(result.count, targetLength, result)
+        try await initial.withCache { [targetLength, generationParameters] cache in
+            XCTAssertNotNil(cache)
+
+            if let cache {
+                // restore the cache into a new session and verify generation continues
+                let restored = ChatSession(
+                    container,
+                    cache: cache.map { $0.copy() },
+                    generateParameters: generationParameters)
+                let result = try await restored.respond(to: "hello again")
+                XCTAssertGreaterThan(result.count, targetLength, result)
+            }
+        }
     }
 
     func testSaveCacheThrowsBeforeGeneration() async throws {
-        let session = ChatSession(model())
+        let session = ChatSession(model(), generateParameters: generationParameters)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("safetensors")
@@ -205,7 +213,7 @@ public class ChatSessionTests: XCTestCase {
 
     func testSaveAndRestoreCache() async throws {
         let ctx = model()
-        let initial = ChatSession(ctx)
+        let initial = ChatSession(ctx, generateParameters: generationParameters)
         _ = try await initial.respond(to: "hello")
 
         let url = FileManager.default.temporaryDirectory
@@ -214,7 +222,8 @@ public class ChatSessionTests: XCTestCase {
         try await initial.saveCache(to: url)
 
         let (loadedCache, _) = try loadPromptCache(url: url)
-        let restored = ChatSession(ctx, cache: loadedCache)
+        let restored = ChatSession(
+            ctx, cache: loadedCache, generateParameters: generationParameters)
         let result = try await restored.respond(to: "hello again")
         XCTAssertGreaterThan(result.count, targetLength, result)
     }
@@ -222,29 +231,37 @@ public class ChatSessionTests: XCTestCase {
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {
         // .history state should behave like .empty: no cache until first generation
         let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
-        let session = ChatSession(model(), history: history)
-        let cache = await session.currentCache()
-        XCTAssertNil(cache)
+        let session = ChatSession(
+            model(), history: history, generateParameters: generationParameters)
+        await session.withCache { cache in
+            XCTAssertNil(cache)
+        }
     }
 
     func testCurrentCacheNonNilForHistorySessionAfterGeneration() async throws {
         // after generation from .history state, cache transitions to .kvcache
         let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
-        let session = ChatSession(model(), history: history)
+        let session = ChatSession(
+            model(),
+            history: history,
+            generateParameters: generationParameters)
         _ = try await session.respond(to: "hello again")
-        let cache = await session.currentCache()
-        XCTAssertNotNil(cache)
+        await session.withCache { cache in
+            XCTAssertNotNil(cache)
+        }
     }
 
     func testCurrentCacheNilAfterClear() async throws {
         // clear() resets to .empty; currentCache() should return nil again
-        let session = ChatSession(model())
+        let session = ChatSession(model(), generateParameters: generationParameters)
         _ = try await session.respond(to: "hello")
-        let cacheBeforeClear = await session.currentCache()
-        XCTAssertNotNil(cacheBeforeClear)
+        await session.withCache { cache in
+            XCTAssertNotNil(cache)
+        }
         await session.clear()
-        let cacheAfterClear = await session.currentCache()
-        XCTAssertNil(cacheAfterClear)
+        await session.withCache { cache in
+            XCTAssertNil(cache)
+        }
     }
 
     /// something that looks like a view model
