@@ -304,6 +304,19 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
         preRotated = true
     }
 
+    /// Forward pass: applies pairwise Givens rotation then quantized matmul.
+    ///
+    /// Standard path computes `y = quantizedMM(rotate(x), W)` where
+    /// `rotate(x) = R @ diag(channel_scales) @ x` fuses channel scaling and
+    /// Givens rotations in a single Metal kernel.
+    ///
+    /// - Note: The stored weights are quantized in the rotated+scaled space:
+    ///   `W_q = Q(R @ diag(s) @ W_train)`. This means the effective computation
+    ///   is `x @ diag(s²) @ W_train^T` rather than `x @ W_train^T`. The `diag(s²)`
+    ///   factor is compensated during the original ParoQuant optimization, which
+    ///   jointly trains W, θ, and s to match the pretrained model's layer outputs.
+    ///   This is an inherent property of the algorithm (present in the reference
+    ///   Python implementation as well), not a bug in this port.
     open override func callAsFunction(_ x: MLXArray) -> MLXArray {
         if preRotated {
             // Fast path: weights already include rotation + channel_scales
