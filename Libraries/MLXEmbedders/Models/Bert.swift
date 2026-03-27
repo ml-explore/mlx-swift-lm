@@ -261,6 +261,11 @@ public class BertModel: Module, EmbeddingModel {
     /// The total count of tokens in the model's vocabulary.
     public var vocabularySize: Int
 
+    public var maxPositionEmbeddings: Int? {
+        _maxPositionEmbeddings > 0 ? _maxPositionEmbeddings : nil
+    }
+    private let _maxPositionEmbeddings: Int
+
     /// Initializes a BERT model.
     /// - Parameters:
     ///   - config: The architecture settings (layers, heads, dimensions).
@@ -269,6 +274,7 @@ public class BertModel: Module, EmbeddingModel {
     public init(_ config: BertConfiguration, lmHead: Bool = false) {
         precondition(config.vocabularySize > 0)
         vocabularySize = config.vocabularySize
+        _maxPositionEmbeddings = config.maxPositionEmbeddings
         encoder = Encoder(config)
         _embedder.wrappedValue = BertEmbedding(config)
 
@@ -300,8 +306,20 @@ public class BertModel: Module, EmbeddingModel {
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
         }
-        let embeddings = embedder(inp, positionIds: positionIds, tokenTypeIds: tokenTypeIds)
         var mask = attentionMask
+        var typeIds = tokenTypeIds
+        var posIds = positionIds
+        if _maxPositionEmbeddings > 0, inp.dim(1) > _maxPositionEmbeddings {
+            print(
+                "Warning: Input length \(inp.dim(1)) exceeds maxPositionEmbeddings"
+                    + " (\(_maxPositionEmbeddings)), truncating."
+            )
+            inp = inp[0..., ..<_maxPositionEmbeddings]
+            mask = mask?[0..., ..<_maxPositionEmbeddings]
+            typeIds = typeIds?[0..., ..<_maxPositionEmbeddings]
+            posIds = posIds?[0..., ..<_maxPositionEmbeddings]
+        }
+        let embeddings = embedder(inp, positionIds: posIds, tokenTypeIds: typeIds)
         if mask != nil {
             // Cast mask to the same dtype as the embeddings output so it is
             // compatible with scaled_dot_product_attention's type promotion
