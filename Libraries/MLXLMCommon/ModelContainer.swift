@@ -219,4 +219,45 @@ public final class ModelContainer: Sendable {
         let tokenizer = await self.tokenizer
         return try tokenizer.applyChatTemplate(messages: messages)
     }
+
+    // MARK: - Layer Partitioning
+
+    /// Configure GPU/CPU layer partitioning for the loaded model.
+    ///
+    /// When set, the first `gpuLayers` transformer layers run on GPU
+    /// and the rest run on CPU. This enables inference of models larger
+    /// than available GPU memory on Apple Silicon with UMA.
+    ///
+    /// - Parameter gpuLayers: Number of layers to run on GPU, or nil for all-GPU.
+    /// - Returns: The actual number of GPU layers set (after clamping), or nil.
+    @discardableResult
+    public func setGPULayers(_ gpuLayers: Int?) async -> Int? {
+        await context.read { ctx in
+            // Walk the module tree to find a LayerPartitionable child
+            if let partitionable = Self.findPartitionable(in: ctx.model) {
+                partitionable.setGPULayers(gpuLayers)
+                return partitionable.gpuLayerCount
+            }
+            return nil
+        }
+    }
+
+    /// Recursively search for a `LayerPartitionable` in the module tree.
+    private static func findPartitionable(in module: Module) -> (any LayerPartitionable)? {
+        // Check if the module itself conforms
+        if let p = module as? (any LayerPartitionable) {
+            return p
+        }
+        // Check named children — common pattern: model has a `model` property
+        // that is the ModelInner
+        let mirror = Mirror(reflecting: module)
+        for child in mirror.children {
+            if let childModule = child.value as? Module {
+                if let found = findPartitionable(in: childModule) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
 }

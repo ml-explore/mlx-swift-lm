@@ -134,7 +134,7 @@ class GemmaTransformerBlock: Module {
     }
 }
 
-public class GemmaModelInner: Module {
+public class GemmaModelInner: Module, LayerPartitionable {
     let args: GemmaConfiguration
     let vocabularySize: Int
     let numHiddenLayers: Int
@@ -142,6 +142,10 @@ public class GemmaModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     fileprivate let layers: [GemmaTransformerBlock]
     fileprivate let norm: Gemma.RMSNorm
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
 
     public init(_ args: GemmaConfiguration) {
         precondition(args.vocabularySize > 0)
@@ -167,7 +171,9 @@ public class GemmaModelInner: Module {
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: cache?[i])
+            }
         }
 
         return norm(h)
