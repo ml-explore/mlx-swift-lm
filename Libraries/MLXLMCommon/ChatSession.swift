@@ -335,18 +335,15 @@ public final class ChatSession {
                             iterator: iterator
                         )
 
-                        for await item in stream {
-                            // if there is no toolDispatch then the caller must
-                            // handle the toolcall
-                            if let toolCall = item.toolCall, let toolDispatch {
-                                let toolResult = try await toolDispatch(toolCall)
-                                messages = [.tool(toolResult)]
-                                task.cancel()
-                                await task.value
-                                continue restart
-                            }
+                        var pendingToolCalls: [ToolCall] = []
 
-                            if let value = transform(item) {
+                        for await item in stream {
+                            // collect tool calls for dispatch; if no
+                            // toolDispatch the caller handles them via
+                            // the transform (streamDetails path)
+                            if let toolCall = item.toolCall, toolDispatch != nil {
+                                pendingToolCalls.append(toolCall)
+                            } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
                                     break
                                 }
@@ -357,6 +354,17 @@ public final class ChatSession {
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
                         await task.value
+
+                        // dispatch all tool calls from this generation pass
+                        if let toolDispatch, !pendingToolCalls.isEmpty,
+                            !Task.isCancelled
+                        {
+                            for toolCall in pendingToolCalls {
+                                let toolResult = try await toolDispatch(toolCall)
+                                messages.append(.tool(toolResult))
+                            }
+                            continue restart
+                        }
                     }
 
                     continuation.finish()
