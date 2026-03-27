@@ -17,9 +17,8 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     arguments: cacheCreators)
 func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     let cache = (0 ..< 10).map { _ in creator() }
-    let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16).contiguous()
-    let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16).contiguous()
-    eval(keys, values)
+    let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
+    let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
     for item in cache {
         switch item {
         case let arrays as ArraysCache:
