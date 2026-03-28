@@ -1165,7 +1165,9 @@ public class ArraysCache: BaseKVCache {
             return result
         }
         set {
-            assertionFailure("ArraysCache.metaState should not be set directly. Use restoreFromMetaState() instead")
+            assertionFailure(
+                "ArraysCache.metaState should not be set directly. Use restoreFromMetaState() instead"
+            )
         }
     }
 
@@ -1173,7 +1175,8 @@ public class ArraysCache: BaseKVCache {
     internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) {
         // Detect new format: first element parses as int (slotCount), second element is present slots
         if savedMetaState.count >= 2, let slotCount = Int(savedMetaState[0]) {
-            let presentSlots = savedMetaState[1].isEmpty
+            let presentSlots =
+                savedMetaState[1].isEmpty
                 ? [] : savedMetaState[1].split(separator: ",").compactMap { Int($0) }
             let lp: [Int]? =
                 savedMetaState.count >= 3
@@ -1306,7 +1309,8 @@ public class CacheList: BaseKVCache {
             return result
         }
         set {
-            assertionFailure("CacheList.metaState should not be set directly. Use CacheList.fromState() instead")
+            assertionFailure(
+                "CacheList.metaState should not be set directly. Use CacheList.fromState() instead")
         }
     }
 
