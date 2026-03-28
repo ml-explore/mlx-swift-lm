@@ -242,6 +242,25 @@ public final class ModelContainer: Sendable {
         }
     }
 
+    /// Enable or disable SSD Expert Streaming for MoE models.
+    ///
+    /// When enabled, the model evaluates intermediate states and clears the MLX cache
+    /// layer-by-layer. This allows the OS Page Cache to trivially load active experts
+    /// from SSD and discard them immediately, preventing OOM on memory-constrained devices.
+    ///
+    /// - Parameter stream: Whether expert streaming should be enabled.
+    /// - Returns: True if the model supports streaming and it was set, false otherwise.
+    @discardableResult
+    public func setStreamExperts(_ stream: Bool) async -> Bool {
+        await context.read { ctx in
+            if let streamable = Self.findStreamable(in: ctx.model) {
+                streamable.streamExperts = stream
+                return true
+            }
+            return false
+        }
+    }
+
     /// Recursively search for a `LayerPartitionable` in the module tree.
     private static func findPartitionable(in module: Module) -> (any LayerPartitionable)? {
         // Check if the module itself conforms
@@ -254,6 +273,24 @@ public final class ModelContainer: Sendable {
         for child in mirror.children {
             if let childModule = child.value as? Module {
                 if let found = findPartitionable(in: childModule) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Recursively search for a `StreamableMoE` in the module tree.
+    private static func findStreamable(in module: Module) -> (any StreamableMoE)? {
+        // Check if the module itself conforms
+        if let p = module as? (any StreamableMoE) {
+            return p
+        }
+        // Check named children
+        let mirror = Mirror(reflecting: module)
+        for child in mirror.children {
+            if let childModule = child.value as? Module {
+                if let found = findStreamable(in: childModule) {
                     return found
                 }
             }

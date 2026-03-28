@@ -69,6 +69,20 @@ extension LayerPartitionable {
     }
 }
 
+// MARK: - Expert Streaming Protocol
+
+/// Protocol for Mixture-of-Experts (MoE) models that support SSD expert streaming.
+///
+/// When `streamExperts` is enabled, the model evaluates intermediate states and
+/// clears the MLX cache layer-by-layer. This pattern allows the OS Page Cache
+/// to effortlessly load multi-gigabyte expert weights on the fly (`mmap`) and
+/// discard them immediately to prevent Out-Of-Memory errors on memory-constrained
+/// Apple Silicon devices (e.g., loading a 100B model on 16GB RAM).
+public protocol StreamableMoE: AnyObject {
+    /// Whether this model should stream expert weights from SSD layer-by-layer
+    var streamExperts: Bool { get set }
+}
+
 // MARK: - Partitioned Layer Execution
 
 /// Execute a single transformer layer on the appropriate device (GPU or CPU).
@@ -81,17 +95,34 @@ extension LayerPartitionable {
 /// - Parameters:
 ///   - index: The layer index (0-based)
 ///   - gpuLayerCount: Number of layers assigned to GPU (nil = all GPU)
+///   - stream: If true, synchronously evaluates the layer and clears MLX cache (Flash-MoE style)
 ///   - body: The layer forward pass closure
 /// - Returns: The layer output
 public func partitionedLayerCall<T>(
     index: Int,
     gpuLayerCount: Int?,
+    stream: Bool = false,
     body: () -> T
 ) -> T {
-    guard let gpuCount = gpuLayerCount, index >= gpuCount else {
+    let result: T
+    
+    if let gpuCount = gpuLayerCount, index >= gpuCount {
+        // CPU layer — scope the computation to the CPU device
+        result = Device.withDefaultDevice(.cpu, body)
+    } else {
         // GPU layer (default path — no overhead)
-        return body()
+        result = body()
     }
-    // CPU layer — scope the computation to the CPU device
-    return Device.withDefaultDevice(.cpu, body)
+    
+    if stream, let array = result as? MLXArray {
+        // 1. Force evaluation of this single layer.
+        // The router hits K experts. The OS pages ONLY those K experts from SSD to RAM.
+        eval(array)
+        
+        // 2. Clear MLX's internal Metal buffer pool.
+        // This ensures temporary buffers don't push the Attention weights out of the OS page cache.
+        GPU.clearCache()
+    }
+    
+    return result
 }

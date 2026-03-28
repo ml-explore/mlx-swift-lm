@@ -42,13 +42,17 @@ public struct ModelConfiguration: Sendable {
     /// Tool call format for this model (nil = default JSON format)
     public var toolCallFormat: ToolCallFormat?
 
+    /// If true, model weights are loaded lazily via mmap and not evaluated during loading.
+    public var lazyLoad: Bool = false
+
     public init(
         id: String, revision: String = "main",
         tokenizerId: String? = nil, overrideTokenizer: String? = nil,
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         toolCallFormat: ToolCallFormat? = nil,
-        preparePrompt: (@Sendable (String) -> String)? = nil
+        preparePrompt: (@Sendable (String) -> String)? = nil,
+        lazyLoad: Bool = false
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerId = tokenizerId
@@ -56,6 +60,7 @@ public struct ModelConfiguration: Sendable {
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.toolCallFormat = toolCallFormat
+        self.lazyLoad = lazyLoad
     }
 
     public init(
@@ -64,7 +69,8 @@ public struct ModelConfiguration: Sendable {
         defaultPrompt: String = "hello",
         extraEOSTokens: Set<String> = [],
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        lazyLoad: Bool = false
     ) {
         self.id = .directory(directory)
         self.tokenizerId = tokenizerId
@@ -73,6 +79,7 @@ public struct ModelConfiguration: Sendable {
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.lazyLoad = lazyLoad
     }
 
     public func modelDirectory(hub: HubApi = HubApi()) -> URL {

@@ -346,7 +346,8 @@ public final class VLMModelFactory: ModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            lazyLoad: configuration.lazyLoad)
 
         let tokenizer = try await tokenizerTask
         let processorConfigData: Data

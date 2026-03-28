@@ -499,7 +499,7 @@ final class Qwen35DecoderLayer: Module {
 
 // MARK: - Text Model
 
-public class Qwen35TextModelInner: Module, LayerPartitionable {
+public class Qwen35TextModelInner: Module, LayerPartitionable, StreamableMoE {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [Qwen35DecoderLayer]
@@ -511,6 +511,9 @@ public class Qwen35TextModelInner: Module, LayerPartitionable {
     // LayerPartitionable
     public var gpuLayerCount: Int?
     public var totalLayerCount: Int { layers.count }
+    
+    // StreamableMoE
+    public var streamExperts: Bool = false
 
     init(_ args: Qwen35TextConfiguration) {
         precondition(args.vocabularySize > 0)
@@ -548,7 +551,7 @@ public class Qwen35TextModelInner: Module, LayerPartitionable {
             let attnMask =
                 layer.isLinear
                 ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
-            hiddenStates = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+            hiddenStates = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
                 layer(
                     hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
             }

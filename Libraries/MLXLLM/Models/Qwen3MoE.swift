@@ -191,12 +191,16 @@ class Qwen3MoeDecoderLayer: Module {
     }
 }
 
-public class Qwen3MoEModelInner: Module, LayerPartitionable {
+public class Qwen3MoEModelInner: Module, LayerPartitionable, StreamableMoE {
 
 
     // LayerPartitionable
     public var gpuLayerCount: Int?
     public var totalLayerCount: Int { layers.count }
+    
+    // StreamableMoE
+    public var streamExperts: Bool = false
+    
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [Qwen3MoeDecoderLayer]
@@ -223,7 +227,7 @@ public class Qwen3MoEModelInner: Module, LayerPartitionable {
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
                 layer(h, mask: mask, cache: cache?[i])
             }
         }
