@@ -1,7 +1,8 @@
 import Foundation
 import MLX
-@testable import MLXLMCommon
 import Testing
+
+@testable import MLXLMCommon
 
 private let cacheCreators: [@Sendable () -> any KVCache] = [
     { KVCacheSimple() },
