@@ -499,7 +499,7 @@ protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element == Int 
 
 /// Generator of tokens.
 ///
-/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>`.
+/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>`.
 ///
 /// To use it directly:
 ///
@@ -1144,7 +1144,7 @@ private func runSynchronousGenerationLoop(
 
 /// Given prompt tokens generate text using the given model and parameters.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - promptTokens: tokenized prompt
@@ -1183,7 +1183,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1209,7 +1209,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1245,7 +1245,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1271,7 +1271,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1316,7 +1316,7 @@ public func generate(
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
 /// one-shot calls, but for "chat session" type calls consider using
-/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:)``
+/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:tools:)``
 /// so that the end of the generation task can be observed.
 ///
 /// - Parameters:
@@ -1327,6 +1327,7 @@ public func generate(
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
+///   - tools: Optional tool schemas used to parse tool-call arguments into their declared types.
 /// - Returns: An `AsyncStream` that emits `Generation` values, including generated text chunks (`.chunk`),
 ///   tool calls (`.toolCall`), and completion information (`.info`).
 /// - Throws: An error if the `TokenIterator` initialization fails due to invalid input or model configuration.
@@ -1357,7 +1358,8 @@ public func generate(
 /// ```
 public func generate(
     input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
-    wiredMemoryTicket: WiredMemoryTicket? = nil
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
@@ -1366,7 +1368,8 @@ public func generate(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
-        wiredMemoryTicket: wiredMemoryTicket)
+        wiredMemoryTicket: wiredMemoryTicket,
+        tools: tools)
     return stream
 }
 
@@ -1375,7 +1378,7 @@ public func generate(
 /// This function uses a smaller draft model to propose tokens that are verified in batch
 /// by the main model, potentially accelerating generation. The resulting stream yields
 /// decoded text chunks, tool calls, and completion information. It has the same output as the
-/// non-speculative ``generate(input:cache:parameters:context:wiredMemoryTicket:)``.
+/// non-speculative ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``.
 ///
 /// Both models must share the same tokenizer.
 ///
@@ -1479,13 +1482,15 @@ public func generate(
 ///   - tokenizer: tokenizer (for EOS id, unknown token id, and detokenization)
 ///   - iterator: token iterator
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
+///   - tools: Optional tool schemas used to parse tool-call arguments into their declared types.
 /// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
 public func generateTask(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
-    wiredMemoryTicket: WiredMemoryTicket? = nil
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
 ) -> (AsyncStream<Generation>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1495,7 +1500,8 @@ public func generateTask(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
-            format: modelConfiguration.toolCallFormat ?? .json
+            format: modelConfiguration.toolCallFormat ?? .json,
+            tools: tools
         )
     )
 }
@@ -1957,9 +1963,9 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     var detokenizer: NaiveStreamingDetokenizer
     let toolCallProcessor: ToolCallProcessor
 
-    init(tokenizer: Tokenizer, format: ToolCallFormat) {
+    init(tokenizer: Tokenizer, format: ToolCallFormat, tools: [[String: any Sendable]]? = nil) {
         detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-        toolCallProcessor = ToolCallProcessor(format: format)
+        toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
     }
 
     mutating func onToken(
