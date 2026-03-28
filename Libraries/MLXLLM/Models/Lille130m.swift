@@ -137,7 +137,12 @@ final class Lille130mBlock: Module {
 
 // MARK: - Model (inner)
 
-public final class Lille130mModelInner: Module {
+public final class Lille130mModelInner: Module, LayerPartitionable {
+
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
     @ModuleInfo(key: "tok_embeddings") var embedTokens: Embedding
 
     let layers: [Lille130mBlock]
@@ -155,7 +160,9 @@ public final class Lille130mModelInner: Module {
         var h = embedTokens(inputs)
         let mask = createAttentionMask(h: h, cache: cache?.first)
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: cache?[i])
+            }
         }
         return norm(h)
     }

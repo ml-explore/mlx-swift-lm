@@ -198,7 +198,12 @@ class BaichuanM1DecoderLayer: Module {
     }
 }
 
-public class BaichuanM1ModelInner: Module {
+public class BaichuanM1ModelInner: Module, LayerPartitionable {
+
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
     let args: BaichuanM1Configuration
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
@@ -224,7 +229,9 @@ public class BaichuanM1ModelInner: Module {
         let mask = mask ?? createAttentionMask(h: x, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: cache?[i])
+            x = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(x, mask: mask, cache: cache?[i])
+            }
         }
 
         return norm(x)
