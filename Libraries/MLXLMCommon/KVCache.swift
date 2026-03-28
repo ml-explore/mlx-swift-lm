@@ -1269,7 +1269,7 @@ public class CacheList: BaseKVCache {
 
     public override func copy() -> any KVCache {
         let copiedCaches = caches.map { $0.copy() }
-        let new = CacheList(copiedCaches)
+        let new = CacheList(caches: copiedCaches)
         return new
     }
 
