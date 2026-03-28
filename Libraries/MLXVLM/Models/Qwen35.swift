@@ -810,13 +810,20 @@ enum Qwen35Language {
         }
     }
 
-    final class Model: Module {
+    final class Model: Module, LayerPartitionable, StreamableMoE {
         @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
         @ModuleInfo(key: "layers") fileprivate var layers: [DecoderLayer]
         @ModuleInfo(key: "norm") var norm: RMSNorm
 
         let ssmIdx: Int
         let faIdx: Int
+
+        // LayerPartitionable
+        public var gpuLayerCount: Int?
+        public var totalLayerCount: Int { layers.count }
+
+        // StreamableMoE
+        public var streamExperts: Bool = false
 
         init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
@@ -862,13 +869,15 @@ enum Qwen35Language {
 
             for (index, layer) in layers.enumerated() {
                 let layerSSMMask = layer.isLinear ? ssmMask : nil
-                hiddenStates = layer(
-                    hiddenStates,
-                    attentionMask: faMask,
-                    ssmMask: layerSSMMask,
-                    cache: cacheArray?[index],
-                    positionIds: positionIds
-                )
+                hiddenStates = partitionedLayerCall(index: index, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
+                    layer(
+                        hiddenStates,
+                        attentionMask: faMask,
+                        ssmMask: layerSSMMask,
+                        cache: cacheArray?[index],
+                        positionIds: positionIds
+                    )
+                }
             }
 
             return norm(hiddenStates)
