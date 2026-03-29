@@ -1,5 +1,3 @@
-// Copyright © 2025 INQTR. All rights reserved.
-
 import Foundation
 import Hub
 import MLX
