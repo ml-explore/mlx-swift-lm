@@ -367,11 +367,11 @@ final public class ModelFactoryRegistry: @unchecked Sendable {
     private init() {
         self.trampolines = [
             {
-                (NSClassFromString("MLXLLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
+                (NSClassFromString("MLXVLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
                     .modelFactory()
             },
             {
-                (NSClassFromString("MLXVLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
+                (NSClassFromString("MLXLLM.TrampolineModelFactory") as? ModelFactoryTrampoline.Type)?
                     .modelFactory()
             },
         ]
