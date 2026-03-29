@@ -204,4 +204,82 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[2], 0.0, accuracy: 1e-4)
         XCTAssertEqual(values[3], -0.5, accuracy: 1e-4)
     }
+
+    // MARK: - Repetition penalty
+
+    func testRepetitionContextPenalizesSeenTokens() {
+        var processor = RepetitionContext(repetitionPenalty: 2.0, repetitionContextSize: 20)
+        processor.prompt(MLXArray([1, 1, 3]))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor.process(logits: logits)
+        let values = processed[0].asArray(Float.self)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 2.0, accuracy: 1e-6)
+    }
+
+    // MARK: - 2D prompt shape tests (issue #168)
+
+    func testRepetitionContextWith2DPrompt() {
+        var processor = RepetitionContext(repetitionPenalty: 2.0, repetitionContextSize: 20)
+        processor.prompt(MLXArray([1, 1, 3]).reshaped(1, -1))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor.process(logits: logits)
+        let values = processed[0].asArray(Float.self)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 2.0, accuracy: 1e-6)
+
+        // Exercise the append path where the original crash occurred
+        processor.didSample(token: MLXArray(Int32(2)))
+        let afterAppend = processor.process(logits: logits)
+        let valuesAfter = afterAppend[0].asArray(Float.self)
+        XCTAssertEqual(valuesAfter[2], 1.5, accuracy: 1e-6)
+    }
+
+    func testPresencePenaltyContextWith2DPrompt() {
+        var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
+        processor.prompt(MLXArray([1, 1, 3]).reshaped(1, -1))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor.process(logits: logits)
+        let values = processed[0].asArray(Float.self)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.5, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
+
+        // Exercise the append path where the original crash occurred
+        processor.didSample(token: MLXArray(Int32(2)))
+        let afterAppend = processor.process(logits: logits)
+        let valuesAfter = afterAppend[0].asArray(Float.self)
+        XCTAssertEqual(valuesAfter[2], 2.5, accuracy: 1e-6)
+    }
+
+    func testFrequencyPenaltyContextWith2DPrompt() {
+        var processor = FrequencyPenaltyContext(frequencyPenalty: 0.5, frequencyContextSize: 20)
+        processor.prompt(MLXArray([1, 1, 3]).reshaped(1, -1))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor.process(logits: logits)
+        let values = processed[0].asArray(Float.self)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
+
+        // Exercise the append path where the original crash occurred
+        processor.didSample(token: MLXArray(Int32(2)))
+        let afterAppend = processor.process(logits: logits)
+        let valuesAfter = afterAppend[0].asArray(Float.self)
+        XCTAssertEqual(valuesAfter[2], 2.5, accuracy: 1e-6)
+    }
 }
