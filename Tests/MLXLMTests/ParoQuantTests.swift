@@ -157,30 +157,6 @@ public class ParoQuantTests: XCTestCase {
         XCTAssertLessThan(relError, 0.15, "Quantized matmul error: \(relError)")
     }
 
-    // MARK: - Pre-Rotation Equivalence
-
-    func testPreRotationEquivalence() throws {
-        let layer = try makeTestLayer(hasBias: false)
-        let x = MLXRandom.normal([4, 128]).asType(.float16)
-        eval(x)
-
-        // Output BEFORE pre-rotation (runtime rotation path)
-        let yBefore = layer(x)
-        eval(yBefore)
-
-        // Pre-rotate: bakes rotation into weights
-        try layer.preRotateWeights()
-        eval(layer)
-
-        // Output AFTER pre-rotation (fast path)
-        let yAfter = layer(x)
-        eval(yAfter)
-
-        // One extra quantization round → allow up to 25% relative error
-        let relError = relativeRMSError(yBefore, yAfter)
-        XCTAssertLessThan(relError, 0.25, "Pre-rotation equivalence error: \(relError)")
-    }
-
     func testRotateQuantizedLinearProducesValidOutput() throws {
         let layer = try makeTestLayer(hasBias: true)
 

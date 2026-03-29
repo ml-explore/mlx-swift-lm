@@ -131,8 +131,8 @@ nonisolated private func packPairs(_ pairs: MLXArray, groupSize: Int) -> MLXArra
 /// via `update(modules:)`. Only overrides `callAsFunction` to insert the rotation
 /// step before the standard quantized matmul.
 ///
-/// After `preRotateWeights()` is called, the rotation is baked into the weights
-/// and runtime is identical to a plain QuantizedLinear (no rotation kernel dispatch).
+/// Rotation is applied to activations at runtime via a Metal kernel, preserving
+/// the quantization-friendly properties of the original weights.
 nonisolated open class RotateQuantizedLinear: QuantizedLinear {
 
     // Rotation parameters — discovered by Module reflection for update(parameters:)
@@ -155,9 +155,6 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
     private var cached: CachedRotation?
     private var cachedParams: MLXArray?
     private var cachedBatch: Int = -1
-
-    /// When true, weights have been pre-rotated and callAsFunction skips the rotation kernel.
-    private var preRotated = false
 
     public init(
         inputDims: Int, outputDims: Int, hasBias: Bool,
@@ -223,113 +220,11 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
         )[0]
     }
 
-    /// Pre-rotate weights at load time to eliminate per-token rotation kernel dispatches.
-    ///
-    /// Transforms: `y = quantizedMM(rotate(x), W)` → `y = quantizedMM(x, W_pre)`
-    /// where `W_pre` incorporates both channel_scales and the Givens rotation.
-    ///
-    /// The rotation matrix is block-diagonal (independent per group), so we build it
-    /// group-by-group to keep memory usage at O(group_size²) per group.
-    public func preRotateWeights() throws {
-        let c = ensureCached()
-        let dim = c.dim
-        let gs = groupSize
-        let numGroups = c.numGroups
-
-        // 1. Dequantize current weights to float16
-        let wFloat = dequantized(
-            weight, scales: scales, biases: biases,
-            groupSize: gs, bits: bits
-        )
-        // wFloat is [outputDims, inputDims] in float16
-
-        // 2. Build rotation matrix group-by-group and pre-rotate columns of W.
-        //    rotate(I_g) computes the rotation+scale block for group g.
-        //    W_pre[:, g] = wFloat[:, g] @ block_g^T
-        var preRotatedGroups = [MLXArray]()
-        preRotatedGroups.reserveCapacity(numGroups)
-
-        for g in 0 ..< numGroups {
-            let colStart = g * gs
-            let colEnd = colStart + gs
-
-            // Build [gs, dim] input: identity block at columns [colStart, colEnd), zeros elsewhere
-            let eye = MLXArray.identity(gs).asType(.float16)
-            if colStart == 0 && colEnd == dim {
-                // Single group spans entire dim
-                let rotated = rotate(eye, cache: c)
-                let wCols = wFloat[0..., colStart ..< colEnd]
-                preRotatedGroups.append(matmul(wCols, rotated.transposed()))
-            } else {
-                let leftPad =
-                    colStart > 0
-                    ? MLXArray.zeros([gs, colStart], dtype: .float16) : nil
-                let rightPad =
-                    colEnd < dim
-                    ? MLXArray.zeros([gs, dim - colEnd], dtype: .float16) : nil
-                var parts = [MLXArray]()
-                if let leftPad { parts.append(leftPad) }
-                parts.append(eye)
-                if let rightPad { parts.append(rightPad) }
-                let groupInput = concatenated(parts, axis: 1)
-
-                let rotated = rotate(groupInput, cache: c)
-                let block = rotated[0..., colStart ..< colEnd]
-
-                let wCols = wFloat[0..., colStart ..< colEnd]
-                preRotatedGroups.append(matmul(wCols, block.transposed()))
-            }
-
-            // Eval every few groups to bound computation graph size
-            if (g + 1) % 8 == 0 || g == numGroups - 1 {
-                eval(preRotatedGroups)
-            }
-        }
-
-        // 3. Reassemble the full pre-rotated weight matrix
-        let wPre = concatenated(preRotatedGroups, axis: 1)
-        eval(wPre)
-
-        // 4. Re-quantize
-        let (wq, sc, bi) = quantized(wPre, groupSize: gs, bits: bits)
-
-        // 5. Update the QuantizedLinear properties
-        let params: [String: MLXArray] = [
-            "weight": wq,
-            "scales": sc,
-            "biases": bi ?? MLXArray.zeros(scales.shape),
-        ]
-        try self.update(parameters: ModuleParameters.unflattened(params), verify: [])
-
-        preRotated = true
-    }
-
     /// Forward pass: applies pairwise Givens rotation then quantized matmul.
     ///
-    /// Standard path computes `y = quantizedMM(rotate(x), W)` where
-    /// `rotate(x) = R @ diag(channel_scales) @ x` fuses channel scaling and
-    /// Givens rotations in a single Metal kernel.
-    ///
-    /// - Note: The stored weights are quantized in the rotated+scaled space:
-    ///   `W_q = Q(R @ diag(s) @ W_train)`. This means the effective computation
-    ///   is `x @ diag(s²) @ W_train^T` rather than `x @ W_train^T`. The `diag(s²)`
-    ///   factor is compensated during the original ParoQuant optimization, which
-    ///   jointly trains W, θ, and s to match the pretrained model's layer outputs.
-    ///   This is an inherent property of the algorithm (present in the reference
-    ///   Python implementation as well), not a bug in this port.
+    /// Computes `y = quantizedMM(rotate(x), W)` where `rotate(x)` fuses channel
+    /// scaling and Givens rotations in a single Metal kernel.
     open override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        if preRotated {
-            // Fast path: weights already include rotation + channel_scales
-            var y = quantizedMM(
-                x, weight,
-                scales: scales, biases: biases,
-                transpose: true, groupSize: groupSize, bits: bits
-            )
-            if let bias { y = y + bias }
-            return y
-        }
-
-        // Standard path: apply rotation kernel then quantized matmul
         let c = ensureCached()
         let shape = x.shape
         let rotated = rotate(x.reshaped(-1, c.dim), cache: c)
