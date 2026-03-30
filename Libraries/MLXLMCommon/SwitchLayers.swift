@@ -213,18 +213,25 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
                 let rangeX = x[startIdx ..< endIdx]
                 let expertIndices = MLXArray.zeros([rangeX.dim(0)], type: UInt32.self)
                 
-                // Get a concrete slice with correct MLX shape/stride/dtype metadata
-                let expertWeight = self.weight[currentExpert ..< currentExpert + 1]
-                MLX.eval(expertWeight)
-                
-                // Fast path: pread() directly into the buffer at full NVMe speed (~5 GB/s)
-                // Slow fallback: page-walk via prefault() if no safetensors mapping available
                 let readStart = DispatchTime.now().uptimeNanoseconds
+                let expertWeight: MLXArray
                 if let info = ssdInfo {
-                    MLXFast.preadInto(expertWeight, safetensorsPath: info.path,
-                                      tensorName: info.tensorName, expertIndex: UInt32(currentExpert))
+                    // Fast path: LoadSSDExpert allocates fresh allocator::malloc memory and
+                    // pread()s directly from NVMe into it — full 5 GB/s NVMe throughput.
+                    // The cache-keying bug (E → tensor_name) is now fixed so offsets are correct.
+                    expertWeight = MLXFast.streamedGatherMM(
+                        x: rangeX,
+                        wShape: self.weight,
+                        activeExpert: UInt32(currentExpert),
+                        safetensorsPath: info.path,
+                        tensorName: info.tensorName
+                    )
                 } else {
-                    MLXFast.prefault(expertWeight)
+                    // Slow fallback: use mmap-backed slice + prefault when no SSD mapping available
+                    let w = self.weight[currentExpert ..< currentExpert + 1]
+                    MLX.eval(w)
+                    MLXFast.prefault(w)
+                    expertWeight = w
                 }
                 let readEnd = DispatchTime.now().uptimeNanoseconds
                 SSDStreamMetrics.shared.record(bytes: expertWeight.nbytes, timeNs: readEnd - readStart)
