@@ -183,20 +183,11 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
     override public func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
-        var result: MLXArray
-        
-        // SSD Streaming: if EXPERIMENTAL_SSD_STREAM is set, route expert GEMMs through the
-        // GCD dispatch_io → MTLSharedEvent → GPU hardware pipeline.
-        // wShape uses logical (unquantized) dims so moe_stream_op computes output shape correctly:
-        //   shape(0)=numExperts, shape(1)=outputDims, shape(2)=inputDims
-        if let envPtr = getenv("EXPERIMENTAL_SSD_STREAM"), let _ = String(cString: envPtr) as String? {
-           if let tensorName = self.tensorName {
-               if let filename = ExpertStreamerManager.shared?.getFile(for: tensorName) {
-                    let ssdPath = URL(fileURLWithPath: String(cString: envPtr)).appendingPathComponent(filename).path
-                    
-                    // X is already sorted and flattened by gatherSort in SwitchGLU to [N, 1, 1, inputDims]
-                    // We just need to segment the sequence into contiguous chunks per expert
+        if let envPath = ProcessInfo.processInfo.environment["EXPERIMENTAL_SSD_STREAM"],
+           let tensorName = self.tensorName,
+           let filename = ExpertStreamerManager.shared?.getFile(for: tensorName) {
             
+            let ssdPath = URL(fileURLWithPath: envPath).appendingPathComponent(filename).path
             
             MLX.eval(indices)
             if indices.size == 0 {
@@ -206,32 +197,57 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
             }
             
             let cpuIndices = indices.asArray(UInt32.self)
-            
             var expertResults = [MLXArray]()
-            // Broadcast a scalar zero to the required shape to avoid allocating gigabytes of zeros
-            let wShape = MLX.broadcast(MLXArray(0.0), to: [self.numExperts, self.outputDims, self.inputDims])
-            
             var startIdx = 0
+            
             while startIdx < cpuIndices.count {
-                let currentExpert = cpuIndices[startIdx]
+                let currentExpert = Int(cpuIndices[startIdx])
                 var endIdx = startIdx + 1
-                while endIdx < cpuIndices.count && cpuIndices[endIdx] == currentExpert {
+                while endIdx < cpuIndices.count && Int(cpuIndices[endIdx]) == currentExpert {
                     endIdx += 1
                 }
                 
-                // Slice X across the 0th axis (batch dimension)
                 let rangeX = x[startIdx ..< endIdx]
+                let expertIndices = MLXArray.zeros([rangeX.dim(0)], type: UInt32.self)
                 
-                let expertOutput = MLXFast.streamedGatherMM(
-                    x: rangeX.asType(.float16),
-                    wShape: wShape,
-                    activeExpert: currentExpert,
+                // Directly load the SSD blob into MLX Metal allocation WITHOUT mmap,
+                // strictly enforcing the --mem-limit limit because it allocates via `allocator::malloc`
+                let expertWeight = MLXFast.streamedGatherMM(
+                    x: rangeX,
+                    wShape: self.weight,
+                    activeExpert: UInt32(currentExpert),
                     safetensorsPath: ssdPath,
                     tensorName: tensorName
                 )
                 
-                expertResults.append(expertOutput)
+                let expertScales = self.scales[currentExpert ..< currentExpert + 1]
+                var expertBiases: MLXArray? = nil
+                if let b = self.biases {
+                    expertBiases = b[currentExpert ..< currentExpert + 1]
+                }
                 
+                var expertOutput = MLX.gatherQuantizedMM(
+                    rangeX,
+                    expertWeight,
+                    scales: expertScales,
+                    biases: expertBiases,
+                    rhsIndices: expertIndices,
+                    transpose: true,
+                    groupSize: self.groupSize,
+                    bits: self.bits,
+                    mode: mode,
+                    sortedIndices: true
+                )
+                
+                if let bias = self.bias {
+                    let biasSlice = bias[currentExpert ..< currentExpert + 1]
+                    expertOutput = expertOutput + MLX.expandedDimensions(biasSlice[expertIndices], axis: -2)
+                }
+                
+                MLX.eval(expertOutput)
+                Stream.gpu.synchronize()
+                
+                expertResults.append(expertOutput)
                 startIdx = endIdx
             }
             
@@ -241,17 +257,10 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
                 return MLXArray.zeros(outShape).asType(.float16)
             }
             
-            let concatedResults = MLX.concatenated(expertResults, axis: 0)
-            return concatedResults.asType(.float16)
-               } else {
-                   print("[SSD_STREAM] WARNING: filename is nil for tensorName: \(tensorName)")
-               }
-           } else {
-               print("[SSD_STREAM] WARNING: self.tensorName is nil!")
-           }
+            return MLX.concatenated(expertResults, axis: 0)
         }
-        
-        result = MLX.gatherQuantizedMM(
+
+        var result = MLX.gatherQuantizedMM(
             x,
             self.weight,
             scales: self.scales,
@@ -270,6 +279,7 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
 
         return result
     }
+
 }
 
 public class ExpertStreamerManager {
@@ -292,3 +302,40 @@ public class ExpertStreamerManager {
         return weightMap[tensorName]
     }
 }
+
+public final class SSDStreamMetrics: @unchecked Sendable {
+    public static let shared = SSDStreamMetrics()
+    private var totalBytes: Int = 0
+    private var totalTimeNs: UInt64 = 0
+    private var readCount: Int = 0
+    private var lastLogTimeNs: UInt64 = DispatchTime.now().uptimeNanoseconds
+    private let lock = NSLock()
+    
+    public func record(bytes: Int, timeNs: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        totalBytes += bytes
+        totalTimeNs += timeNs
+        readCount += 1
+        
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now - lastLogTimeNs >= 1_000_000_000 {
+            let count = readCount
+            let bytes = totalBytes
+            let ns = totalTimeNs
+            
+            self.readCount = 0
+            self.totalBytes = 0
+            self.totalTimeNs = 0
+            self.lastLogTimeNs = now
+            
+            if count > 0 {
+                let mb = Double(bytes) / (1024.0 * 1024.0)
+                let avgMs = (Double(ns) / 1_000_000.0) / Double(count)
+                print(String(format: "[⚡️ SSD Stream] %.1f MB/s over %d chunks | Avg latency per chunk: %.6f ms", mb, count, avgMs))
+                fflush(stdout)
+            }
+        }
+    }
+}
+
