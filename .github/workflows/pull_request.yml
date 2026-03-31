@@ -83,13 +83,14 @@ jobs:
         run: xcodebuild -showComponent MetalToolchain
 
       - name: Build (Xcode, macOS)
+        # note skipMacroValidation causes CI to trust the codable macros
         shell: sh
         run: |
           xcodebuild -version
           xcrun --show-sdk-build-version
           swift --version
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
-          xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+          xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS' -skipMacroValidation
 
       - name: Run Tests (Xcode, macOS)
         shell: sh
