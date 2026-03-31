@@ -336,43 +336,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let previous = self.offset
 
-        // ── TurboQuant path: compress every incoming token immediately ─────────
-        // Reference: TurboQuantKVCacheV3.update_and_fetch() quantizes all tokens
-        // on every call. No threshold, no hot-window split. The entire KV history
-        // lives in polarKeys/polarValues; fp16 buffers are not maintained.
-        if turboQuantEnabled {
-            if keys.dim(-1) != 128 && keys.dim(-1) != 256 {
-                // Unsupported architecture — fall through to standard fp16 path
-                print("[TurboKV] ⚠️  head_dim \(keys.dim(-1)) unsupported (needs 128 or 256). Falling back to fp16.")
-                turboQuantEnabled = false
-            } else {
-                // Encode new tokens → packed uint8
-                let (qK, qV) = MLXFast.turboQuantEncode(keys: keys, values: values, bits: 3)
-
-                // Append to growing packed buffers
-                if let existingPK = self.polarKeys, let existingPV = self.polarValues {
-                    self.polarKeys   = concatenated([existingPK, qK.0], axis: 2)
-                    self.polarValues = concatenated([existingPV, qV.0], axis: 2)
-                } else {
-                    self.polarKeys   = qK.0
-                    self.polarValues = qV.0
-                }
-                self.residualKeys   = qK.1
-                self.residualValues = qV.1
-                self.compressedOffset += keys.dim(2)
-                self.offset          += keys.dim(2)
-
-                // Telemetry — log once when the pipeline first activates
-                TurboKVCacheTelemetry.logOnce(compressedOffset: self.compressedOffset, keys: qK.0, values: qV.0,
-                                              headDim: keys.dim(-1))
-
-                // Return the raw incoming tokens — AttentionUtils will prepend
-                // the decoded full history before SDPA.
-                return (keys, values)
-            }
-        }
-
-        // ── Standard fp16 path ────────────────────────────────────────────────
+        // ── Standard fp16 buffer (always runs — TurboKV evicts cold tokens after writing) ──
         let reset =
             if let currentKeys = self.keys, (previous + keys.dim(2)) > currentKeys.dim(2) {
                 true
@@ -405,15 +369,73 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         }
 
         self.offset += keys.dim(2)
-
         self.keys?[.ellipsis,   previous..<self.offset, 0...] = keys
         self.values?[.ellipsis, previous..<self.offset, 0...] = values
 
+        // ── TurboKV hot-window eviction ───────────────────────────────────────────
+        // Keep the last `turboHotWindowSize` tokens as fp16 (full quality, no decode latency).
+        // Compress everything older into polarKeys in step-sized chunks and evict from fp16.
+        //
+        // Design rationale:
+        //   • Short prompts (< hotWindowSize tokens): zero compression → full fp16 quality ✅
+        //   • Prompt-cache restore: restored fp16 stays in self.keys → not silently lost ✅
+        //   • AttentionUtils: cachedKeys (hot window) and polarKeys (history) are disjoint ✅
+        if turboQuantEnabled {
+            if keys.dim(-1) != 128 && keys.dim(-1) != 256 {
+                print("[TurboKV] ⚠️  head_dim \(keys.dim(-1)) unsupported (needs 128 or 256). Falling back to fp16.")
+                turboQuantEnabled = false
+            } else if self.offset > turboHotWindowSize {
+                // Tokens older than the hot window boundary are "cold" and eligible for compression.
+                let coldEnd      = self.offset - turboHotWindowSize
+                let newColdCount = coldEnd - self.compressedOffset  // not-yet-compressed cold tokens
+
+                if newColdCount >= step {  // evict in step-sized chunks to avoid micro-operations
+                    if let fullK = self.keys, let fullV = self.values {
+                        let coldK = fullK[.ellipsis, self.compressedOffset..<coldEnd, 0...]
+                        let coldV = fullV[.ellipsis, self.compressedOffset..<coldEnd, 0...]
+
+                        let (qK, qV) = MLXFast.turboQuantEncode(keys: coldK, values: coldV, bits: 3)
+
+                        if let existingPK = self.polarKeys, let existingPV = self.polarValues {
+                            self.polarKeys   = concatenated([existingPK, qK.0], axis: 2)
+                            self.polarValues = concatenated([existingPV, qV.0], axis: 2)
+                        } else {
+                            self.polarKeys   = qK.0
+                            self.polarValues = qV.0
+                        }
+                        self.residualKeys   = qK.1
+                        self.residualValues = qV.1
+                        self.compressedOffset += newColdCount
+
+                        // Evict: rebuild fp16 buffer containing only the hot window + one spare step
+                        let hotK = fullK[.ellipsis, coldEnd..<self.offset, 0...]
+                        let hotV = fullV[.ellipsis, coldEnd..<self.offset, 0...]
+                        let sparK = MLXArray.zeros(
+                            [keys.dim(0), keys.dim(1), step, keys.dim(3)], dtype: keys.dtype)
+                        let sparV = MLXArray.zeros(
+                            [values.dim(0), values.dim(1), step, values.dim(3)], dtype: values.dtype)
+                        self.keys   = concatenated([hotK, sparK], axis: 2)
+                        self.values = concatenated([hotV, sparV], axis: 2)
+                        self.offset = turboHotWindowSize  // hot window is now exactly this many tokens
+
+                        TurboKVCacheTelemetry.logOnce(
+                            compressedOffset: newColdCount, keys: qK.0, values: qV.0,
+                            headDim: keys.dim(-1))
+                    }
+                }
+            }
+        }
+
         let returnedKeys   = self.keys![.ellipsis,   ..<self.offset, 0...]
         let returnedValues = self.values![.ellipsis, ..<self.offset, 0...]
-
         return (returnedKeys, returnedValues)
     }
+
+    /// Number of fp16 tokens preserved as a high-quality hot window.
+    /// Only tokens older than this boundary are compressed into polarKeys.
+    public var turboHotWindowSize: Int = 256
+
+
 
 
 
