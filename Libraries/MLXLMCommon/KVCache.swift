@@ -364,13 +364,19 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         
         // TurboQuant: Compress older segments of the cache to reduce KV RAM on
         // high-context (100k+ token) requests. Enabled via --turbo-kv at startup.
-        if turboQuantEnabled, previous >= 512, let fullK = self.keys, let fullV = self.values {
-            // Encode history past the eviction boundary into 3-bit PolarQuant primitives
-            let compressLimit = previous / 2
-            let staleK = fullK[.ellipsis, ..<compressLimit, 0...]
-            let staleV = fullV[.ellipsis, ..<compressLimit, 0...]
-            
-            let (qK, qV) = MLXFast.turboQuantEncode(keys: staleK, values: staleV, bits: 3)
+        if turboQuantEnabled, previous >= 1, let fullK = self.keys, let fullV = self.values {
+            // TurboQuant currently physically hardcodes head_dim=128 in Metal shaders.
+            // Dynamically disable compression if the model architecture differs (e.g., Qwen 122B has 256).
+            if fullK.dim(-1) != 128 {
+                print("[TurboKV] Warning: Model head_dim (\(fullK.dim(-1))) unsupported. TurboKV requires 128. Compression sequence dynamically disabled.")
+                turboQuantEnabled = false
+            } else {
+                // Encode history past the eviction boundary into 3-bit PolarQuant primitives
+                let compressLimit = previous / 2
+                let staleK = fullK[.ellipsis, ..<compressLimit, 0...]
+                let staleV = fullV[.ellipsis, ..<compressLimit, 0...]
+                
+                let (qK, qV) = MLXFast.turboQuantEncode(keys: staleK, values: staleV, bits: 3)
             self.polarKeys = qK.0
             self.residualKeys = qK.1
             self.polarValues = qV.0
@@ -379,6 +385,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             // The standard self.keys cache would normally be truncated here,
             // but we leave this disabled in experimental mode until Metal decoding is fully routed.
             // print("TurboQuant: Compressed 4096 tokens down to 3-bit Polar Coordinates.")
+            }
         }
 
         self.offset += keys.dim(2)
