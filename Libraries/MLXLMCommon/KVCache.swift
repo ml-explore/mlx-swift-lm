@@ -433,7 +433,8 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
     /// Number of fp16 tokens preserved as a high-quality hot window.
     /// Only tokens older than this boundary are compressed into polarKeys.
-    public var turboHotWindowSize: Int = 256
+    /// Compression first triggers when offset > turboHotWindowSize + step (i.e. ~1024 tokens).
+    public var turboHotWindowSize: Int = 512
 
 
 
