@@ -1,10 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Container for models that guarantees single threaded access.
 ///
@@ -130,6 +128,20 @@ public final class ModelContainer: Sendable {
 
     // MARK: - Thread-safe convenience methods
 
+    /// The resolved local model directory for the loaded container.
+    public var modelDirectory: URL {
+        get async throws {
+            try (await configuration).modelDirectory
+        }
+    }
+
+    /// The resolved local tokenizer directory for the loaded container.
+    public var tokenizerDirectory: URL {
+        get async throws {
+            try (await configuration).tokenizerDirectory
+        }
+    }
+
     /// Prepare user input for generation.
     ///
     /// This method safely prepares input within the actor's isolation,
@@ -195,11 +207,16 @@ public final class ModelContainer: Sendable {
 
     /// Decode token IDs to a string.
     ///
-    /// - Parameter tokens: Array of token IDs
+    /// - Parameter tokenIds: Array of token IDs
     /// - Returns: Decoded string
-    public func decode(tokens: [Int]) async -> String {
+    public func decode(tokenIds: [Int]) async -> String {
         let tokenizer = await self.tokenizer
-        return tokenizer.decode(tokens: tokens)
+        return tokenizer.decode(tokenIds: tokenIds)
+    }
+
+    @available(*, deprecated, renamed: "decode(tokenIds:)")
+    public func decode(tokens: [Int]) async -> String {
+        await decode(tokenIds: tokens)
     }
 
     /// Encode a string to token IDs.

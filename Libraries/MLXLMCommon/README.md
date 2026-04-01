@@ -9,16 +9,81 @@
 
 # Quick Start
 
-Using LLMs and VLMs from MLXLMCommon is as easy as:
+Using LLMs and VLMs is as easy as:
 
 ```swift
-let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+import MLXLLM
+import MLXLMHuggingFace
+import MLXLMTokenizers
+
+let model = try await loadModel(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
 let session = ChatSession(model)
-print(try await session.respond(to: "What are two things to see in San Francisco?")
-print(try await session.respond(to: "How about a great place to eat?")
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
-For more information see 
+## More Loading Scenarios
+
+Load from a local directory:
+
+```swift
+import MLXLLM
+import MLXLMTokenizers
+
+let modelDirectory = URL(filePath: "/path/to/model")
+let container = try await loadModelContainer(
+    from: modelDirectory,
+    using: TokenizersLoader()
+)
+```
+
+Use a custom Hugging Face client:
+
+```swift
+import MLXLLM
+import MLXLMHuggingFace
+import MLXLMTokenizers
+
+let hub = HubClient(token: "hf_...")
+let container = try await loadModelContainer(
+    from: hub,
+    using: TokenizersLoader(),
+    id: "mlx-community/Qwen3-4B-4bit"
+)
+```
+
+Use a custom downloader:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+import MLXLMTokenizers
+
+struct S3Downloader: Downloader {
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        // Download files and return a local directory URL.
+        return URL(filePath: "/tmp/model")
+    }
+}
+
+let container = try await loadModelContainer(
+    from: S3Downloader(),
+    using: TokenizersLoader(),
+    id: "my-bucket/my-model"
+)
+```
+
+For more information see
 [Evaluation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/evaluation)
 or [Using Models](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/using-model)
 for more advanced API.
@@ -38,13 +103,29 @@ of language models, from LLMs to VLMs:
 A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`:
 
 ```swift
+import MLXLMCommon
+import MLXLMHuggingFace
+import MLXLMTokenizers
+
 // e.g. VLMModelFactory.shared
 let modelFactory: ModelFactory
 
 // e.g. VLMRegistry.paligemma3bMix4488bit
 let modelConfiguration: ModelConfiguration
 
-let container = try await modelFactory.loadContainer(configuration: modelConfiguration)
+let container = try await modelFactory.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    configuration: modelConfiguration
+)
+
+// Custom Hub client (token, endpoint, etc.).
+let customHub = HubClient(token: "hf_...")
+let privateContainer = try await modelFactory.loadContainer(
+    from: customHub,
+    using: TokenizersLoader(),
+    configuration: modelConfiguration
+)
 ```
 
 The `container` provides an isolation context (an `actor`) to run inference in the model.
@@ -62,15 +143,15 @@ The flow inside the `ModelFactory` goes like this:
 public class VLMModelFactory: ModelFactory {
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
-        // download the weight and config using HubApi
+        // modelDirectory and tokenizerDirectory are already resolved
         // load the base configuration
         // using the typeRegistry create a model (random weights)
         // load the weights, apply quantization as needed, update the model
             // calls model.sanitize() for weight preparation
-        // load the tokenizer
+        // load the tokenizer via tokenizerLoader.load(from: directory)
         // (vlm) load the processor configuration, create the processor
     }
 }

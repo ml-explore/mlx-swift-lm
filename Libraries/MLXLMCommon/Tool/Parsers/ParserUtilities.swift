@@ -2,30 +2,42 @@
 
 import Foundation
 
-// MARK: - Basic Deserialization
+// MARK: - JSON to Sendable Bridge
 
-private func asSendable(_ value: Any) -> (any Sendable)? {
+/// Convert a JSON-deserialized value to `any Sendable`.
+///
+/// `JSONSerialization` returns `Any`, but all JSON types it produces
+/// (String, NSNumber, NSNull, Array, Dictionary) are Sendable.
+func asSendable(_ value: Any) -> any Sendable {
     switch value {
-    case let dict as [String: Any]:
-        return dict.compactMapValues { asSendable($0) }
-    case let array as [Any]:
-        return array.compactMap { asSendable($0) }
-    case let sendable as any Sendable:
-        return sendable
-    default:
-        return nil
+    case let s as String: return s
+    case let n as NSNumber: return n
+    case let a as [Any]: return a.map(asSendable)
+    case let d as [String: Any]: return d.mapValues(asSendable)
+    case let null as NSNull: return null
+    default: return "\(value)"
     }
 }
+
+/// Deserialize JSON data, returning a Sendable value.
+func deserializeJSON(_ data: Data) -> (any Sendable)? {
+    guard let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+    return asSendable(object)
+}
+
+// MARK: - Basic Deserialization
 
 /// Deserialize a string value to JSON or return as string.
 ///
 /// Attempts JSON parsing first, falling back to the original string value.
 /// Reference: Python's `ast.literal_eval` / `json.loads` pattern
 func tryParseJSON(_ value: String) -> (any Sendable)? {
-    if let data = value.data(using: .utf8) {
-        return try? asSendable(JSONSerialization.jsonObject(with: data))
-    }
-    return nil
+    guard let data = value.data(using: .utf8) else { return nil }
+    return deserializeJSON(data)
+}
+
+func deserialize(_ value: String) -> any Sendable {
+    tryParseJSON(value) ?? value
 }
 
 // MARK: - Schema Lookup Functions
@@ -93,7 +105,7 @@ func extractTypesFromSchema(_ schema: [String: any Sendable]?) -> [String] {
     }
 
     // Handle enum - infer types from enum values
-    if let enumValues = schema["enum"] as? [Any], !enumValues.isEmpty {
+    if let enumValues = schema["enum"] as? [any Sendable], !enumValues.isEmpty {
         for value in enumValues {
             switch value {
             case is NSNull: types.insert("null")
@@ -101,8 +113,8 @@ func extractTypesFromSchema(_ schema: [String: any Sendable]?) -> [String] {
             case is Int: types.insert("integer")
             case is Double: types.insert("number")
             case is String: types.insert("string")
-            case is [Any]: types.insert("array")
-            case is [String: Any]: types.insert("object")
+            case is [any Sendable]: types.insert("array")
+            case is [String: any Sendable]: types.insert("object")
             default: break
             }
         }

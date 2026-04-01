@@ -4,7 +4,6 @@
 import CoreImage
 import Foundation
 import MLX
-import Tokenizers
 
 public typealias Message = [String: any Sendable]
 

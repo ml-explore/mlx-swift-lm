@@ -1,6 +1,7 @@
 // swift-tools-version: 6.1
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import CompilerPluginSupport
 import PackageDescription
 
 let package = Package(
@@ -24,13 +25,19 @@ let package = Package(
         .library(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
+        .library(
+            name: "MLXHuggingFace",
+            targets: ["MLXHuggingFace"]),
+        .library(
+            name: "BenchmarkHelpers",
+            targets: ["BenchmarkHelpers"]),
+        .library(
+            name: "IntegrationTestHelpers",
+            targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
-        .package(
-            url: "https://github.com/huggingface/swift-transformers",
-            .upToNextMinor(from: "1.2.0")
-        ),
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "600.0.0-latest"),
     ],
     targets: [
         .target(
@@ -40,7 +47,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXLLM",
             exclude: [
@@ -54,7 +60,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXVLM",
             exclude: [
@@ -67,7 +72,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
             ],
             path: "Libraries/MLXLMCommon",
             exclude: [
@@ -79,7 +83,6 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
                 .target(name: "MLXLMCommon"),
             ],
             path: "Libraries/MLXEmbedders",
@@ -87,13 +90,35 @@ let package = Package(
                 "README.md"
             ]
         ),
+        .target(
+            name: "BenchmarkHelpers",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+                "MLXEmbedders",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/BenchmarkHelpers"
+        ),
+        .target(
+            name: "IntegrationTestHelpers",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+                "MLXEmbedders",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/IntegrationTestHelpers",
+            exclude: ["README.md"]
+        ),
         .testTarget(
             name: "MLXLMTests",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
@@ -105,31 +130,21 @@ let package = Package(
             ],
             resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
         ),
-        .testTarget(
-            name: "MLXLMIntegrationTests",
+        .macro(
+            name: "MLXHuggingFaceMacros",
             dependencies: [
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
-                "MLXLMCommon",
-                "MLXLLM",
-                "MLXVLM",
-                "MLXEmbedders",
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
             ],
-            path: "Tests/MLXLMIntegrationTests",
-            exclude: [
-                "README.md"
-            ]
+            path: "Libraries/MLXHuggingFaceMacros"
         ),
-        .testTarget(
-            name: "Benchmarks",
+        .target(
+            name: "MLXHuggingFace",
             dependencies: [
-                "MLXLLM",
-                "MLXVLM",
+                "MLXHuggingFaceMacros",
                 "MLXLMCommon",
             ],
-            path: "Tests/Benchmarks"
+            path: "Libraries/MLXHuggingFace"
         ),
     ]
 )
@@ -137,7 +152,6 @@ let package = Package(
 if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
     || Context.environment["SPI_GENERATE_DOCS"] == "1"
 {
-    // docc builder
     package.dependencies.append(
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.3.0")
     )

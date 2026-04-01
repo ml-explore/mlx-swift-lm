@@ -3,10 +3,9 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 /// A test tokenizer -- this can be used in place of a real tokenizer for unit/integration tests.
-struct TestTokenizer: Tokenizer {
+struct TestTokenizer: MLXLMCommon.Tokenizer {
 
     let length = 8
     let maxLength = 50
@@ -35,26 +34,18 @@ struct TestTokenizer: Tokenizer {
         )
     }
 
-    func tokenize(text: String) -> [String] {
-        text.split(separator: " ").map { String($0) }
-    }
-
-    func encode(text: String) -> [Int] {
-        (0 ..< length).enumerated().map { (index, _) in
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        (0 ..< length).map { _ in
             Int.random(in: 1 ..< vocabularySize)
         }
     }
 
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        encode(text: text)
-    }
-
-    func decode(tokens: [Int], skipSpecialTokens: Bool) -> String {
-        var tokens = tokens
-        if tokens.count > maxLength {
-            tokens.append(_eosTokenId)
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        var tokenIds = tokenIds
+        if tokenIds.count > maxLength {
+            tokenIds.append(_eosTokenId)
         }
-        return tokens.map { convertIdToToken($0) ?? "" }.joined(separator: " ")
+        return tokenIds.map { convertIdToToken($0) ?? "" }.joined(separator: " ")
     }
 
     func convertTokenToId(_ token: String) -> Int? {
@@ -69,54 +60,16 @@ struct TestTokenizer: Tokenizer {
     }
 
     var bosToken: String? = nil
-
-    var bosTokenId: Int? = 0
-
     var eosToken: String? = nil
-
     var eosTokenId: Int? { _eosTokenId }
 
     var unknownToken: String? = nil
 
     var unknownTokenId: Int? { _unknownTokenId }
 
-    func applyChatTemplate(messages: [Tokenizers.Message]) throws -> [Int] {
-        encode(text: "")
-    }
-
-    func applyChatTemplate(messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?) throws
-        -> [Int]
-    {
-        encode(text: "")
-    }
-
     func applyChatTemplate(
-        messages: [Tokenizers.Message], tools: [Tokenizers.ToolSpec]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        encode(text: "")
-    }
-
-    func applyChatTemplate(
-        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument
-    ) throws -> [Int] {
-        encode(text: "")
-    }
-
-    func applyChatTemplate(messages: [Tokenizers.Message], chatTemplate: String) throws -> [Int] {
-        encode(text: "")
-    }
-
-    func applyChatTemplate(
-        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
-        addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?
-    ) throws -> [Int] {
-        encode(text: "")
-    }
-
-    func applyChatTemplate(
-        messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
-        addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?,
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
         encode(text: "")

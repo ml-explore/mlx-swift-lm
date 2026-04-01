@@ -16,7 +16,13 @@ let modelFactory: ModelFactory
 // e.g. LLMRegistry.llama3_8B_4bit
 let modelConfiguration: ModelConfiguration
 
-let container = try await modelFactory.loadContainer(configuration: modelConfiguration)
+// e.g. TokenizersLoader() from MLXLMTokenizers
+let tokenizerLoader: any TokenizerLoader
+
+let container = try await modelFactory.loadContainer(
+    using: tokenizerLoader,
+    configuration: modelConfiguration
+)
 ```
 
 The `container` provides an isolation context (an `actor`) to run inference in the model.
@@ -34,16 +40,15 @@ The flow inside the `ModelFactory` goes like this:
 public class LLMModelFactory: ModelFactory {
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
-        // download the weight and config using HubApi
+        // modelDirectory and tokenizerDirectory are already resolved
         // load the base configuration
         // using the typeRegistry create a model (random weights)
         // load the weights, apply quantization as needed, update the model
             // calls model.sanitize() for weight preparation
-        // load the tokenizer
-        // (vlm) load the processor configuration, create the processor
+        // load the tokenizer via tokenizerLoader.load(from: directory)
     }
 }
 ```

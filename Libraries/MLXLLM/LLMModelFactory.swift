@@ -1,10 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 /// Creates a function that decodes configuration data and instantiates a model with the proper configuration
 private func create<C: Codable, M>(
@@ -18,7 +16,7 @@ private func create<C: Codable, M>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/load(hub:configuration:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/load(from:configuration:progressHandler:)``.
 public enum LLMTypeRegistry {
 
     /// Shared instance with default model types.
@@ -107,7 +105,6 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let codeLlama13b4bit = ModelConfiguration(
         id: "mlx-community/CodeLlama-13b-Instruct-hf-4bit-MLX",
-        overrideTokenizer: "PreTrainedTokenizer",
         defaultPrompt: "func sortArray(_ array: [Int]) -> String { <FILL_ME> }"
     )
 
@@ -132,28 +129,22 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "mlx-community/Phi-3.5-MoE-instruct-4bit",
         defaultPrompt: "What is the gravity on Mars and the moon?",
         extraEOSTokens: ["<|end|>"]
-    ) {
-        prompt in
-        "<|user|>\n\(prompt)<|end|>\n<|assistant|>\n"
-    }
+    )
 
     static public let gemma2bQuantized = ModelConfiguration(
         id: "mlx-community/quantized-gemma-2b-it",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "what is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_9b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-9b-it-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_2b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-2b-it-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
@@ -194,7 +185,6 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public let qwen205b4bit = ModelConfiguration(
         id: "mlx-community/Qwen1.5-0.5B-Chat-4bit",
-        overrideTokenizer: "PreTrainedTokenizer",
         defaultPrompt: "why is the sky blue?"
     )
 
@@ -484,12 +474,10 @@ public final class LLMModelFactory: ModelFactory {
     public let modelRegistry: AbstractModelRegistry
 
     public func _load(
-        hub: HubApi, configuration: ModelConfiguration,
-        progressHandler: @Sendable @escaping (Progress) -> Void
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
-        // download weights and config
-        let modelDirectory = try await downloadModel(
-            hub: hub, configuration: configuration, progressHandler: progressHandler)
+        let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
         let configurationURL = modelDirectory.appending(component: "config.json")
@@ -528,17 +516,16 @@ public final class LLMModelFactory: ModelFactory {
             eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
         }
 
-        // Create mutable configuration with loaded EOS token IDs
+        // Build a ModelConfiguration with loaded EOS token IDs and tool call format
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
-
-        // Auto-detect tool call format from model type if not explicitly set
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
         }
 
-        // Load tokenizer and weights in parallel using async let.
-        async let tokenizerTask = loadTokenizer(configuration: configuration, hub: hub)
+        // Load tokenizer and weights in parallel
+        async let tokenizerTask = tokenizerLoader.load(
+            from: configuration.tokenizerDirectory)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
@@ -553,12 +540,25 @@ public final class LLMModelFactory: ModelFactory {
                 DefaultMessageGenerator()
             }
 
+        // Build a ModelConfiguration for the ModelContext
+        let tokenizerSource: TokenizerSource? =
+            configuration.tokenizerDirectory == modelDirectory
+            ? nil
+            : .directory(configuration.tokenizerDirectory)
+        let modelConfig = ModelConfiguration(
+            directory: modelDirectory,
+            tokenizerSource: tokenizerSource,
+            defaultPrompt: configuration.defaultPrompt,
+            extraEOSTokens: mutableConfiguration.extraEOSTokens,
+            eosTokenIds: mutableConfiguration.eosTokenIds,
+            toolCallFormat: mutableConfiguration.toolCallFormat)
+
         let processor = LLMUserInputProcessor(
-            tokenizer: tokenizer, configuration: mutableConfiguration,
+            tokenizer: tokenizer, configuration: modelConfig,
             messageGenerator: messageGenerator)
 
         return .init(
-            configuration: mutableConfiguration, model: model, processor: processor,
+            configuration: modelConfig, model: model, processor: processor,
             tokenizer: tokenizer)
     }
 
