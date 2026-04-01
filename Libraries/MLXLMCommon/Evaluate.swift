@@ -822,7 +822,6 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             mainState = result.state
-            asyncEval(y.tokens)
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
