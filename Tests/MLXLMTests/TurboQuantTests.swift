@@ -48,8 +48,8 @@ func testExplicitTurboQuantSelectsTurboCacheForIntegerBits() async throws {
 @Test
 func testIntegerUniformKvBitsStillSelectUniformQuantization() async throws {
     var cache: [KVCache] = [KVCacheSimple()]
-    let keys = makeTensor(shape: [1, 2, 8, 16])
-    let values = makeTensor(shape: [1, 2, 8, 16], bias: -0.1)
+    let keys = makeTensor(shape: [1, 2, 8, 64])
+    let values = makeTensor(shape: [1, 2, 8, 64], bias: -0.1)
 
     _ = cache[0].update(keys: keys, values: values)
     maybeQuantizeKVCache(

@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import Testing
 
-private typealias CacheFactory = @Sendable () -> any KVCache
+typealias CacheFactory = @Sendable () -> any KVCache
 
 @Test(
     .serialized,
@@ -40,9 +40,37 @@ func testCacheSerialization(creator: CacheFactory) async throws {
     let (loadedCache, _) = try loadPromptCache(url: url)
 
     #expect(cache.count == loadedCache.count)
+
     for (lhs, rhs) in zip(cache, loadedCache) {
         #expect(type(of: lhs) == type(of: rhs))
-        #expect(lhs.metaState == rhs.metaState)
+        #expect(lhs.metaState.count == rhs.metaState.count)
+
+        for index in lhs.metaState.indices {
+            let lhsString = lhs.metaState[index]
+            let rhsString = rhs.metaState[index]
+
+            // Check if either looks like JSON (contains { or [)
+            let isLhsJSON = lhsString.contains("{") || lhsString.contains("[")
+            let isRhsJSON = rhsString.contains("{") || rhsString.contains("[")
+
+            if isLhsJSON && isRhsJSON {
+                // Both JSON: normalize with sorted keys
+                let lhsData = lhsString.data(using: .utf8)!
+                let rhsData = rhsString.data(using: .utf8)!
+
+                let lhsObj = try JSONSerialization.jsonObject(with: lhsData)
+                let rhsObj = try JSONSerialization.jsonObject(with: rhsData)
+
+                let sortedLhs = try JSONSerialization.data(withJSONObject: lhsObj, options: .sortedKeys)
+                let sortedRhs = try JSONSerialization.data(withJSONObject: rhsObj, options: .sortedKeys)
+
+                #expect(sortedLhs == sortedRhs)
+            } else {
+                // Not JSON (or mixed): compare as plain strings
+                #expect(lhsString == rhsString)
+            }
+        }
+
         #expect(lhs.state.count == rhs.state.count)
     }
 }
