@@ -1407,6 +1407,7 @@ public func generate(
 ///
 /// - Parameters:
 ///   - input: The input for the language model.
+///   - cache: optional ``KVCache`` for the main model.
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context for the main (verifier) model.
 ///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
@@ -1417,6 +1418,7 @@ public func generate(
 /// - Throws: An error if the iterator initialization fails.
 public func generate(
     input: LMInput,
+    cache: [KVCache]? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
     draftModel: any LanguageModel,
@@ -1428,6 +1430,7 @@ public func generate(
         input: input,
         mainModel: context.model,
         draftModel: draftModel,
+        mainCache: cache,
         draftCache: draftCache,
         parameters: parameters,
         numDraftTokens: numDraftTokens
@@ -1543,6 +1546,7 @@ public func generateTokens(
 ///
 /// - Parameters:
 ///   - input: The input for the language model.
+///   - cache: optional ``KVCache`` for the main model.
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context for the main (verifier) model.
 ///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
@@ -1553,6 +1557,7 @@ public func generateTokens(
 /// - Throws: An error if the iterator initialization fails.
 public func generateTokens(
     input: LMInput,
+    cache: [KVCache]? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
     draftModel: any LanguageModel,
@@ -1564,6 +1569,7 @@ public func generateTokens(
         input: input,
         mainModel: context.model,
         draftModel: draftModel,
+        mainCache: cache,
         draftCache: draftCache,
         parameters: parameters,
         numDraftTokens: numDraftTokens
