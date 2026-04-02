@@ -1,8 +1,6 @@
 import Foundation
-import Hub
 import MLX
 import MLXNN
-import Tokenizers
 import os
 
 private let logger = Logger(subsystem: "mlx-swift-lm", category: "paroquant")
@@ -324,6 +322,7 @@ private struct ParoQuantInputProcessor: UserInputProcessor {
 public func loadParoQuantModel(
     from directory: URL,
     typeRegistry: ModelTypeRegistry,
+    tokenizerLoader: any TokenizerLoader,
     toolCallFormat: ToolCallFormat? = nil
 ) async throws -> ModelContainer {
     // 1. Parse config.json (flatten VLM text_config if present)
@@ -430,7 +429,7 @@ public func loadParoQuantModel(
     logger.info("ParoQuant model loaded and evaluated")
 
     // 13. Load tokenizer
-    let tokenizer = try await loadTokenizer(configuration: config, hub: defaultHubApi)
+    let tokenizer = try await tokenizerLoader.load(from: directory)
 
     // 14. Create processor with messageGenerator
     // Use DefaultMessageGenerator — LLMModel.messageGenerator(tokenizer:) is in MLXLLM
