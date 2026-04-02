@@ -15,10 +15,10 @@ print(try await session.respond(to: "How about a great place to eat?")
 ```
 
 The second question actually refers to information (the location) from the first
-question -- this context is maintained inside the ``ChatSession`` object.
+question -- this context is maintained inside the `ChatSession` object.
 
-If you need a one-shot prompt/response simply create a ``ChatSession``, evaluate
-the prompt and discard.  Multiple ``ChatSession`` instances could also be used
+If you need a one-shot prompt/response simply create a `ChatSession`, evaluate
+the prompt and discard.  Multiple `ChatSession` instances could also be used
 (at the cost of the memory in the `KVCache`) to handle multiple streams of
 context.
 
@@ -44,7 +44,7 @@ print()
 ## VLMs (Vision Language Models)
 
 This same API supports VLMs as well.  Simply present the image or video
-to the ``ChatSession``:
+to the `ChatSession`:
 
 ```swift
 let model = try await loadModel(
@@ -68,12 +68,12 @@ print(answer2)
 
 ## Advanced Usage
 
-The ``ChatSession`` has a number of parameters you can supply when creating it:
+The `ChatSession` has a number of parameters you can supply when creating it:
 
 - **instructions**: optional instructions to the chat session, e.g. describing what type of responses to give
     - for example you might instruct the language model to respond in rhyme or
         talking like a famous character from a movie
     - or that the responses should be very brief
 - **generateParameters**: parameters that control the generation of output, e.g. token limits and temperature
-    - see ``GenerateParameters``
+    - see `GenerateParameters`
 - **processing**: optional media processing instructions

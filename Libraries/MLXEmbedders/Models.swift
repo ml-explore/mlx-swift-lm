@@ -45,7 +45,7 @@ public struct ModelConfiguration: Sendable {
 
     /// Where to load the tokenizer from when it differs from the model directory.
     ///
-    /// - `.id`: download from a remote provider (requires a ``Downloader``)
+    /// - `.id`: download from a remote provider (requires a downloader)
     /// - `.directory`: load from a local path
     /// - `nil`: use the same directory as the model
     public let tokenizerSource: TokenizerSource?

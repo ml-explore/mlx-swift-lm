@@ -40,7 +40,7 @@ public protocol Downloader: Sendable {
 /// Used by ``ModelConfiguration`` to specify an alternate tokenizer source
 /// when the tokenizer files are not co-located with the model weights.
 ///
-/// - ``id(_:)`` downloads tokenizer files from a remote provider (requires a ``Downloader``)
+/// - ``id(_:revision:)`` downloads tokenizer files from a remote provider (requires a ``Downloader``)
 /// - ``directory(_:)`` loads tokenizer files from a local path
 ///
 /// When `nil` on a ``ModelConfiguration``, the tokenizer is loaded from the

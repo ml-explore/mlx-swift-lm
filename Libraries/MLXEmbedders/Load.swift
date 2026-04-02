@@ -114,7 +114,8 @@ func resolveDirectories(
 /// structure is being built synchronously.
 ///
 /// - Parameters:
-///   - downloader: The ``Downloader`` to use for fetching remote resources.
+///   - downloader: The downloader to use for fetching remote resources.
+///   - tokenizerLoader: The tokenizer loader to use for loading the tokenizer.
 ///   - configuration: The model configuration.
 ///   - useLatest: When true, always checks the provider for updates.
 ///   - progressHandler: A closure for tracking download progress.
@@ -215,7 +216,8 @@ func loadSynchronous(modelDirectory: URL, modelName: String) throws -> Embedding
 /// or tasks may need to access the embedding model simultaneously.
 ///
 /// - Parameters:
-///   - downloader: The ``Downloader`` to use for fetching remote resources.
+///   - downloader: The downloader to use for fetching remote resources.
+///   - tokenizerLoader: The tokenizer loader to use for loading the tokenizer.
 ///   - configuration: The model configuration.
 ///   - useLatest: When true, always checks the provider for updates.
 ///   - progressHandler: A closure for tracking download progress.
@@ -243,7 +245,9 @@ public func loadModelContainer(
 /// No downloader is needed — the model and tokenizer are loaded from
 /// the given directory.
 ///
-/// - Parameter directory: The local directory containing model files.
+/// - Parameters:
+///   - directory: The local directory containing model files.
+///   - tokenizerLoader: The tokenizer loader to use for loading the tokenizer.
 /// - Returns: A tuple containing the initialized `EmbeddingModel` and `Tokenizer`.
 public func load(
     from directory: URL,
@@ -265,7 +269,7 @@ public func load(
 ///
 /// - Parameters:
 ///   - directory: The local directory containing model files.
-///   - tokenizerLoader: The ``TokenizerLoader`` to use for loading the tokenizer.
+///   - tokenizerLoader: The tokenizer loader to use for loading the tokenizer.
 /// - Returns: A thread-safe `ModelContainer` instance.
 public func loadModelContainer(
     from directory: URL,

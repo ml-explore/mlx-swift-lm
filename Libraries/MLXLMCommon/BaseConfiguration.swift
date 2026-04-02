@@ -6,7 +6,7 @@ import MLX
 /// Base ``LanguageModel`` configuration -- provides `modelType`
 /// and `quantization` (used in loading the model).
 ///
-/// This is used by ``ModelFactory/load(from:configuration:progressHandler:)``
+/// This is used by ``ModelFactory/load(from:using:configuration:useLatest:progressHandler:)``
 /// to determine the type of model to load.
 public struct BaseConfiguration: Codable, Sendable {
     public let modelType: String
