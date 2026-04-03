@@ -88,6 +88,7 @@ public enum VLMTypeRegistry {
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
         "idefics3": create(Idefics3Configuration.self, Idefics3.init),
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
+        "gemma4": create(Gemma4Configuration.self, Gemma4.init),
         "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
         // TODO: see if we can make it work with fastvlm rather than llava_qwen2
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
@@ -116,6 +117,8 @@ public enum VLMProcessorTypeRegistry {
             Idefics3ProcessorConfiguration.self, Idefics3Processor.init),
         "Gemma3Processor": create(
             Gemma3ProcessorConfiguration.self, Gemma3Processor.init),
+        "Gemma4Processor": create(
+            Gemma4ProcessorConfiguration.self, Gemma4Processor.init),
         "SmolVLMProcessor": create(
             SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         "FastVLMProcessor": create(
@@ -205,6 +208,30 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<end_of_turn>"]
     )
 
+    static public let gemma4_E2B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-e2b-it-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let gemma4_E4B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-e4b-it-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let gemma4_31B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-31b-it-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-26b-a4b-it-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
     static public let smolvlm = ModelConfiguration(
         id: "HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx",
         defaultPrompt:
@@ -237,6 +264,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3_4B_qat_4bit,
             gemma3_12B_qat_4bit,
             gemma3_27B_qat_4bit,
+            gemma4_E2B_it_4bit,
             smolvlm,
             fastvlm,
         ]
