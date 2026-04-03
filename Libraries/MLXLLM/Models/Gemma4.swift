@@ -31,6 +31,10 @@ public struct Gemma4Configuration: Codable {
     let globalHeadDim: Int
     let numKvSharedLayers: Int
     let useDoubleWideMlp: Bool
+    /// Fraction of global head_dim used for RoPE (default 0.25 for Gemma 4 global attn)
+    let globalRopePartialFactor: Float
+    /// Final logit softcapping value (0 = disabled). Gemma 4 uses 30.0.
+    let finalLogitSoftcapping: Float
     /// Per-layer conditioning dimension (0 = disabled)
     let hiddenSizePerLayerInput: Int
     /// Vocabulary size for per-layer embedding table (0 = disabled)
@@ -45,7 +49,9 @@ public struct Gemma4Configuration: Codable {
         globalHeadDim: Int = 512, numKvSharedLayers: Int = 0, useDoubleWideMlp: Bool = false,
         numExperts: Int? = nil, topKExperts: Int? = nil, moeIntermediateSize: Int? = nil,
         numGlobalKeyValueHeads: Int? = nil,
-        hiddenSizePerLayerInput: Int = 0, vocabSizePerLayerInput: Int = 0
+        hiddenSizePerLayerInput: Int = 0, vocabSizePerLayerInput: Int = 0,
+        globalRopePartialFactor: Float = 0.25,
+        finalLogitSoftcapping: Float = 0.0
     ) {
         self.modelType = modelType
         self.hiddenSize = hiddenSize
@@ -73,6 +79,8 @@ public struct Gemma4Configuration: Codable {
         self.numGlobalKeyValueHeads = numGlobalKeyValueHeads ?? kvHeads
         self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
         self.vocabSizePerLayerInput = vocabSizePerLayerInput
+        self.globalRopePartialFactor = globalRopePartialFactor
+        self.finalLogitSoftcapping = finalLogitSoftcapping
     }
 
     enum CodingKeys: String, CodingKey {
@@ -99,11 +107,18 @@ public struct Gemma4Configuration: Codable {
         case numGlobalKeyValueHeads = "num_global_key_value_heads"
         // MoE
         case numExperts = "num_experts"
-        case topKExperts = "num_experts_per_tok"
+        case topKExperts = "top_k_experts"
         case moeIntermediateSize = "moe_intermediate_size"
         // Per-layer conditioning
         case hiddenSizePerLayerInput = "hidden_size_per_layer_input"
         case vocabSizePerLayerInput = "vocab_size_per_layer_input"
+        // Logit softcapping
+        case finalLogitSoftcapping = "final_logit_softcapping"
+    }
+
+    // Top-level keys (outside text_config)
+    enum TopLevelCodingKeys: String, CodingKey {
+        case textConfig = "text_config"
     }
 
     enum VLMCodingKeys: String, CodingKey {
@@ -134,6 +149,7 @@ public struct Gemma4Configuration: Codable {
         ropeLocalBaseFreq = try container.decodeIfPresent(Float.self, forKey: .ropeLocalBaseFreq) ?? 10_000.0
         ropeTraditional = try container.decodeIfPresent(Bool.self, forKey: .ropeTraditional) ?? false
         queryPreAttnScalar = try container.decodeIfPresent(Float.self, forKey: .queryPreAttnScalar) ?? 256
+        finalLogitSoftcapping = try container.decodeIfPresent(Float.self, forKey: .finalLogitSoftcapping) ?? 0.0
         slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
         slidingWindowPattern = try container.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? (hiddenLayers == 35 ? 5 : 6)
         maxPositionEmbeddings = try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
@@ -149,6 +165,20 @@ public struct Gemma4Configuration: Codable {
         // Per-layer conditioning
         self.hiddenSizePerLayerInput = try container.decodeIfPresent(Int.self, forKey: .hiddenSizePerLayerInput) ?? 0
         self.vocabSizePerLayerInput = try container.decodeIfPresent(Int.self, forKey: .vocabSizePerLayerInput) ?? 0
+        // Parse partial_rotary_factor for global attention from rope_parameters.full_attention
+        // Gemma 4 uses only 25% of global_head_dim (512) for positional encoding = 128 rotated dims.
+        struct AC: CodingKey {
+            var stringValue: String; init?(stringValue s: String) { stringValue = s }
+            var intValue: Int? { nil }; init?(intValue _: Int) { nil }
+        }
+        if let nestedContainer = try? decoder.container(keyedBy: AC.self),
+           let ropeParamsContainer = try? nestedContainer.nestedContainer(keyedBy: AC.self, forKey: AC(stringValue: "rope_parameters")!),
+           let fullAttnContainer = try? ropeParamsContainer.nestedContainer(keyedBy: AC.self, forKey: AC(stringValue: "full_attention")!),
+           let prf = try? fullAttnContainer.decode(Float.self, forKey: AC(stringValue: "partial_rotary_factor")!) {
+            self.globalRopePartialFactor = prf
+        } else {
+            self.globalRopePartialFactor = 0.25  // Gemma 4 default: 128/512
+        }
     }
 
     // Optional MoE configurations
@@ -169,6 +199,8 @@ class Gemma4Attention: Module {
     let isSliding: Bool
     let slidingWindow: Int
     let slidingWindowPattern: Int
+    /// QK attention logit softcapping (Gemma 4 uses 30.0). 0 = disabled.
+    let attnLogitSoftcap: Float
 
     @ModuleInfo(key: "q_proj") var queryProj: Linear
     @ModuleInfo(key: "k_proj") var keyProj: Linear
@@ -193,6 +225,9 @@ class Gemma4Attention: Module {
         self.headDim = self.isSliding ? config.headDim : config.globalHeadDim
 
         self.scale = pow(config.queryPreAttnScalar, -0.5)
+        // Gemma 4 does NOT apply softcapping to attention logits (only to final logits).
+        // Set to 0.0 to skip the manual attention path and use MLXFast.scaledDotProductAttention.
+        self.attnLogitSoftcap = 0.0
 
         self._queryProj.wrappedValue = Linear(dim, nHeads * self.headDim, bias: false)
         self._keyProj.wrappedValue = Linear(dim, nKVHeads * self.headDim, bias: false)
@@ -208,8 +243,11 @@ class Gemma4Attention: Module {
                 dims: headDim, base: config.ropeLocalBaseFreq, traditional: false,
                 scalingConfig: nil, maxPositionEmbeddings: nil)
         } else {
+            // Global attention: Gemma 4 uses partial_rotary_factor to rotate only a fraction
+            // of the head_dim. E.g. globalHeadDim=512, partialFactor=0.25 → 128 rotated dims.
+            let globalRopeDims = Int((Float(headDim) * config.globalRopePartialFactor).rounded())
             self.rope = initializeRope(
-                dims: headDim, base: config.ropeTheta, traditional: false,
+                dims: globalRopeDims, base: config.ropeTheta, traditional: false,
                 scalingConfig: config.ropeScaling,
                 maxPositionEmbeddings: config.maxPositionEmbeddings)
         }
@@ -243,18 +281,50 @@ class Gemma4Attention: Module {
             keys = rope(keys, offset: 0)
         }
 
-        let output = attentionWithCacheUpdate(
-            queries: queries,
-            keys: keys,
-            values: values,
-            cache: cache,
-            scale: scale,
-            mask: mask
+        let output: MLXArray
+        if attnLogitSoftcap > 0 {
+            // Gemma 4 uses QK attention logit softcapping before softmax:
+            //   scores = tanh(scores / cap) * cap  (llama.cpp llm_build_gemma4_iswa)
+            // MLXFast.scaledDotProductAttention has no softcap parameter, so we do it manually.
+            let (cachedKeys, cachedValues) = cache?.update(keys: keys, values: values) ?? (keys, values)
+            var fullKeys = cachedKeys
+            var fullValues = cachedValues
+            // TurboKV decode if needed
+            if let kvCache = cache as? KVCacheSimple,
+               let pk = kvCache.polarKeys, let pv = kvCache.polarValues,
+               kvCache.compressedOffset > 0 {
+                let histK = MLXFast.turboDecodeK(packed: pk).asType(cachedKeys.dtype)
+                let histV = MLXFast.turboDecodeV(packed: pv).asType(cachedValues.dtype)
+                fullKeys   = concatenated([histK, cachedKeys],   axis: 2)
+                fullValues = concatenated([histV, cachedValues], axis: 2)
+            }
+            // GQA expansion
+            var k = fullKeys
+            var v = fullValues
+            if nHeads > nKVHeads {
+                k = MLX.repeated(k, count: repeats, axis: 1)
+                v = MLX.repeated(v, count: repeats, axis: 1)
+            }
+            // scores: [B, nH, L, S]
+            var scores = (queries * scale).matmul(k.transposed(0, 1, 3, 2))
+            // Apply attention mask
+            if let maskArray = mask.mask {
+                scores = scores + maskArray
+            }
+            // Apply QK softcap: tanh(scores / cap) * cap
+            let cap = MLXArray(attnLogitSoftcap).asType(scores.dtype)
+            scores = MLX.tanh(scores / cap) * cap
+            // Softmax + weighted sum
+            let attnWeights = MLX.softmax(scores.asType(.float32), axis: -1).asType(scores.dtype)
+            output = matmul(attnWeights, v)
+        } else {
+            output = attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values,
+                cache: cache, scale: scale, mask: mask)
+        }
+        return outputProj(
+            output.transposed(0, 2, 1, 3).reshaped(B, L, -1)
         )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
-        
-        return outputProj(output)
     }
 }
 
@@ -580,6 +650,12 @@ public class Gemma4Model: Module, LLMModel {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var out = model(inputs, mask: nil, cache: cache)
         out = lmHead(out)
+        // Apply final logit softcapping: logits = tanh(logits / cap) * cap
+        // Critical for Gemma 4 output quality — without this logits blow up.
+        if config.finalLogitSoftcapping > 0 {
+            let cap = config.finalLogitSoftcapping
+            out = MLX.tanh(out / cap) * cap
+        }
         return out
     }
 
