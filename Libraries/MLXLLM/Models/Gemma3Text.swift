@@ -140,7 +140,7 @@ class Gemma3Attention: Module {
     @ModuleInfo(key: "q_norm") var queryNorm: Gemma.RMSNorm
     @ModuleInfo(key: "k_norm") var keyNorm: Gemma.RMSNorm
 
-    @ModuleInfo var rope: OffsetLayer
+    @ModuleInfo var rope: RoPELayer
 
     init(_ config: Gemma3TextConfiguration, layerIdx: Int) {
         let dim = config.hiddenSize
