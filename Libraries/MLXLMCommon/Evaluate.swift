@@ -707,7 +707,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 
 /// Generator of tokens using speculative decoding.
 ///
-/// This is typically used via a call to ``generate(input:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
 /// returning `AsyncStream<Generation>`.
 ///
 /// To use it directly:
@@ -1538,7 +1538,7 @@ public func generateTokens(
 
 /// Generates raw token IDs asynchronously using speculative decoding with a draft model.
 ///
-/// This is similar to `generate(input:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)`,
+/// This is similar to `generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)`,
 /// but yields raw token IDs instead of decoded text/tool calls.
 ///
 /// Both models must share the same tokenizer.
