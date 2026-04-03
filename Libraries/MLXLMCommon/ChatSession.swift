@@ -174,7 +174,7 @@ public final class ChatSession {
     ///   - model: the ``ModelContainer``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty `[KVCache]` previously obtained from ``saveCache(to:)``,
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -216,7 +216,7 @@ public final class ChatSession {
     ///   - model: the ``ModelContext``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty `[KVCache]` previously obtained from ``saveCache(to:)``,
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
