@@ -208,14 +208,14 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
     func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         guard rotatedDims > 0 else { return x }
 
-        // Extract the two halves of the head dimension
-        let left = x[0..., 0..., 0..., ..<half]
-        let right = x[0..., 0..., 0..., half...]
+        // Use .ellipsis for efficient single-op slicing (not per-axis 0...)
+        let left = x[.ellipsis, ..<half]
+        let right = x[.ellipsis, half...]
 
         // Gather dims to rotate from each half, apply RoPE, then scatter back
         let rotated = MLXFast.RoPE(
-            concatenated([left[0..., 0..., 0..., ..<rotHalf],
-                          right[0..., 0..., 0..., ..<rotHalf]], axis: -1),
+            concatenated([left[.ellipsis, ..<rotHalf],
+                          right[.ellipsis, ..<rotHalf]], axis: -1),
             dimensions: rotatedDims,
             traditional: traditional,
             base: nil,
@@ -227,15 +227,15 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
         // Reassemble: rotated portions + unrotated remainders
         if rotHalf < half {
             return concatenated([
-                rotated[0..., 0..., 0..., ..<rotHalf],
-                left[0..., 0..., 0..., rotHalf...],
-                rotated[0..., 0..., 0..., rotHalf...],
-                right[0..., 0..., 0..., rotHalf...],
+                rotated[.ellipsis, ..<rotHalf],
+                left[.ellipsis, rotHalf...],
+                rotated[.ellipsis, rotHalf...],
+                right[.ellipsis, rotHalf...],
             ], axis: -1)
         } else {
             return concatenated([
-                rotated[0..., 0..., 0..., ..<rotHalf],
-                rotated[0..., 0..., 0..., rotHalf...],
+                rotated[.ellipsis, ..<rotHalf],
+                rotated[.ellipsis, rotHalf...],
             ], axis: -1)
         }
     }
@@ -539,20 +539,17 @@ class Gemma4DecoderLayer: Module {
 
 // MARK: - Scaled Linear (for per-layer projection)
 
-class Gemma4ScaledLinear: Module {
-    let weight: MLXArray
+/// Linear layer with output scaling — extends Linear so it gets quantized properly
+class Gemma4ScaledLinear: Linear {
     let scalar: Float
-    private lazy var _scaledWeight: MLXArray = weight.transposed() * scalar
 
     init(inFeatures: Int, outFeatures: Int, scalar: Float) {
-        self.weight = MLXArray.zeros([outFeatures, inFeatures])
         self.scalar = scalar
-        super.init()
+        super.init(weight: MLXArray.zeros([outFeatures, inFeatures]), bias: nil)
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // Single matmul with pre-scaled weight (avoids extra multiply per call)
-        return matmul(x, weight.transposed()) * scalar
+    override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        return super.callAsFunction(x) * scalar
     }
 }
 
