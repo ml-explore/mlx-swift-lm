@@ -13,7 +13,7 @@ public struct ProcessedFrames {
     public let totalDuration: CMTime
 }
 
-private let context = CIContext()
+nonisolated(unsafe) private let context = CIContext()
 
 /// Collection of methods for processing media (images, video, etc.).
 ///
