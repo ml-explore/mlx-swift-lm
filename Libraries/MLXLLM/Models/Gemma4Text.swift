@@ -363,22 +363,20 @@ class Gemma4Attention: Module {
         queries = queries.transposed(0, 2, 1, 3)
         queries = rope(queries, offset: offset)
 
-        // For KV shared layers, read from the already-updated cache
+        // For KV shared layers, read directly from the already-updated cache
         if isKVSharedLayer, let cache {
-            let cachedState = cache.state
-            let cachedKeys = cachedState[0]
-            let cachedValues = cachedState[1]
-
-            let output = MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: cachedKeys,
-                values: cachedValues,
-                scale: scale,
-                mask: mask
+            let state = cache.state
+            return outputProj(
+                MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: state[0],
+                    values: state[1],
+                    scale: scale,
+                    mask: mask
+                )
+                .transposed(0, 2, 1, 3)
+                .reshaped(B, L, -1)
             )
-            .transposed(0, 2, 1, 3)
-            .reshaped(B, L, -1)
-            return outputProj(output)
         }
 
         // Compute K and V
@@ -500,14 +498,18 @@ class Gemma4DecoderLayer: Module {
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil
     ) -> MLXArray {
-        // Self-attention block
-        let inputNorm = inputLayerNorm(x)
-        let attnOut = selfAttention(inputNorm, mask: mask, cache: cache)
-        let attnNorm = postAttentionLayerNorm(attnOut)
-        var h = x + attnNorm
+        // Match Python's variable reuse pattern to enable ARC-driven buffer donation.
+        // By reassigning `var h` at each step, ARC releases the previous MLXArray,
+        // dropping the C++ shared_ptr ref count to 1 (graph-only), enabling in-place ops.
 
-        // MLP block
-        let residual = h
+        // Self-attention: residual = x, h = x + norm(attn(norm(x)))
+        var h = inputLayerNorm(x)
+        h = selfAttention(h, mask: mask, cache: cache)
+        h = postAttentionLayerNorm(h)
+        h = x + h
+
+        // MLP: residual = h, h = residual + norm(mlp(norm(h)))
+        var residual = h
         h = preFeedforwardLayerNorm(h)
         h = mlp(h)
         h = postFeedforwardLayerNorm(h)
@@ -519,13 +521,13 @@ class Gemma4DecoderLayer: Module {
             let norm = postPerLayerInputNorm,
             let pli = perLayerInput
         {
-            let gateResidual = h
-            var gated = gate(h)
-            gated = geluApproximate(gated)
-            gated = gated * pli
-            gated = proj(gated)
-            gated = norm(gated)
-            h = gateResidual + gated
+            residual = h
+            h = gate(h)
+            h = geluApproximate(h)
+            h = h * pli
+            h = proj(h)
+            h = norm(h)
+            h = residual + h
         }
 
         // Layer scalar
