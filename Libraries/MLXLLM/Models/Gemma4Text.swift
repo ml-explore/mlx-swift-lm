@@ -171,7 +171,7 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
     let dims: Int
     let traditional: Bool
     let rotatedDims: Int
-    let freqs: MLXArray?
+    let _freqs: MLXArray?
 
     init(
         dims: Int,
@@ -189,11 +189,13 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
         if rotatedDims > 0 {
             let exponents = MLXArray(stride(from: 0, to: rotatedDims, by: 2))
                 .asType(.float32) / Float(dims)
-            self.freqs = factor * MLX.pow(base, exponents)
+            self._freqs = factor * MLX.pow(base, exponents)
         } else {
-            self.freqs = nil
+            self._freqs = nil
         }
         super.init()
+        // Freeze computed frequencies — they are not model weights
+        self.freeze(keys: ["freqs"])
     }
 
     func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
@@ -219,7 +221,7 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
             base: nil,
             scale: 1.0,
             offset: offset,
-            freqs: freqs
+            freqs: _freqs
         )
 
         // Reassemble: replace rotated portions back
@@ -748,9 +750,10 @@ public class Gemma4TextModel: Module, LLMModel {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
 
-        // Filter out rotary embeddings and quantization range params
+        // Filter out rotary embeddings, rope frequencies, and quantization range params
         processedWeights = processedWeights.filter { key, _ in
             !key.contains("self_attn.rotary_emb")
+                && !key.contains("rope.freqs")
                 && !key.contains("input_max")
                 && !key.contains("input_min")
                 && !key.contains("output_max")
