@@ -767,7 +767,19 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override func trim(_ n: Int) -> Int {
         let trimmed = min(offset, n)
         offset -= trimmed
+        
         idx -= trimmed
+        // Wrap circular buffer correctly, skipping 'keep' region
+        while idx < keep && offset >= keep {
+            // idx underflowed into the keep region (or negative). 
+            // The logical step back from 'keep' is the end of the buffer.
+            idx += (maxCacheSize - keep)
+        }
+        if offset < keep {
+            // If offset itself is within the keep region, idx and offset match.
+            idx = offset
+        }
+
         return trimmed
     }
 
@@ -776,14 +788,25 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         n: Int, windowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
         if n > 1 {
-            // Multi-token case
+            // Multi-token case (prefill / prompt re-encode)
+            //
+            // updateConcat temporarily allows the physical key buffer to grow to
+            // (existingKeys + n) before trimming back toward maxCacheSize + n - 1.
+            // The buffer returned to the attention layer has exactly:
+            //   physicalKeyCount = min(existingKeys + n, maxCacheSize + n - 1)
+            // columns, where existingKeys = min(offset, maxCacheSize).
+            //
+            // The mask must be [n, physicalKeyCount] wide, so we pass
+            //   offset = physicalKeyCount - n  to createCausalMask.
             let actualWindowSize = windowSize ?? maxCacheSize
-            let cappedOffset = min(maxCacheSize - 1, offset)
+            let existingKeys = min(offset, maxCacheSize)
+            // Physical key width the cache returns for this n-token batch
+            let physicalKeyCount = min(existingKeys + n, maxCacheSize + n - 1)
+            let maskOffset = physicalKeyCount - n
 
-            // Decide if we need an array mask
-            if cappedOffset + n > actualWindowSize || returnArray {
+            if maskOffset + n > actualWindowSize || returnArray {
                 return .array(
-                    createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+                    createCausalMask(n: n, offset: maskOffset, windowSize: actualWindowSize))
             }
             return .causal
         } else {
