@@ -662,7 +662,10 @@ class Gemma4TransformerBlock: Module {
     }
 }
 
-public class Gemma4ModelInternal: Module {
+// Restored LayerPartitionable & StreamableMoE conformance to re-enable 
+// SSD expert streaming, bridging the missing protocols from Damon Janis's initial draft.
+// Reference: https://github.com/SharpAI/mlx-swift-lm/pull/1
+public class Gemma4ModelInternal: Module, LayerPartitionable, StreamableMoE {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [Gemma4TransformerBlock]
     @ModuleInfo var norm: RMSNorm
@@ -673,6 +676,13 @@ public class Gemma4ModelInternal: Module {
     @ModuleInfo(key: "per_layer_projection_norm") var perLayerProjectionNorm: RMSNorm?
 
     let config: Gemma4Configuration
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int? = nil
+    public var totalLayerCount: Int { layers.count }
+    
+    // StreamableMoE
+    public var streamExperts: Bool = false
 
     init(_ config: Gemma4Configuration) {
         self.config = config
@@ -759,7 +769,10 @@ public class Gemma4ModelInternal: Module {
             let layerMask = isGlobal ? globalMask : slidingWindowMask
             // Slice per-layer conditioning for this layer: [B, L, D]
             let pli = perLayerInputs.map { $0[0..., 0..., i, 0...] }
-            h = layer(h, mask: layerMask, cache: layerCache?[i], perLayerInput: pli)
+            
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts, cacheToEval: layerCache?[i]) {
+                layer(h, mask: layerMask, cache: layerCache?[i], perLayerInput: pli)
+            }
         }
         return norm(h)
     }
