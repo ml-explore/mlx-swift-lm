@@ -38,6 +38,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "600.0.0-latest"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.2.1"),
     ],
     targets: [
         .target(
@@ -113,12 +114,23 @@ let package = Package(
             path: "Libraries/IntegrationTestHelpers",
             exclude: ["README.md"]
         ),
+        .executableTarget(
+            name: "Gemma4Test",
+            dependencies: [
+                "MLXLLM",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            path: "Tools/Gemma4Test"
+        ),
         .testTarget(
             name: "MLXLMTests",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXOptimizers", package: "mlx-swift"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",

@@ -273,8 +273,8 @@ class Gemma4Attention: Module {
     @ModuleInfo(key: "v_proj") var valueProj: Linear?
     @ModuleInfo(key: "o_proj") var outputProj: Linear
 
-    @ModuleInfo(key: "q_norm") var queryNorm: Gemma.RMSNorm
-    @ModuleInfo(key: "k_norm") var keyNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "q_norm") var queryNorm: Gemma4RMSNormZeroShift
+    @ModuleInfo(key: "k_norm") var keyNorm: Gemma4RMSNormZeroShift
     @ModuleInfo(key: "v_norm") var vNorm: Gemma4RMSNormNoScale
 
     var rope: any OffsetLayer
@@ -310,9 +310,9 @@ class Gemma4Attention: Module {
         }
         self._outputProj.wrappedValue = Linear(nHeads * effectiveHeadDim, dim, bias: false)
 
-        self._queryNorm.wrappedValue = Gemma.RMSNorm(
+        self._queryNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._keyNorm.wrappedValue = Gemma.RMSNorm(
+        self._keyNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: effectiveHeadDim, eps: config.rmsNormEps)
         self._vNorm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
 
@@ -441,15 +441,15 @@ class Gemma4DecoderLayer: Module {
 
     @ModuleInfo(key: "self_attn") var selfAttention: Gemma4Attention
     @ModuleInfo var mlp: Gemma4MLP
-    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
-    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
-    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: Gemma.RMSNorm
-    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma4RMSNormZeroShift
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma4RMSNormZeroShift
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: Gemma4RMSNormZeroShift
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: Gemma4RMSNormZeroShift
 
     // Per-layer input gating
     @ModuleInfo(key: "per_layer_input_gate") var perLayerInputGate: Linear?
     @ModuleInfo(key: "per_layer_projection") var perLayerProjection: Linear?
-    @ModuleInfo(key: "post_per_layer_input_norm") var postPerLayerInputNorm: Gemma.RMSNorm?
+    @ModuleInfo(key: "post_per_layer_input_norm") var postPerLayerInputNorm: Gemma4RMSNormZeroShift?
 
     // Layer scalar
     @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray?
@@ -470,13 +470,13 @@ class Gemma4DecoderLayer: Module {
             ? config.intermediateSize * 2 : config.intermediateSize
         self.mlp = Gemma4MLP(dimensions: config.hiddenSize, hiddenDimensions: mlpIntermediate)
 
-        self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
+        self._inputLayerNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(
+        self._postAttentionLayerNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._preFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
+        self._preFeedforwardLayerNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
+        self._postFeedforwardLayerNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         // Per-layer input gating (2B/4B models)
@@ -485,7 +485,7 @@ class Gemma4DecoderLayer: Module {
                 config.hiddenSize, config.hiddenSizePerLayerInput, bias: false)
             self._perLayerProjection.wrappedValue = Linear(
                 config.hiddenSizePerLayerInput, config.hiddenSize, bias: false)
-            self._postPerLayerInputNorm.wrappedValue = Gemma.RMSNorm(
+            self._postPerLayerInputNorm.wrappedValue = Gemma4RMSNormZeroShift(
                 dimensions: config.hiddenSize, eps: config.rmsNormEps)
         }
 
@@ -559,7 +559,7 @@ class Gemma4ScaledLinear: Module {
 public class Gemma4TextModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [Gemma4DecoderLayer]
-    @ModuleInfo var norm: Gemma.RMSNorm
+    @ModuleInfo var norm: Gemma4RMSNormZeroShift
 
     let config: Gemma4TextConfiguration
     let embedScale: Float
@@ -585,7 +585,7 @@ public class Gemma4TextModelInner: Module {
             Gemma4DecoderLayer(config, layerIdx: i)
         }
 
-        self.norm = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self.norm = Gemma4RMSNormZeroShift(dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         // Build cache index mapping for KV sharing
         let firstShared = config.firstKVSharedLayerIdx

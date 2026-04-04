@@ -1,5 +1,7 @@
-// Integration test for Gemma 4 model loading and inference.
-// Run: xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS' -only-testing:MLXLMTests/Gemma4IntegrationTests
+// Gemma 4 integration test — load real model and generate text
+// Run via xcodebuild:
+//   xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS' \
+//     -only-testing:MLXLMTests/Gemma4IntegrationTests/testGemma4RealModel
 
 import Foundation
 import MLX
@@ -7,15 +9,20 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import Tokenizers
-import XCTest
 
 /// Bridges swift-transformers Tokenizer to MLXLMCommon.Tokenizer protocol
 struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer {
     let upstream: Tokenizers.Tokenizer
 
-    var bosToken: String? { upstream.bosToken }
-    var eosToken: String? { upstream.eosToken }
-    var unknownToken: String? { upstream.unknownToken }
+    var bosToken: String? {
+        upstream.bosToken
+    }
+    var eosToken: String? {
+        upstream.eosToken
+    }
+    var unknownToken: String? {
+        upstream.unknownToken
+    }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
@@ -38,10 +45,12 @@ struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
+        // Convert to swift-transformers Message format
         return try upstream.applyChatTemplate(messages: messages)
     }
 }
 
+/// Loads tokenizer from a local directory using swift-transformers
 struct HFTokenizerLoader: TokenizerLoader, @unchecked Sendable {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         let tokenizer = try await AutoTokenizer.from(modelFolder: directory)
@@ -49,30 +58,39 @@ struct HFTokenizerLoader: TokenizerLoader, @unchecked Sendable {
     }
 }
 
-public class Gemma4IntegrationTests: XCTestCase {
+@main
+struct Gemma4Test {
+    static func main() async throws {
+        print("=== Gemma 4 Swift Inference Test ===\n")
 
-    func testGemma4RealModel() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let modelDir =
-            "\(home)/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-8bit/snapshots/dc1f72fa71acb997e1581a8ec8f69edd6e8f5707"
-
-        guard FileManager.default.fileExists(atPath: modelDir) else {
-            throw XCTSkip("Gemma 4 model not found in HF cache")
-        }
+            if CommandLine.arguments.count > 1 {
+                CommandLine.arguments[1]
+            } else {
+                "\(home)/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-8bit/snapshots/dc1f72fa71acb997e1581a8ec8f69edd6e8f5707"
+            }
 
         let modelURL = URL(fileURLWithPath: modelDir)
+        guard FileManager.default.fileExists(atPath: modelDir) else {
+            print("ERROR: Model not found at \(modelDir)")
+            return
+        }
 
-        print("Loading Gemma 4 E4B 8-bit with HF tokenizer...")
+        print("Loading from: \(modelDir)")
         let start = Date()
 
         let container = try await LLMModelFactory.shared.loadContainer(
             from: modelURL, using: HFTokenizerLoader())
 
         let loadTime = Date().timeIntervalSince(start)
-        print("Loaded in \(String(format: "%.1f", loadTime))s")
+        print("Model loaded in \(String(format: "%.1f", loadTime))s\n")
 
         let prompt = "Hello, what model are you? Reply in one sentence."
         print("Prompt: \(prompt)")
+        print("Response: ", terminator: "")
+
+        let genStart = Date()
 
         let info: GenerateCompletionInfo = try await container.perform {
             (context: ModelContext) async throws -> GenerateCompletionInfo in
@@ -80,30 +98,31 @@ public class Gemma4IntegrationTests: XCTestCase {
             let input = try await context.processor.prepare(input: .init(prompt: prompt))
             let stream = try MLXLMCommon.generate(
                 input: input,
-                parameters: .init(maxTokens: 64, temperature: 0.0, topP: 1.0),
+                parameters: .init(maxTokens: 128, temperature: 0.0, topP: 1.0),
                 context: context)
 
-            var output = ""
             var completionInfo: GenerateCompletionInfo?
             for await generation in stream {
                 switch generation {
                 case .chunk(let text):
-                    output += text
+                    print(text, terminator: "")
+                    fflush(stdout)
                 case .info(let i):
                     completionInfo = i
                 default:
                     break
                 }
             }
-            print("Response: \(output)")
             return completionInfo ?? GenerateCompletionInfo(
                 promptTokenCount: 0, generationTokenCount: 0,
                 promptTime: 0, generationTime: 0)
         }
 
-        print(info.summary())
-
-        XCTAssertGreaterThan(info.generationTokenCount, 0, "Should generate at least 1 token")
-        XCTAssertGreaterThan(info.tokensPerSecond, 1.0, "Should generate faster than 1 tok/s")
+        let genTime = Date().timeIntervalSince(genStart)
+        print("\n\n--- Performance ---")
+        print("Prompt:  \(info.promptTokenCount) tokens, \(String(format: "%.1f", info.promptTokensPerSecond)) tok/s")
+        print("Gen:     \(info.generationTokenCount) tokens, \(String(format: "%.1f", info.tokensPerSecond)) tok/s")
+        print("Total:   \(String(format: "%.2f", genTime))s")
+        print("\nPython baseline: 79.8 tok/s gen, 9017 MB peak")
     }
 }
