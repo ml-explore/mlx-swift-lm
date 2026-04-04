@@ -193,6 +193,12 @@ struct Gemma4Test {
         print(info.summary())
         print("Python baseline: 75.5 tok/s gen, peak 9003 MB active")
 
+        // ========== Buffer donation test ==========
+        runDonationTest()
+
+        // ========== Compiled generation test ==========
+        try await runCompiledBenchmark(container: container)
+
         // ========== Gemma 3 1B comparison ==========
         print("\n=== Gemma 3 1B Cache Comparison ===")
         let g3Dir = "\(home)/.cache/huggingface/hub/models--mlx-community--gemma-3-1b-it-qat-4bit/snapshots/15fed4eafb456c6fcb2a1165f19ac609670ed14b"
