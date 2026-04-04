@@ -86,7 +86,7 @@ struct Gemma4Test {
         let loadTime = Date().timeIntervalSince(start)
         print("Model loaded in \(String(format: "%.1f", loadTime))s\n")
 
-        let prompt = "Hello, what model are you? Reply in one sentence."
+        let prompt = "Write a detailed explanation of how neural network attention mechanisms work, including the mathematical formulation of scaled dot-product attention."
         print("Prompt: \(prompt)")
         print("Response: ", terminator: "")
 

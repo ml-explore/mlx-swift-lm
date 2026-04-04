@@ -128,9 +128,10 @@ public struct Gemma4TextConfiguration: Codable {
 
 // MARK: - Custom RMSNorm Variants
 
-/// RMSNorm without learnable scale (scale_shift=0.0)
+/// RMSNorm without learnable scale — uses MLXFast with ones weight for GPU-accelerated path
 class Gemma4RMSNormNoScale: Module, UnaryLayer {
     let eps: Float
+    private var _onesWeight: MLXArray?
 
     init(eps: Float = 1e-6) {
         self.eps = eps
@@ -138,11 +139,13 @@ class Gemma4RMSNormNoScale: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // rmsNorm with nil weight — normalize only, no scale
-        let xFloat = x.asType(.float32)
-        let variance = (xFloat * xFloat).mean(axis: -1, keepDims: true)
-        let normalized = xFloat * MLX.rsqrt(variance + eps)
-        return normalized.asType(x.dtype)
+        // Use MLXFast.rmsNorm with a ones weight vector for the fast Metal kernel path
+        // Lazily create and cache the weight to match input dimensions
+        let dim = x.dim(-1)
+        if _onesWeight == nil || _onesWeight!.dim(0) != dim {
+            _onesWeight = MLXArray.ones([dim])
+        }
+        return MLXFast.rmsNorm(x, weight: _onesWeight!, eps: self.eps)
     }
 }
 
@@ -166,11 +169,14 @@ class Gemma4RMSNormZeroShift: Module, UnaryLayer {
 // MARK: - ProportionalRoPE
 
 /// Proportional RoPE for Gemma 4 full-attention layers.
-/// Applies rotation to only a fraction of head dimensions (partial_rotary_factor).
+/// Frequencies spaced over full head dim but rotation applied to only partial_rotary_factor
+/// fraction of dimensions across the two halves (HF rotate_half convention).
 class Gemma4ProportionalRoPE: Module, OffsetLayer {
     let dims: Int
     let traditional: Bool
     let rotatedDims: Int
+    let rotHalf: Int
+    let half: Int
     let _freqs: MLXArray?
 
     init(
@@ -182,9 +188,11 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
     ) {
         self.dims = dims
         self.traditional = traditional
+        self.half = dims / 2
 
         let ropeAngles = Int(partialRotaryFactor * Float(dims) / 2.0)
         self.rotatedDims = 2 * ropeAngles
+        self.rotHalf = ropeAngles
 
         if rotatedDims > 0 {
             let exponents = MLXArray(stride(from: 0, to: rotatedDims, by: 2))
@@ -194,28 +202,20 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
             self._freqs = nil
         }
         super.init()
-        // Freeze computed frequencies — they are not model weights
         self.freeze(keys: ["freqs"])
     }
 
     func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
         guard rotatedDims > 0 else { return x }
 
-        let head = x[0..., 0..., 0..., ..<dims]
-        let half = dims / 2
-        let rotHalf = rotatedDims / 2
+        // Extract the two halves of the head dimension
+        let left = x[0..., 0..., 0..., ..<half]
+        let right = x[0..., 0..., 0..., half...]
 
-        let left = head[0..., 0..., 0..., ..<half]
-        let right = head[0..., 0..., 0..., half...]
-
-        // Extract the portions to rotate from each half
-        let leftRot = left[0..., 0..., 0..., ..<rotHalf]
-        let rightRot = right[0..., 0..., 0..., ..<rotHalf]
-
-        // Concatenate and apply RoPE
-        var rotated = concatenated([leftRot, rightRot], axis: -1)
-        rotated = MLXFast.RoPE(
-            rotated,
+        // Gather dims to rotate from each half, apply RoPE, then scatter back
+        let rotated = MLXFast.RoPE(
+            concatenated([left[0..., 0..., 0..., ..<rotHalf],
+                          right[0..., 0..., 0..., ..<rotHalf]], axis: -1),
             dimensions: rotatedDims,
             traditional: traditional,
             base: nil,
@@ -224,27 +224,20 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
             freqs: _freqs
         )
 
-        // Reassemble: replace rotated portions back
-        let newLeft: MLXArray
-        let newRight: MLXArray
+        // Reassemble: rotated portions + unrotated remainders
         if rotHalf < half {
-            let leftUnrot = left[0..., 0..., 0..., rotHalf...]
-            newLeft = concatenated([rotated[0..., 0..., 0..., ..<rotHalf], leftUnrot], axis: -1)
-            let rightUnrot = right[0..., 0..., 0..., rotHalf...]
-            newRight = concatenated([rotated[0..., 0..., 0..., rotHalf...], rightUnrot], axis: -1)
+            return concatenated([
+                rotated[0..., 0..., 0..., ..<rotHalf],
+                left[0..., 0..., 0..., rotHalf...],
+                rotated[0..., 0..., 0..., rotHalf...],
+                right[0..., 0..., 0..., rotHalf...],
+            ], axis: -1)
         } else {
-            newLeft = rotated[0..., 0..., 0..., ..<rotHalf]
-            newRight = rotated[0..., 0..., 0..., rotHalf...]
+            return concatenated([
+                rotated[0..., 0..., 0..., ..<rotHalf],
+                rotated[0..., 0..., 0..., rotHalf...],
+            ], axis: -1)
         }
-
-        let result = concatenated([newLeft, newRight], axis: -1)
-
-        // If there are extra dimensions beyond head, concatenate them back
-        if x.dim(-1) > dims {
-            let tail = x[0..., 0..., 0..., dims...]
-            return concatenated([result, tail], axis: -1)
-        }
-        return result
     }
 }
 
@@ -542,6 +535,7 @@ class Gemma4DecoderLayer: Module {
 class Gemma4ScaledLinear: Module {
     let weight: MLXArray
     let scalar: Float
+    private lazy var _scaledWeight: MLXArray = weight.transposed() * scalar
 
     init(inFeatures: Int, outFeatures: Int, scalar: Float) {
         self.weight = MLXArray.zeros([outFeatures, inFeatures])
@@ -550,6 +544,7 @@ class Gemma4ScaledLinear: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
+        // Single matmul with pre-scaled weight (avoids extra multiply per call)
         return matmul(x, weight.transposed()) * scalar
     }
 }
@@ -630,14 +625,16 @@ public class Gemma4TextModelInner: Module {
         super.init()
     }
 
+    // Pre-computed constants
+    private lazy var perLayerEmbedScale: Float = sqrt(Float(config.hiddenSizePerLayerInput))
+    private let perLayerInputScale: Float = 0.7071067811865476  // pow(2.0, -0.5)
+
     func getPerLayerInputs(_ inputIds: MLXArray) -> MLXArray {
         guard let embedPerLayer = embedTokensPerLayer else {
             fatalError("Per-layer embeddings not initialized")
         }
-        let scale = sqrt(Float(config.hiddenSizePerLayerInput))
         var result = embedPerLayer(inputIds)
-        result = result * scale
-        // Reshape to [B, L, numLayers, hiddenSizePerLayerInput]
+        result = result * perLayerEmbedScale
         let shape = inputIds.shape
         return result.reshaped(
             shape[0], shape.count > 1 ? shape[1] : 1,
@@ -663,7 +660,6 @@ public class Gemma4TextModelInner: Module {
             return perLayerProjection
         }
 
-        let perLayerInputScale: Float = pow(2.0, -0.5)
         return (perLayerProjection + pli) * perLayerInputScale
     }
 
@@ -671,16 +667,20 @@ public class Gemma4TextModelInner: Module {
         _ inputs: MLXArray, cache: [KVCache]? = nil
     ) -> MLXArray {
         var h = embedTokens(inputs)
-        h = h * MLXArray(embedScale, dtype: .bfloat16).asType(h.dtype)
+        h = h * embedScale
 
-        // Per-layer inputs
-        var perLayerInputs: MLXArray? = nil
+        // Per-layer inputs — pre-slice all layers upfront to avoid per-layer slicing overhead
+        var perLayerSlices: [MLXArray]? = nil
         if config.hiddenSizePerLayerInput > 0 {
-            perLayerInputs = getPerLayerInputs(inputs)
+            var perLayerInputs = getPerLayerInputs(inputs)
             perLayerInputs = projectPerLayerInputs(h, perLayerInputs: perLayerInputs)
+            // Pre-slice into per-layer arrays once
+            perLayerSlices = (0..<config.hiddenLayers).map { i in
+                perLayerInputs[0..., 0..., i, 0...]
+            }
         }
 
-        // Create masks
+        // Create masks once for the entire forward pass
         let globalMask: MLXFast.ScaledDotProductAttentionMaskMode
         let slidingMask: MLXFast.ScaledDotProductAttentionMaskMode
 
@@ -699,19 +699,10 @@ public class Gemma4TextModelInner: Module {
         }
 
         for (i, layer) in layers.enumerated() {
-            let cacheIdx = i < layerIdxToCacheIdx.count ? layerIdxToCacheIdx[i] : i
+            let cacheIdx = layerIdxToCacheIdx[i]
             let c: KVCache? = cache != nil && cacheIdx < cache!.count ? cache![cacheIdx] : nil
-            let isGlobal = layer.layerType == "full_attention"
-            let mask = isGlobal ? globalMask : slidingMask
-
-            let perLayerInput: MLXArray?
-            if let pli = perLayerInputs {
-                perLayerInput = pli[0..., 0..., i, 0...]
-            } else {
-                perLayerInput = nil
-            }
-
-            h = layer(h, mask: mask, cache: c, perLayerInput: perLayerInput)
+            let mask = layer.layerType == "full_attention" ? globalMask : slidingMask
+            h = layer(h, mask: mask, cache: c, perLayerInput: perLayerSlices?[i])
         }
 
         return norm(h)

@@ -71,7 +71,7 @@ public class Gemma4IntegrationTests: XCTestCase {
         let loadTime = Date().timeIntervalSince(start)
         print("Loaded in \(String(format: "%.1f", loadTime))s")
 
-        let prompt = "Hello, what model are you? Reply in one sentence."
+        let prompt = "Write a detailed explanation of how neural network attention mechanisms work, including the mathematical formulation of scaled dot-product attention."
         print("Prompt: \(prompt)")
 
         let info: GenerateCompletionInfo = try await container.perform {
@@ -80,7 +80,7 @@ public class Gemma4IntegrationTests: XCTestCase {
             let input = try await context.processor.prepare(input: .init(prompt: prompt))
             let stream = try MLXLMCommon.generate(
                 input: input,
-                parameters: .init(maxTokens: 64, temperature: 0.0, topP: 1.0),
+                parameters: .init(maxTokens: 128, temperature: 0.6, topP: 0.95),
                 context: context)
 
             var output = ""
