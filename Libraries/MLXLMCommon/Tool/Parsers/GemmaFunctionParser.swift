@@ -5,21 +5,28 @@ import Foundation
 /// Parser for Gemma format: call:name{key:value,k:<escape>str<escape>}
 /// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/function_gemma.py
 public struct GemmaFunctionParser: ToolCallParser, Sendable {
-    public let startTag: String? = "<start_function_call>"
-    public let endTag: String? = "<end_function_call>"
+    public let startTag: String?
+    public let endTag: String?
+    public let escapeMarker: String?
 
-    private let escapeMarker = "<escape>"
-
-    public init() {}
+    public init(startTag: String, endTag: String, escapeMarker: String) {
+        self.startTag = startTag
+        self.endTag = endTag
+        self.escapeMarker = escapeMarker
+    }
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
+        // Unwrap
+        guard let start = startTag, let end = endTag else { return nil }
+        guard let marker = escapeMarker else { return nil }
+
         // Strip tags if present
         var text = content
-        if let start = startTag {
-            text = text.replacingOccurrences(of: start, with: "")
+        if let startRange = text.range(of: start) {
+            text = String(text[startRange.upperBound...])
         }
-        if let end = endTag {
-            text = text.replacingOccurrences(of: end, with: "")
+        if let endRange = text.range(of: end) {
+            text = String(text[..<endRange.lowerBound])
         }
 
         // Pattern: call:(\w+)\{(.*?)\}
@@ -48,9 +55,9 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
             argsStr = String(argsStr[argsStr.index(after: colonIdx)...])
 
             // Handle escaped strings
-            if argsStr.hasPrefix(escapeMarker) {
-                argsStr = String(argsStr.dropFirst(escapeMarker.count))
-                guard let endEscape = argsStr.range(of: escapeMarker) else { break }
+            if argsStr.hasPrefix(marker) {
+                argsStr = String(argsStr.dropFirst(marker.count))
+                guard let endEscape = argsStr.range(of: marker) else { break }
                 let value = String(argsStr[..<endEscape.lowerBound])
                 arguments[key] = value
                 argsStr = String(argsStr[endEscape.upperBound...])
