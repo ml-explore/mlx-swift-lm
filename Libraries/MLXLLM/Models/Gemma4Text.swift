@@ -243,6 +243,13 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
 
 // MARK: - Logit Softcapping
 
+// Compiled logit softcapping — matches Python's @partial(mx.compile, shapeless=True)
+private func makeCompiledSoftcap(_ softcapValue: Float) -> @Sendable (MLXArray) -> MLXArray {
+    compile(shapeless: true) { (x: MLXArray) -> MLXArray in
+        MLX.tanh(x / softcapValue) * softcapValue
+    }
+}
+
 private func logitSoftcap(_ x: MLXArray, softcap: Float) -> MLXArray {
     return MLX.tanh(x / softcap) * softcap
 }
@@ -717,17 +724,25 @@ public class Gemma4TextModel: Module, LLMModel {
     public let config: Gemma4TextConfiguration
     public var vocabularySize: Int { config.vocabularySize }
 
+    // Pre-compiled softcap function — avoids graph retracing per token
+    private let compiledSoftcap: (@Sendable (MLXArray) -> MLXArray)?
+
     public init(_ config: Gemma4TextConfiguration) {
         self.config = config
         self.model = Gemma4TextModelInner(config)
+        if let softcap = config.finalLogitSoftcapping {
+            self.compiledSoftcap = makeCompiledSoftcap(softcap)
+        } else {
+            self.compiledSoftcap = nil
+        }
         super.init()
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var out = model(inputs, cache: cache)
         out = model.embedTokens.asLinear(out)
-        if let softcap = config.finalLogitSoftcapping {
-            out = logitSoftcap(out, softcap: softcap)
+        if let softcap = compiledSoftcap {
+            out = softcap(out)
         }
         return out
     }
