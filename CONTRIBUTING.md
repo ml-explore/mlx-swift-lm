@@ -19,6 +19,25 @@ possible.
  
    or run `pre-commit run --all-files` to check all files in the repo.
  
+## Running Tests
+
+Unit tests run without any special hardware and do not download models:
+
+```
+swift test
+```
+
+Integration tests verify end-to-end model loading and generation. They require macOS with Metal and download models from Hugging Face Hub on first run:
+
+```bash
+xcodebuild test \
+  -scheme mlx-swift-lm-Package \
+  -destination 'platform=macOS' \
+  -only-testing:MLXLMIntegrationTests
+```
+
+See [Libraries/IntegrationTestHelpers/README.md](Libraries/IntegrationTestHelpers/README.md) for more details.
+
 ## Issues
 
 We use GitHub issues to track public bugs. Please ensure your description is
