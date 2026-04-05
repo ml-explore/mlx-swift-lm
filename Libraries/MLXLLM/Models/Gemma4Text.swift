@@ -241,6 +241,18 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
     }
 }
 
+// MARK: - Dtype-safe GELU Approximate
+
+/// GELU approximate that preserves input dtype (avoids float32 upcast from Swift literals)
+private let compiledGeluApproxBF16: @Sendable (MLXArray) -> MLXArray = {
+    compile(shapeless: true) { (x: MLXArray) -> MLXArray in
+        let half = MLXArray(0.5, dtype: x.dtype)
+        let coeff = MLXArray(0.044715, dtype: x.dtype)
+        let sqrtTwoPi = MLXArray(sqrt(2.0 / Float.pi), dtype: x.dtype)
+        return half * x * (1 + tanh(sqrtTwoPi * (x + coeff * x ** 3)))
+    }
+}()
+
 // MARK: - Logit Softcapping
 
 // Compiled logit softcapping — matches Python's @partial(mx.compile, shapeless=True)
@@ -428,7 +440,7 @@ class Gemma4MLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        return downProj(geluApproximate(gateProj(x)) * upProj(x))
+        return downProj(compiledGeluApproxBF16(gateProj(x)) * upProj(x))
     }
 }
 
@@ -525,7 +537,7 @@ class Gemma4DecoderLayer: Module {
         {
             residual = h
             h = gate(h)
-            h = geluApproximate(h)
+            h = compiledGeluApproxBF16(h)
             h = h * pli
             h = proj(h)
             h = norm(h)
