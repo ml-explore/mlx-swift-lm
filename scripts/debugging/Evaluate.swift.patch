@@ -1,0 +1,17 @@
+--- mlx-swift-lm/Libraries/MLXLMCommon/Evaluate.swift
++++ mlx-swift-lm/Libraries/MLXLMCommon/Evaluate.swift
+@@ -53,6 +53,15 @@
+ 
+     // generate the stream of results
+     let stream = try generate(
+         prompt: Array(tokens), model: model, temp: temp,
+         topP: topP, repetitionPenalty: repetitionPenalty, repetitionContextSize: repetitionContextSize
+     )
++    
++    if let gemma4 = model.model as? MLXLLM.Gemma4Model {
++        let layer0 = gemma4.model.layers[0]
++        print("DEBUG WEIGHTS Layer 0:")
++        print("post1:", layer0.postFeedforwardLayerNorm1?.weight.max().item(Float.self) ?? "NIL")
++        print("pre2:", layer0.preFeedforwardLayerNorm2?.weight.max().item(Float.self) ?? "NIL")
++        print("post2:", layer0.postFeedforwardLayerNorm2?.weight.max().item(Float.self) ?? "NIL")
++    }
