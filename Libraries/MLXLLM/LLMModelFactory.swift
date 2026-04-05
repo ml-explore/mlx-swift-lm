@@ -185,16 +185,16 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<end_of_turn>"]
     )
 
-    static public let gemma4_E4B_it_lm_4bit = ModelConfiguration(
-        id: "mlx-community/gemma-4-E4B-it-lm-4bit",
+    static public let gemma4_e4b_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
-    static public let gemma4_E2B_it_lm_4bit = ModelConfiguration(
-        id: "mlx-community/gemma-4-E2B-it-lm-4bit",
+    static public let gemma4_e2b_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
     static public let qwen205b4bit = ModelConfiguration(
@@ -378,8 +378,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3n_E2B_it_lm_bf16,
             gemma3n_E4B_it_lm_4bit,
             gemma3n_E2B_it_lm_4bit,
-            gemma4_E4B_it_lm_4bit,
-            gemma4_E2B_it_lm_4bit,
+            gemma4_e4b_it_4bit,
+            gemma4_e2b_it_4bit,
             granite3_3_2b_4bit,
             granite_4_0_h_tiny_4bit_dwq,
             llama3_1_8B_4bit,
