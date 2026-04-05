@@ -140,10 +140,10 @@ class Gemma4RMSNormNoScale: Module, UnaryLayer {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // Use MLXFast.rmsNorm with a ones weight vector for the fast Metal kernel path
-        // Lazily create and cache the weight to match input dimensions
+        // Lazily create and cache the weight — MUST match input dtype to avoid AsType casts
         let dim = x.dim(-1)
-        if _onesWeight == nil || _onesWeight!.dim(0) != dim {
-            _onesWeight = MLXArray.ones([dim])
+        if _onesWeight == nil || _onesWeight!.dim(0) != dim || _onesWeight!.dtype != x.dtype {
+            _onesWeight = MLXArray.ones([dim], dtype: x.dtype)
         }
         return MLXFast.rmsNorm(x, weight: _onesWeight!, eps: self.eps)
     }
@@ -246,12 +246,14 @@ class Gemma4ProportionalRoPE: Module, OffsetLayer {
 // Compiled logit softcapping — matches Python's @partial(mx.compile, shapeless=True)
 private func makeCompiledSoftcap(_ softcapValue: Float) -> @Sendable (MLXArray) -> MLXArray {
     compile(shapeless: true) { (x: MLXArray) -> MLXArray in
-        MLX.tanh(x / softcapValue) * softcapValue
+        let sc = MLXArray(softcapValue, dtype: x.dtype)
+        return MLX.tanh(x / sc) * sc
     }
 }
 
 private func logitSoftcap(_ x: MLXArray, softcap: Float) -> MLXArray {
-    return MLX.tanh(x / softcap) * softcap
+    let sc = MLXArray(softcap, dtype: x.dtype)
+    return MLX.tanh(x / sc) * sc
 }
 
 // MARK: - Attention
@@ -551,7 +553,8 @@ class Gemma4ScaledLinear: Linear {
     }
 
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        return super.callAsFunction(x) * scalar
+        let out = super.callAsFunction(x)
+        return out * MLXArray(scalar, dtype: out.dtype)
     }
 }
 
@@ -640,7 +643,7 @@ public class Gemma4TextModelInner: Module {
             fatalError("Per-layer embeddings not initialized")
         }
         var result = embedPerLayer(inputIds)
-        result = result * perLayerEmbedScale
+        result = result * MLXArray(perLayerEmbedScale, dtype: result.dtype)
         let shape = inputIds.shape
         return result.reshaped(
             shape[0], shape.count > 1 ? shape[1] : 1,
@@ -666,14 +669,15 @@ public class Gemma4TextModelInner: Module {
             return perLayerProjection
         }
 
-        return (perLayerProjection + pli) * perLayerInputScale
+        let combined = perLayerProjection + pli
+        return combined * MLXArray(perLayerInputScale, dtype: combined.dtype)
     }
 
     func callAsFunction(
         _ inputs: MLXArray, cache: [KVCache]? = nil
     ) -> MLXArray {
         var h = embedTokens(inputs)
-        h = h * embedScale
+        h = h * MLXArray(embedScale, dtype: h.dtype)
 
         // Per-layer inputs — pre-slice all layers upfront to avoid per-layer slicing overhead
         var perLayerSlices: [MLXArray]? = nil

@@ -193,6 +193,52 @@ struct Gemma4Test {
         print(info.summary())
         print("Python baseline: 75.5 tok/s gen, peak 9003 MB active")
 
+        // ========== Graph node count ==========
+        print("\n=== Graph Node Count ===")
+        try await container.perform { (ctx: ModelContext) in
+            let model = ctx.model
+            guard let lm = model as? Gemma4TextModel else { return }
+            let cache = lm.newCache()
+
+            let p = MLXArray([2, 1596, 603, 476, 2195])[.newAxis, .ellipsis]
+            let _ = model(p, cache: cache)
+            MLX.eval(cache.flatMap { $0.innerState() })
+
+            var last = MLXArray([235265])[.newAxis, .ellipsis]
+            for _ in 0..<4 {
+                last = model(last, cache: cache).argMax(axis: -1)
+                MLX.eval(last)
+            }
+
+            // Check weight dtypes via parameters
+            let params = lm.parameters()
+            for (path, arr) in params.flattened().prefix(15) {
+                if path.contains("layers.0") || path.contains("embed_tokens") || path.contains("norm") {
+                    print("  \(path): dtype=\(arr.dtype), shape=\(arr.shape)")
+                }
+            }
+            // Check output dtype
+            let fwdOut = model(MLXArray([2])[.newAxis, .ellipsis], cache: nil)
+            print("  forward output dtype: \(fwdOut.dtype)")
+
+            // Build graph for 1 token WITHOUT eval
+            let logits = model(last, cache: cache)
+            let nextToken = logits.argMax(axis: -1)
+
+            // Export graph to DOT
+            let path = "/tmp/swift_gemma4_graph.dot"
+            exportGraphToDot(path: path, output: nextToken)
+            print("Exported graph to \(path)")
+
+            // Count nodes
+            if let dot = try? String(contentsOfFile: path) {
+                let labels = dot.components(separatedBy: "label =").count - 1
+                let edges = dot.components(separatedBy: "->").count - 1
+                print("Swift graph: \(labels) nodes, \(edges) edges")
+                print("Python graph: 1852 nodes, 5984 edges")
+            }
+        }
+
         // ========== Buffer donation test ==========
         runDonationTest()
 

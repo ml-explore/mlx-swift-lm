@@ -168,17 +168,23 @@ func runDonationTest() {
         return lastK
     }
 
-    // ========== Test 8: Module layer + KV Cache together ==========
-    print("\n--- Module + KV Cache combined ---")
+    // ========== Test 8: Module layer + KV Cache (with full warmup) ==========
+    print("\n--- Module + KV Cache (with warmup to steady state) ---")
     let cache2 = RotatingKVCache(maxSize: 512, keep: 0)
-    let _ = cache2.update(keys: kInit, values: vInit)
+    // Warm up cache to near-max size (500 entries) so it's in steady state
+    for i in 0..<500 {
+        let _ = cache2.update(
+            keys: MLXArray.ones([1, 2, 1, 256]),
+            values: MLXArray.ones([1, 2, 1, 256]))
+    }
     MLX.eval(cache2)
+    MLX.Memory.clearCache()
 
-    measureCache("10x (Module layer + cache update)") {
+    // Now measure at steady state (cache full, rotating in-place)
+    measureCache("10x (Module layer + cache update) STEADY STATE") {
         var h = x
         for layer in layers {
             h = layer(h)
-            // Simulate attention cache update
             let keys = h.reshaped(1, 2, 1, -1)[.ellipsis, ..<256]
             let vals = h.reshaped(1, 2, 1, -1)[.ellipsis, ..<256]
             let (_, _) = cache2.update(keys: keys, values: vals)
@@ -186,6 +192,31 @@ func runDonationTest() {
         return h
     }
 
+    // ========== Test 9: Full-scale 42-layer chain (matching Python test) ==========
+    print("\n--- 42-layer full-scale chain (non-quantized, no cache) ---")
+    let bigWeights = (0..<(42*3)).map { _ in MLXRandom.normal([2560, 2560]) }
+    let bigNorms = (0..<(42*4)).map { _ in MLXArray.ones([2560]) }
+    MLX.eval(bigWeights + bigNorms)
+    MLX.Memory.clearCache()
+
+    measureCache("42-layer chain (294 ops, 2560×2560 weights)") {
+        var h = x
+        for i in 0..<42 {
+            var residual = h
+            h = MLXFast.rmsNorm(h, weight: bigNorms[i*4], eps: 1e-6)
+            h = matmul(h, bigWeights[i*3].transposed())
+            h = MLXFast.rmsNorm(h, weight: bigNorms[i*4+1], eps: 1e-6)
+            h = residual + h
+            residual = h
+            h = MLXFast.rmsNorm(h, weight: bigNorms[i*4+2], eps: 1e-6)
+            h = matmul(h, bigWeights[i*3+1].transposed())
+            h = matmul(h, bigWeights[i*3+2].transposed())
+            h = MLXFast.rmsNorm(h, weight: bigNorms[i*4+3], eps: 1e-6)
+            h = residual + h
+        }
+        return h
+    }
+
     print("\n--- Summary ---")
-    print("If any test above shows >0 MB, that component is the source of cache churn.")
+    print("Python 42-layer chain: 1.7 MB. If Swift shows >2 MB, scale is the factor.")
 }
