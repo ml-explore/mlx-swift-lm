@@ -1378,9 +1378,15 @@ private final class Gemma4VisionPooler: Module {
         validCount: Int,
         outputLength: Int? = nil
     ) -> MLXArray {
+        let paddingPositions = patchPositions[0..., 0..., 0] .< 0
+        let pooledHiddenStates = MLX.where(
+            expandedDimensions(paddingPositions, axis: -1),
+            MLXArray(0.0, dtype: hiddenStates.dtype),
+            hiddenStates
+        )
         let length = outputLength ?? defaultOutputLength
-        if hiddenStates.dim(1) <= length {
-            return hiddenStates * MLXArray(rootHiddenSize, dtype: hiddenStates.dtype)
+        if pooledHiddenStates.dim(1) <= length {
+            return pooledHiddenStates * MLXArray(rootHiddenSize, dtype: pooledHiddenStates.dtype)
         }
 
         let actualPositions = patchPositions[0, ..<validCount]
@@ -1397,9 +1403,10 @@ private final class Gemma4VisionPooler: Module {
         let weights =
             gemma4OneHot(flatKernel, numClasses: pooledLength).asType(.float32)
             / Float(divisor)
-        let output = einsum("lL,bld->bLd", weights, hiddenStates[0..., ..<validCount, 0...])
-            .asType(hiddenStates.dtype)
-        return output * MLXArray(rootHiddenSize, dtype: hiddenStates.dtype)
+        let output = einsum(
+            "lL,bld->bLd", weights, pooledHiddenStates[0..., ..<validCount, 0...])
+            .asType(pooledHiddenStates.dtype)
+        return output * MLXArray(rootHiddenSize, dtype: pooledHiddenStates.dtype)
     }
 }
 
@@ -1523,17 +1530,17 @@ private final class Gemma4VisionModel: Module {
 
 private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
     @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
-    @ModuleInfo(key: "embedding_post_projection_norm") var embeddingPostProjectionNorm:
+    @ModuleInfo(key: "embedding_pre_projection_norm") var embeddingPreProjectionNorm:
         Gemma4RMSNormNoScale
 
     init(embeddingDim: Int, textHiddenSize: Int, eps: Float) {
         self._embeddingProjection.wrappedValue = Linear(embeddingDim, textHiddenSize, bias: false)
-        self._embeddingPostProjectionNorm.wrappedValue = Gemma4RMSNormNoScale(eps: eps)
+        self._embeddingPreProjectionNorm.wrappedValue = Gemma4RMSNormNoScale(eps: eps)
         super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        embeddingPostProjectionNorm(embeddingProjection(x))
+        embeddingProjection(embeddingPreProjectionNorm(x))
     }
 }
 
