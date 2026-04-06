@@ -401,7 +401,7 @@ private class Gemma4DecoderLayer: Module {
                 dimensions: config.hiddenSize, eps: config.rmsNormEps)
         }
 
-        self._layerScalar.wrappedValue = MLXArray.ones([1])
+        self._layerScalar.wrappedValue = MLXArray.ones([1], dtype: .float16)
 
         super.init()
     }
