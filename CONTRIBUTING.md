@@ -21,10 +21,11 @@ possible.
  
 ## Running Tests
 
-Unit tests run without any special hardware and do not download models:
+Unit tests run without any special hardware and do not download models.
+Note: `swift test` [does not work yet](https://github.com/ml-explore/mlx-swift?tab=readme-ov-file#xcodebuild) — use `xcodebuild` instead:
 
-```
-swift test
+```bash
+xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS'
 ```
 
 Integration tests verify end-to-end model loading and generation. They require
