@@ -557,19 +557,19 @@ public enum ToolCallTests {
         print("LFM2 Output:", result)
         print("LFM2 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("tokyo"),
-                    "Expected location containing 'Tokyo', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
     }
 
     // MARK: GLM4
@@ -590,19 +590,19 @@ public enum ToolCallTests {
         print("GLM4 Output:", result)
         print("GLM4 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("paris"),
-                    "Expected location containing 'Paris', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("paris"),
+            "Expected location containing 'Paris', got: \(location)"
+        )
     }
 
     // MARK: Mistral3
@@ -632,19 +632,19 @@ public enum ToolCallTests {
         print("Mistral3 Output:", result)
         print("Mistral3 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("tokyo"),
-                    "Expected location containing 'Tokyo', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
     }
 
     public static func mistral3MultiToolGeneration(container: LMModelContainer) async throws {
@@ -672,9 +672,10 @@ public enum ToolCallTests {
             )
         }
 
-        if toolCalls.count > 1 {
-            print("Successfully parsed \(toolCalls.count) tool calls from Mistral3")
-        }
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
     }
 
     // MARK: Nemotron
@@ -705,19 +706,19 @@ public enum ToolCallTests {
         print("Nemotron Output:", result)
         print("Nemotron Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("tokyo"),
-                    "Expected location containing 'Tokyo', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
     }
 
     public static func nemotronMultiToolGeneration(container: LMModelContainer) async throws {
@@ -746,9 +747,10 @@ public enum ToolCallTests {
             )
         }
 
-        if toolCalls.count > 1 {
-            print("Successfully parsed \(toolCalls.count) tool calls from Nemotron")
-        }
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
     }
 
     // MARK: Qwen3.5
@@ -778,19 +780,19 @@ public enum ToolCallTests {
         print("Qwen3.5 Output:", result)
         print("Qwen3.5 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("tokyo"),
-                    "Expected location containing 'Tokyo', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
     }
 
     public static func qwen35MultiToolGeneration(container: LMModelContainer) async throws {
@@ -819,9 +821,10 @@ public enum ToolCallTests {
             )
         }
 
-        if toolCalls.count > 1 {
-            print("Successfully parsed \(toolCalls.count) tool calls from Qwen3.5")
-        }
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
     }
 
     // MARK: Helpers
