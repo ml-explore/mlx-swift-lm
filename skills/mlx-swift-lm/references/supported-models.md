@@ -43,12 +43,15 @@ LLMRegistry.qwen3MoE_30b_a3b_4bit // mlx-community/Qwen3-30B-A3B-4bit
 ### Gemma
 
 ```swift
-// model_type: "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n"
+// model_type: "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n", "gemma4", "gemma4_text"
 LLMRegistry.gemma2bQuantized      // mlx-community/quantized-gemma-2b-it
 LLMRegistry.gemma_2_2b_it_4bit    // mlx-community/gemma-2-2b-it-4bit
 LLMRegistry.gemma_2_9b_it_4bit    // mlx-community/gemma-2-9b-it-4bit
 LLMRegistry.gemma3_1B_qat_4bit    // mlx-community/gemma-3-1b-it-qat-4bit
 LLMRegistry.gemma3n_E4B_it_lm_4bit // mlx-community/gemma-3n-E4B-it-lm-4bit
+// Gemma 4 text models (E2B, E4B) — use model_type "gemma4" or "gemma4_text"
+// mlx-community/gemma-4-e2b-it-4bit
+// mlx-community/gemma-4-e4b-it-4bit
 ```
 
 ### Phi

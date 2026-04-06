@@ -105,7 +105,7 @@ public struct Gemma4TextConfiguration: Codable {
             Array(repeating: "sliding_attention", count: slidingWindowPattern - 1)
             + ["full_attention"]
         let repeated = Array(
-            (0..<((hiddenLayers / pattern.count) + 1)).flatMap { _ in pattern }
+            (0 ..< ((hiddenLayers / pattern.count) + 1)).flatMap { _ in pattern }
         )
         return Array(repeated.prefix(hiddenLayers))
     }
@@ -282,7 +282,8 @@ final class ProportionalRoPE {
 
         if rotatedDims > 0 {
             // Python: exponents = arange(0, rotated_dims, 2) / dims
-            let exponents = MLXArray(stride(from: 0, to: Float(rotatedDims), by: 2))
+            let exponents =
+                MLXArray(stride(from: 0, to: Float(rotatedDims), by: 2))
                 .asType(.float32) / Float(dims)
             self.freqs = factor * pow(MLXArray(base), exponents)
         } else {
@@ -293,31 +294,33 @@ final class ProportionalRoPE {
     func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray {
         guard rotatedDims > 0, let freqs else { return x }
 
-        let head = x[.ellipsis, 0..<dims]
+        let head = x[.ellipsis, 0 ..< dims]
         let tail = dims < x.dim(-1) ? x[.ellipsis, dims...] : nil
 
         let half = dims / 2
-        let left = head[.ellipsis, 0..<half]
-        let right = head[.ellipsis, half..<dims]
+        let left = head[.ellipsis, 0 ..< half]
+        let right = head[.ellipsis, half ..< dims]
 
         let rotHalf = rotatedDims / 2
-        let leftRot = left[.ellipsis, 0..<rotHalf]
-        let rightRot = right[.ellipsis, 0..<rotHalf]
+        let leftRot = left[.ellipsis, 0 ..< rotHalf]
+        let rightRot = right[.ellipsis, 0 ..< rotHalf]
         let toRotate = concatenated([leftRot, rightRot], axis: -1)
 
         let rotated = MLXFast.RoPE(
             toRotate, dimensions: rotatedDims, traditional: traditional,
             base: nil, scale: 1.0, offset: offset, freqs: freqs)
 
-        let newLeft = concatenated([
-            rotated[.ellipsis, 0..<rotHalf],
-            left[.ellipsis, rotHalf...],
-        ], axis: -1)
+        let newLeft = concatenated(
+            [
+                rotated[.ellipsis, 0 ..< rotHalf],
+                left[.ellipsis, rotHalf...],
+            ], axis: -1)
 
-        let newRight = concatenated([
-            rotated[.ellipsis, rotHalf...],
-            right[.ellipsis, rotHalf...],
-        ], axis: -1)
+        let newRight = concatenated(
+            [
+                rotated[.ellipsis, rotHalf...],
+                right[.ellipsis, rotHalf...],
+            ], axis: -1)
 
         let newHead = concatenated([newLeft, newRight], axis: -1)
 
@@ -682,25 +685,25 @@ public class Gemma4Model: Module {
             )
         }
 
-        self._layers.wrappedValue = (0..<config.hiddenLayers).map { layerIdx in
+        self._layers.wrappedValue = (0 ..< config.hiddenLayers).map { layerIdx in
             Gemma4DecoderLayer(config, layerIdx: layerIdx)
         }
 
         self.norm = Gemma4RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         // Build KV sharing map (Python lines 458-466)
-        var prevKVs = Array(0..<config.hiddenLayers)
+        var prevKVs = Array(0 ..< config.hiddenLayers)
         if config.numKvSharedLayers > 0 {
             let n = config.hiddenLayers
             let m = n - config.numKvSharedLayers
             let layerTypes = config.resolvedLayerTypes
             // Find last non-shared layer of each type
             var kvsByType = [String: Int]()
-            for i in 0..<m {
+            for i in 0 ..< m {
                 kvsByType[layerTypes[i]] = i
             }
             // Shared layers map to the non-shared layer of the same type
-            for j in m..<n {
+            for j in m ..< n {
                 if let mapped = kvsByType[layerTypes[j]] {
                     prevKVs[j] = mapped
                 }
@@ -763,8 +766,10 @@ public class Gemma4Model: Module {
     ) -> MLXArray {
         // Embed and scale
         let inputEmbeddings = embedTokens(inputs)
-        var h = inputEmbeddings * MLXArray(embedScale, dtype: .bfloat16).asType(
-            inputEmbeddings.dtype)
+        var h =
+            inputEmbeddings
+            * MLXArray(embedScale, dtype: .bfloat16).asType(
+                inputEmbeddings.dtype)
 
         // Compute per-layer signals if PLE is available
         var perLayerSignals: [MLXArray?]
@@ -772,7 +777,7 @@ public class Gemma4Model: Module {
             let tokenPLE = getPerLayerInputs(inputs)
             let combined = projectPerLayerInputs(h, perLayerInputs: tokenPLE)
             // Split into per-layer slices: [B, L, num_layers, dim] → array of [B, L, dim]
-            perLayerSignals = (0..<config.hiddenLayers).map { i in
+            perLayerSignals = (0 ..< config.hiddenLayers).map { i in
                 combined[.ellipsis, i, 0...]
             }
         } else {
@@ -796,7 +801,7 @@ public class Gemma4Model: Module {
         var intermediates: [(kvs: (MLXArray, MLXArray)?, offset: Int?)] =
             Array(repeating: (nil, nil), count: config.hiddenLayers)
 
-        for idx in 0..<layers.count {
+        for idx in 0 ..< layers.count {
             let layer = layers[idx]
             let c = layerCache[idx]
             let mask = masks[idx]
@@ -899,7 +904,7 @@ public class Gemma4TextModel: Module, LLMModel {
         ]
         for key in keysToCheck {
             if let tensor = processedWeights[key], tensor.dim(0) > expectedVocab {
-                processedWeights[key] = tensor[0..<expectedVocab]
+                processedWeights[key] = tensor[0 ..< expectedVocab]
             }
         }
 
@@ -911,7 +916,7 @@ public class Gemma4TextModel: Module, LLMModel {
                 "model.embed_tokens_per_layer.biases",
             ] {
                 if let tensor = processedWeights[key], tensor.dim(0) > perLayerVocab {
-                    processedWeights[key] = tensor[0..<perLayerVocab]
+                    processedWeights[key] = tensor[0 ..< perLayerVocab]
                 }
             }
         }
@@ -934,7 +939,7 @@ public class Gemma4TextModel: Module, LLMModel {
     /// (via maybeQuantizeKVCache), each layer uses its own cache independently.
     public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
         var caches = [KVCache]()
-        for i in 0..<config.hiddenLayers {
+        for i in 0 ..< config.hiddenLayers {
             if config.isGlobalLayer(i) {
                 let cache = StandardKVCache()
                 cache.step = 1024
@@ -953,7 +958,7 @@ public class Gemma4TextModel: Module, LLMModel {
     ) throws -> PrepareResult {
         let promptTokens = input.text.tokens
         guard promptTokens.shape[0] > 0 else {
-            let emptyToken = MLXArray(Int32(0))[0..<0]
+            let emptyToken = MLXArray(Int32(0))[0 ..< 0]
             return .tokens(.init(tokens: emptyToken))
         }
         return .tokens(input.text)
