@@ -55,15 +55,15 @@ public enum ModelFactoryError: LocalizedError {
 
 /// Context of types that work together to provide a ``LanguageModel``.
 ///
-/// A ``ModelContext`` is created by ``ModelFactory/load(from:configuration:progressHandler:)``.
+/// A ``ModelContext`` is created by ``ModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This contains the following:
 ///
-/// - ``ModelConfiguration`` -- identifier for the model
-/// - ``LanguageModel`` -- the model itself, see ``generate(input:cache:parameters:context:)``
-/// - ``UserInputProcessor`` -- can convert ``UserInput`` into ``LMInput``
+/// - ``ModelConfiguration``: identifier for the model
+/// - ``LanguageModel``: the model itself, see ``generate(input:cache:parameters:context:wiredMemoryTicket:)``
+/// - ``UserInputProcessor``: can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///
-/// See also ``ModelFactory/loadContainer(from:configuration:progressHandler:)`` and
+/// See also ``ModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
 /// ``ModelContainer``.
 public struct ModelContext {
     public var configuration: ModelConfiguration
@@ -85,10 +85,10 @@ public struct ModelContext {
 /// Protocol for code that can load models.
 ///
 /// ## See Also
-/// - ``loadModel(from:id:progressHandler:)``
-/// - ``loadModel(from:)-ModelContext``
-/// - ``loadModelContainer(from:id:progressHandler:)``
-/// - ``loadModelContainer(from:)-ModelContainer``
+/// - ``loadModel(from:using:id:revision:useLatest:progressHandler:)``
+/// - ``loadModel(from:using:)``
+/// - ``loadModelContainer(from:using:id:revision:useLatest:progressHandler:)``
+/// - ``loadModelContainer(from:using:)``
 public protocol ModelFactory: Sendable {
 
     var modelRegistry: AbstractModelRegistry { get }
@@ -130,8 +130,8 @@ extension ModelFactory {
     /// and then loads the model from local files.
     ///
     /// ## See Also
-    /// - ``loadModel(from:configuration:useLatest:progressHandler:)``
-    /// - ``loadModelContainer(from:configuration:useLatest:progressHandler:)``
+    /// - ``loadModel(from:using:configuration:useLatest:progressHandler:)``
+    /// - ``loadModelContainer(from:using:configuration:useLatest:progressHandler:)``
     public func load(
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
@@ -424,19 +424,19 @@ public protocol ModelFactoryTrampoline {
 
 /// Registry of ``ModelFactory`` trampolines.
 ///
-/// This allows ``loadModel(from:id:progressHandler:)`` to use any ``ModelFactory`` instances
+/// This allows ``loadModel(from:using:id:revision:useLatest:progressHandler:)`` to use any ``ModelFactory`` instances
 /// available but be defined in the `LLMCommon` layer.  This is not typically used directly -- it is
-/// called via ``loadModel(from:id:progressHandler:)``:
+/// called via ``loadModel(from:using:id:revision:useLatest:progressHandler:)``:
 ///
 /// ```swift
-/// let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+/// let model = try await loadModel(from: downloader, using: tokenizerLoader, id: "mlx-community/Qwen3-4B-4bit")
 /// ```
 ///
 /// ## See Also
-/// - ``loadModel(from:id:progressHandler:)``
-/// - ``loadModel(from:)-ModelContext``
-/// - ``loadModelContainer(from:id:progressHandler:)``
-/// - ``loadModelContainer(from:)-ModelContainer``
+/// - ``loadModel(from:using:id:revision:useLatest:progressHandler:)``
+/// - ``loadModel(from:using:)``
+/// - ``loadModelContainer(from:using:id:revision:useLatest:progressHandler:)``
+/// - ``loadModelContainer(from:using:)``
 final public class ModelFactoryRegistry: @unchecked Sendable {
     public static let shared = ModelFactoryRegistry()
 

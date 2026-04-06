@@ -166,7 +166,7 @@ public protocol LanguageModel: Module {
     /// Models may implement this simplified interface if they do not produce any ``LMOutput/State``
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
 
-    /// create a new array of ``KVCache`` -- automatic implementation if self
+    /// create a new array of ``KVCache``: automatic implementation if self
     /// implements ``KVCacheDimensionProvider``
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 

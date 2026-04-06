@@ -6,7 +6,7 @@ import MLXNN
 
 /// Load model weights.
 ///
-/// This is typically called via ``ModelFactory/load(from:configuration:progressHandler:)``.
+/// This is typically called via ``ModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This function loads all `safetensor` files in the given `modelDirectory`,
 /// calls ``LanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
 /// applies optional quantization, and

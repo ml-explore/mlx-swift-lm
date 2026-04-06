@@ -99,6 +99,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - model: the ``ModelContainer``
+    ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -131,6 +132,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - model: the ``ModelContext``
+    ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -172,8 +174,8 @@ public final class ChatSession {
     ///   - model: the ``ModelContainer``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty ``[KVCache]`` previously obtained from ``saveCache(to:)`` or
-    ///     ``currentCache()``, matching the given model
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
+    ///     matching the given model
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -214,8 +216,8 @@ public final class ChatSession {
     ///   - model: the ``ModelContext``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty ``[KVCache]`` previously obtained from ``saveCache(to:)`` or
-    ///     ``currentCache()``, matching the given model
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
+    ///     matching the given model
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -245,6 +247,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: the model's response
@@ -267,6 +270,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - image: optional image (for use with VLMs)
     ///   - video: optional video (for use with VLMs)
     /// - Returns: the model's response
@@ -288,6 +292,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of string chunks from the model
@@ -306,6 +311,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of `Generation` from the model

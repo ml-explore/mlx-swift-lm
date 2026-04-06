@@ -49,4 +49,3 @@ More advanced APIs are available for those that need them, see <doc:using-model>
 - ``Starcoder2Model``
 - ``MiMoModel``
 - ``GLM4Model``
-- ``AceReason``
