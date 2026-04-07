@@ -24,11 +24,11 @@ import MLX
 /// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
-    /// Le modèle léger utilisé pour proposer des tokens candidats.
+    /// The lightweight model used to propose candidate tokens.
     public let draftModel: ModelContainer
 
-    /// Nombre de tokens proposés par le modèle draft à chaque cycle de vérification.
-    /// La valeur par défaut de 5 offre un bon équilibre vitesse/précision.
+    /// Number of tokens proposed by the draft model per verification cycle.
+    /// The default value of 5 offers a good balance between speed and accuracy.
     public let numDraftTokens: Int
 
     public init(draftModel: ModelContainer, numDraftTokens: Int = 5) {
@@ -65,7 +65,7 @@ public final class ChatSession {
 
     enum Cache {
         case empty
-        case kvcache([KVCache])
+        case kvcache([KVCache], draftKVCache: [KVCache]?)
         case history([Chat.Message])
     }
 
@@ -78,7 +78,7 @@ public final class ChatSession {
     public var tools: [ToolSpec]?
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
 
-    /// Configuration du décodage spéculatif, nil si désactivé.
+    /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
     /// Initialize the `ChatSession`.
@@ -253,7 +253,7 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil))
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -298,7 +298,7 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil))
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -450,18 +450,20 @@ public final class ChatSession {
                     }.consume()
 
                     var kvCache: [KVCache]
+                    var draftKVCache: [KVCache]?
                     switch cache {
                     case .empty:
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache)
+                        cache = .kvcache(kvCache, draftKVCache: nil)
 
-                    case .kvcache(let array):
+                    case .kvcache(let array, let storedDraftCache):
                         kvCache = array
+                        draftKVCache = storedDraftCache
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache)
+                        cache = .kvcache(kvCache, draftKVCache: nil)
                         messages.append(contentsOf: history)
                     }
 
@@ -476,15 +478,22 @@ public final class ChatSession {
                         let input = try await processor.prepare(input: userInput)
                         messages.removeAll()
 
-                        // Choisir l'itérateur selon la configuration du décodage spéculatif.
+                        // Select the token iterator based on speculative decoding configuration.
                         let (genStream, genTask): (AsyncStream<Generation>, Task<Void, Never>)
 
                         if let speculativeDecoding {
-                            // Extraire le modèle draft hors de son container (même pattern que le modèle principal).
+                            // Extract the draft model from its container (same pattern as the main model).
                             let draftModel = await speculativeDecoding.draftModel.perform { context in
                                 SendableBox(context.model)
                             }.consume()
-                            let draftCache = draftModel.newCache(parameters: generateParameters)
+
+                            // Allocate the draft KV cache once and reuse it across turns,
+                            // exactly like the main model's KV cache.
+                            if draftKVCache == nil {
+                                draftKVCache = draftModel.newCache(parameters: generateParameters)
+                                cache = .kvcache(kvCache, draftKVCache: draftKVCache)
+                            }
+                            let draftCache = draftKVCache!
 
                             let iterator = try SpeculativeTokenIterator(
                                 input: input,
@@ -503,7 +512,7 @@ public final class ChatSession {
                                 iterator: iterator
                             )
                         } else {
-                            // Chemin standard sans décodage spéculatif.
+                            // Standard path with no speculative decoding.
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
                                 parameters: generateParameters)
@@ -604,7 +613,7 @@ public final class ChatSession {
     {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache):
+            case .kvcache(let cache, _):
                 return try await body(cache)
             default:
                 return try await body(nil)
@@ -623,7 +632,7 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache):
+            case .kvcache(let cache, _):
                 try savePromptCache(url: url, cache: cache)
             default:
                 throw ChatSessionError.noCacheAvailable
