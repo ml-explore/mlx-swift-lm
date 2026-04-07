@@ -4,6 +4,39 @@ import CoreGraphics
 import Foundation
 import MLX
 
+/// Configuration for speculative decoding in a `ChatSession`.
+///
+/// Speculative decoding uses a small draft model to propose candidate tokens
+/// that the main model then verifies in a single forward pass, providing a
+/// ~2–3× generation speedup with no quality degradation.
+///
+/// Both models must share the same tokenizer vocabulary.
+///
+/// Example usage:
+/// ```swift
+/// let main  = try await LLMModelFactory.shared.loadContainer(configuration: mainConfig)
+/// let draft = try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+///
+/// let session = ChatSession(
+///     main,
+///     speculativeDecoding: SpeculativeDecodingConfig(draftModel: draft, numDraftTokens: 5)
+/// )
+/// ```
+public struct SpeculativeDecodingConfig: Sendable {
+
+    /// Le modèle léger utilisé pour proposer des tokens candidats.
+    public let draftModel: ModelContainer
+
+    /// Nombre de tokens proposés par le modèle draft à chaque cycle de vérification.
+    /// La valeur par défaut de 5 offre un bon équilibre vitesse/précision.
+    public let numDraftTokens: Int
+
+    public init(draftModel: ModelContainer, numDraftTokens: Int = 5) {
+        self.draftModel = draftModel
+        self.numDraftTokens = numDraftTokens
+    }
+}
+
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///
 /// For example:
@@ -13,6 +46,16 @@ import MLX
 /// let session = ChatSession(modelContainer)
 /// print(try await session.respond(to: "What are two things to see in San Francisco?"))
 /// print(try await session.respond(to: "How about a great place to eat?"))
+/// ```
+///
+/// To enable speculative decoding for faster generation, pass a `SpeculativeDecodingConfig`:
+///
+/// ```swift
+/// let draft = try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+/// let session = ChatSession(
+///     modelContainer,
+///     speculativeDecoding: SpeculativeDecodingConfig(draftModel: draft)
+/// )
 /// ```
 ///
 /// - Note: `ChatSession` is not thread-safe. Each session should be used from a single
@@ -35,11 +78,15 @@ public final class ChatSession {
     public var tools: [ToolSpec]?
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
 
+    /// Configuration du décodage spéculatif, nil si désactivé.
+    public let speculativeDecoding: SpeculativeDecodingConfig?
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
     ///   - model: the ``ModelContainer``
     ///   - instructions: optional system instructions for the session
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -48,6 +95,7 @@ public final class ChatSession {
     public init(
         _ model: ModelContainer,
         instructions: String? = nil,
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -62,6 +110,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Initialize the `ChatSession`.
@@ -69,6 +118,7 @@ public final class ChatSession {
     /// - Parameters:
     ///   - model: the ``ModelContext``
     ///   - instructions: optional system instructions for the session
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -77,6 +127,7 @@ public final class ChatSession {
     public init(
         _ model: ModelContext,
         instructions: String? = nil,
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -91,6 +142,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Initialize the `ChatSession` with an existing message history.
@@ -101,6 +153,7 @@ public final class ChatSession {
     ///   - model: the ``ModelContainer``
     ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -110,6 +163,7 @@ public final class ChatSession {
         _ model: ModelContainer,
         instructions: String? = nil,
         history: consuming [Chat.Message],
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -124,6 +178,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Initialize the `ChatSession` with an existing message history.
@@ -134,6 +189,7 @@ public final class ChatSession {
     ///   - model: the ``ModelContext``
     ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -143,6 +199,7 @@ public final class ChatSession {
         _ model: ModelContext,
         instructions: String? = nil,
         history: [Chat.Message],
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -157,6 +214,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Initialize the `ChatSession` with a pre-built KV cache.
@@ -176,6 +234,7 @@ public final class ChatSession {
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -185,6 +244,7 @@ public final class ChatSession {
         _ model: ModelContainer,
         instructions: String? = nil,
         cache: consuming [KVCache],
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -199,6 +259,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Initialize the `ChatSession` with a pre-built KV cache.
@@ -218,6 +279,7 @@ public final class ChatSession {
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
+    ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
@@ -227,6 +289,7 @@ public final class ChatSession {
         _ model: ModelContext,
         instructions: String? = nil,
         cache: consuming [KVCache],
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
@@ -241,6 +304,7 @@ public final class ChatSession {
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Produces a response to a prompt.
@@ -353,7 +417,7 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, generateParameters
+                additionalContext, cache, generateParameters, speculativeDecoding
             ] in
             do {
                 try await cache.update { cache in
@@ -412,21 +476,49 @@ public final class ChatSession {
                         let input = try await processor.prepare(input: userInput)
                         messages.removeAll()
 
-                        // generate output
-                        let iterator = try TokenIterator(
-                            input: input, model: model, cache: kvCache,
-                            parameters: generateParameters)
+                        // Choisir l'itérateur selon la configuration du décodage spéculatif.
+                        let (genStream, genTask): (AsyncStream<Generation>, Task<Void, Never>)
 
-                        let (stream, task) = MLXLMCommon.generateTask(
-                            promptTokenCount: input.text.tokens.size,
-                            modelConfiguration: modelConfiguration,
-                            tokenizer: tokenizer,
-                            iterator: iterator
-                        )
+                        if let speculativeDecoding {
+                            // Extraire le modèle draft hors de son container (même pattern que le modèle principal).
+                            let draftModel = await speculativeDecoding.draftModel.perform { context in
+                                SendableBox(context.model)
+                            }.consume()
+                            let draftCache = draftModel.newCache(parameters: generateParameters)
+
+                            let iterator = try SpeculativeTokenIterator(
+                                input: input,
+                                mainModel: model,
+                                draftModel: draftModel,
+                                mainCache: kvCache,
+                                draftCache: draftCache,
+                                parameters: generateParameters,
+                                numDraftTokens: speculativeDecoding.numDraftTokens
+                            )
+
+                            (genStream, genTask) = MLXLMCommon.generateTask(
+                                promptTokenCount: input.text.tokens.size,
+                                modelConfiguration: modelConfiguration,
+                                tokenizer: tokenizer,
+                                iterator: iterator
+                            )
+                        } else {
+                            // Chemin standard sans décodage spéculatif.
+                            let iterator = try TokenIterator(
+                                input: input, model: model, cache: kvCache,
+                                parameters: generateParameters)
+
+                            (genStream, genTask) = MLXLMCommon.generateTask(
+                                promptTokenCount: input.text.tokens.size,
+                                modelConfiguration: modelConfiguration,
+                                tokenizer: tokenizer,
+                                iterator: iterator
+                            )
+                        }
 
                         var pendingToolCalls: [ToolCall] = []
 
-                        for await item in stream {
+                        for await item in genStream {
                             // collect tool calls for dispatch; if no
                             // toolDispatch the caller handles them via
                             // the transform (streamDetails path)
@@ -442,7 +534,7 @@ public final class ChatSession {
                         // wait for the task to complete -- this is important in
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
-                        await task.value
+                        await genTask.value
 
                         // dispatch all tool calls from this generation pass
                         if let toolDispatch, !pendingToolCalls.isEmpty,
