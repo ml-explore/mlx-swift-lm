@@ -508,6 +508,7 @@ struct ToolTests {
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
+        #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -551,6 +552,11 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
+
+        // GPT-OSS models
+        #expect(ToolCallFormat.infer(from: "gpt_oss") == .gptOSS)
+        #expect(ToolCallFormat.infer(from: "GPT_OSS") == .gptOSS)
+        #expect(ToolCallFormat.infer(from: "gptoss") == .gptOSS)
 
         // Unknown models should return nil (use default JSON format)
         #expect(ToolCallFormat.infer(from: "llama") == nil)
@@ -679,5 +685,233 @@ struct ToolTests {
         let second = processor.toolCalls[1]
         #expect(second.function.name == "get_time")
         #expect(second.function.arguments["timezone"] == .string("UTC"))
+    }
+
+    // MARK: - GPT-OSS Harmony Format Tests
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser")
+    func testGPTOSSHarmonyParser() throws {
+        let parser = GPTOSSToolCallParser()
+        let content =
+            "<|channel|>commentary to=get_weather<|message|>{\"location\": \"Tokyo\"}<|call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - Multi Line")
+    func testGPTOSSHarmonyParserMultiLine() throws {
+        let parser = GPTOSSToolCallParser()
+        let content = """
+            <|channel|>commentary to=functions.get_weather
+            <|message|>
+            {"location": "San Francisco"}
+            <|call|>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("San Francisco"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - Recipient in Role Header")
+    func testGPTOSSHarmonyParserRoleHeaderRecipient() throws {
+        let parser = GPTOSSToolCallParser()
+        let content =
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"location\": \"Rome\"}<|call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Rome"))
+    }
+
+    @Test("Test GPT-OSS Format via ToolCallProcessor")
+    func testGPTOSSFormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .gptOSS)
+        let chunks: [String] = [
+            "<|chan", "nel|>com", "mentary to=search", "<|", "message|>",
+            "{\"query\":", " \"swift\"}", "<|ca", "ll|>",
+        ]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
+    @Test("Test GPT-OSS Format Processor Multiple Tool Calls with EOS")
+    func testGPTOSSFormatProcessorMultipleToolCalls() throws {
+        let processor = ToolCallProcessor(format: .gptOSS)
+        let content = """
+            <|channel|>commentary to=get_weather<|message|>{"location": "Paris"}<|call|>
+            <|channel|>commentary to=get_time<|message|>{"timezone": "UTC"}<|call|>
+            """
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 2)
+
+        let first = processor.toolCalls[0]
+        #expect(first.function.name == "get_weather")
+        #expect(first.function.arguments["location"] == .string("Paris"))
+
+        let second = processor.toolCalls[1]
+        #expect(second.function.name == "get_time")
+        #expect(second.function.arguments["timezone"] == .string("UTC"))
+    }
+
+    @Test("Test GPT-OSS Format Processor with Commentary Preamble")
+    func testGPTOSSFormatProcessorWithCommentaryPreamble() throws {
+        let processor = ToolCallProcessor(format: .gptOSS)
+        let content = """
+            <|channel|>commentary<|message|>Let me check.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{"location":"Milan"}<|call|>
+            """
+
+        let passthrough = processor.processChunk(content)
+
+        #expect(passthrough?.contains("Let me check.") == true)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Milan"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - With Constrain Tag")
+    func testGPTOSSHarmonyParserWithConstrainTag() throws {
+        let parser = GPTOSSToolCallParser()
+        let content =
+            "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\": \"Seattle\"}<|call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Seattle"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - With Markdown Fences")
+    func testGPTOSSHarmonyParserWithMarkdownFences() throws {
+        let parser = GPTOSSToolCallParser()
+        let content = """
+            <|channel|>commentary to=get_weather
+            <|message|>
+            ```json
+            {"location": "Boston"}
+            ```
+            <|call|>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Boston"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - With Nested Arguments Object")
+    func testGPTOSSHarmonyParserWithNestedArguments() throws {
+        let parser = GPTOSSToolCallParser()
+        let content = """
+            <|channel|>commentary to=get_weather
+            <|message|>
+            {"arguments": {"location": "Austin"}}
+            <|call|>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Austin"))
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - Invalid Channel")
+    func testGPTOSSHarmonyParserInvalidChannel() throws {
+        let parser = GPTOSSToolCallParser()
+        // Tools should only be parsed from the 'commentary' channel, not 'analysis' or 'final'
+        let content =
+            "<|channel|>analysis to=get_weather<|message|>{\"location\": \"Tokyo\"}<|call|>"
+
+        let toolCall = parser.parse(content: content, tools: nil)
+        #expect(toolCall == nil)
+    }
+
+    @Test("Test GPT-OSS Harmony Tool Call Parser - Invalid JSON")
+    func testGPTOSSHarmonyParserInvalidJSON() throws {
+        let parser = GPTOSSToolCallParser()
+        let content =
+            "<|channel|>commentary to=get_weather<|message|>{\"location\":<|call|>"
+
+        let toolCall = parser.parse(content: content, tools: nil)
+        #expect(toolCall == nil)
+    }
+
+    @Test("Test GPT-OSS Format Processor - Split Assistant+Channel Header Parsed at EOS")
+    func testGPTOSSFormatProcessorSplitAssistantChannelHeaderAtEOS() throws {
+        let processor = ToolCallProcessor(format: .gptOSS)
+        let chunks: [String] = [
+            "<|start|>",
+            "assistant",
+            "<|channel|>",
+            "comment",
+            "ary",
+            " to",
+            "=",
+            "functions",
+            ".web",
+            "_search",
+            " ",
+            "<|constrain|>",
+            "json",
+            "<|message|>",
+            "{\"query\":\"latest news Dubai\"}",
+        ]
+
+        for chunk in chunks {
+            let passthrough = processor.processChunk(chunk)
+            #expect(passthrough == nil)
+        }
+
+        #expect(processor.toolCalls.isEmpty)
+        processor.processEOS()
+        #expect(processor.toolCalls.count == 1)
+
+        let call = try #require(processor.toolCalls.first)
+        #expect(call.function.name == "web_search")
+        #expect(call.function.arguments["query"] == .string("latest news Dubai"))
+    }
+
+    @Test("Test GPT-OSS Harmony Parser EOS - Multiple Calls Separated by Channel Boundary")
+    func testGPTOSSHarmonyParserEOSMultipleCallsChannelBoundary() throws {
+        let parser = GPTOSSToolCallParser()
+        // Two tool calls separated only by <|channel|>, no <|call|> end tokens
+        let content =
+            "<|channel|>commentary to=get_weather<|message|>{\"location\":\"Paris\"}<|channel|>commentary to=get_time<|message|>{\"timezone\":\"UTC\"}"
+
+        let calls = parser.parseEOS(content, tools: nil)
+
+        #expect(calls.count == 2)
+        #expect(calls[0].function.name == "get_weather")
+        #expect(calls[0].function.arguments["location"] == .string("Paris"))
+        #expect(calls[1].function.name == "get_time")
+        #expect(calls[1].function.arguments["timezone"] == .string("UTC"))
+    }
+
+    @Test("Test GPT-OSS Harmony Parser EOS - Role Header without <|call|>")
+    func testGPTOSSHarmonyParserEOSRoleHeaderWithoutCallToken() throws {
+        let parser = GPTOSSToolCallParser()
+        let content =
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"location\":\"Naples\"}"
+
+        let calls = parser.parseEOS(content, tools: nil)
+
+        #expect(calls.count == 1)
+        #expect(calls[0].function.name == "get_weather")
+        #expect(calls[0].function.arguments["location"] == .string("Naples"))
     }
 }
