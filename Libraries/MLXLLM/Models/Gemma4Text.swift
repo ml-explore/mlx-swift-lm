@@ -24,7 +24,7 @@ import MLXNN
 
 // MARK: - Configuration
 
-public struct Gemma4TextConfiguration: Codable {
+public struct Gemma4TextConfiguration: Codable, Sendable {
     let modelType: String
     let hiddenSize: Int
     let hiddenLayers: Int
@@ -33,7 +33,7 @@ public struct Gemma4TextConfiguration: Codable {
     let headDim: Int
     let globalHeadDim: Int
     let rmsNormEps: Float
-    let vocabularySize: Int
+    var vocabularySize: Int
     let kvHeads: Int
     let numGlobalKeyValueHeads: Int?
     let slidingWindow: Int
@@ -331,10 +331,51 @@ final class ProportionalRoPE {
     }
 }
 
+// MARK: - Shared KV State
+
+/// Represents KV state for sharing between layers, supporting both regular and quantized caches.
+/// When caches are quantized, shared layers can still reuse KV from reference layers.
+enum Gemma4SharedKVState {
+    case regular(keys: MLXArray, values: MLXArray)
+    case quantized(
+        keys: (MLXArray, MLXArray, MLXArray?),
+        values: (MLXArray, MLXArray, MLXArray?),
+        groupSize: Int,
+        bits: Int,
+        mode: QuantizationMode
+    )
+
+    var sequenceLength: Int {
+        switch self {
+        case .regular(let keys, _):
+            return keys.dim(2)
+        case .quantized(let keys, _, _, _, _):
+            return keys.0.dim(-2)
+        }
+    }
+}
+
+/// Adjusts attention mask to match the actual key sequence length when using shared KV.
+func gemma4AdjustAttentionMask(
+    _ mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    keyLength: Int
+) -> MLXFast.ScaledDotProductAttentionMaskMode {
+    switch mask {
+    case .array(let maskArray):
+        guard let maskLength = maskArray.shape.last, maskLength > keyLength else {
+            return mask
+        }
+        let start = maskLength - keyLength
+        return .array(maskArray[.ellipsis, start...])
+    case .arrays, .causal, .none:
+        return mask
+    }
+}
+
 // MARK: - Attention
 
 /// Matches Python `class Attention` exactly.
-/// Returns `(output, (keys, values), offset)` to support KV sharing.
+/// Returns `(output, sharedKV, offset)` to support KV sharing with both regular and quantized caches.
 class Gemma4Attention: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
@@ -427,79 +468,101 @@ class Gemma4Attention: Module {
     }
 
     /// Returns `(output, sharedKV, offset)`.
-    /// `sharedKV` is non-nil only for non-shared layers with regular (non-quantized) caches,
-    /// enabling KV sharing. When caches are quantized, each layer operates independently.
+    /// `sharedKV` supports both regular and quantized caches for KV sharing.
     func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil,
-        sharedKV: (MLXArray, MLXArray)? = nil,
+        sharedKV: Gemma4SharedKVState? = nil,
         offset inputOffset: Int? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray)?, Int) {
+    ) -> (MLXArray, Gemma4SharedKVState?, Int) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = queryProj(x).reshaped(B, L, nHeads, headDim)
         queries = queryNorm(queries)
 
-        if let (sharedK, sharedV) = sharedKV {
-            // KV-shared layer: reuse keys/values from earlier layer (no cache update)
-            let offset = inputOffset ?? 0
+        let currentOffset: Int
+        let kvState: Gemma4SharedKVState?
 
-            queries = queries.transposed(0, 2, 1, 3)
-            queries = applyRope(queries, offset: offset)
-
-            let output = MLXFast.scaledDotProductAttention(
-                queries: queries, keys: sharedK, values: sharedV,
-                scale: scale, mask: mask
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(B, L, -1)
-
-            return (outputProj(output), (sharedK, sharedV), offset)
-        }
-
-        // Compute own KV
-        var keys = keyProj(x).reshaped(B, L, nKVHeads, headDim)
-        var values: MLXArray
-        if useKEqV {
-            values = keys
+        if let sharedKV {
+            // KV-shared layer: reuse keys/values from earlier layer
+            currentOffset = inputOffset ?? 0
+            kvState = sharedKV
         } else {
-            values = valueProj!(x).reshaped(B, L, nKVHeads, headDim)
-        }
+            // Compute own KV
+            currentOffset = cache?.offset ?? 0
+            var keys = keyProj(x).reshaped(B, L, nKVHeads, headDim)
+            var values: MLXArray =
+                if useKEqV {
+                    keys
+                } else {
+                    valueProj!(x).reshaped(B, L, nKVHeads, headDim)
+                }
 
-        let offset = cache?.offset ?? 0
+            keys = keyNorm(keys)
+            keys = keys.transposed(0, 2, 1, 3)
+            keys = applyRope(keys, offset: currentOffset)
 
-        keys = keyNorm(keys)
-        keys = keys.transposed(0, 2, 1, 3)
-        keys = applyRope(keys, offset: offset)
+            values = valueNorm(values)
+            values = values.transposed(0, 2, 1, 3)
 
-        values = valueNorm(values)
-        values = values.transposed(0, 2, 1, 3)
-
-        queries = queries.transposed(0, 2, 1, 3)
-        queries = applyRope(queries, offset: offset)
-
-        // Use attentionWithCacheUpdate which handles both regular and quantized caches
-        let attnOutput = attentionWithCacheUpdate(
-            queries: queries, keys: keys, values: values,
-            cache: cache, scale: scale, mask: mask
-        )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
-
-        // For KV sharing: only return shareable KV from regular (non-quantized) caches
-        var returnedKV: (MLXArray, MLXArray)? = nil
-        if let cache, !(cache is QuantizedKVCacheProtocol) {
-            // After attentionWithCacheUpdate, the cache contains the full K/V history.
-            // Re-read from cache state for sharing with downstream layers.
-            // For KVCacheSimple/RotatingKVCache, the state arrays are [keys, values].
-            let state = cache.state
-            if state.count >= 2 {
-                returnedKV = (state[0], state[1])
+            if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+                // Quantized cache: update and capture quantized state for sharing
+                let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
+                    keys: keys, values: values)
+                kvState = .quantized(
+                    keys: quantizedKeys,
+                    values: quantizedValues,
+                    groupSize: quantizedCache.groupSize,
+                    bits: quantizedCache.bits,
+                    mode: quantizedCache.mode
+                )
+            } else {
+                // Regular cache
+                if let cache {
+                    (keys, values) = cache.update(keys: keys, values: values)
+                }
+                kvState = .regular(keys: keys, values: values)
             }
         }
 
-        return (outputProj(attnOutput), returnedKV, offset)
+        queries = queries.transposed(0, 2, 1, 3)
+        queries = applyRope(queries, offset: currentOffset)
+
+        guard let kvState else {
+            fatalError("Gemma4 attention expected a KV state")
+        }
+
+        let localMask = gemma4AdjustAttentionMask(mask, keyLength: kvState.sequenceLength)
+
+        let output: MLXArray =
+            switch kvState {
+            case .regular(let keys, let values):
+                MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    scale: scale,
+                    mask: localMask
+                )
+            case .quantized(let keys, let values, let groupSize, let bits, let mode):
+                quantizedScaledDotProductAttention(
+                    queries: queries,
+                    quantizedKeys: keys,
+                    quantizedValues: values,
+                    scale: scale,
+                    mask: localMask,
+                    groupSize: groupSize,
+                    bits: bits,
+                    mode: mode
+                )
+            }
+
+        return (
+            outputProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1)),
+            kvState,
+            currentOffset
+        )
     }
 }
 
@@ -597,13 +660,13 @@ class Gemma4DecoderLayer: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
-        sharedKV: (MLXArray, MLXArray)? = nil,
+        sharedKV: Gemma4SharedKVState? = nil,
         offset: Int? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray)?, Int) {
+    ) -> (MLXArray, Gemma4SharedKVState?, Int) {
         // Attention block
         var residual = x
         var h = inputLayerNorm(x)
-        let (attnOut, kvs, newOffset) = selfAttn(
+        let (attnOut, kvState, newOffset) = selfAttn(
             h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset)
         h = postAttentionLayerNorm(attnOut)
         h = residual + h
@@ -630,13 +693,13 @@ class Gemma4DecoderLayer: Module {
         // Scale entire block output
         h = h * layer_scalar
 
-        return (h, kvs, newOffset)
+        return (h, kvState, newOffset)
     }
 }
 
 // MARK: - Gemma4TextModel (inner model)
 
-public class Gemma4Model: Module {
+public class Gemma4TextModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [Gemma4DecoderLayer]
     @ModuleInfo var norm: Gemma4RMSNorm
@@ -797,8 +860,8 @@ public class Gemma4Model: Module {
         let masks = makeMasks(h: h, cache: layerCache)
 
         // Apply each layer with KV sharing
-        // Python: intermediates stores (kvs, offset) per layer
-        var intermediates: [(kvs: (MLXArray, MLXArray)?, offset: Int?)] =
+        // Python: intermediates stores (kvState, offset) per layer
+        var intermediates: [(kvState: Gemma4SharedKVState?, offset: Int?)] =
             Array(repeating: (nil, nil), count: config.hiddenLayers)
 
         for idx in 0 ..< layers.count {
@@ -809,15 +872,15 @@ public class Gemma4Model: Module {
             let perLayerInput = perLayerSignals[idx]
 
             // Get shared KV from the layer this one maps to
-            let sharedKV = intermediates[prevIdx].kvs
+            let sharedKV = intermediates[prevIdx].kvState
             let sharedOffset = intermediates[prevIdx].offset
 
-            let (output, kvs, offset) = layer(
+            let (output, kvState, offset) = layer(
                 h, mask: mask, cache: c, perLayerInput: perLayerInput,
                 sharedKV: sharedKV, offset: sharedOffset)
 
             h = output
-            intermediates[idx] = (kvs, offset)
+            intermediates[idx] = (kvState, offset)
         }
 
         return norm(h)
@@ -848,17 +911,28 @@ public class Gemma4Model: Module {
 
 // MARK: - Top-level Model
 
-public class Gemma4TextModel: Module, LLMModel {
+public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
 
-    @ModuleInfo public var model: Gemma4Model
+    @ModuleInfo public var model: Gemma4TextModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma4TextConfiguration
     public var vocabularySize: Int { config.vocabularySize }
 
+    public var kvHeads: [Int] {
+        (0 ..< config.hiddenLayers).map { i in
+            if config.isGlobalLayer(i), let globalKVHeads = config.numGlobalKeyValueHeads,
+                config.attentionKEqV
+            {
+                return globalKVHeads
+            }
+            return config.kvHeads
+        }
+    }
+
     public init(_ config: Gemma4TextConfiguration) {
         self.config = config
-        self.model = Gemma4Model(config)
+        self.model = Gemma4TextModelInner(config)
         self._lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabularySize, bias: false)
         super.init()
     }
@@ -894,6 +968,37 @@ public class Gemma4TextModel: Module, LLMModel {
                 && !key.contains("output_max")
                 && !key.contains("output_min")
         }
+
+        // MoE weight remapping: split fused gate_up_proj into gate_proj + up_proj,
+        // and remap down_proj into switch_glu path (needed for 26B model)
+        var moeRemapped = [String: MLXArray]()
+        for (key, value) in processedWeights {
+            if key.hasSuffix(".experts.down_proj") {
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.down_proj",
+                        with: ".experts.switch_glu.down_proj.weight"
+                    )
+                ] = value
+            } else if key.hasSuffix(".experts.gate_up_proj") {
+                let mid = value.dim(-2) / 2
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.gate_proj.weight"
+                    )
+                ] = value[.ellipsis, ..<mid, 0...]
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.up_proj.weight"
+                    )
+                ] = value[.ellipsis, mid..., 0...]
+            } else {
+                moeRemapped[key] = value
+            }
+        }
+        processedWeights = moeRemapped
 
         // Vocab truncation
         let expectedVocab = config.vocabularySize
