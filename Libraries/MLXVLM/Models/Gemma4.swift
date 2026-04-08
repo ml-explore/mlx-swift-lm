@@ -1139,6 +1139,30 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
                 newKey = "language_model.model.\(rest)"
             }
 
+            if newKey.hasSuffix(".experts.down_proj") {
+                newKey = newKey.replacingOccurrences(
+                    of: ".experts.down_proj",
+                    with: ".experts.switch_glu.down_proj.weight"
+                )
+            }
+
+            if newKey.hasSuffix(".experts.gate_up_proj") {
+                let mid = value.dim(-2) / 2
+                sanitized[
+                    newKey.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.gate_proj.weight"
+                    )
+                ] = value[.ellipsis, ..<mid, 0...]
+                sanitized[
+                    newKey.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.up_proj.weight"
+                    )
+                ] = value[.ellipsis, mid..., 0...]
+                continue
+            }
+
             sanitized[newKey] = value
         }
 
@@ -1708,8 +1732,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                 nil,
                 cache: convertedCache,
                 inputsEmbeds: inputsEmbeds,
-                perLayerInputs: perLayerInputs,
-                mask: .causal
+                perLayerInputs: perLayerInputs
             )
             return .logits(result)
         } else {
