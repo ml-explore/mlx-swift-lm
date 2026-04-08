@@ -49,10 +49,10 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
     public var vocabularySize: Int { languageModel.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
 
-    fileprivate let languageModel: Gemma4TextModel
+    @ModuleInfo(key: "language_model") fileprivate var languageModel: Gemma4TextModel
 
     public init(_ config: Gemma4Configuration) {
-        self.languageModel = Gemma4TextModel(config.textConfig)
+        self._languageModel.wrappedValue = Gemma4TextModel(config.textConfig)
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
