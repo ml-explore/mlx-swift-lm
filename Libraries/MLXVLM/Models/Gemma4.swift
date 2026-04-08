@@ -1499,8 +1499,9 @@ private final class Gemma4VisionPooler: Module {
             gemma4OneHot(flatKernel, numClasses: pooledLength).asType(.float32)
             / Float(divisor)
         let output = einsum(
-            "lL,bld->bLd", weights, pooledHiddenStates[0..., ..<validCount, 0...])
-            .asType(pooledHiddenStates.dtype)
+            "lL,bld->bLd", weights, pooledHiddenStates[0..., ..<validCount, 0...]
+        )
+        .asType(pooledHiddenStates.dtype)
         return output * MLXArray(rootHiddenSize, dtype: pooledHiddenStates.dtype)
     }
 }
