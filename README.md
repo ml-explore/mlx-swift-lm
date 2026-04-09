@@ -17,6 +17,17 @@ For some example applications and tools that use MLX Swift LM, check out [MLX Sw
 
 ## Usage
 
+This package integrates with a variety of tokenizer and downloader packages through protocol conformance. Users can pick from three ways to integrate with these packages, which offer different tradeoffs between freedom and convenience:
+
+- Maximum freedom
+  - Copy the protocol conformance code (~100 lines) from the [integration packages](#Tokenizer and Downloader Integrations)
+- Freedom and convenience
+  - Use the [integration packages](#Tokenizer and Downloader Integrations) for your preferred tokenizer and downloader packages
+- Convenience
+  - Use the macros for integration with Swift Transformers and Swift Hugging Face
+
+### Installation
+
 Add the core package to your `Package.swift`:
 
 ```swift
@@ -44,19 +55,20 @@ And add the libraries to your target:
 
 ### Tokenizer and Downloader Integrations
 
-MLX Swift LM focuses on model implementations. Tokenization and model downloading are handled by separate packages. Adapters make it easy to use your preferred downloader and tokenizer packages.
-
-| Downloader package                                           | Adapter                                                      |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [huggingface/swift-huggingface](https://github.com/huggingface/swift-huggingface) | [DePasqualeOrg/swift-huggingface-mlx](https://github.com/DePasqualeOrg/swift-huggingface-mlx) |
-| [DePasqualeOrg/swift-hf-api](https://github.com/DePasqualeOrg/swift-hf-api) | [DePasqualeOrg/swift-hf-api-mlx](https://github.com/DePasqualeOrg/swift-hf-api-mlx) |
+Tokenization and model downloading are handled by separate packages. Adapters make it easy to use your preferred tokenizer and downloader packages. For instructions on how to use them, see the readmes in the respective packages.
 
 | Tokenizer package                                            | Adapter                                                      |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | [DePasqualeOrg/swift-tokenizers](https://github.com/DePasqualeOrg/swift-tokenizers) | [DePasqualeOrg/swift-tokenizers-mlx](https://github.com/DePasqualeOrg/swift-tokenizers-mlx) |
 | [huggingface/swift-transformers](https://github.com/huggingface/swift-transformers) | [DePasqualeOrg/swift-transformers-mlx](https://github.com/DePasqualeOrg/swift-transformers-mlx) |
 
-> **Note:** The adapters are offered for convenience and are not required. You can also use tokenizer and downloader packages directly by setting up the required protocol conformance for MLX Swift LM. See the integration packages for examples of how to do this.
+| Downloader package                                           | Adapter                                                      |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [huggingface/swift-huggingface](https://github.com/huggingface/swift-huggingface) | [DePasqualeOrg/swift-huggingface-mlx](https://github.com/DePasqualeOrg/swift-huggingface-mlx) |
+| [DePasqualeOrg/swift-hf-api](https://github.com/DePasqualeOrg/swift-hf-api) | [DePasqualeOrg/swift-hf-api-mlx](https://github.com/DePasqualeOrg/swift-hf-api-mlx) |
+
+
+> **Note:** The adapters are offered for convenience and are not required. You can also use tokenizer and downloader packages directly by setting up the required protocol conformance for MLX Swift LM, just like the code in the integration packages. Alternatively, you can use the macros provided by this package to integrate with Swift Transformers and Swift Hugging Face.
 
 ### Quick Start
 
