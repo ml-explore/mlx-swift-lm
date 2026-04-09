@@ -85,8 +85,10 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
                 continue
             }
 
-            // Remap language_model keys
-            if k.hasPrefix("language_model") {
+            // Remap language_model keys — only add model. if not already present.
+            // E2B/E4B weights have language_model.model.* already;
+            // some converted weights may have language_model.* without the model. sublevel.
+            if k.hasPrefix("language_model.") && !k.hasPrefix("language_model.model.") {
                 k = k.replacingOccurrences(
                     of: "language_model.", with: "language_model.model.", options: .anchored)
             }
@@ -94,7 +96,85 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
             sanitized[k] = value
         }
 
-        return languageModel.sanitize(weights: sanitized)
+        // Filter rotary_emb and quantization stats
+        sanitized = sanitized.filter { key, _ in
+            !key.contains("self_attn.rotary_emb")
+                && !key.contains("input_max")
+                && !key.contains("input_min")
+                && !key.contains("output_max")
+                && !key.contains("output_min")
+        }
+
+        // MoE weight remapping (26B model)
+        var moeRemapped = [String: MLXArray]()
+        for (key, value) in sanitized {
+            if key.hasSuffix(".experts.down_proj") {
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.down_proj",
+                        with: ".experts.switch_glu.down_proj.weight"
+                    )
+                ] = value
+            } else if key.hasSuffix(".experts.gate_up_proj") {
+                let mid = value.dim(-2) / 2
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.gate_proj.weight"
+                    )
+                ] = value[.ellipsis, ..<mid, 0...]
+                moeRemapped[
+                    key.replacingOccurrences(
+                        of: ".experts.gate_up_proj",
+                        with: ".experts.switch_glu.up_proj.weight"
+                    )
+                ] = value[.ellipsis, mid..., 0...]
+            } else {
+                moeRemapped[key] = value
+            }
+        }
+        sanitized = moeRemapped
+
+        // Vocab truncation
+        let expectedVocab = languageModel.config.vocabularySize
+        for key in [
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.embed_tokens.scales",
+            "language_model.model.embed_tokens.biases",
+            "language_model.lm_head.weight",
+            "language_model.lm_head.scales",
+            "language_model.lm_head.biases",
+        ] {
+            if let tensor = sanitized[key], tensor.dim(0) > expectedVocab {
+                sanitized[key] = tensor[0 ..< expectedVocab]
+            }
+        }
+
+        // Per-layer embedding vocab truncation
+        if let perLayerVocab = languageModel.config.vocabSizePerLayerInput {
+            for key in [
+                "language_model.model.embed_tokens_per_layer.weight",
+                "language_model.model.embed_tokens_per_layer.scales",
+                "language_model.model.embed_tokens_per_layer.biases",
+            ] {
+                if let tensor = sanitized[key], tensor.dim(0) > perLayerVocab {
+                    sanitized[key] = tensor[0 ..< perLayerVocab]
+                }
+            }
+        }
+
+        // Tie word embeddings
+        if languageModel.config.tieWordEmbeddings
+            && sanitized["language_model.lm_head.weight"] == nil
+        {
+            ["weight", "scales", "biases"].forEach { key in
+                if let w = sanitized["language_model.model.embed_tokens.\(key)"] {
+                    sanitized["language_model.lm_head.\(key)"] = w
+                }
+            }
+        }
+
+        return sanitized
     }
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
