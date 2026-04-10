@@ -35,7 +35,7 @@ public struct Llama3ToolCallParser: ToolCallParser, Sendable {
 
             let function = ToolCall.Function(
                 name: llamaFunc.name,
-                arguments: args.mapValues { $0.anyValue }
+                arguments: args
             )
             return ToolCall(function: function)
         }
@@ -65,7 +65,7 @@ public struct Llama3ToolCallParser: ToolCallParser, Sendable {
                 let args = llamaFunc.parameters ?? llamaFunc.arguments ?? [:]
                 let function = ToolCall.Function(
                     name: llamaFunc.name,
-                    arguments: args.mapValues { $0.anyValue }
+                    arguments: args
                 )
                 return ToolCall(function: function)
             }
@@ -76,7 +76,7 @@ public struct Llama3ToolCallParser: ToolCallParser, Sendable {
             let args = llamaFunc.parameters ?? llamaFunc.arguments ?? [:]
             let function = ToolCall.Function(
                 name: llamaFunc.name,
-                arguments: args.mapValues { $0.anyValue }
+                arguments: args
             )
             return [ToolCall(function: function)]
         }
