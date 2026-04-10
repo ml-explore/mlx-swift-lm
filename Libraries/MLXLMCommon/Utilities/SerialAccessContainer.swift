@@ -41,7 +41,7 @@ private actor AsyncMutex {
 /// Unlike an `actor`, this will guarantee exclusive access for the duration of the async
 /// call.  This is important for things like `ModelContainer` that have to perform async
 /// work but also need to prevent other callers for using _any_ of the internal state.
-final class SerialAccessContainer<T>: @unchecked Sendable {
+package final class SerialAccessContainer<T>: @unchecked Sendable {
 
     private var value: T
     private let lock = AsyncMutex()
@@ -101,14 +101,14 @@ final class SerialAccessContainer<T>: @unchecked Sendable {
 ///     }.consume()
 /// }
 /// ```
-final class SendableBox<T>: @unchecked Sendable {
+package final class SendableBox<T>: @unchecked Sendable {
     private var value: T?
 
-    init(_ value: consuming T) {
+    package init(_ value: consuming T) {
         self.value = consume value
     }
 
-    consuming func consume() -> T {
+    package consuming func consume() -> T {
         guard let value else {
             fatalError("value already consumed")
         }

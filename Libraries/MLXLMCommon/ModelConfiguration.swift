@@ -2,7 +2,15 @@
 
 import Foundation
 
-/// Configuration for a given model name with overrides for prompts and tokens.
+/// Configuration for a given model:  at least an org/name identifier or a directory with the model files.
+///
+/// Optionally callers can provide some default values and overrides for:
+///
+/// - a default prompt
+/// - EOS tokens / strings
+/// - tool calling formats
+///
+/// Some of these are specific to LLMs and VLMs -- embedding models will ignore those properties.
 ///
 /// See e.g. `MLXLM.ModelRegistry` for an example of use.
 public struct ModelConfiguration: Sendable {
@@ -21,13 +29,21 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    /// The backing storage for the model's location.
     public enum Identifier: Sendable {
+        /// A Hugging Face Hub repository identifier (e.g., "BAAI/bge-small-en-v1.5").
         case id(String, revision: String = "main")
+        /// A file system URL pointing to a local model directory.
         case directory(URL)
     }
 
+    /// The model's identifier (ID or Directory).
     public var id: Identifier
 
+    /// A display-friendly name for the model.
+    ///
+    /// For Hub models, this returns the repo ID. For local directories,
+    /// it returns a path-based name (e.g., "ParentDir/ModelDir").
     public var name: String {
         switch id {
         case .id(let id, _):

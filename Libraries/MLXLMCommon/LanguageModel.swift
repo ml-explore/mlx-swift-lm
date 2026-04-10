@@ -4,6 +4,31 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Abstract form of a model that processes language.
+public protocol BaseLanguageModel: Module {
+    /// Optionally preprocess the weights and modify / remove values as needed.
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
+
+    /// Optionally preprocess the weights with access to safetensor metadata.
+    ///
+    /// The default implementation forwards to ``sanitize(weights:)``.
+    /// Models can override this to inspect metadata (e.g. check `metadata["format"] == "mlx"`)
+    /// and skip or customize sanitization accordingly.
+    func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
+}
+
+extension BaseLanguageModel {
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        weights
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+        MLXArray]
+    {
+        sanitize(weights: weights)
+    }
+}
+
 /// Time/Height/Width struct to represent information about input images.
 public struct THW: Sendable {
 
@@ -150,7 +175,7 @@ public enum PrepareResult {
 /// - calls ``prepare(_:cache:windowSize:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
-public protocol LanguageModel: Module {
+public protocol LanguageModel: BaseLanguageModel {
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
@@ -169,16 +194,6 @@ public protocol LanguageModel: Module {
     /// create a new array of ``KVCache``: automatic implementation if self
     /// implements ``KVCacheDimensionProvider``
     func newCache(parameters: GenerateParameters?) -> [KVCache]
-
-    /// Optionally preprocess the weights and modify / remove values as needed.
-    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
-
-    /// Optionally preprocess the weights with access to safetensor metadata.
-    ///
-    /// The default implementation forwards to ``sanitize(weights:)``.
-    /// Models can override this to inspect metadata (e.g. check `metadata["format"] == "mlx"`)
-    /// and skip or customize sanitization accordingly.
-    func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
 }
 
 extension LanguageModel {
@@ -191,18 +206,6 @@ extension LanguageModel {
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         fatalError("callAsFunction(inputs:cache:) not implemented for \(Self.self)")
-    }
-}
-
-extension LanguageModel {
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        weights
-    }
-
-    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
-        MLXArray]
-    {
-        sanitize(weights: weights)
     }
 }
 

@@ -409,11 +409,11 @@ public func benchmarkVLMLoading(
 public func benchmarkEmbeddingLoading(
     from downloader: any Downloader,
     using tokenizerLoader: any TokenizerLoader,
-    configuration: MLXEmbedders.ModelConfiguration = .init(
+    configuration: ModelConfiguration = .init(
         id: "mlx-community/Qwen3-Embedding-0.6B-8bit"),
     runs: Int = BenchmarkDefaults.loadingRuns
 ) async throws -> BenchmarkStats {
-    _ = try await MLXEmbedders.loadModelContainer(
+    _ = try await EmbedderModelFactory.shared.loadContainer(
         from: downloader, using: tokenizerLoader, configuration: configuration
     ) { _ in }
     Memory.clearCache()
@@ -421,7 +421,7 @@ public func benchmarkEmbeddingLoading(
     var times: [Double] = []
     for i in 1 ... runs {
         let start = CFAbsoluteTimeGetCurrent()
-        _ = try await MLXEmbedders.loadModelContainer(
+        _ = try await EmbedderModelFactory.shared.loadContainer(
             from: downloader, using: tokenizerLoader, configuration: configuration
         ) { _ in }
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000

@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 
 public enum VLMError: LocalizedError, Equatable {
     case imageRequired
@@ -79,7 +80,7 @@ private func create<C: Codable, P>(
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
-    public static let shared: ModelTypeRegistry = .init(creators: [
+    public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
         "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
         "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
         "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
@@ -287,10 +288,13 @@ public typealias ModelRegistry = VLMRegistry
 /// let modelContainer = try await VLMModelFactory.shared.loadContainer(
 ///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
-public final class VLMModelFactory: ModelFactory {
+public final class VLMModelFactory: GenericModelFactory {
+
+    public typealias ContextType = ModelContext
+    public typealias ContainerType = ModelContainer
 
     public init(
-        typeRegistry: ModelTypeRegistry, processorRegistry: ProcessorTypeRegistry,
+        typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
         modelRegistry: AbstractModelRegistry
     ) {
         self.typeRegistry = typeRegistry
@@ -304,7 +308,7 @@ public final class VLMModelFactory: ModelFactory {
         modelRegistry: VLMRegistry.shared)
 
     /// registry of model type, e.g. configuration value `paligemma` -> configuration and init methods
-    public let typeRegistry: ModelTypeRegistry
+    public let typeRegistry: ModelTypeRegistry<LanguageModel>
 
     /// registry of input processor type, e.g. configuration value `PaliGemmaProcessor` -> configuration and init methods
     public let processorRegistry: ProcessorTypeRegistry
