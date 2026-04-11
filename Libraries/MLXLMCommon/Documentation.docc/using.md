@@ -119,8 +119,7 @@ So which adapter do you chose?
 - `huggingface/swift-transformers`
     - this is the package that mlx-swift-lm originally integrated with
 - `DePasqualeOrg/swift-tokenizers`
-    - Swift Tokenizers is a streamlined and optimized fork of Swift Transformers that focuses solely on tokenizer functionality.
-    - Provides a 2x performance improvement over plain Swift Transformers (see implementation repository for details)
+    - Swift Tokenizers is a streamlined and optimized fork of Swift Transformers that focuses solely on tokenizer functionality, with an optional Rust backend for even better performance.
 
 You need a downloader package if you want to download weights at runtime -- this isn't
 required if you have some other way to get weights into a local directory.
