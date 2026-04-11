@@ -16,14 +16,22 @@ See <doc:evaluation>.
 Using LLMs and VLMs is as easy as this:
 
 ```swift
+import MLXLMCommon
+    
+let downloader: any Downloader = ...
+let tokenizerLoader: any TokenizerLoader = ...
+
 let model = try await loadModel(
-    using: TokenizersLoader(),
+    from: downloader,
+    using: tokenizerLoader,
     id: "mlx-community/Qwen3-4B-4bit"
 )
 let session = ChatSession(model)
-print(try await session.respond(to: "What are two things to see in San Francisco?")
-print(try await session.respond(to: "How about a great place to eat?")
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
 ```
+
+See [MLXLMCommon](MLXLMCommon) for information about `Downloader` and `TokenizerLoader`.
 
 More advanced APIs are available for those that need them, see <doc:using-model>.
 

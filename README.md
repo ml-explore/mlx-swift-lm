@@ -1,9 +1,16 @@
 # MLX Swift LM
 
+
 > [!IMPORTANT]
 > The `main` branch is a _new_ major version number: 3.x.  In order
 > to decouple from tokenizer and downloader packages some breaking
 > changes were introduced. See [Breaking Changes](#breaking-changes) for more information.
+>
+> Additionally [upgrading documentation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/upgrade)) has detailed instructions on upgrading.
+
+> [!NOTE]
+> https://github.com/ml-explore/mlx-swift-examples/pull/468 is a branch in mlx-swift-examples
+> that uses the new 3.x APIs.
 
 MLX Swift LM is a Swift package to build tools and applications with large language models (LLMs) and vision language models (VLMs) in [MLX Swift](https://github.com/ml-explore/mlx-swift).
 
@@ -14,6 +21,16 @@ Some key features include:
 - Many model architectures for both LLMs and VLMs.
 
 For some example applications and tools that use MLX Swift LM, check out [MLX Swift Examples](https://github.com/ml-explore/mlx-swift-examples).
+
+## Documentation
+
+Developers can use these examples in their own programs -- just import the swift package!
+
+- [Porting and implementing models](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/porting)
+- [MLXLLMCommon](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon): Common API for LLM and VLM
+- [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
+- [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
+- [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
 
 ## Usage
 
@@ -64,8 +81,8 @@ Tokenization and model downloading are handled by separate packages. Adapters ma
 
 | Downloader package                                           | Adapter                                                      |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [huggingface/swift-huggingface](https://github.com/huggingface/swift-huggingface) | [DePasqualeOrg/swift-huggingface-mlx](https://github.com/DePasqualeOrg/swift-huggingface-mlx) |
 | [DePasqualeOrg/swift-hf-api](https://github.com/DePasqualeOrg/swift-hf-api) | [DePasqualeOrg/swift-hf-api-mlx](https://github.com/DePasqualeOrg/swift-hf-api-mlx) |
+| [huggingface/swift-huggingface](https://github.com/huggingface/swift-huggingface) | [DePasqualeOrg/swift-huggingface-mlx](https://github.com/DePasqualeOrg/swift-huggingface-mlx) |
 
 
 > **Note:** The adapters are offered for convenience and are not required. You can also use tokenizer and downloader packages directly by setting up the required protocol conformance for MLX Swift LM, just like the code in the integration packages. Alternatively, you can use the macros provided by this package to integrate with Swift Transformers and Swift Hugging Face.
@@ -264,16 +281,6 @@ let text = tokenizer.decode(tokens: ids)
 // After (3.0)
 let text = tokenizer.decode(tokenIds: ids)
 ```
-
-## Documentation
-
-Developers can use these examples in their own programs -- just import the swift package!
-
-- [Porting and implementing models](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/porting)
-- [MLXLLMCommon](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon): Common API for LLM and VLM
-- [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
-- [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
-- [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
 
 ## Breaking Changes
 

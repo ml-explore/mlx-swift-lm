@@ -9,6 +9,11 @@ There are a number of ways to implement new models in MLX in Swift:
 
 This document talks primarily about the latter.
 
+## Developing mlx-swift-lm
+
+Please see <doc:developing> for more information about how to
+do development _in_ mlx-swift-lm.
+
 ## Porting Models from MLX in Python
 
 Let's consider a concrete example, [gemma.py](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma.py). For reference, here is the current port [Gemma.swift](https://github.com/ml-explore/mlx-swift-lm/blob/main/Libraries/MLXLLM/Models/Gemma.swift).
