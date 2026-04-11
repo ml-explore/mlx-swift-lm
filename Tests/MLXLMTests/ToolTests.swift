@@ -113,6 +113,317 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("swift programming"))
     }
 
+    @Test("Test JSON Format via ToolCallProcessor - Bare JSON Fallback")
+    func testJSONFormatProcessorBareJSONFallback() throws {
+        let processor = ToolCallProcessor(format: .json)
+        let chunks: [String] = [
+            "{\"name\": \"get_weather\", ",
+            "\"arguments\": {\"location\": \"Rome\"}}",
+        ]
+
+        var emittedText = ""
+        for chunk in chunks {
+            if let text = processor.processChunk(chunk) {
+                emittedText += text
+            }
+        }
+
+        if let text = processor.processEOS(returnBufferedText: true) {
+            emittedText += text
+        }
+
+        #expect(emittedText.isEmpty)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Rome"))
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Bare JSON With Leading Text")
+    func testJSONFormatProcessorBareJSONWithLeadingText() throws {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk =
+            "Let me check that.\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Milan\"}}"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == "Let me check that.\n")
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Milan"))
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Tagged JSON In Single Chunk")
+    func testJSONFormatProcessorTaggedSingleChunk() throws {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk =
+            "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Tokyo\"}}</tool_call>"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == nil)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Multiple Tagged Calls Preserve Order")
+    func testJSONFormatProcessorMultipleTaggedCallsPreserveOrder() throws {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk =
+            "<tool_call>{\"name\":\"first_call\",\"arguments\":{}}</tool_call><tool_call>{\"name\":\"second_call\",\"arguments\":{}}</tool_call>"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == nil)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 2)
+        #expect(processor.toolCalls[0].function.name == "first_call")
+        #expect(processor.toolCalls[1].function.name == "second_call")
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Tagged JSON With Leading Text")
+    func testJSONFormatProcessorTaggedWithLeadingText() throws {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk =
+            "Let me check that.\n<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Osaka\"}}</tool_call>"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == "Let me check that.\n")
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Osaka"))
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Invalid Bare JSON Flushes At EOS")
+    func testJSONFormatProcessorInvalidBareJSONFlushesAtEOS() {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk = "{\"name\": \"get_weather\", \"arguments\": "
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == nil)
+        #expect(eosOutput == chunk)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Non Tool JSON Stays Text")
+    func testJSONFormatProcessorNonToolJSONStaysText() {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk = "{\"status\": \"ok\", \"data\": {\"value\": 42}}"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == chunk)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Split Non Tool JSON Stays Text")
+    func testJSONFormatProcessorSplitNonToolJSONStaysText() {
+        let processor = ToolCallProcessor(format: .json)
+        let chunks = ["{\"status\": ", "\"ok\", \"data\": {\"value\": 42}}"]
+
+        var emittedText = ""
+        for chunk in chunks {
+            if let output = processor.processChunk(chunk) {
+                emittedText += output
+            }
+        }
+
+        if let eosOutput = processor.processEOS(returnBufferedText: true) {
+            emittedText += eosOutput
+        }
+
+        #expect(emittedText == "{\"status\": \"ok\", \"data\": {\"value\": 42}}")
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Missing Arguments Stays Text")
+    func testJSONFormatProcessorMissingArgumentsStaysText() {
+        let processor = ToolCallProcessor(format: .json)
+        let chunk = "{\"name\": \"not_a_tool_call_payload\"}"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == chunk)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Brace Text Is Not Treated As JSON Tool Call")
+    func testJSONFormatProcessorBraceTextNotToolCall() {
+        let processor = ToolCallProcessor(format: .json)
+
+        let first = processor.processChunk("Use {")
+        let second = processor.processChunk("x} notation")
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(first == "Use ")
+        #expect(second == "{x} notation")
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test(
+        "Test JSON Format via ToolCallProcessor - Unknown Tool Name Stays Text When Tools Are Provided"
+    )
+    func testJSONFormatProcessorUnknownToolNameStaysTextWithTools() {
+        struct EmptyInput: Codable {}
+        struct EmptyOutput: Codable { let ok: Bool }
+
+        let tool = Tool<EmptyInput, EmptyOutput>(
+            name: "get_weather",
+            description: "Gets weather",
+            parameters: []
+        ) { _ in
+            EmptyOutput(ok: true)
+        }
+
+        let processor = ToolCallProcessor(format: .json, tools: [tool.schema])
+        let chunk = "{\"name\": \"not_declared\", \"arguments\": {}}"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == chunk)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test JSON Format via ToolCallProcessor - Recovers Tagged Tool Call After Brace Text")
+    func testJSONFormatProcessorRecoversTaggedToolCallAfterBraceText() throws {
+        let processor = ToolCallProcessor(format: .json)
+        var emittedText = ""
+
+        if let output = processor.processChunk("note {x") {
+            emittedText += output
+        }
+        if let output = processor.processChunk(
+            "} <tool_call>{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Paris\"}}</tool_call>"
+        ) {
+            emittedText += output
+        }
+        if let eosOutput = processor.processEOS(returnBufferedText: true) {
+            emittedText += eosOutput
+        }
+
+        #expect(emittedText == "note {x} ")
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+    }
+
+    @Test(
+        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool Preserved And Continues Parsing"
+    )
+    func testJSONFormatProcessorUnknownTaggedToolPreservedAndContinuesParsing() throws {
+        struct EmptyInput: Codable {}
+        struct EmptyOutput: Codable { let ok: Bool }
+
+        let tool = Tool<EmptyInput, EmptyOutput>(
+            name: "get_weather",
+            description: "Gets weather",
+            parameters: []
+        ) { _ in
+            EmptyOutput(ok: true)
+        }
+
+        let processor = ToolCallProcessor(format: .json, tools: [tool.schema])
+        let chunk =
+            "<tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call><tool_call>{\"name\":\"get_weather\",\"arguments\":{}}</tool_call>"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == "<tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+    }
+
+    @Test(
+        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool With Leading Text Preserved"
+    )
+    func testJSONFormatProcessorUnknownTaggedToolWithLeadingTextPreserved() throws {
+        struct EmptyInput: Codable {}
+        struct EmptyOutput: Codable { let ok: Bool }
+
+        let tool = Tool<EmptyInput, EmptyOutput>(
+            name: "get_weather",
+            description: "Gets weather",
+            parameters: []
+        ) { _ in
+            EmptyOutput(ok: true)
+        }
+
+        let processor = ToolCallProcessor(format: .json, tools: [tool.schema])
+        let chunk =
+            "Preface <tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call><tool_call>{\"name\":\"get_weather\",\"arguments\":{}}</tool_call>"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(
+            output == "Preface <tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+    }
+
+    @Test(
+        "Test JSON Format via ToolCallProcessor - Declared Tool Name Parses When Tools Are Provided"
+    )
+    func testJSONFormatProcessorDeclaredToolNameParsesWithTools() throws {
+        struct EmptyInput: Codable {}
+        struct EmptyOutput: Codable { let ok: Bool }
+
+        let tool = Tool<EmptyInput, EmptyOutput>(
+            name: "get_weather",
+            description: "Gets weather",
+            parameters: []
+        ) { _ in
+            EmptyOutput(ok: true)
+        }
+
+        let processor = ToolCallProcessor(format: .json, tools: [tool.schema])
+        let chunk = "{\"name\": \"get_weather\", \"arguments\": {}}"
+
+        let output = processor.processChunk(chunk)
+        let eosOutput = processor.processEOS(returnBufferedText: true)
+
+        #expect(output == nil)
+        #expect(eosOutput == nil)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+    }
+
     // MARK: - Pythonic Format Tests (LFM2/LFM2.5)
 
     @Test("Test Pythonic Tool Call Parser - Basic")
@@ -740,7 +1051,6 @@ struct ToolTests {
 
         // End tag never arrives in text, so tool call stays buffered until processEOS
         #expect(processor.toolCalls.count == 0)
-
         processor.processEOS()
 
         #expect(processor.toolCalls.count == 1)
@@ -788,7 +1098,6 @@ struct ToolTests {
 
         // No tool calls before processEOS
         #expect(processor.toolCalls.count == 0)
-
         processor.processEOS()
 
         // Both tool calls should be extracted
