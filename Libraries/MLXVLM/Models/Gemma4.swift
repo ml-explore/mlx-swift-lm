@@ -1703,9 +1703,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
         let imageMask = inputIds .== config.imageTokenId
         let expectedImageTokens = imageMask.asType(.int32).sum().item(Int.self)
-        print(
-            "[Gemma4][image] inputIds imageTokenCount=\(expectedImageTokens) imageFeaturesShape=\(imageFeatures.shape)"
-        )
+
         if expectedImageTokens != imageFeatures.dim(1) {
             throw Gemma4Error.imageTokenCountMismatch(
                 expectedVisionTokens: imageFeatures.dim(1), actualPromptTokens: expectedImageTokens)
@@ -1817,9 +1815,6 @@ public struct Gemma4Processor: UserInputProcessor {
             let imagePlaceholderCount = promptTokens.filter { $0 == config.imageTokenId }.count
             let boiCount = promptTokens.filter { $0 == config.boiTokenId }.count
             let eoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-            print(
-                "[Gemma4][prepare] before expansion imagePlaceholders=\(imagePlaceholderCount) boi=\(boiCount) eoi=\(eoiCount) imageSeqLength=\(config.imageSeqLength)"
-            )
 
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
@@ -1849,9 +1844,6 @@ public struct Gemma4Processor: UserInputProcessor {
             let expandedImageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
             let expandedBoiCount = promptTokens.filter { $0 == config.boiTokenId }.count
             let expandedEoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-            print(
-                "[Gemma4][prepare] after expansion imageTokens=\(expandedImageTokenCount) boi=\(expandedBoiCount) eoi=\(expandedEoiCount)"
-            )
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
