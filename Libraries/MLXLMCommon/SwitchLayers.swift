@@ -45,6 +45,15 @@ public class SwitchGLU: Module {
     let numExperts: Int
     let activation: (MLXArray) -> MLXArray
 
+    // ── Async pipeline state (SSD streaming optimization) ──
+    // Persistent buffers: allocated once per layer, reused across tokens.
+    // Avoids per-token buffer allocation + eval overhead.
+    private var _persistentGate: [MLXArray]?
+    private var _persistentUp: [MLXArray]?
+    private var _persistentDown: [MLXArray]?
+    // Previous token's expert routing per layer for speculative prefetch.
+    private var _previousExpertIds: [Int]?
+
     public init(
         inputDims: Int,
         hiddenDims: Int,
@@ -110,78 +119,244 @@ public class SwitchGLU: Module {
             // ─────────────────────────────────────────────────────────────────
 
             if idx.size <= 32 {
-                // ── FAST PATH: single-token generation ──
-                // Pre-allocate max buffers (idx.size = top_k, e.g. 8) and eval
-                // everything in a single call.
-                let maxBuffers = idx.size
-                let gateBuffers = qGate.allocateExpertBuffers(maxBuffers)
-                let upBuffers = qUp.allocateExpertBuffers(maxBuffers)
-                let downBuffers = qDown.allocateExpertBuffers(maxBuffers)
+                // ── FAST PATH: single-token generation with async I/O-GPU pipeline ──
+                //
+                // STRATEGY: Overlap NVMe I/O with GPU compute using asyncEval.
+                //
+                // Cold path (first token): Allocate persistent buffers, merged eval,
+                //   full pread — same as ssd-opt-v1 baseline.
+                //
+                // Warm path (subsequent tokens): asyncEval(idx) starts GPU work
+                //   (prev layer expert compute + current attention/router) while
+                //   CPU speculatively preads predicted experts (from previous token's
+                //   routing) into persistent buffers. After GPU sync, only ~30% of
+                //   experts need on-demand pread (misses). Saves ~60ms/token by
+                //   hiding I/O behind GPU compute.
+                //
+                // Memory cost: ~5GB for persistent buffers across 48 layers
+                //   (vs ~13GB for the failed in-memory cache approach).
 
-                // SINGLE EVAL: sorted indices + all buffer allocations.
-                // Evaluating idx also transitively forces the PREVIOUS layer's
-                // complete output (including KV cache) since idx depends on
-                // router(prev_layer_output) via gatherSort.
-                var toEval: [MLXArray] = [idx]
-                toEval.append(contentsOf: gateBuffers)
-                toEval.append(contentsOf: upBuffers)
-                toEval.append(contentsOf: downBuffers)
-                MLX.eval(toEval)
+                let maxBuffers = idx.size  // typically 8 (top_k)
 
-                // Handle empty indices
-                if idx.size == 0 {
-                    var outShape = x.shape
-                    outShape[outShape.count - 1] = qDown.outputDims
-                    let result = MLXArray.zeros(outShape).asType(.float16)
-                    if doSort {
-                        return MLX.squeezed(scatterUnsort(x: result, invOrder: inverseOrder, shape: indices.shape), axis: -2)
+                if _persistentGate == nil {
+                    // ── COLD PATH: first token, allocate persistent buffers ──
+                    _persistentGate = qGate.allocateExpertBuffers(maxBuffers)
+                    _persistentUp = qUp.allocateExpertBuffers(maxBuffers)
+                    _persistentDown = qDown.allocateExpertBuffers(maxBuffers)
+
+                    // Merged eval: idx + buffer allocations (same as ssd-opt-v1)
+                    var toEval: [MLXArray] = [idx]
+                    toEval.append(contentsOf: _persistentGate!)
+                    toEval.append(contentsOf: _persistentUp!)
+                    toEval.append(contentsOf: _persistentDown!)
+                    MLX.eval(toEval)
+
+                    // Handle empty indices
+                    if idx.size == 0 {
+                        var outShape = x.shape
+                        outShape[outShape.count - 1] = qDown.outputDims
+                        let result = MLXArray.zeros(outShape).asType(.float16)
+                        if doSort {
+                            return MLX.squeezed(scatterUnsort(x: result, invOrder: inverseOrder, shape: indices.shape), axis: -2)
+                        }
+                        return MLX.squeezed(result, axis: -2)
                     }
-                    return MLX.squeezed(result, axis: -2)
-                }
 
-                // Parse expert ranges from materialized sorted indices
-                let cpuIndices = idx.asArray(UInt32.self)
-                var ranges = [ExpertRange]()
-                var startIdx = 0
-                while startIdx < cpuIndices.count {
-                    let eid = Int(cpuIndices[startIdx])
-                    var endIdx = startIdx + 1
-                    while endIdx < cpuIndices.count && Int(cpuIndices[endIdx]) == eid { endIdx += 1 }
-                    ranges.append(ExpertRange(id: eid, start: startIdx, end: endIdx))
-                    startIdx = endIdx
-                }
-
-                // ── CONCURRENT PREAD: all 3 projections × all experts in parallel ──
-                // Dispatches up to 24 pread() syscalls simultaneously (8 experts × 3 projections),
-                // pushing NVMe queue depth from QD=1 to QD=~24.
-                // Raw benchmark: QD=1 = 4.5 GB/s, QD=8 = 12.3 GB/s → ~2.7× throughput.
-                // preadInto is thread-safe: unique buffer per call, pread() uses explicit offset.
-                let usedGate = Array(gateBuffers[0..<ranges.count])
-                let usedUp = Array(upBuffers[0..<ranges.count])
-                let usedDown = Array(downBuffers[0..<ranges.count])
-                let totalReads = ranges.count * 3
-                DispatchQueue.concurrentPerform(iterations: totalReads) { i in
-                    let expertIdx = i / 3
-                    let projIdx = i % 3
-                    let r = ranges[expertIdx]
-                    switch projIdx {
-                    case 0:
-                        MLXFast.preadInto(usedGate[expertIdx], safetensorsPath: gateSSD.path,
-                                          tensorName: gateSSD.tensorName, expertIndex: UInt32(r.id))
-                    case 1:
-                        MLXFast.preadInto(usedUp[expertIdx], safetensorsPath: upSSD.path,
-                                          tensorName: upSSD.tensorName, expertIndex: UInt32(r.id))
-                    default:
-                        MLXFast.preadInto(usedDown[expertIdx], safetensorsPath: downSSD.path,
-                                          tensorName: downSSD.tensorName, expertIndex: UInt32(r.id))
+                    // Parse routing
+                    let cpuIndices = idx.asArray(UInt32.self)
+                    var ranges = [ExpertRange]()
+                    var startIdx = 0
+                    while startIdx < cpuIndices.count {
+                        let eid = Int(cpuIndices[startIdx])
+                        var endIdx = startIdx + 1
+                        while endIdx < cpuIndices.count && Int(cpuIndices[endIdx]) == eid { endIdx += 1 }
+                        ranges.append(ExpertRange(id: eid, start: startIdx, end: endIdx))
+                        startIdx = endIdx
                     }
-                }
 
-                // Lazy compute (no eval — next layer forces it)
-                let xGate = qGate.computeExperts(x, buffers: Array(gateBuffers[0..<ranges.count]), ranges: ranges)
-                let xUp = qUp.computeExperts(x, buffers: Array(upBuffers[0..<ranges.count]), ranges: ranges)
-                let intermediate = activation(xGate) * xUp
-                x = qDown.computeExperts(intermediate, buffers: Array(downBuffers[0..<ranges.count]), ranges: ranges)
+                    // Full concurrent pread (baseline path)
+                    let totalReads = ranges.count * 3
+                    DispatchQueue.concurrentPerform(iterations: totalReads) { i in
+                        let expertIdx = i / 3
+                        let projIdx = i % 3
+                        let r = ranges[expertIdx]
+                        switch projIdx {
+                        case 0:
+                            MLXFast.preadInto(self._persistentGate![expertIdx], safetensorsPath: gateSSD.path,
+                                              tensorName: gateSSD.tensorName, expertIndex: UInt32(r.id))
+                        case 1:
+                            MLXFast.preadInto(self._persistentUp![expertIdx], safetensorsPath: upSSD.path,
+                                              tensorName: upSSD.tensorName, expertIndex: UInt32(r.id))
+                        default:
+                            MLXFast.preadInto(self._persistentDown![expertIdx], safetensorsPath: downSSD.path,
+                                              tensorName: downSSD.tensorName, expertIndex: UInt32(r.id))
+                        }
+                    }
+
+                    // Store routing for next token's predictions
+                    _previousExpertIds = ranges.map { $0.id }
+
+                    // Lazy compute
+                    let usedGate = Array(_persistentGate![0..<ranges.count])
+                    let usedUp = Array(_persistentUp![0..<ranges.count])
+                    let usedDown = Array(_persistentDown![0..<ranges.count])
+                    let xGate = qGate.computeExperts(x, buffers: usedGate, ranges: ranges)
+                    let xUp = qUp.computeExperts(x, buffers: usedUp, ranges: ranges)
+                    let intermediate = activation(xGate) * xUp
+                    x = qDown.computeExperts(intermediate, buffers: usedDown, ranges: ranges)
+
+                } else {
+                    // ── WARM PATH: asyncEval + speculative pread pipeline ──
+
+                    // Start GPU work asynchronously: forces prev layer's expert
+                    // compute + current layer's attention + router.
+                    // GPU time: ~2.7ms. CPU is free immediately.
+                    asyncEval(idx)
+
+                    // Speculative pread during GPU async window.
+                    // Load previous token's experts into persistent buffers.
+                    // ~70% will match this token's routing (expert stickiness).
+                    // The 1.7ms of pread overlaps with 2.7ms of GPU work.
+                    if let prevIds = _previousExpertIds {
+                        let specCount = min(prevIds.count, maxBuffers)
+                        let specReads = specCount * 3
+                        DispatchQueue.concurrentPerform(iterations: specReads) { i in
+                            let slot = i / 3
+                            let proj = i % 3
+                            let expertId = prevIds[slot]
+                            switch proj {
+                            case 0:
+                                MLXFast.preadInto(self._persistentGate![slot], safetensorsPath: gateSSD.path,
+                                                  tensorName: gateSSD.tensorName, expertIndex: UInt32(expertId))
+                            case 1:
+                                MLXFast.preadInto(self._persistentUp![slot], safetensorsPath: upSSD.path,
+                                                  tensorName: upSSD.tensorName, expertIndex: UInt32(expertId))
+                            default:
+                                MLXFast.preadInto(self._persistentDown![slot], safetensorsPath: downSSD.path,
+                                                  tensorName: downSSD.tensorName, expertIndex: UInt32(expertId))
+                            }
+                        }
+                    }
+
+                    // Sync on idx (blocks until GPU finishes attention + router)
+                    if idx.size == 0 {
+                        var outShape = x.shape
+                        outShape[outShape.count - 1] = qDown.outputDims
+                        let result = MLXArray.zeros(outShape).asType(.float16)
+                        if doSort {
+                            return MLX.squeezed(scatterUnsort(x: result, invOrder: inverseOrder, shape: indices.shape), axis: -2)
+                        }
+                        return MLX.squeezed(result, axis: -2)
+                    }
+
+                    // Parse actual routing
+                    let cpuIndices = idx.asArray(UInt32.self)
+                    var ranges = [ExpertRange]()
+                    var startIdx = 0
+                    while startIdx < cpuIndices.count {
+                        let eid = Int(cpuIndices[startIdx])
+                        var endIdx = startIdx + 1
+                        while endIdx < cpuIndices.count && Int(cpuIndices[endIdx]) == eid { endIdx += 1 }
+                        ranges.append(ExpertRange(id: eid, start: startIdx, end: endIdx))
+                        startIdx = endIdx
+                    }
+                    let actualIds = ranges.map { $0.id }
+
+                    // Map actual experts to persistent buffer slots.
+                    // Hits: buffer slot already has correct data from speculative pread.
+                    // Misses: assign to a free slot, pread on demand.
+                    var usedGate = [MLXArray]()
+                    var usedUp = [MLXArray]()
+                    var usedDown = [MLXArray]()
+
+                    if let prevIds = _previousExpertIds {
+                        var prevSlotMap = [Int: Int]()  // expertId -> buffer slot
+                        for (slot, eid) in prevIds.enumerated() {
+                            prevSlotMap[eid] = slot
+                        }
+
+                        var usedSlots = Set<Int>()
+                        var missInfo = [(rangeIdx: Int, expertId: Int, bufferSlot: Int)]()
+
+                        for (ri, r) in ranges.enumerated() {
+                            if let slot = prevSlotMap[r.id], !usedSlots.contains(slot) {
+                                // HIT: persistent buffer[slot] has correct expert data
+                                usedGate.append(_persistentGate![slot])
+                                usedUp.append(_persistentUp![slot])
+                                usedDown.append(_persistentDown![slot])
+                                usedSlots.insert(slot)
+                            } else {
+                                // MISS: find a free slot
+                                let freeSlot = (0..<maxBuffers).first { !usedSlots.contains($0) }!
+                                usedGate.append(_persistentGate![freeSlot])
+                                usedUp.append(_persistentUp![freeSlot])
+                                usedDown.append(_persistentDown![freeSlot])
+                                usedSlots.insert(freeSlot)
+                                missInfo.append((ri, r.id, freeSlot))
+                            }
+                        }
+
+                        // Pread only misses (~30% of experts, ~6 reads at QD=6)
+                        if !missInfo.isEmpty {
+                            let totalMissReads = missInfo.count * 3
+                            DispatchQueue.concurrentPerform(iterations: totalMissReads) { i in
+                                let mIdx = i / 3
+                                let proj = i % 3
+                                let info = missInfo[mIdx]
+                                switch proj {
+                                case 0:
+                                    MLXFast.preadInto(self._persistentGate![info.bufferSlot],
+                                                      safetensorsPath: gateSSD.path,
+                                                      tensorName: gateSSD.tensorName,
+                                                      expertIndex: UInt32(info.expertId))
+                                case 1:
+                                    MLXFast.preadInto(self._persistentUp![info.bufferSlot],
+                                                      safetensorsPath: upSSD.path,
+                                                      tensorName: upSSD.tensorName,
+                                                      expertIndex: UInt32(info.expertId))
+                                default:
+                                    MLXFast.preadInto(self._persistentDown![info.bufferSlot],
+                                                      safetensorsPath: downSSD.path,
+                                                      tensorName: downSSD.tensorName,
+                                                      expertIndex: UInt32(info.expertId))
+                                }
+                            }
+                        }
+                    } else {
+                        // No predictions available — full pread fallback
+                        for i in 0..<ranges.count {
+                            usedGate.append(_persistentGate![i])
+                            usedUp.append(_persistentUp![i])
+                            usedDown.append(_persistentDown![i])
+                        }
+                        let totalReads = ranges.count * 3
+                        DispatchQueue.concurrentPerform(iterations: totalReads) { i in
+                            let expertIdx = i / 3
+                            let projIdx = i % 3
+                            let r = ranges[expertIdx]
+                            switch projIdx {
+                            case 0:
+                                MLXFast.preadInto(self._persistentGate![expertIdx], safetensorsPath: gateSSD.path,
+                                                  tensorName: gateSSD.tensorName, expertIndex: UInt32(r.id))
+                            case 1:
+                                MLXFast.preadInto(self._persistentUp![expertIdx], safetensorsPath: upSSD.path,
+                                                  tensorName: upSSD.tensorName, expertIndex: UInt32(r.id))
+                            default:
+                                MLXFast.preadInto(self._persistentDown![expertIdx], safetensorsPath: downSSD.path,
+                                                  tensorName: downSSD.tensorName, expertIndex: UInt32(r.id))
+                            }
+                        }
+                    }
+
+                    // Update routing for next token's predictions
+                    _previousExpertIds = actualIds
+
+                    // Lazy compute (no eval — next layer forces it)
+                    let xGate = qGate.computeExperts(x, buffers: usedGate, ranges: ranges)
+                    let xUp = qUp.computeExperts(x, buffers: usedUp, ranges: ranges)
+                    let intermediate = activation(xGate) * xUp
+                    x = qDown.computeExperts(intermediate, buffers: usedDown, ranges: ranges)
+                }
 
             } else {
                 // ── PROMPT PATH: larger batches ──
