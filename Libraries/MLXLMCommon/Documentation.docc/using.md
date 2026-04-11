@@ -38,7 +38,7 @@ There are 3 general ways to select and use concrete Downloader and Tokenizer imp
 - using [MLXHuggingFace](MLXHuggingFace) macros
 
 If you are <doc:upgrade> from mlx-swift-lm 2.x the macros will be the
-simplest way, but consider <doc:#Integration-Package> as there are alternate
+simplest way, but consider <doc:#Integration-Packages> as there are alternate
 implementations that may provide features and capabilities that you want.
 
 ### Implementing Protocols
@@ -53,7 +53,7 @@ mlx-swift-lm requires implementation of at least the two tokenizer protocols:
 - ``Tokenizer`` -- adapt the concrete tokenizers to the mlx-swift-lm protocol.
 - ``TokenizerLoader`` -- factory for ``Tokenizer`` implementations.
 
-You can look at <doc:#Integration-Package> implementations for examples
+You can look at <doc:#Integration-Packages> implementations for examples
 of how to write these -- there are only a few properties and methods
 and they typically have trivial mappings to the concrete implementation.
 
