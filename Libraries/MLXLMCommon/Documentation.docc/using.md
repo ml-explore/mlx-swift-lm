@@ -37,7 +37,7 @@ There are 3 general ways to select and use concrete Downloader and Tokenizer imp
 - using an integration package
 - using [MLXHuggingFace](MLXHuggingFace) macros
 
-If you are <doc:upgrading> from mlx-swift-lm 2.x the macros will be the
+If you are <doc:upgrade> from mlx-swift-lm 2.x the macros will be the
 simplest way, but consider <doc:#Integration-Package> as there are alternate
 implementations that may provide features and capabilities that you want.
 
