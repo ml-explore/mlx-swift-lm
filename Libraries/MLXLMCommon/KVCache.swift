@@ -1310,8 +1310,38 @@ public class ArraysCache: BaseKVCache {
 
 /// Simple cache for Mamba-style state space models
 public class MambaCache: ArraysCache {
+    /// Saved state for speculative decoding rollback.
+    /// Mamba state is recurrent and cannot be partially "trimmed" like attention KV caches.
+    /// Instead, we checkpoint before speculation and restore on rollback.
+    private var savedState: [MLXArray]?
+
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
+    }
+
+    /// Mark as trimmable to enable speculative decoding on hybrid Attention+Mamba models.
+    public override var isTrimmable: Bool { true }
+
+    /// Save a checkpoint of the current Mamba state (call before speculative draft round).
+    public func checkpoint() {
+        let s = self.state
+        if !s.isEmpty {
+            savedState = s.map { $0[.ellipsis] }  // deep copy
+        }
+    }
+
+    /// Trim: for Mamba, restore from checkpoint if tokens are rejected.
+    /// When n > 0, rejected draft tokens have polluted the state — restore checkpoint.
+    /// When n == 0, all drafts accepted — keep current state and clear checkpoint.
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        if n > 0, let saved = savedState {
+            self.state = saved
+            savedState = nil
+            return n
+        }
+        savedState = nil  // Clear checkpoint on full acceptance
+        return 0
     }
 
     public override func copy() -> any KVCache {

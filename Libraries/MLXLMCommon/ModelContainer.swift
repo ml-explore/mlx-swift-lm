@@ -290,4 +290,56 @@ public final class ModelContainer: Sendable {
         // Use MLX's native `modules()` traversal which correctly unwraps @ModuleInfo property wrappers
         return module.modules().lazy.compactMap { $0 as? (any StreamableMoE) }.first
     }
+
+    // MARK: - Speculative Decoding
+
+    /// Extract the raw LanguageModel for use as a draft model in speculative decoding.
+    /// The model weights are immutable after loading, making this safe for cross-context use.
+    public func extractDraftModel() async -> DraftModelRef {
+        await context.read { DraftModelRef(model: $0.model) }
+    }
+
+    /// Generate tokens using speculative decoding with a draft model.
+    ///
+    /// The draft model generates `numDraftTokens` tokens which are then verified in batch
+    /// by the main model. Accepted tokens are emitted; rejected tokens cause KV cache rollback.
+    /// Both models must share the same tokenizer.
+    ///
+    /// - Parameters:
+    ///   - input: Prepared language model input
+    ///   - parameters: Generation parameters
+    ///   - draftModel: Draft model reference (extracted via `extractDraftModel()`)
+    ///   - numDraftTokens: Number of tokens the draft model proposes per round
+    ///   - wiredMemoryTicket: Optional wired memory ticket
+    /// - Returns: An AsyncStream of generation events (same format as non-speculative)
+    public func generate(
+        input: consuming sending LMInput,
+        parameters: GenerateParameters,
+        draftModel: DraftModelRef,
+        numDraftTokens: Int = 4,
+        wiredMemoryTicket: WiredMemoryTicket? = nil
+    ) async throws -> AsyncStream<Generation> {
+        let input = SendableBox(input)
+        let draft = draftModel  // Already Sendable via @unchecked
+
+        return try await context.read { context in
+            try MLXLMCommon.generate(
+                input: input.consume(),
+                parameters: parameters,
+                context: context,
+                draftModel: draft.model,
+                numDraftTokens: numDraftTokens,
+                wiredMemoryTicket: wiredMemoryTicket
+            )
+        }
+    }
+}
+
+// MARK: - Speculative Decoding Types
+
+/// Thread-safe wrapper for passing a LanguageModel reference across concurrency boundaries.
+/// Safe when model weights are immutable (post-loading, inference-only usage).
+/// KV caches are created fresh per SpeculativeTokenIterator, so no shared mutable state.
+public struct DraftModelRef: @unchecked Sendable {
+    public let model: any LanguageModel
 }

@@ -845,6 +845,11 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
+        // Checkpoint Mamba caches before speculation (for rollback on rejection)
+        for layer in mainCache {
+            if let mamba = layer as? MambaCache { mamba.checkpoint() }
+        }
+
         // Draft generation: autoregressive loop with draft model
         var draftProcessor = processor  // Copy to discard later
         var draftTokens = [MLXArray]()
