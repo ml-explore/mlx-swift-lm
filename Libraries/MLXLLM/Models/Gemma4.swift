@@ -38,6 +38,7 @@ public struct Gemma4Configuration: Codable {
     public let moeIntermediateSize: Int?
     public let numGlobalKeyValueHeads: Int
     public let tieWordEmbeddings: Bool
+    public let enableMoeBlock: Bool
 
     /// Fraction of global head_dim used for RoPE (default 0.25 for Gemma 4 global attn)
     let globalRopePartialFactor: Float
@@ -60,7 +61,8 @@ public struct Gemma4Configuration: Codable {
         numGlobalKeyValueHeads: Int? = nil,
         hiddenSizePerLayerInput: Int = 0, vocabSizePerLayerInput: Int = 0,
         globalRopePartialFactor: Float = 0.25,
-        finalLogitSoftcapping: Float = 0.0
+        finalLogitSoftcapping: Float = 0.0,
+        enableMoeBlock: Bool? = nil
     ) {
         self.modelType = modelType
         self.hiddenSize = hiddenSize
@@ -91,6 +93,7 @@ public struct Gemma4Configuration: Codable {
         self.vocabSizePerLayerInput = vocabSizePerLayerInput
         self.globalRopePartialFactor = globalRopePartialFactor
         self.finalLogitSoftcapping = finalLogitSoftcapping
+        self.enableMoeBlock = enableMoeBlock ?? (numExperts != nil && numExperts! > 0)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -120,6 +123,7 @@ public struct Gemma4Configuration: Codable {
         case numExperts = "num_experts"
         case topKExperts = "top_k_experts"
         case moeIntermediateSize = "moe_intermediate_size"
+        case enableMoeBlock = "enable_moe_block"
         // Per-layer conditioning
         case hiddenSizePerLayerInput = "hidden_size_per_layer_input"
         case vocabSizePerLayerInput = "vocab_size_per_layer_input"
@@ -134,6 +138,7 @@ public struct Gemma4Configuration: Codable {
 
     enum VLMCodingKeys: String, CodingKey {
         case textConfig = "text_config"
+        case enableMoeBlock = "enable_moe_block"
     }
 
     public init(from decoder: Decoder) throws {
@@ -153,6 +158,10 @@ public struct Gemma4Configuration: Codable {
         numExperts = try container.decodeIfPresent(Int.self, forKey: .numExperts)
         topKExperts = try container.decodeIfPresent(Int.self, forKey: .topKExperts)
         moeIntermediateSize = try container.decodeIfPresent(Int.self, forKey: .moeIntermediateSize)
+
+        let enableMoeOpt = try container.decodeIfPresent(Bool.self, forKey: .enableMoeBlock)
+        enableMoeBlock = enableMoeOpt ?? (self.numExperts != nil && self.numExperts! > 0)
+
         numGlobalKeyValueHeads = try container.decodeIfPresent(Int.self, forKey: .numGlobalKeyValueHeads) ?? (try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 1)
         hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 1152
         hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 26
@@ -531,7 +540,7 @@ class Gemma4SparseMoeBlock: Module {
 class Gemma4TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Gemma4Attention
     @ModuleInfo var mlp: Gemma4MLP
-    @ModuleInfo(key: "experts") var expertsBlock: Gemma4SparseMoeBlock
+    @ModuleInfo(key: "experts") var expertsBlock: Gemma4SparseMoeBlock?
 
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
@@ -572,17 +581,17 @@ class Gemma4TransformerBlock: Module {
         }
         self.mlp = Gemma4MLP(dimensions: config.hiddenSize, hiddenDimensions: mlpSize)
 
-        self.isMoe = config.numExperts != nil && config.numExperts! > 0
-        let numExperts = config.numExperts ?? 1
-        
-        self._expertsBlock.wrappedValue = Gemma4SparseMoeBlock(
-            dimensions: config.hiddenSize,
-            numExperts: numExperts,
-            topK: config.topKExperts ?? 1,
-            moeIntermediateSize: config.moeIntermediateSize ?? config.intermediateSize
-        )
+        self.isMoe = config.enableMoeBlock
         
         if self.isMoe {
+            let numExperts = config.numExperts ?? 1
+            self._expertsBlock.wrappedValue = Gemma4SparseMoeBlock(
+                dimensions: config.hiddenSize,
+                numExperts: numExperts,
+                topK: config.topKExperts ?? 1,
+                moeIntermediateSize: config.moeIntermediateSize ?? config.intermediateSize
+            )
+            
             self._postFeedforwardLayerNorm1.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
             self._preFeedforwardLayerNorm2.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
             self._postFeedforwardLayerNorm2.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -618,18 +627,22 @@ class Gemma4TransformerBlock: Module {
 
         var residualUpdates: MLXArray
 
-        if isMoe {
+        if isMoe,
+           let eb = expertsBlock,
+           let n1 = postFeedforwardLayerNorm1,
+           let preN2 = preFeedforwardLayerNorm2,
+           let postN2 = postFeedforwardLayerNorm2 {
             let preMLPNorm = preFeedforwardLayerNorm(x + attnNorm)
             let denseOut = mlp(preMLPNorm)
-            let densePostNorm1 = postFeedforwardLayerNorm1!(denseOut)
+            let densePostNorm1 = n1(denseOut)
 
             // Router evaluates on the un-normed `attn_out` stream
             let routerInput = x + attnNorm
 
             // Experts evaluate on the DENSE-NORMED sparse stream (llama.cpp `ffn_pre_norm_2`)
-            let sparsePreNorm = preFeedforwardLayerNorm2!(routerInput)
-            let sparseOut = expertsBlock(sparsePreNorm, routerInput: routerInput)
-            let sparsePostNorm2 = postFeedforwardLayerNorm2!(sparseOut)
+            let sparsePreNorm = preN2(routerInput)
+            let sparseOut = eb(sparsePreNorm, routerInput: routerInput)
+            let sparsePostNorm2 = postN2(sparseOut)
 
             let combined = densePostNorm1 + sparsePostNorm2
             let postMLPNorm = postFeedforwardLayerNorm(combined)
