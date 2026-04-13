@@ -281,11 +281,11 @@ public class UserInputTests: XCTestCase {
                 "role": "user",
                 "content": [
                     [
-                        "type": "text",
-                        "text": "What is this?",
+                        "type": "image"
                     ],
                     [
-                        "type": "image"
+                        "type": "text",
+                        "text": "What is this?",
                     ],
                 ],
             ],
