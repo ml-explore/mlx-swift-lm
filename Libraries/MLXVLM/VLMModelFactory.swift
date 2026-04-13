@@ -265,6 +265,9 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3_12B_qat_4bit,
             gemma3_27B_qat_4bit,
             gemma4_E2B_it_4bit,
+            gemma4_E4B_it_4bit,
+            gemma4_26BA4B_it_4bit,
+            gemma4_31B_it_4bit,
             smolvlm,
             fastvlm,
         ]
