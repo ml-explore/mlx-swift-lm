@@ -33,7 +33,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
     var attentionKeqV: Bool = false
     var finalLogitSoftcapping: Float = 30.0
     var useDoubleWideMlp: Bool = true
-    var layerTypes: [String]?
+    var layerTypes: [String] = []
     var tieWordEmbeddings: Bool = true
 
     // RoPE parameters (nested dict with full_attention/sliding_attention sub-configs)
@@ -110,15 +110,10 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Float.self, forKey: .finalLogitSoftcapping) ?? 30.0
         self.useDoubleWideMlp =
             try container.decodeIfPresent(Bool.self, forKey: .useDoubleWideMlp) ?? true
-        self.layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes)
-        self.tieWordEmbeddings =
-            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
-        self.ropeParameters =
-            try container.decodeIfPresent(
-                [String: [String: StringOrNumber]].self, forKey: .ropeParameters)
-
-        // Derive layer types from sliding window pattern if not provided
-        if self.layerTypes == nil {
+        if let decoded = try container.decodeIfPresent([String].self, forKey: .layerTypes) {
+            self.layerTypes = decoded
+        } else {
+            // Derive layer types from sliding window pattern
             var pattern = [String]()
             for i in 0 ..< slidingWindowPattern {
                 pattern.append(
@@ -130,6 +125,11 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
             }
             self.layerTypes = Array(types.prefix(numHiddenLayers))
         }
+        self.tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+        self.ropeParameters =
+            try container.decodeIfPresent(
+                [String: [String: StringOrNumber]].self, forKey: .ropeParameters)
 
         // Extract RoPE parameters from nested config
         if let ropeParams = ropeParameters {
@@ -197,12 +197,12 @@ private class Gemma4Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale
 
-    @ModuleInfo var rope: ProportionalRoPE
+    @ModuleInfo var rope: RoPELayer
 
     init(_ config: Gemma4TextConfiguration, layerIdx: Int) {
         self.config = config
         self.layerIdx = layerIdx
-        self.layerType = config.layerTypes![layerIdx]
+        self.layerType = config.layerTypes[layerIdx]
         self.isSliding = layerType == "sliding_attention"
 
         // Full attention uses globalHeadDim, sliding uses headDim
@@ -234,20 +234,19 @@ private class Gemma4Attention: Module {
         self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
 
         // RoPE: sliding uses default, full uses proportional with partial rotation
-        let ropeTheta: Float
-        let partialFactor: Float
         if isSliding {
-            ropeTheta = config.slidingRopeTheta
-            partialFactor = 1.0
+            self.rope = initializeRope(
+                dims: effectiveHeadDim, base: config.slidingRopeTheta, traditional: false,
+                scalingConfig: nil, maxPositionEmbeddings: nil)
         } else {
-            ropeTheta = config.fullRopeTheta
-            partialFactor = config.fullPartialRotaryFactor
+            self.rope = initializeRope(
+                dims: effectiveHeadDim, base: config.fullRopeTheta, traditional: false,
+                scalingConfig: [
+                    "type": .string("proportional"),
+                    "partial_rotary_factor": .float(config.fullPartialRotaryFactor),
+                ],
+                maxPositionEmbeddings: nil)
         }
-        self._rope.wrappedValue = ProportionalRoPE(
-            dims: effectiveHeadDim,
-            rotatedDims: Int(Float(effectiveHeadDim) * partialFactor),
-            base: ropeTheta
-        )
 
         super.init()
     }
@@ -282,10 +281,10 @@ private class Gemma4Attention: Module {
             k = rope(k, offset: currentOffset)
 
             var v: MLXArray
-            if useKeqV {
-                v = k
+            if let vProj {
+                v = vProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             } else {
-                v = vProj!(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
+                v = k
             }
             v = vNorm(v)
             v = v.transposed(0, 2, 1, 3)
@@ -377,7 +376,7 @@ private class Gemma4DecoderLayer: Module {
     init(_ config: Gemma4TextConfiguration, layerIdx: Int) {
         self.config = config
         self.layerIdx = layerIdx
-        self.layerType = config.layerTypes![layerIdx]
+        self.layerType = config.layerTypes[layerIdx]
         self.hiddenSizePerLayerInput = config.hiddenSizePerLayerInput
 
         self._selfAttn.wrappedValue = Gemma4Attention(config, layerIdx: layerIdx)
@@ -501,11 +500,11 @@ private class Gemma4TextModelInner: Module {
             // Find the last non-shared layer of each type
             var lastByType = [String: Int]()
             for i in 0 ..< firstKvSharedLayerIdx {
-                lastByType[config.layerTypes![i]] = i
+                lastByType[config.layerTypes[i]] = i
             }
             // Shared layers reference the last non-shared layer of the same type
             for j in firstKvSharedLayerIdx ..< config.numHiddenLayers {
-                if let prev = lastByType[config.layerTypes![j]] {
+                if let prev = lastByType[config.layerTypes[j]] {
                     kvMap[j] = prev
                 }
             }
@@ -658,13 +657,11 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        let layerTypes =
-            config.layerTypes ?? Array(repeating: "full_attention", count: config.numHiddenLayers)
         let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
 
         var caches = [any KVCache]()
         for i in 0 ..< firstKvShared {
-            if layerTypes[i] == "full_attention" {
+            if config.layerTypes[i] == "full_attention" {
                 caches.append(StandardKVCache())
             } else {
                 caches.append(RotatingKVCache(maxSize: config.slidingWindow, keep: 0))
@@ -679,65 +676,5 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
 extension Gemma4TextModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers.map { $0.selfAttn }
-    }
-}
-
-// MARK: - ProportionalRoPE
-
-/// RoPE variant where only a fraction of dimensions are rotated.
-/// Unrotated dimensions get infinite-frequency (effectively zero embedding).
-/// Used by Gemma 4 full-attention layers (partial_rotary_factor = 0.25).
-public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
-    let dims: Int
-    let traditional: Bool
-    let _freqs: MLXArray
-
-    public init(
-        dims: Int,
-        rotatedDims: Int? = nil,
-        traditional: Bool = false,
-        base: Float = 10000.0,
-        factor: Float = 1.0
-    ) {
-        let rotatedDims = rotatedDims ?? dims
-        self.dims = dims
-        self.traditional = traditional
-
-        let exponents =
-            MLXArray(stride(from: Float(0), to: Float(rotatedDims), by: 2)) / Float(dims)
-        let rotatedFreqs = factor * pow(base, exponents)
-        let unrotatedCount = (dims - rotatedDims) / 2
-        if unrotatedCount > 0 {
-            self._freqs = concatenated(
-                [rotatedFreqs, MLXArray.full([unrotatedCount], values: MLXArray(Float.infinity))])
-        } else {
-            self._freqs = rotatedFreqs
-        }
-
-        super.init()
-    }
-
-    public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        MLXFast.RoPE(
-            x,
-            dimensions: dims,
-            traditional: traditional,
-            base: nil,
-            scale: 1.0,
-            offset: offset,
-            freqs: _freqs
-        )
-    }
-
-    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
-        MLXFast.RoPE(
-            x,
-            dimensions: dims,
-            traditional: traditional,
-            base: nil,
-            scale: 1.0,
-            offset: offset,
-            freqs: _freqs
-        )
     }
 }
