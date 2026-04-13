@@ -87,6 +87,134 @@ public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
 
 }
 
+public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
+    let dims: Int
+    let traditional: Bool
+    let rotatedDims: Int
+    let _freqs: MLXArray?
+
+    init(
+        dims: Int,
+        traditional: Bool = false,
+        base: Float = 10_000,
+        scalingConfig: [String: StringOrNumber]? = nil
+    ) {
+        self.dims = dims
+        self.traditional = traditional
+
+        let factor = scalingConfig?["factor"]?.asFloat() ?? 1.0
+        let partialRotaryFactor = scalingConfig?["partial_rotary_factor"]?.asFloat() ?? 1.0
+        let ropeAngles = Int(partialRotaryFactor * Float(dims) / 2.0)
+        self.rotatedDims = 2 * ropeAngles
+
+        if rotatedDims > 0 {
+            let exponents =
+                MLXArray(stride(from: 0, to: rotatedDims, by: 2)).asType(.float32) / Float(dims)
+            self._freqs = factor * MLX.pow(base, exponents)
+        } else {
+            self._freqs = nil
+        }
+
+        super.init()
+    }
+
+    public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+        guard rotatedDims > 0, let _freqs else {
+            return x
+        }
+
+        let half = dims / 2
+        let rotatedHalf = rotatedDims / 2
+
+        let head: MLXArray
+        let tail: MLXArray?
+        if x.shape[x.ndim - 1] > dims {
+            let parts = split(x, indices: [dims], axis: -1)
+            head = parts[0]
+            tail = parts[1]
+        } else {
+            head = x
+            tail = nil
+        }
+
+        let headParts = split(head, indices: [half], axis: -1)
+        var left = headParts[0]
+        var right = headParts[1]
+
+        let leftParts = split(left, indices: [rotatedHalf], axis: -1)
+        let rightParts = split(right, indices: [rotatedHalf], axis: -1)
+        var rotated = concatenated([leftParts[0], rightParts[0]], axis: -1)
+        rotated = MLXFast.RoPE(
+            rotated,
+            dimensions: rotatedDims,
+            traditional: traditional,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: _freqs
+        )
+
+        let rotatedParts = split(rotated, indices: [rotatedHalf], axis: -1)
+        left = concatenated([rotatedParts[0], leftParts[1]], axis: -1)
+        right = concatenated([rotatedParts[1], rightParts[1]], axis: -1)
+        let updatedHead = concatenated([left, right], axis: -1)
+
+        if let tail {
+            return concatenated([updatedHead, tail], axis: -1)
+        } else {
+            return updatedHead
+        }
+    }
+
+    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        guard rotatedDims > 0, let _freqs else {
+            return x
+        }
+
+        let half = dims / 2
+        let rotatedHalf = rotatedDims / 2
+
+        let head: MLXArray
+        let tail: MLXArray?
+        if x.shape[x.ndim - 1] > dims {
+            let parts = split(x, indices: [dims], axis: -1)
+            head = parts[0]
+            tail = parts[1]
+        } else {
+            head = x
+            tail = nil
+        }
+
+        let headParts = split(head, indices: [half], axis: -1)
+        var left = headParts[0]
+        var right = headParts[1]
+
+        let leftParts = split(left, indices: [rotatedHalf], axis: -1)
+        let rightParts = split(right, indices: [rotatedHalf], axis: -1)
+        var rotated = concatenated([leftParts[0], rightParts[0]], axis: -1)
+        rotated = MLXFast.RoPE(
+            rotated,
+            dimensions: rotatedDims,
+            traditional: traditional,
+            base: nil,
+            scale: 1.0,
+            offset: offset,
+            freqs: _freqs
+        )
+
+        let rotatedParts = split(rotated, indices: [rotatedHalf], axis: -1)
+        left = concatenated([rotatedParts[0], leftParts[1]], axis: -1)
+        right = concatenated([rotatedParts[1], rightParts[1]], axis: -1)
+        let updatedHead = concatenated([left, right], axis: -1)
+
+        if let tail {
+            return concatenated([updatedHead, tail], axis: -1)
+        } else {
+            return updatedHead
+        }
+    }
+}
+
 public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let traditional: Bool
@@ -232,6 +360,13 @@ public func initializeRope(
             scale = 1.0
         }
         return RoPE(dimensions: dims, traditional: traditional, base: base, scale: scale)
+    } else if ropeType == "proportional" {
+        return ProportionalRoPE(
+            dims: dims,
+            traditional: traditional,
+            base: base,
+            scalingConfig: scalingConfig
+        )
     } else if ropeType == "llama3" {
         return Llama3RoPE(
             dims: dims,

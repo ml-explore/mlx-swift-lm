@@ -2,7 +2,7 @@
 
 import Foundation
 import MLX
-import Tokenizers
+import MLXNN
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
@@ -31,15 +31,15 @@ public protocol LogitSampler {
 /// ```
 ///
 /// See also: ``LogitSampler``
-public protocol LogitProcessor: Sendable {
+public protocol LogitProcessor {
 
-    /// called before token generation starts with the text tokens of the prompt
+    /// Called before token generation starts with the text tokens of the prompt
     mutating func prompt(_ prompt: MLXArray)
 
-    /// called to visit and possibly modify the logits
+    /// Called to visit and possibly modify the logits
     func process(logits: MLXArray) -> MLXArray
 
-    /// called to provide the sampled token
+    /// Called to provide the sampled token
     mutating func didSample(token: MLXArray)
 }
 
@@ -72,22 +72,22 @@ public struct GenerateParameters: Sendable {
     /// Step to begin using a quantized KV cache when kvBits is non-nil (default: 0)
     public var quantizedKVStart: Int
 
-    /// sampling temperature
+    /// Sampling temperature
     public var temperature: Float
 
-    /// top p sampling
+    /// Top-p sampling
     public var topP: Float
 
-    /// top k sampling (0 disables)
+    /// Top-k sampling (0 disables)
     public var topK: Int
 
-    /// min p sampling threshold relative to the highest probability token (0 disables)
+    /// Min-p sampling threshold relative to the highest probability token (0 disables)
     public var minP: Float
 
-    /// penalty factor for repeating tokens
+    /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
-    /// number of tokens to consider for repetition penalty
+    /// Number of tokens to consider for repetition penalty
     public var repetitionContextSize: Int
 
     /// additive penalty for tokens that appear in recent context
@@ -206,11 +206,17 @@ public struct ArgMaxSampler: LogitSampler {
 
 /// Sampler that uses probability filters (`topP`, `topK`, `minP`) and `temperature`
 /// to sample the logits.
+///
+/// Filters are applied in the same order as Python mlx-lm: top_p → min_p → top_k.
+/// Each filter operates on the full vocabulary in original token order, masking
+/// rejected tokens with `-inf`. This matches the composable filter chain in
+/// `mlx_lm.sample_utils.make_sampler`.
 public struct TopPSampler: LogitSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
     let minP: MLXArray?
+    let negInf: MLXArray
     let randomState: MLXRandom.RandomState
 
     public init(temperature: Float, topP: Float = 1.0, topK: Int = 0, minP: Float = 0.0) {
@@ -222,6 +228,7 @@ public struct TopPSampler: LogitSampler {
         }
         self.topK = topK > 0 ? topK : nil
         self.minP = minP > 0 ? MLXArray(minP) : nil
+        self.negInf = MLXArray(-Float.infinity)
         self.randomState = MLXRandom.RandomState()
     }
 
@@ -232,45 +239,54 @@ public struct TopPSampler: LogitSampler {
         }
 
         return withRandomState(randomState) {
-            // Match mlx-lm Python behavior:
-            // apply filtering on the base distribution, then apply temperature at sampling time.
-            let probs = softmax(logits, axis: -1)
-            let sortedIndices = argSort(probs, axis: -1)
+            var logprobs = logSoftmax(logits)
 
-            // probs shape is [B,V] and after take it will be [1, B, V], so we squeeze it back to [B, V]
-            let sortedProbs = take(probs, sortedIndices, axis: -1).squeezed(axis: 0)
-
-            var filteredProbs = sortedProbs
-
+            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
             if let topP {
-                let cumulativeProbs = cumsum(sortedProbs, axis: -1)
-                filteredProbs = MLX.where(
-                    cumulativeProbs .> (1 - topP), filteredProbs, zeros(like: filteredProbs))
+                logprobs = applyTopP(logprobs, topP: topP)
             }
-
             if let minP {
-                let maxProbs = sortedProbs[0..., -1].expandedDimensions(axis: -1)
-                let keepMask = sortedProbs .>= (maxProbs * minP)
-                filteredProbs = MLX.where(keepMask, filteredProbs, zeros(like: filteredProbs))
+                logprobs = applyMinP(logprobs, minP: minP)
             }
-
             if let topK {
-                let vocabularySize = sortedProbs.dim(-1)
-                if topK < vocabularySize {
-                    let cutOff = vocabularySize - topK
-                    let sortedPositions = MLXArray(Array(0 ..< vocabularySize))
-                    let keepMask = sortedPositions .>= cutOff
-                    filteredProbs = MLX.where(
-                        keepMask, filteredProbs, zeros(like: filteredProbs))
-                }
+                logprobs = applyTopK(logprobs, topK: topK)
             }
 
-            // Always keep the maximum-probability token so sampling always has a valid candidate.
-            filteredProbs[0..., -1] = sortedProbs[0..., -1]
-
-            let sortedToken = categorical(log(filteredProbs) * (1 / temp))
-            return sortedIndices.squeezed(axis: 0)[sortedToken]
+            return categorical(logprobs * (1 / temp))
         }
+    }
+
+    /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
+    /// Matches `apply_top_p` from `mlx_lm/sample_utils.py`.
+    private func applyTopP(_ logprobs: MLXArray, topP: MLXArray) -> MLXArray {
+        let sortedIndices = argSort(logprobs, axis: -1)
+        let sortedLogprobs = takeAlong(logprobs, sortedIndices, axis: -1)
+        let sortedProbs = exp(sortedLogprobs)
+        let cumulativeProbs = cumsum(sortedProbs, axis: -1)
+
+        // Mask low-probability tail in sorted order, scatter back to original vocab order.
+        let filtered = MLX.where(cumulativeProbs .> (1 - topP), sortedLogprobs, negInf)
+        return putAlong(logprobs, sortedIndices, values: filtered, axis: -1)
+    }
+
+    /// Keep tokens with probability >= maxProb * minP.
+    /// Matches `apply_min_p` from `mlx_lm/sample_utils.py`.
+    private func applyMinP(_ logprobs: MLXArray, minP: MLXArray) -> MLXArray {
+        // threshold in log-space: log(maxProb * minP) = maxLogprob + log(minP)
+        let maxLogprob = logprobs.max(axis: -1, keepDims: true)
+        let threshold = maxLogprob + log(minP)
+        return MLX.where(logprobs .>= threshold, logprobs, negInf)
+    }
+
+    /// Keep only the top-k highest-probability tokens.
+    /// Mirrors `apply_top_k` from `mlx_lm/sample_utils.py`.
+    private func applyTopK(_ logprobs: MLXArray, topK: Int) -> MLXArray {
+        let vocabularySize = logprobs.dim(-1)
+        guard topK < vocabularySize else { return logprobs }
+        // O(V) partition on negated logprobs so top-k land at [0, topK).
+        // Indices at [topK, V) are the tokens to mask out.
+        let maskIndices = argPartition(-logprobs, kth: topK - 1, axis: -1)[0..., topK...]
+        return putAlong(logprobs, maskIndices, values: negInf, axis: -1)
     }
 }
 
@@ -291,151 +307,149 @@ public struct CategoricalSampler: LogitSampler {
     }
 }
 
-/// Processor that implements a `repetitionPenalty`
+/// GPU-resident ring buffer of recent token IDs.
+///
+/// Shared by penalty processors to avoid duplicating ring buffer logic.
+/// Uses `MLX.where` mask operations for GPU-only updates (no CPU←GPU sync),
+/// preserving `asyncEval()` pipelining in `TokenIterator`.
+struct TokenRing {
+    private(set) var buffer: MLXArray
+    private(set) var count = 0
+    private var writeIndex = 0
+    let capacity: Int
+    private let positions: MLXArray
+
+    init(capacity: Int) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+        self.buffer = MLXArray.zeros([capacity], type: Int32.self)
+        self.positions = MLXArray.arange(capacity)
+    }
+
+    /// The valid portion of the ring (all of it once full), or `nil` if empty.
+    var validTokens: MLXArray? {
+        guard count > 0 else { return nil }
+        return count < capacity ? buffer[..<count] : buffer
+    }
+
+    /// Bulk-load from a prompt. Keeps the last `capacity` tokens.
+    mutating func loadPrompt(_ prompt: MLXArray) {
+        let n = prompt.dim(0)
+        let promptTokens = prompt.asType(.int32)
+        if n <= capacity {
+            if n < capacity {
+                let padding = MLXArray.zeros([capacity - n], type: Int32.self)
+                buffer = concatenated([promptTokens.reshaped(-1), padding])
+            } else {
+                buffer = promptTokens.reshaped(-1)
+            }
+            count = n
+            writeIndex = n % capacity
+        } else {
+            buffer = promptTokens[(-capacity)...].reshaped(-1)
+            count = capacity
+            writeIndex = 0
+        }
+    }
+
+    /// Append a single token using GPU-only mask write (no CPU←GPU sync).
+    mutating func append(_ token: MLXArray) {
+        let mask = positions .== Int32(writeIndex)
+        buffer = MLX.where(mask, token.asType(.int32), buffer)
+        writeIndex = (writeIndex + 1) % capacity
+        count = min(count + 1, capacity)
+    }
+}
+
+/// Processor that implements a `repetitionPenalty`.
 public struct RepetitionContext: LogitProcessor {
-    /// tokens in the repetition context sliding window
-    var tokens = [Int]()
-
-    /// current write index into the tokens circular array
-    var index = 0
-
-    /// penalty factor for repeating tokens
+    private var ring: TokenRing
     let repetitionPenalty: Float
 
-    /// number of tokens to consider for repetition penalty
-    let repetitionContextSize: Int
-
     public init(repetitionPenalty: Float, repetitionContextSize: Int) {
-        precondition(repetitionContextSize > 0)
         self.repetitionPenalty = repetitionPenalty
-        self.repetitionContextSize = repetitionContextSize
+        self.ring = TokenRing(capacity: repetitionContextSize)
     }
 
     mutating public func prompt(_ prompt: MLXArray) {
-        if prompt.shape[0] <= repetitionContextSize {
-            self.tokens = prompt.asArray(Int.self)
-        } else {
-            self.tokens = prompt[(-repetitionContextSize)...].asArray(Int.self)
-        }
+        ring.loadPrompt(prompt)
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        if tokens.count > 0 {
-            let indices = MLXArray(tokens.map { UInt32($0) })
-            var selectedLogits = logits[0..., indices]
+        guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
+        var selectedLogits = logits[0..., indices]
 
-            selectedLogits = MLX.where(
-                selectedLogits .< 0, selectedLogits * repetitionPenalty,
-                selectedLogits / repetitionPenalty)
+        selectedLogits = MLX.where(
+            selectedLogits .< 0, selectedLogits * repetitionPenalty,
+            selectedLogits / repetitionPenalty)
 
-            logits[0..., indices] = selectedLogits
-            return logits
-        }
-
+        logits[0..., indices] = selectedLogits
         return logits
     }
 
     mutating public func didSample(token: MLXArray) {
-        if tokens.count >= repetitionContextSize {
-            tokens[index] = token.item(Int.self)
-            index = (index + 1) % repetitionContextSize
-        } else {
-            tokens.append(token.item(Int.self))
-        }
+        ring.append(token)
     }
 }
 
 /// Processor that applies an additive presence penalty to tokens in a recent context window.
+///
+/// The penalty is applied once per unique token via scatter-write (writing the
+/// same value to the same index multiple times is idempotent).
 public struct PresencePenaltyContext: LogitProcessor {
-    var tokens = [Int]()
-    var index = 0
-
+    private var ring: TokenRing
     let presencePenalty: Float
-    let presenceContextSize: Int
 
     public init(presencePenalty: Float, presenceContextSize: Int) {
-        precondition(presenceContextSize > 0)
         self.presencePenalty = presencePenalty
-        self.presenceContextSize = presenceContextSize
+        self.ring = TokenRing(capacity: presenceContextSize)
     }
 
     mutating public func prompt(_ prompt: MLXArray) {
-        if prompt.shape[0] <= presenceContextSize {
-            self.tokens = prompt.asArray(Int.self)
-        } else {
-            self.tokens = prompt[(-presenceContextSize)...].asArray(Int.self)
-        }
+        ring.loadPrompt(prompt)
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        if tokens.isEmpty {
-            return logits
-        }
-
-        let uniqueTokens = Array(Set(tokens))
-        let indices = MLXArray(uniqueTokens.map { UInt32($0) })
+        guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
         logits[0..., indices] = logits[0..., indices] - presencePenalty
         return logits
     }
 
     mutating public func didSample(token: MLXArray) {
-        if tokens.count >= presenceContextSize {
-            tokens[index] = token.item(Int.self)
-            index = (index + 1) % presenceContextSize
-        } else {
-            tokens.append(token.item(Int.self))
-        }
+        ring.append(token)
     }
 }
 
 /// Processor that applies an additive frequency penalty to tokens in a recent context window.
+///
+/// Frequency counting is performed on GPU via `scatter_add` to build a histogram
+/// of token occurrences, avoiding CPU←GPU synchronization.
 public struct FrequencyPenaltyContext: LogitProcessor {
-    var tokens = [Int]()
-    var index = 0
-
+    private var ring: TokenRing
     let frequencyPenalty: Float
-    let frequencyContextSize: Int
 
     public init(frequencyPenalty: Float, frequencyContextSize: Int) {
-        precondition(frequencyContextSize > 0)
         self.frequencyPenalty = frequencyPenalty
-        self.frequencyContextSize = frequencyContextSize
+        self.ring = TokenRing(capacity: frequencyContextSize)
     }
 
     mutating public func prompt(_ prompt: MLXArray) {
-        if prompt.shape[0] <= frequencyContextSize {
-            self.tokens = prompt.asArray(Int.self)
-        } else {
-            self.tokens = prompt[(-frequencyContextSize)...].asArray(Int.self)
-        }
+        ring.loadPrompt(prompt)
     }
 
     public func process(logits: MLXArray) -> MLXArray {
-        if tokens.isEmpty {
-            return logits
-        }
+        guard let validTokens = ring.validTokens else { return logits }
 
-        var counts = [Int: Int]()
-        for token in tokens {
-            counts[token, default: 0] += 1
-        }
+        let vocabSize = logits.dim(-1)
+        let ones = MLXArray.ones([validTokens.dim(0)], type: Float32.self)
+        let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
+            .at[validTokens.asType(.int32)].add(ones)
 
-        let orderedTokens = Array(counts.keys)
-        let indices = MLXArray(orderedTokens.map { UInt32($0) })
-        let penalties = MLXArray(
-            orderedTokens.map { frequencyPenalty * Float(counts[$0] ?? 0) }
-        )
-        logits[0..., indices] = logits[0..., indices] - penalties
-        return logits
+        return logits - (histogram * frequencyPenalty).reshaped(1, -1)
     }
 
     mutating public func didSample(token: MLXArray) {
-        if tokens.count >= frequencyContextSize {
-            tokens[index] = token.item(Int.self)
-            index = (index + 1) % frequencyContextSize
-        } else {
-            tokens.append(token.item(Int.self))
-        }
+        ring.append(token)
     }
 }
 
@@ -476,9 +490,16 @@ public struct PenaltyProcessor: LogitProcessor {
     }
 }
 
+/// Common properties shared by token-generating iterators.
+protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element == Int {
+    var maxTokens: Int? { get }
+    var tokenCount: Int { get }
+    var promptPrefillTime: TimeInterval { get }
+}
+
 /// Generator of tokens.
 ///
-/// This is typically used via a call to ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>`.
+/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>`.
 ///
 /// To use it directly:
 ///
@@ -499,7 +520,7 @@ public struct PenaltyProcessor: LogitProcessor {
 /// Port of `generate_step()` from https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/utils.py
 ///
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
-public struct TokenIterator: Sequence, IteratorProtocol {
+public struct TokenIterator: TokenIteratorProtocol {
     let model: any LanguageModel
     var state: LMOutput.State?
 
@@ -552,7 +573,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:processor:sampler:prefillStepSize:)``
+    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///
@@ -684,6 +705,260 @@ public struct TokenIterator: Sequence, IteratorProtocol {
     }
 }
 
+/// Generator of tokens using speculative decoding.
+///
+/// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// returning `AsyncStream<Generation>`.
+///
+/// To use it directly:
+///
+/// ```swift
+/// let generateParameters: GenerateParameters
+/// let input: LMInput
+/// let mainModel: LanguageModel
+/// let draftModel: LanguageModel
+///
+/// let iterator = try SpeculativeTokenIterator(
+///     input: input, mainModel: mainModel, draftModel: draftModel,
+///     parameters: generateParameters, numDraftTokens: 2)
+///
+/// for token in iterator {
+///     ...
+/// }
+/// ```
+///
+/// Tokens are integers that can be passed through a `Tokenizer` or ``StreamingDetokenizer`` to produce Strings.
+///
+/// Port of `speculative_generate_step()` from https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py
+public struct SpeculativeTokenIterator: TokenIteratorProtocol {
+
+    var y: LMInput.Text
+    var draftY: LMInput.Text
+
+    let mainModel: any LanguageModel
+    let draftModel: any LanguageModel
+
+    var mainState: LMOutput.State?
+    var mainCache: [KVCache]
+    var draftCache: [KVCache]
+    let quantizeKVCache: (inout [KVCache]) -> Void
+
+    var processor: LogitProcessor?
+    let sampler: LogitSampler
+
+    var tokenCount = 0
+    let maxTokens: Int?
+    let numDraftTokens: Int
+
+    // Buffer of accepted tokens from the current speculation round
+    private var pendingTokens = [Int]()
+    private var pendingIndex = 0
+
+    // Internal metrics
+    var promptPrefillTime: TimeInterval = 0.0
+
+    /// Initialize a `SpeculativeTokenIterator` with the given input.
+    ///
+    /// - Parameters:
+    ///   - input: language model input
+    ///   - mainModel: the main (verifier) ``LanguageModel``
+    ///   - draftModel: the draft ``LanguageModel`` (must share the same tokenizer)
+    ///   - mainCache: optional ``KVCache`` for the main model
+    ///   - draftCache: optional ``KVCache`` for the draft model
+    ///   - parameters: the generation parameters
+    ///   - numDraftTokens: number of tokens the draft model proposes per round
+    public init(
+        input: LMInput,
+        mainModel: any LanguageModel,
+        draftModel: any LanguageModel,
+        mainCache: [KVCache]? = nil,
+        draftCache: [KVCache]? = nil,
+        parameters: GenerateParameters,
+        numDraftTokens: Int
+    ) throws {
+        self.y = input.text
+        self.draftY = input.text
+        self.mainModel = mainModel
+        self.draftModel = draftModel
+
+        self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
+        self.draftCache = draftCache ?? draftModel.newCache(parameters: parameters)
+        guard canTrimPromptCache(self.mainCache), canTrimPromptCache(self.draftCache) else {
+            throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
+        }
+
+        self.sampler = parameters.sampler()
+        self.processor = parameters.processor()
+
+        self.maxTokens = parameters.maxTokens
+        self.numDraftTokens = numDraftTokens
+
+        self.quantizeKVCache = { cache in
+            maybeQuantizeKVCache(
+                cache: &cache,
+                kvBits: parameters.kvBits,
+                kvGroupSize: parameters.kvGroupSize,
+                quantizedKVStart: parameters.quantizedKVStart
+            )
+        }
+
+        self.promptPrefillTime = try measure {
+            try prepare(input: input, windowSize: parameters.prefillStepSize)
+        }
+    }
+
+    /// Prefill both main and draft models with the prompt, priming caches for generation
+    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+        processor?.prompt(input.text.tokens)
+
+        // Prefill main model
+        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        case .tokens(let tokens):
+            y = tokens
+        case .logits(let result):
+            var logits = result.logits[0..., -1, 0...]
+            logits = processor?.process(logits: logits) ?? logits
+            let token = sampler.sample(logits: logits)
+            processor?.didSample(token: token)
+            y = .init(tokens: token)
+            mainState = result.state
+        }
+
+        // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
+        switch try draftModel.prepare(input, cache: draftCache, windowSize: windowSize) {
+        case .tokens(let tokens):
+            draftY = tokens
+        case .logits(let result):
+            var logits = result.logits[0..., -1, 0...]
+            logits = processor?.process(logits: logits) ?? logits
+            let token = sampler.sample(logits: logits)
+            draftY = .init(tokens: token)
+            asyncEval(draftY.tokens)
+        }
+    }
+
+    /// Run one round of speculative decoding: draft, verify, accept/reject
+    mutating func speculateRound() {
+        let remaining = maxTokens.map { $0 - tokenCount } ?? numDraftTokens
+        let numDraft = Swift.min(remaining, numDraftTokens)
+        guard numDraft > 0 else {
+            return
+        }
+
+        // Draft generation: autoregressive loop with draft model
+        var draftProcessor = processor  // Copy to discard later
+        var draftTokens = [MLXArray]()
+        for _ in 0 ..< numDraft {
+            let draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+            var draftLogits = draftResult.logits[0..., -1, 0...]
+            draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
+            let draftToken = sampler.sample(logits: draftLogits)
+            draftProcessor?.didSample(token: draftToken)
+            asyncEval(draftToken)
+            draftTokens.append(draftToken)
+            draftY = .init(tokens: draftToken)
+        }
+
+        // Verification: main model processes proposals in one pass
+        let verifyTokens = [y.tokens] + draftTokens
+        let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
+        let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
+        let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        let mainLogits = mainResult.logits
+        mainState = mainResult.state
+
+        let mainTokens: MLXArray
+        if var verifyProcessor = processor {
+            // Process each position sequentially so that the processor sees tokens sampled at earlier positions
+            var sampled = [MLXArray]()
+            for i in 0 ..< (numDraft + 1) {
+                var logits = mainLogits[0..., verifyStart + i, 0...]
+                logits = verifyProcessor.process(logits: logits)
+                let token = sampler.sample(logits: logits)
+                verifyProcessor.didSample(token: token)
+                sampled.append(token)
+            }
+            mainTokens = concatenated(sampled)
+        } else {
+            // Batch-sample all verify tokens from main model in one operation
+            let verifyLogits = mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0)
+            mainTokens = sampler.sample(logits: verifyLogits)
+        }
+
+        // Compare and accept proposed tokens
+        eval(mainTokens, draftTokens)
+        let mainTokensList = mainTokens.asArray(Int.self)
+        let draftTokensList = concatenated(draftTokens).asArray(Int.self)
+        var accepted = 0
+        for i in 0 ..< numDraft {
+            guard mainTokensList[i] == draftTokensList[i] else {
+                break
+            }
+
+            processor?.didSample(token: draftTokens[i])
+            pendingTokens.append(mainTokensList[i])
+            accepted += 1
+        }
+
+        // Always emit the main model's token at position `accepted`
+        // (either the correction token or the bonus token if all drafts matched)
+        let finalToken = mainTokens[accepted ... accepted]
+        processor?.didSample(token: finalToken)
+        pendingTokens.append(mainTokensList[accepted])
+
+        // Rewind caches for rejected tokens
+        trimPromptCache(mainCache, numTokens: numDraft - accepted)
+        trimPromptCache(draftCache, numTokens: Swift.max(numDraft - accepted - 1, 0))
+
+        // Apply dynamic cache quantization after rewind
+        quantizeKVCache(&mainCache)
+        quantizeKVCache(&draftCache)
+
+        // Set y/draftY for the next round
+        y = .init(tokens: finalToken)
+        draftY = .init(tokens: finalToken)
+
+        // If all draft tokens were accepted, the draft model hasn't processed
+        // the last accepted draft token yet. Feed it through to keep caches in sync.
+        if accepted == numDraft {
+            draftY = .init(
+                tokens: concatenated([
+                    draftTokens[numDraft - 1].reshaped([1]),
+                    finalToken,
+                ])
+            )
+        }
+    }
+
+    mutating public func next() -> Int? {
+        if let maxTokens, tokenCount >= maxTokens {
+            return nil
+        }
+
+        // Drain the pending buffer first
+        if pendingIndex < pendingTokens.count {
+            let token = pendingTokens[pendingIndex]
+            pendingIndex += 1
+            tokenCount += 1
+            return token
+        }
+
+        // Run a new speculation round
+        pendingTokens.removeAll(keepingCapacity: true)
+        pendingIndex = 0
+        speculateRound()
+
+        if pendingTokens.isEmpty {
+            return nil
+        }
+
+        let token = pendingTokens[pendingIndex]
+        pendingIndex += 1
+        tokenCount += 1
+        return token
+    }
+}
+
 /// Result of a call to a deprecated callback-based generate function.
 public struct GenerateResult {
 
@@ -691,45 +966,61 @@ public struct GenerateResult {
     ///
     /// - Parameters:
     ///   - inputText: The input text used for generation.
-    ///   - tokens: The array of tokens generated.
+    ///   - tokenIds: The array of generated token IDs.
     ///   - output: The generated output string.
     ///   - promptTime: The time taken to prompt the input.
     ///   - generateTime: The time taken to generate the output.
     public init(
-        inputText: LMInput.Text, tokens: [Int], output: String, promptTime: TimeInterval,
+        inputText: LMInput.Text, tokenIds: [Int], output: String, promptTime: TimeInterval,
         generateTime: TimeInterval
     ) {
         self.inputText = inputText
-        self.tokens = tokens
+        self.tokenIds = tokenIds
         self.output = output
         self.promptTime = promptTime
         self.generateTime = generateTime
     }
 
+    @available(*, deprecated, renamed: "init(inputText:tokenIds:output:promptTime:generateTime:)")
+    public init(
+        inputText: LMInput.Text, tokens: [Int], output: String, promptTime: TimeInterval,
+        generateTime: TimeInterval
+    ) {
+        self.init(
+            inputText: inputText, tokenIds: tokens, output: output, promptTime: promptTime,
+            generateTime: generateTime)
+    }
+
     /// input (prompt, images, etc.)
     public let inputText: LMInput.Text
 
-    @available(*, deprecated, message: "use inputText")
-    public var promptTokens: [Int] {
+    /// The token IDs of the input prompt.
+    public var promptTokenIds: [Int] {
         inputText.tokens.asArray(Int.self)
     }
 
-    /// output tokens
-    public let tokens: [Int]
+    @available(*, deprecated, renamed: "promptTokenIds")
+    public var promptTokens: [Int] { promptTokenIds }
 
-    /// output text
+    /// Generated token IDs
+    public let tokenIds: [Int]
+
+    @available(*, deprecated, renamed: "tokenIds")
+    public var tokens: [Int] { tokenIds }
+
+    /// Output text
     public let output: String
 
     /// The number of tokens included in the input prompt.
     public var promptTokenCount: Int { inputText.tokens.size }
 
     /// The number of tokens generated by the language model.
-    public var generationTokenCount: Int { tokens.count }
+    public var generationTokenCount: Int { tokenIds.count }
 
-    /// time to process the prompt / generate the first token
+    /// Time to process the prompt (generate the first token)
     public let promptTime: TimeInterval
 
-    /// time to generate the remaining tokens
+    /// Time to generate the remaining tokens
     public let generateTime: TimeInterval
 
     /// The number of tokens processed per second during the prompt phase.
@@ -739,7 +1030,7 @@ public struct GenerateResult {
 
     /// The number of tokens generated per second during the generation phase.
     public var tokensPerSecond: Double {
-        Double(tokens.count) / generateTime
+        Double(tokenIds.count) / generateTime
     }
 
     public func summary() -> String {
@@ -752,53 +1043,53 @@ public struct GenerateResult {
 
 /// Action from token visitor callback in deprecated callback-based generate functions.
 public enum GenerateDisposition: Sendable {
-    /// keep producing tokens until an EOS token is produced
+    /// Keep producing tokens until an EOS token is produced
     case more
 
-    /// stop producing tokens, e.g. a token limit has been hit
+    /// Stop producing tokens, e.g. a token limit has been hit
     case stop
 }
 
 private struct SynchronousGenerationLoopResult {
-    let generatedTokens: [Int]
+    let generatedTokenIds: [Int]
     let promptTime: TimeInterval
     let generateTime: TimeInterval
     let promptPrefillTime: TimeInterval
     let stopReason: GenerateStopReason
 }
 
-private func buildStopTokenIDs(
+private func buildStopTokenIds(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer
 ) -> Set<Int> {
     // Build complete EOS token set from all sources.
-    var stopTokenIDs = modelConfiguration.eosTokenIds
+    var stopTokenIds = modelConfiguration.eosTokenIds
     if let tokenizerEOS = tokenizer.eosTokenId {
-        stopTokenIDs.insert(tokenizerEOS)
+        stopTokenIds.insert(tokenizerEOS)
     }
     for token in modelConfiguration.extraEOSTokens {
         if let id = tokenizer.convertTokenToId(token) {
-            stopTokenIDs.insert(id)
+            stopTokenIds.insert(id)
         }
     }
-    return stopTokenIDs
+    return stopTokenIds
 }
 
 private func runSynchronousGenerationLoop(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: TokenIterator,
-    didGenerate: (_ token: Int, _ generatedTokens: [Int]) -> GenerateDisposition
+    didGenerate: (_ token: Int, _ generatedTokenIds: [Int]) -> GenerateDisposition
 ) -> SynchronousGenerationLoopResult {
     var start = Date.timeIntervalSinceReferenceDate
     var promptTime: TimeInterval = 0
 
-    let stopTokenIDs = buildStopTokenIDs(
+    let stopTokenIds = buildStopTokenIds(
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer
     )
 
-    var generatedTokens = [Int]()
+    var generatedTokenIds = [Int]()
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
@@ -811,14 +1102,14 @@ private func runSynchronousGenerationLoop(
         }
 
         // Check for end-of-sequence tokens.
-        if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+        if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
             stopReason = .stop
             break
         }
 
-        generatedTokens.append(token)
+        generatedTokenIds.append(token)
 
-        if didGenerate(token, generatedTokens) == .stop {
+        if didGenerate(token, generatedTokenIds) == .stop {
             stopReason = .cancelled
             break
         }
@@ -843,7 +1134,7 @@ private func runSynchronousGenerationLoop(
     Stream().synchronize()
 
     return SynchronousGenerationLoopResult(
-        generatedTokens: generatedTokens,
+        generatedTokenIds: generatedTokenIds,
         promptTime: promptTime,
         generateTime: generateTime,
         promptPrefillTime: iterator.promptPrefillTime,
@@ -853,7 +1144,7 @@ private func runSynchronousGenerationLoop(
 
 /// Given prompt tokens generate text using the given model and parameters.
 ///
-/// ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - promptTokens: tokenized prompt
@@ -892,7 +1183,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -918,7 +1209,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -945,8 +1236,8 @@ public func generate(
     }
 
     return GenerateResult(
-        inputText: input.text, tokens: result.generatedTokens,
-        output: context.tokenizer.decode(tokens: result.generatedTokens),
+        inputText: input.text, tokenIds: result.generatedTokenIds,
+        output: context.tokenizer.decode(tokenIds: result.generatedTokenIds),
         promptTime: result.promptTime + result.promptPrefillTime,
         generateTime: result.generateTime
     )
@@ -954,7 +1245,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -980,7 +1271,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1008,7 +1299,7 @@ public func generate(
 
     return GenerateCompletionInfo(
         promptTokenCount: input.text.tokens.size,
-        generationTokenCount: result.generatedTokens.count,
+        generationTokenCount: result.generatedTokenIds.count,
         promptTime: result.promptTime + result.promptPrefillTime,
         generationTime: result.generateTime,
         stopReason: result.stopReason
@@ -1025,7 +1316,7 @@ public func generate(
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
 /// one-shot calls, but for "chat session" type calls consider using
-/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:)``
+/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:)``
 /// so that the end of the generation task can be observed.
 ///
 /// - Parameters:
@@ -1076,6 +1367,84 @@ public func generate(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket)
+    return stream
+}
+
+/// Generates text and tool calls asynchronously using speculative decoding with a draft model.
+///
+/// This function uses a smaller draft model to propose tokens that are verified in batch
+/// by the main model, potentially accelerating generation. The resulting stream yields
+/// decoded text chunks, tool calls, and completion information. It has the same output as the
+/// non-speculative ``generate(input:cache:parameters:context:wiredMemoryTicket:)``.
+///
+/// Both models must share the same tokenizer.
+///
+/// ### Example Usage:
+/// ```swift
+/// let generateParameters: GenerateParameters
+/// let input: UserInput
+/// let mainContext: ModelContext
+/// let draftModel: LanguageModel
+///
+/// let lmInput = try mainContext.processor.prepare(input: input)
+///
+/// let stream = try generate(
+///     input: lmInput, parameters: generateParameters,
+///     context: mainContext, draftModel: draftModel)
+///
+/// for await generation in stream {
+///     switch generation {
+///     case .chunk(let text):
+///         print("Generated text: \(text)")
+///     case .info(let info):
+///         print("Finished: \(info.tokensPerSecond) tokens/s.")
+///     case .toolCall(let call):
+///         print("Tool call: \(call.function.name)")
+///     }
+/// }
+/// ```
+///
+/// - Parameters:
+///   - input: The input for the language model.
+///   - cache: optional ``KVCache`` for the main model.
+///   - parameters: The configuration options for token generation.
+///   - context: The model context for the main (verifier) model.
+///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
+///   - draftCache: optional ``KVCache`` for the draft model.
+///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
+///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
+/// - Returns: An `AsyncStream` that emits `Generation` values.
+/// - Throws: An error if the iterator initialization fails.
+public func generate(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    draftModel: any LanguageModel,
+    draftCache: [KVCache]? = nil,
+    numDraftTokens: Int = 2,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<Generation> {
+    let iterator = try SpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        draftModel: draftModel,
+        mainCache: cache,
+        draftCache: draftCache,
+        parameters: parameters,
+        numDraftTokens: numDraftTokens
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            format: context.configuration.toolCallFormat ?? .json
+        )
+    )
     return stream
 }
 
@@ -1167,6 +1536,54 @@ public func generateTokens(
     return stream
 }
 
+/// Generates raw token IDs asynchronously using speculative decoding with a draft model.
+///
+/// This is similar to `generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)`,
+/// but yields raw token IDs instead of decoded text/tool calls.
+///
+/// Both models must share the same tokenizer.
+///
+/// - Parameters:
+///   - input: The input for the language model.
+///   - cache: optional ``KVCache`` for the main model.
+///   - parameters: The configuration options for token generation.
+///   - context: The model context for the main (verifier) model.
+///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
+///   - draftCache: optional ``KVCache`` for the draft model.
+///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
+///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
+/// - Returns: An `AsyncStream` that emits `TokenGeneration` values.
+/// - Throws: An error if the iterator initialization fails.
+public func generateTokens(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    draftModel: any LanguageModel,
+    draftCache: [KVCache]? = nil,
+    numDraftTokens: Int = 2,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<TokenGeneration> {
+    let iterator = try SpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        draftModel: draftModel,
+        mainCache: cache,
+        draftCache: draftCache,
+        parameters: parameters,
+        numDraftTokens: numDraftTokens
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: RawTokenLoopHandler()
+    )
+    return stream
+}
+
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.
 ///
 /// Prefer this overload if you want to be able to observe when the underlying generation work is finished
@@ -1242,7 +1659,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
-    iterator: consuming TokenIterator,
+    iterator: consuming any TokenIteratorProtocol,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     includeStopToken: Bool = false,
     handler: consuming Handler
@@ -1264,7 +1681,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             var tokenCount = 0
             var stopReason: GenerateStopReason?
 
-            let stopTokenIDs = buildStopTokenIDs(
+            let stopTokenIds = buildStopTokenIds(
                 modelConfiguration: modelConfiguration,
                 tokenizer: tokenizer
             )
@@ -1283,7 +1700,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
 
                 // Check for end-of-sequence tokens
-                if token == tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+                if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if includeStopToken {
                         tokenCount += 1
                         if !handler.onStopToken(token, emit: continuation.yield) {

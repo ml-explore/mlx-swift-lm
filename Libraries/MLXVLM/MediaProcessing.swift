@@ -341,7 +341,7 @@ public enum MediaProcessing {
     static public func asProcessedSequence(
         _ video: UserInput.Video,
         samplesPerSecond: Int,
-        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
         return try await asProcessedSequence(
             video,

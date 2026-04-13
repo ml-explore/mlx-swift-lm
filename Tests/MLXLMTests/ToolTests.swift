@@ -196,6 +196,33 @@ struct ToolTests {
         #expect(toolCall.function.arguments.isEmpty)
     }
 
+    @Test("Test Pythonic Tool Call Parser - Multiple Tools via parseEOS")
+    func testPythonicParserMultipleToolsEOS() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+
+        let content1 =
+            "<|tool_call_start|>[get_weather(location='Paris'), current_time(timezone=\"UTC\")]<|tool_call_end|>"
+        let toolCalls1 = parser.parseEOS(content1, tools: nil)
+
+        #expect(toolCalls1.count == 2)
+        #expect(toolCalls1[0].function.name == "get_weather")
+        #expect(toolCalls1[0].function.arguments["location"] == .string("Paris"))
+        #expect(toolCalls1[1].function.name == "current_time")
+        #expect(toolCalls1[1].function.arguments["timezone"] == .string("UTC"))
+
+        // Multiple distinct tool call blocks
+        let content2 =
+            "<|tool_call_start|>[get_weather(location='London')]<|tool_call_end|> <text> <|tool_call_start|>[current_time(timezone='UTC')]<|tool_call_end|>"
+        let toolCalls2 = parser.parseEOS(content2, tools: nil)
+
+        #expect(toolCalls2.count == 2)
+        #expect(toolCalls2[0].function.name == "get_weather")
+        #expect(toolCalls2[0].function.arguments["location"] == .string("London"))
+        #expect(toolCalls2[1].function.name == "current_time")
+        #expect(toolCalls2[1].function.arguments["timezone"] == .string("UTC"))
+    }
+
     @Test("Test Pythonic Tool Call Parser - Type Conversion")
     func testPythonicParserTypeConversion() throws {
         let parser = PythonicToolCallParser(
@@ -495,6 +522,73 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("AI news"))
     }
 
+    // MARK: - Llama 3 Format Tests
+
+    @Test("Test Llama 3 Tool Call Parser")
+    func testLlama3Parser() throws {
+        let parser = Llama3ToolCallParser()
+
+        let content1 = """
+            <|python_tag|>{"name": "knowledge_search", "parameters": {"query": "example"}}
+            """
+
+        let toolCall1 = try #require(parser.parse(content: content1, tools: nil))
+        #expect(toolCall1.function.name == "knowledge_search")
+        #expect(toolCall1.function.arguments["query"] == .string("example"))
+
+        let content2 = """
+            {"name": "get_weather", "arguments": {"location": "Tokyo"}}
+            """
+
+        let toolCall2 = try #require(parser.parse(content: content2, tools: nil))
+        #expect(toolCall2.function.name == "get_weather")
+        #expect(toolCall2.function.arguments["location"] == .string("Tokyo"))
+
+        // Pythonic format
+        let content3 = """
+            <|python_tag|>get_weather(location="San Francisco, CA")
+            """
+
+        let toolCall3 = try #require(parser.parse(content: content3, tools: nil))
+        #expect(toolCall3.function.name == "get_weather")
+        #expect(toolCall3.function.arguments["location"] == .string("San Francisco, CA"))
+
+        // Multiple arguments Pythonic
+        let content4 = """
+            <|python_tag|>calculate(expression="2 + 2", precision=4)
+            """
+
+        let toolCall4 = try #require(parser.parse(content: content4, tools: nil))
+        #expect(toolCall4.function.name == "calculate")
+        #expect(toolCall4.function.arguments["expression"] == .string("2 + 2"))
+        #expect(toolCall4.function.arguments["precision"] == .string("4"))
+
+        // Multiple JSON list format via parseEOS
+        let content5 = """
+            <|python_tag|>[
+              {"name": "get_weather", "parameters": {"location": "New York"}},
+              {"name": "get_time", "parameters": {"location": "London"}}
+            ]
+            """
+        let toolCalls5 = parser.parseEOS(content5, tools: nil)
+        #expect(toolCalls5.count == 2)
+        #expect(toolCalls5[0].function.name == "get_weather")
+        #expect(toolCalls5[0].function.arguments["location"] == .string("New York"))
+        #expect(toolCalls5[1].function.name == "get_time")
+        #expect(toolCalls5[1].function.arguments["location"] == .string("London"))
+
+        // Multiple pythonic format via parseEOS
+        let content6 = """
+            <|python_tag|>[get_weather(location="New York"), get_time(location="London")]
+            """
+        let toolCalls6 = parser.parseEOS(content6, tools: nil)
+        #expect(toolCalls6.count == 2)
+        #expect(toolCalls6[0].function.name == "get_weather")
+        #expect(toolCalls6[0].function.arguments["location"] == .string("New York"))
+        #expect(toolCalls6[1].function.name == "get_time")
+        #expect(toolCalls6[1].function.arguments["location"] == .string("London"))
+    }
+
     // MARK: - ToolCallFormat Serialization Tests
 
     @Test("Test ToolCallFormat Raw Values for Serialization")
@@ -557,8 +651,36 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
 
+        // Llama models - require secondary signals from configData
+        #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
+
+        let llama3RopeConfig = """
+            {
+                "model_type": "llama",
+                "rope_scaling": {
+                    "rope_type": "llama3"
+                }
+            }
+            """.data(using: .utf8)!
+        #expect(ToolCallFormat.infer(from: "llama", configData: llama3RopeConfig) == .llama3)
+
+        let llama3VocabConfig = """
+            {
+                "model_type": "llama",
+                "vocab_size": 128256
+            }
+            """.data(using: .utf8)!
+        #expect(ToolCallFormat.infer(from: "LLAMA", configData: llama3VocabConfig) == .llama3)
+
+        let llama2Config = """
+            {
+                "model_type": "llama",
+                "vocab_size": 32000
+            }
+            """.data(using: .utf8)!
+        #expect(ToolCallFormat.infer(from: "llama", configData: llama2Config) == nil)
+
         // Unknown models should return nil (use default JSON format)
-        #expect(ToolCallFormat.infer(from: "llama") == nil)
         #expect(ToolCallFormat.infer(from: "qwen2") == nil)
         #expect(ToolCallFormat.infer(from: "mistral") == nil)
     }

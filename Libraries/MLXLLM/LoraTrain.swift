@@ -5,7 +5,6 @@ import MLX
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
-import Tokenizers
 
 /// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
 struct LoRABatchIterator: Sequence, IteratorProtocol {
@@ -99,9 +98,9 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// At this point the model will be trained and you could do one of the following:
 ///
-/// - ``saveLoRAWeights(model:url:)`` -- write the LoRA weights to a file
-/// - ``fuse(model:layers:deQuantize:)`` -- fuse the LoRA weights and convert back into the original model
-///     architecture. These weights can be saved and reloaded with normal model handling code.
+/// - ``saveLoRAWeights(model:url:)``: write the LoRA weights to a file
+/// - fuse the LoRA weights and convert back into the original model
+///     architecture using the LoRA adapter APIs in `MLXLMCommon`
 /// - ``evaluate(model:dataset:loss:tokenizer:batchSize:batchCount:)``-- compute the test loss
 ///     againts a test dataset
 /// - use the in memory model as a normal `LLMModel` and evaluate a prompt
@@ -208,8 +207,8 @@ public enum LoRATrain {
     /// Given a model with LoRA adaptors applied, write adapter weights to a `.safetensors` file.
     ///
     /// ### See Also
-    /// - ``convert(model:layers:)``
-    /// - ``loadLoRAWeights(model:url:)``
+    /// - ``evaluate(model:dataset:loss:tokenizer:batchSize:batchCount:)``
+    /// - ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``
     public static func saveLoRAWeights(model: Module, url: URL) throws {
         let parameters = Dictionary(
             uniqueKeysWithValues: model.trainableParameters().flattened())

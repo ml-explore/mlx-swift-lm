@@ -38,20 +38,25 @@ public struct PoolingConfiguration: Codable {
 /// Loads a `Pooling` module from a specific model directory.
 ///
 /// It looks for a configuration file located at `1_Pooling/config.json` within the provided directory.
-/// If the file is missing or invalid, it returns a `Pooling` module with strategy `.none`.
+/// If the file is missing or invalid, it falls back to the embedding model's built-in pooling strategy.
+/// If neither source provides a strategy, it returns a `Pooling` module with strategy `.none`.
 ///
 /// - Parameter modelDirectory: The base URL of the model weights and configuration.
+/// - Parameter model: The loaded embedding model.
 /// - Returns: An initialized `Pooling` module.
-func loadPooling(modelDirectory: URL) -> Pooling {
+func loadPooling(modelDirectory: URL, model: EmbeddingModel) -> Pooling {
     let configurationURL = modelDirectory.appending(components: "1_Pooling", "config.json")
-    guard
-        let poolingConfig = try? JSONDecoder.json5().decode(
-            PoolingConfiguration.self, from: Data(contentsOf: configurationURL))
-    else {
-        return Pooling(strategy: .none)
+    if let poolingConfig = try? JSONDecoder.json5().decode(
+        PoolingConfiguration.self, from: Data(contentsOf: configurationURL))
+    {
+        return Pooling(config: poolingConfig)
     }
 
-    return Pooling(config: poolingConfig)
+    if let strategy = model.poolingStrategy {
+        return Pooling(strategy: strategy)
+    }
+
+    return Pooling(strategy: .none)
 }
 
 /// A module that performs pooling operations on hidden states to produce fixed-sized sentence embeddings.
@@ -146,7 +151,15 @@ public class Pooling: Module {
         case .first:
             pooled = inputs.hiddenStates![0..., 0, 0...]
         case .last:
-            pooled = inputs.hiddenStates![0..., -1, 0...]
+            let hiddenStates = inputs.hiddenStates!
+            let tokenCounts = sum(_mask.asType(.int32), axis: -1)
+            let tokenIndices = MLX.maximum(
+                tokenCounts - MLXArray(Int32(1)),
+                MLXArray(Int32(0))
+            )
+            let indices = tokenIndices.expandedDimensions(axes: [1, 2])
+            let gathered = MLX.takeAlong(hiddenStates, indices, axis: 1)
+            pooled = MLX.squeezed(gathered, axis: 1)
         case .cls:
             pooled =
                 inputs.pooledOutput

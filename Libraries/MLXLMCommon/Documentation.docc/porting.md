@@ -295,7 +295,7 @@ public init(dimensions: Int, eps: Float = 1e-5) {
 }
 ```
 
-Note that the weight is given an initial value and shape based on the parameters to the initializer. In typical inference use, these values will be replaced when the weights are loaded (``loadWeights(modelDirectory:model:quantization:)``).
+Note that the weight is given an initial value and shape based on the parameters to the initializer. In typical inference use, these values will be replaced when the weights are loaded (``loadWeights(modelDirectory:model:quantization:perLayerQuantization:)``).
 
 * Note: If the property names in Python don't make good Swift names, you can use the `@ParameterInfo` property wrapper to specify the key: `@ParameterInfo(key: "some_weight") var weight: MLXArray`
 
@@ -595,8 +595,14 @@ Now we can load the model using `llm-tool` or the `LLMEval` example application,
 ```swift
 let modelConfiguration = ModelConfiguration(id: "mlx-community/quantized-gemma-2b-it")
 
-// This will download the weights from Hugging Face Hub and load the model
-let container = try await MLXModelFactory.shared.loadContainer(configuration: modelConfiguration)
+// e.g. TokenizersLoader() from MLXLMTokenizers
+let tokenizerLoader: any TokenizerLoader
+
+// This will download the weights and load the model
+let container = try await MLXModelFactory.shared.loadContainer(
+    using: tokenizerLoader,
+    configuration: modelConfiguration
+)
 
 // Prepare the prompt and parameters used to generate the response
 let generateParameters = GenerateParameters()

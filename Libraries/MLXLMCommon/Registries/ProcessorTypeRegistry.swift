@@ -1,7 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Tokenizers
 
 public actor ProcessorTypeRegistry {
 

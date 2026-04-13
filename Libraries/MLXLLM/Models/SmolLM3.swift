@@ -10,22 +10,15 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-protocol SmolLM3PositionEmbedding {
-    func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray
-    func callAsFunction(_ x: MLXArray) -> MLXArray
-}
-
-extension RoPE: SmolLM3PositionEmbedding {}
-
 // MARK: - NoPE
 
-final class NoPE: Module, SmolLM3PositionEmbedding {
-    func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray {
+final class NoPE: Module, OffsetLayer, ArrayOffsetLayer {
+    public func callAsFunction(_ x: MLXArray, offset: Int) -> MLXArray {
         return x
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        callAsFunction(x, offset: 0)
+    public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
+        return x
     }
 }
 
@@ -40,7 +33,7 @@ class SmolLM3Attention: Module {
     @ModuleInfo(key: "v_proj") var wv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    var rope: SmolLM3PositionEmbedding
+    var rope: RoPELayer
 
     init(_ args: SmolLM3Configuration) {
         self.args = args
@@ -78,13 +71,8 @@ class SmolLM3Attention: Module {
         keys = keys.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
-        if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
-        } else {
-            queries = rope(queries)
-            keys = rope(keys)
-        }
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
         let output = attentionWithCacheUpdate(
             queries: queries,

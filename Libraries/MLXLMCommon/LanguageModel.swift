@@ -1,10 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
 import MLX
 import MLXNN
-import Tokenizers
 
 /// Time/Height/Width struct to represent information about input images.
 public struct THW: Sendable {
@@ -168,7 +166,7 @@ public protocol LanguageModel: Module {
     /// Models may implement this simplified interface if they do not produce any ``LMOutput/State``
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
 
-    /// create a new array of ``KVCache`` -- automatic implementation if self
+    /// create a new array of ``KVCache``: automatic implementation if self
     /// implements ``KVCacheDimensionProvider``
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 

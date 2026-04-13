@@ -10,7 +10,6 @@ import CoreMedia
 import Foundation
 import MLX
 import MLXLMCommon
-import Tokenizers
 
 // MARK: - Configuration and modeling are Idefics3
 
@@ -241,7 +240,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let promptTokens = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools,
                 additionalContext: input.additionalContext)
-            let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
             let image = try input.images[0].asCIImage().toSRGB()
             let (tiles, imageRows, imageCols) = tiles(from: image)
@@ -308,7 +307,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
             let promptTokens = try tokenizer.applyChatTemplate(
                 messages: messagesWithSystem(messages))
-            let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
             let video = input.videos[0]
 

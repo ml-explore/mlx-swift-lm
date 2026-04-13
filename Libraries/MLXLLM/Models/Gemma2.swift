@@ -4,7 +4,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 
 // Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma2.py
 
@@ -55,13 +54,11 @@ class Gemma2Attention: Module {
         keys = keys.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
 
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+
         if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
-        } else {
-            queries = rope(queries)
-            keys = rope(keys)
         }
 
         queries = queries * self.scale

@@ -229,13 +229,8 @@ class AttentionBlock: Module {
             if sinksActive {
                 fatalError("Quantized attention does not support non-zero sinks.")
             }
-            if qcache.offset == 0 {
-                q = rope(q)
-                k = rope(k)
-            } else {
-                q = rope(q, offset: qcache.offset)
-                k = rope(k, offset: qcache.offset)
-            }
+            q = applyRotaryPosition(rope, to: q, cache: cache)
+            k = applyRotaryPosition(rope, to: k, cache: cache)
 
             let (qKeys, qValues) = qcache.updateQuantized(keys: k, values: v)
             let vHat = quantizedScaledDotProductAttention(
@@ -252,13 +247,11 @@ class AttentionBlock: Module {
             return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
         }
 
+        q = applyRotaryPosition(rope, to: q, cache: cache)
+        k = applyRotaryPosition(rope, to: k, cache: cache)
+
         if let cache {
-            q = rope(q, offset: cache.offset)
-            k = rope(k, offset: cache.offset)
             (k, v) = cache.update(keys: k, values: v)
-        } else {
-            q = rope(q)
-            k = rope(k)
         }
 
         let vHat = MLXFast.scaledDotProductAttention(

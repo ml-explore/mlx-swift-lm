@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import MLXLMCommon
 
 /// A registry and configuration provider for embedding models.
 ///
@@ -22,7 +22,7 @@ public struct ModelConfiguration: Sendable {
     /// The backing storage for the model's location.
     public enum Identifier: Sendable {
         /// A Hugging Face Hub repository identifier (e.g., "BAAI/bge-small-en-v1.5").
-        case id(String)
+        case id(String, revision: String = "main")
         /// A file system URL pointing to a local model directory.
         case directory(URL)
     }
@@ -36,67 +36,44 @@ public struct ModelConfiguration: Sendable {
     /// it returns a path-based name (e.g., "ParentDir/ModelDir").
     public var name: String {
         switch id {
-        case .id(let string):
+        case .id(let string, _):
             string
         case .directory(let url):
             url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
         }
     }
 
-    /// An optional alternate Hub ID to use specifically for loading the tokenizer.
+    /// Where to load the tokenizer from when it differs from the model directory.
     ///
-    /// Use this if the model weights and tokenizer configuration are hosted in different repositories.
-    public let tokenizerId: String?
-
-    /// An optional override string for specifying a specific tokenizer implementation.
-    ///
-    /// This is useful for providing compatibility hints to `swift-tokenizers` before
-    /// official support is updated.
-    public let overrideTokenizer: String?
+    /// - `.id`: download from a remote provider (requires a downloader)
+    /// - `.directory`: load from a local path
+    /// - `nil`: use the same directory as the model
+    public let tokenizerSource: TokenizerSource?
 
     /// Initializes a configuration using a Hub repository ID.
     /// - Parameters:
     ///   - id: The Hugging Face repo ID.
-    ///   - tokenizerId: Optional alternate repo for the tokenizer.
-    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
+    ///   - revision: The Git revision to use (defaults to "main").
+    ///   - tokenizerSource: Optional alternate source for the tokenizer.
     public init(
         id: String,
-        tokenizerId: String? = nil,
-        overrideTokenizer: String? = nil
+        revision: String = "main",
+        tokenizerSource: TokenizerSource? = nil
     ) {
-        self.id = .id(id)
-        self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
+        self.id = .id(id, revision: revision)
+        self.tokenizerSource = tokenizerSource
     }
 
     /// Initializes a configuration using a local directory.
     /// - Parameters:
     ///   - directory: The `URL` of the model on disk.
-    ///   - tokenizerId: Optional alternate repo for the tokenizer.
-    ///   - overrideTokenizer: Optional specific tokenizer implementation name.
+    ///   - tokenizerSource: Optional alternate source for the tokenizer.
     public init(
         directory: URL,
-        tokenizerId: String? = nil,
-        overrideTokenizer: String? = nil
+        tokenizerSource: TokenizerSource? = nil
     ) {
         self.id = .directory(directory)
-        self.tokenizerId = tokenizerId
-        self.overrideTokenizer = overrideTokenizer
-    }
-
-    /// Resolves the local file system URL where the model is (or will be) stored.
-    ///
-    /// - Parameter hub: The `HubApi` used to resolve Hub paths.
-    /// - Returns: A `URL` pointing to the local directory.
-    public func modelDirectory(hub: HubApi = HubApi()) -> URL {
-        switch id {
-        case .id(let id):
-            let repo = Hub.Repo(id: id)
-            return hub.localRepoLocation(repo)
-
-        case .directory(let directory):
-            return directory
-        }
+        self.tokenizerSource = tokenizerSource
     }
 
     // MARK: - Registry Management

@@ -28,6 +28,8 @@ Tokenizers are loaded automatically by model factories:
 
 ```swift
 let container = try await LLMModelFactory.shared.loadContainer(
+    from: HubClient.default,
+    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: config
 )
 let tokenizer = await container.tokenizer
@@ -35,26 +37,13 @@ let tokenizer = await container.tokenizer
 
 ### Manual Loading
 
-```swift
-let tokenizer = try await loadTokenizer(
-    configuration: config,
-    hub: HubApi()
-)
-```
-
-### Loading Components
+Tokenizer loading is handled by the `TokenizerLoader` protocol. Each integration
+package provides a concrete loader:
 
 ```swift
-// Load tokenizer config and data separately
-let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
-    configuration: config,
-    hub: hub
-)
-
-let tokenizer = try PreTrainedTokenizer(
-    tokenizerConfig: tokenizerConfig,
-    tokenizerData: tokenizerData
-)
+// Using TokenizersLoader from MLXLMTokenizers (swift-tokenizers-mlx)
+let loader = TokenizersLoader()
+let tokenizer = try await loader.load(from: modelDirectory)
 ```
 
 ## Tokenizer Usage

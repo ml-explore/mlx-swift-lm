@@ -3,7 +3,6 @@
 import CoreGraphics
 import Foundation
 import MLX
-import Tokenizers
 
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///
@@ -100,6 +99,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - model: the ``ModelContainer``
+    ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -132,6 +132,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - model: the ``ModelContext``
+    ///   - instructions: optional system instructions for the session
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -158,10 +159,95 @@ public final class ChatSession {
         self.additionalContext = additionalContext
     }
 
+    /// Initialize the `ChatSession` with a pre-built KV cache.
+    ///
+    /// This enables prefix caching: build a KV cache from a long shared context (e.g. a
+    /// system prompt and document) once, save it via ``saveCache(to:)``, and restore it
+    /// across multiple sessions to avoid re-prefilling the same tokens each time.
+    ///
+    /// > Important: If the cache was built from a session that already included system
+    /// > instructions, do not pass the same `instructions` here — they would be
+    /// > re-tokenized on each call to ``respond(to:role:images:videos:)`` without matching
+    /// > KV state, producing incoherent output.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContainer``
+    ///   - instructions: optional system instructions for the session — leave `nil` if the
+    ///     cache already encodes a system prompt
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
+    ///     matching the given model
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
+    ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
+    ///   - additionalContext: optional model-specific context
+    public init(
+        _ model: ModelContainer,
+        instructions: String? = nil,
+        cache: consuming [KVCache],
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.model = model
+        self.instructions = instructions
+        self.cache = .init(.kvcache(cache))
+        self.processing = processing
+        self.generateParameters = generateParameters
+        self.tools = tools
+        self.toolDispatch = toolDispatch
+        self.additionalContext = additionalContext
+    }
+
+    /// Initialize the `ChatSession` with a pre-built KV cache.
+    ///
+    /// This enables prefix caching: build a KV cache from a long shared context (e.g. a
+    /// system prompt and document) once, save it via ``saveCache(to:)``, and restore it
+    /// across multiple sessions to avoid re-prefilling the same tokens each time.
+    ///
+    /// > Important: If the cache was built from a session that already included system
+    /// > instructions, do not pass the same `instructions` here — they would be
+    /// > re-tokenized on each call to ``respond(to:role:images:videos:)`` without matching
+    /// > KV state, producing incoherent output.
+    ///
+    /// - Parameters:
+    ///   - model: the ``ModelContext``
+    ///   - instructions: optional system instructions for the session — leave `nil` if the
+    ///     cache already encodes a system prompt
+    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
+    ///     matching the given model
+    ///   - generateParameters: parameters that control generation
+    ///   - processing: media processing configuration for images/videos
+    ///   - tools: optional tool specifications
+    ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
+    ///   - additionalContext: optional model-specific context
+    public init(
+        _ model: ModelContext,
+        instructions: String? = nil,
+        cache: consuming [KVCache],
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.model = ModelContainer(context: model)
+        self.instructions = instructions
+        self.cache = .init(.kvcache(cache))
+        self.processing = processing
+        self.generateParameters = generateParameters
+        self.tools = tools
+        self.toolDispatch = toolDispatch
+        self.additionalContext = additionalContext
+    }
+
     /// Produces a response to a prompt.
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: the model's response
@@ -184,6 +270,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - image: optional image (for use with VLMs)
     ///   - video: optional video (for use with VLMs)
     /// - Returns: the model's response
@@ -205,6 +292,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of string chunks from the model
@@ -223,6 +311,7 @@ public final class ChatSession {
     ///
     /// - Parameters:
     ///   - prompt: the user prompt
+    ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
     /// - Returns: a stream of `Generation` from the model
@@ -335,18 +424,15 @@ public final class ChatSession {
                             iterator: iterator
                         )
 
-                        for await item in stream {
-                            // if there is no toolDispatch then the caller must
-                            // handle the toolcall
-                            if let toolCall = item.toolCall, let toolDispatch {
-                                let toolResult = try await toolDispatch(toolCall)
-                                messages = [.tool(toolResult)]
-                                task.cancel()
-                                await task.value
-                                continue restart
-                            }
+                        var pendingToolCalls: [ToolCall] = []
 
-                            if let value = transform(item) {
+                        for await item in stream {
+                            // collect tool calls for dispatch; if no
+                            // toolDispatch the caller handles them via
+                            // the transform (streamDetails path)
+                            if let toolCall = item.toolCall, toolDispatch != nil {
+                                pendingToolCalls.append(toolCall)
+                            } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
                                     break
                                 }
@@ -357,6 +443,17 @@ public final class ChatSession {
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
                         await task.value
+
+                        // dispatch all tool calls from this generation pass
+                        if let toolDispatch, !pendingToolCalls.isEmpty,
+                            !Task.isCancelled
+                        {
+                            for toolCall in pendingToolCalls {
+                                let toolResult = try await toolDispatch(toolCall)
+                                messages.append(.tool(toolResult))
+                            }
+                            continue restart
+                        }
                     }
 
                     continuation.finish()
@@ -405,5 +502,50 @@ public final class ChatSession {
     /// async operations are complete.
     public func synchronize() async {
         await cache.read { _ in }
+    }
+
+    /// Visit the current cache value, if realized as a `[KVCache]`.
+    ///
+    /// This method is meant for test support.
+    func withCache<R: Sendable>(_ body: @Sendable ([KVCache]?) async throws -> R) async rethrows
+        -> R?
+    {
+        try await cache.read { cache in
+            switch cache {
+            case .kvcache(let cache):
+                return try await body(cache)
+            default:
+                return try await body(nil)
+            }
+        }
+    }
+
+    /// Saves the current KV cache to disk.
+    ///
+    /// Use one of the initializers that accept a `cache` parameter together with
+    /// ``loadPromptCache(url:)`` to restore the saved cache in a future session.
+    ///
+    /// - Parameter url: the file URL to write the cache to
+    /// - Throws: ``ChatSessionError/noCacheAvailable`` if no generation has occurred yet,
+    ///   or any error thrown by the underlying file write
+    public func saveCache(to url: URL) async throws {
+        try await cache.read { cache in
+            switch cache {
+            case .kvcache(let cache):
+                try savePromptCache(url: url, cache: cache)
+            default:
+                throw ChatSessionError.noCacheAvailable
+            }
+        }
+    }
+}
+
+/// Errors thrown by ``ChatSession``.
+public enum ChatSessionError: LocalizedError {
+    /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
+    case noCacheAvailable
+
+    public var errorDescription: String? {
+        "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
     }
 }

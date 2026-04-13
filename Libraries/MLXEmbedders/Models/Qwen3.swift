@@ -303,6 +303,9 @@ public class Qwen3Model: Module, EmbeddingModel {
     /// The immutable configuration used to build the model.
     let configuration: Qwen3Configuration
 
+    /// Qwen3 embedding models use the final non-padding token as the sentence representation.
+    public let poolingStrategy: Pooling.Strategy? = .last
+
     /// Initializes the Qwen3 Model.
     /// - Parameter args: The configuration parameters for the model architecture.
     public init(_ args: Qwen3Configuration) {

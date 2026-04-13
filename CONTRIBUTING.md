@@ -14,11 +14,44 @@ possible.
    You can also run the formatters manually as follows:
  
      ```
-     swift-format format --in-place --recursive Libraries Tools Applications
+     swift-format format --in-place --recursive Libraries Tools Applications IntegrationTesting
      ```
  
    or run `pre-commit run --all-files` to check all files in the repo.
  
+## Running Tests
+
+Unit tests run without any special hardware and do not download models.
+Note: `swift test` [does not work yet](https://github.com/ml-explore/mlx-swift?tab=readme-ov-file#xcodebuild) — use `xcodebuild` instead:
+
+```bash
+xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+```
+
+Integration tests verify end-to-end model loading and generation. They require
+macOS with Metal and download models from Hugging Face Hub on first run. These
+tests do not run in CI.
+
+Open `IntegrationTesting/IntegrationTesting.xcodeproj` in Xcode and run the
+test target (`Cmd+U` or via the Test Navigator), or use `xcodebuild`:
+
+```bash
+# Run all integration tests
+xcodebuild test \
+  -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting \
+  -destination 'platform=macOS'
+
+# Run a single test
+xcodebuild test \
+  -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting \
+  -destination 'platform=macOS' \
+  -only-testing:IntegrationTestingTests/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
+```
+
+See [Libraries/IntegrationTestHelpers/README.md](Libraries/IntegrationTestHelpers/README.md) for more details.
+
 ## Issues
 
 We use GitHub issues to track public bugs. Please ensure your description is

@@ -4,7 +4,6 @@
 import CoreImage
 import Foundation
 import MLX
-import Tokenizers
 
 public typealias Message = [String: any Sendable]
 
@@ -194,7 +193,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         prompt: String, images: [Image] = [Image](), videos: [Video] = [Video](),
         tools: [ToolSpec]? = nil,
@@ -228,7 +227,7 @@ public struct UserInput {
     /// ]
     /// ```
     ///
-    /// Typically the ``init(chat:tools:additionalContext:)`` should be used instead
+    /// Typically the ``init(chat:processing:tools:additionalContext:)`` should be used instead
     /// along with a model specific ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
     ///
     /// - Parameters:
@@ -239,7 +238,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         messages: [Message], images: [Image] = [Image](), videos: [Video] = [Video](),
         tools: [ToolSpec]? = nil,
@@ -274,7 +273,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         chat: [Chat.Message],
         processing: Processing = .init(),
@@ -298,7 +297,7 @@ public struct UserInput {
 
     /// Initialize the `UserInput` with a preconfigured ``Prompt-swift.enum``.
     ///
-    /// ``init(chat:tools:additionalContext:)`` is the preferred mechanism.
+    /// ``init(chat:processing:tools:additionalContext:)`` is the preferred mechanism.
     ///
     /// - Parameters:
     ///   - prompt: the prompt
@@ -309,7 +308,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         prompt: Prompt,
         images: [Image] = [Image](),

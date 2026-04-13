@@ -302,13 +302,11 @@ class FalconH1Attention: Module {
         keys = keys.reshaped(B, L, numKVHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, numKVHeads, -1).transposed(0, 2, 1, 3)
 
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+
         if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
-        } else {
-            queries = rope(queries, offset: 0)
-            keys = rope(keys, offset: 0)
         }
 
         var output = MLXFast.scaledDotProductAttention(

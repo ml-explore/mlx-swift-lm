@@ -1,126 +1,84 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
-import Tokenizers
 
-struct TokenizerError: Error {
-    let message: String
+/// A protocol for tokenizing text into token IDs and decoding token IDs into text.
+public protocol Tokenizer: Sendable {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int]
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String
+    func convertTokenToId(_ token: String) -> Int?
+    func convertIdToToken(_ id: Int) -> String?
+
+    var bosToken: String? { get }
+    var eosToken: String? { get }
+    var unknownToken: String? { get }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int]
 }
 
-public func loadTokenizer(configuration: ModelConfiguration, hub: HubApi) async throws -> Tokenizer
-{
-    let (tokenizerConfig, tokenizerData) = try await loadTokenizerConfig(
-        configuration: configuration, hub: hub)
-
-    return try PreTrainedTokenizer(
-        tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
-}
-
-public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) async throws -> (
-    Config, Config
-) {
-    // from AutoTokenizer.from() -- this lets us override parts of the configuration
-    let config: LanguageModelConfigurationFromHub
-
-    switch configuration.id {
-    case .id(let id, let revision):
-        do {
-            // the load can fail (async when we try to use it)
-            let loaded = LanguageModelConfigurationFromHub(
-                modelName: configuration.tokenizerId ?? id, revision: revision, hubApi: hub)
-            _ = try await loaded.tokenizerConfig
-            config = loaded
-        } catch {
-            let nserror = error as NSError
-            if nserror.domain == NSURLErrorDomain
-                && nserror.code == NSURLErrorNotConnectedToInternet
-            {
-                // Internet connection appears to be offline -- fall back to loading from
-                // the local directory
-                config = LanguageModelConfigurationFromHub(
-                    modelFolder: configuration.modelDirectory(hub: hub), hubApi: hub)
-            } else {
-                throw error
-            }
-        }
-    case .directory(let directory):
-        config = LanguageModelConfigurationFromHub(modelFolder: directory, hubApi: hub)
+extension Tokenizer {
+    public func encode(text: String) -> [Int] {
+        encode(text: text, addSpecialTokens: true)
     }
 
-    guard var tokenizerConfig = try await config.tokenizerConfig else {
-        throw TokenizerError(message: "missing config")
+    public func decode(tokenIds: [Int]) -> String {
+        decode(tokenIds: tokenIds, skipSpecialTokens: false)
     }
-    let tokenizerData = try await config.tokenizerData
 
-    tokenizerConfig = updateTokenizerConfig(tokenizerConfig)
-
-    return (tokenizerConfig, tokenizerData)
-}
-
-private func updateTokenizerConfig(_ tokenizerConfig: Config) -> Config {
-    // Workaround: replacement tokenizers for unhandled values in swift-transformers
-    if let tokenizerClass = tokenizerConfig.tokenizerClass?.string(),
-        let replacement = replacementTokenizers[tokenizerClass]
-    {
-        if var dictionary = tokenizerConfig.dictionary() {
-            dictionary["tokenizer_class"] = .init(replacement)
-            return Config(dictionary)
-        }
+    public var eosTokenId: Int? {
+        guard let eosToken else { return nil }
+        return convertTokenToId(eosToken)
     }
-    return tokenizerConfig
-}
 
-public class TokenizerReplacementRegistry: @unchecked Sendable {
+    public var unknownTokenId: Int? {
+        guard let unknownToken else { return nil }
+        return convertTokenToId(unknownToken)
+    }
 
-    // Note: using NSLock as we have very small (just dictionary get/set)
-    // critical sections and expect no contention. this allows the methods
-    // to remain synchronous.
-    private let lock = NSLock()
+    public func applyChatTemplate(
+        messages: [[String: any Sendable]]
+    ) throws -> [Int] {
+        try applyChatTemplate(messages: messages, tools: nil, additionalContext: nil)
+    }
 
-    /// overrides for TokenizerModel/knownTokenizers
-    private var replacementTokenizers = [
-        "InternLM2Tokenizer": "PreTrainedTokenizer",
-        "Qwen2Tokenizer": "PreTrainedTokenizer",
-        "Qwen3Tokenizer": "PreTrainedTokenizer",
-        "CohereTokenizer": "PreTrainedTokenizer",
-        "GPTNeoXTokenizer": "PreTrainedTokenizer",
-        "TokenizersBackend": "PreTrainedTokenizer",
-    ]
-
-    public subscript(key: String) -> String? {
-        get {
-            lock.withLock {
-                replacementTokenizers[key]
-            }
-        }
-        set {
-            lock.withLock {
-                replacementTokenizers[key] = newValue
-            }
-        }
+    public func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?
+    ) throws -> [Int] {
+        try applyChatTemplate(messages: messages, tools: tools, additionalContext: nil)
     }
 }
 
-public let replacementTokenizers = TokenizerReplacementRegistry()
+public enum TokenizerError: LocalizedError {
+    case missingChatTemplate
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingChatTemplate:
+            "This tokenizer does not have a chat template."
+        }
+    }
+}
 
 public protocol StreamingDetokenizer: IteratorProtocol<String> {
-
     mutating func append(token: Int)
-
 }
 
 public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
-    let tokenizer: Tokenizer
+    let tokenizer: any Tokenizer
 
     var segmentTokens = [Int]()
     var segment = ""
 
-    public init(tokenizer: Tokenizer) {
+    public init(tokenizer: any Tokenizer) {
         self.tokenizer = tokenizer
     }
 
-    mutating public func append(token: Int) {
+    public mutating func append(token: Int) {
         segmentTokens.append(token)
     }
 
@@ -129,14 +87,14 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
         segmentTokens.removeAll()
         if let lastToken {
             segmentTokens.append(lastToken)
-            segment = tokenizer.decode(tokens: segmentTokens)
+            segment = tokenizer.decode(tokenIds: segmentTokens)
         } else {
             segment = ""
         }
     }
 
     public mutating func next() -> String? {
-        let newSegment = tokenizer.decode(tokens: segmentTokens)
+        let newSegment = tokenizer.decode(tokenIds: segmentTokens)
         let new = newSegment.suffix(newSegment.count - segment.count)
 
         // if the new segment ends with REPLACEMENT CHARACTER this means
@@ -153,5 +111,4 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
 
         return String(new)
     }
-
 }

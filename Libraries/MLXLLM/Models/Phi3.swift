@@ -20,21 +20,7 @@ class Phi3Attention: Module {
     @ModuleInfo(key: "qkv_proj") var wqkv: Linear
     @ModuleInfo(key: "o_proj") var wo: Linear
 
-    enum PositionalEncoding {
-        case rope(RoPE)
-        case suScaledRoPE(SuScaledRoPE)
-
-        func applyEncoding(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-            switch self {
-            case .rope(let rope):
-                return rope.callAsFunction(x, offset: offset)
-            case .suScaledRoPE(let suScaledRoPE):
-                return suScaledRoPE(x, offset: offset)
-            }
-        }
-    }
-
-    let rope: PositionalEncoding
+    let rope: RoPELayer
 
     public init(_ args: Phi3Configuration) {
         self.args = args
@@ -64,19 +50,19 @@ class Phi3Attention: Module {
             ropeScaling.type == "su" || ropeScaling.type == "longrope",
             let shortFactor = ropeScaling.shortFactor, let longFactor = ropeScaling.longFactor
         {
-            self.rope = .suScaledRoPE(
+            self.rope =
                 SuScaledRoPE(
                     dimensions: ropeDim, base: args.ropeTheta,
                     maxPositionEmbeddings: args.maxPositionEmbeddings,
                     originalMaxPositionEmbeddings: args.originalMaxPositionEmbeddings,
                     shortFactor: shortFactor,
-                    longFactor: longFactor))
+                    longFactor: longFactor)
 
         } else {
-            self.rope = .rope(
+            self.rope =
                 RoPE(
                     dimensions: ropeDim, traditional: args.ropeTraditional, base: args.ropeTheta,
-                    scale: ropeScale))
+                    scale: ropeScale)
         }
     }
 
@@ -96,13 +82,8 @@ class Phi3Attention: Module {
         keys = keys.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
-        if let cache {
-            queries = rope.applyEncoding(queries, offset: cache.offset)
-            keys = rope.applyEncoding(keys, offset: cache.offset)
-        } else {
-            queries = rope.applyEncoding(queries)
-            keys = rope.applyEncoding(keys)
-        }
+        queries = applyRotaryPosition(rope, to: queries, cache: cache)
+        keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
         let output = attentionWithCacheUpdate(
             queries: queries,

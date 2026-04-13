@@ -113,12 +113,11 @@ class BaichuanM1Attention: Module {
         var keys = qkv[1].reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
         var values = qkv[2].reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
 
-        var offset = 0
         var lastK: MLXArray? = nil
         var lastV: MLXArray? = nil
+        let kvSubCache: KVCache? = (cache as? CacheList)?[1]
 
         if let cacheList = cache as? CacheList {
-            offset = cacheList[1].offset
             if let mambaCache = cacheList[0] as? MambaCache {
                 lastK = mambaCache[0]
                 lastV = mambaCache[1]
@@ -131,8 +130,8 @@ class BaichuanM1Attention: Module {
         keys = customConvolution(keys, convK, state: lastK)
         values = customConvolution(values, convV, state: lastV)
 
-        queries = rope(queries, offset: offset)
-        keys = rope(keys, offset: offset)
+        queries = applyRotaryPosition(rope, to: queries, cache: kvSubCache)
+        keys = applyRotaryPosition(rope, to: keys, cache: kvSubCache)
 
         if let cache = cache as? CacheList {
             let kvCache = cache[1]
