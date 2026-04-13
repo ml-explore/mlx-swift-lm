@@ -1768,6 +1768,32 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
 // MARK: - Processor
 
+public struct Gemma4MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        if message.role == .system {
+            [
+                "role": message.role.rawValue,
+                "content": message.content,
+            ]
+        } else {
+            [
+                "role": message.role.rawValue,
+                "content": [
+                    ["type": "text", "text": message.content]
+                ]
+                    + message.images.map { _ in
+                        ["type": "image"]
+                    }
+                    + message.videos.map { _ in
+                        ["type": "video"]
+                    },
+            ]
+        }
+    }
+}
+
 public struct Gemma4Processor: UserInputProcessor {
     private let config: Gemma4ProcessorConfiguration
     private let tokenizer: any Tokenizer
@@ -1804,7 +1830,7 @@ public struct Gemma4Processor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let messages = Gemma4MessageGenerator().generate(from: input)
 
         var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools,
