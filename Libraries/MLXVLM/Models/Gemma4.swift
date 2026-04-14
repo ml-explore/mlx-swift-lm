@@ -2435,8 +2435,13 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         )
         if let audioConfig = config.audioConfiguration {
             self._audioTower.wrappedValue = Gemma4AudioEncoder(config: audioConfig)
+            // The audio encoder's output dimension is outputProjDims if the
+            // encoder includes an output projection layer, otherwise the
+            // bare hidden size. This MUST match the actual tensor shape
+            // that audioTower(...) returns.
+            let audioOutputDim = audioConfig.outputProjDims ?? audioConfig.hiddenSize
             self._embedAudio.wrappedValue = Gemma4MultimodalEmbedder(
-                embeddingDim: audioConfig.hiddenSize,
+                embeddingDim: audioOutputDim,
                 textHiddenSize: config.textConfiguration.hiddenSize,
                 eps: audioConfig.rmsNormEps
             )
