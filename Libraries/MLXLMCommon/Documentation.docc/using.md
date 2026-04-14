@@ -153,6 +153,28 @@ and add `HuggingFace`, `Tokenizers`, `MLXLLM`, `MLXLMCommon` and `MLXHuggingFace
 You can use the integration like this:
 
 ```swift
+import MLXLLM
+import MLXLMCommon
+import MLXHuggingFace
+
+import HuggingFace
+import Tokenizers
+
+let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+
+let model = try await #huggingFaceLoadModelContainer(
+    configuration: modelConfiguration
+)
+
+let session = ChatSession(model)
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
+```
+
+or if you prefer more explicit downloader and tokenizer loading for more
+control:
+
+```swift
 import HuggingFace
 import Tokenizers
 

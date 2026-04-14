@@ -48,6 +48,25 @@ import HuggingFace
 import Tokenizers
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let model = try await #huggingFaceLoadModelContainer(
+    configuration: modelConfiguration
+)
+
+...
+```
+
+If you want a little more control over the downloader or the tokenizer loader, that
+expands to this:
+
+```swift
+import MLXLLM
+import MLXLMCommon
+import MLXHuggingFace
+
+import HuggingFace
+import Tokenizers
+
+let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
 let model = try await loadModelContainer(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
