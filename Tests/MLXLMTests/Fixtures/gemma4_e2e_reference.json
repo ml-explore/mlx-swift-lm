@@ -1,0 +1,8 @@
+{
+  "model": "mlx-community/gemma-4-e2b-it-4bit",
+  "audio_file": "7E9A42BA-8AD9-44D7-BED3-95BAEDA2B699.m4a",
+  "expected_text": "好的，我来更新一版。",
+  "python_output": "GenerationResult(text='好的, 我来更新一把。', token=106, logprobs=array([-32, -13.375, -18.625, ..., -32, -32, -32.25], dtype=bfloat16), prompt_tokens=115, generation_tokens=8, total_tokens=123, prompt_tps=833.0732520820604, generation_tps=193.63271264522086, peak_memory=3.882646946)",
+  "load_time": 2.19,
+  "infer_time": 0.2
+}
