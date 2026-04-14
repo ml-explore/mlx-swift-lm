@@ -55,7 +55,7 @@ public enum ModelFactoryError: LocalizedError {
 
 /// Context of types that work together to provide a ``LanguageModel``.
 ///
-/// A ``ModelContext`` is created by ``ModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// A ``ModelContext`` is created by ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This contains the following:
 ///
 /// - ``ModelConfiguration``: identifier for the model
@@ -63,7 +63,7 @@ public enum ModelFactoryError: LocalizedError {
 /// - ``UserInputProcessor``: can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///
-/// See also ``ModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
+/// See also ``GenericModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
 /// ``ModelContainer``.
 public struct ModelContext {
     public var configuration: ModelConfiguration
