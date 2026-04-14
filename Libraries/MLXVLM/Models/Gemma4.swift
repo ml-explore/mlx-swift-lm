@@ -67,9 +67,9 @@ private func gemma4MaskedScatter(
         return inputTensor
     }
 
-    guard flattenedSource.shape[0] == targetIndices.count else {
+    guard flattenedSource.dim(0) == targetIndices.count else {
         fatalError(
-            "Masked scatter shape mismatch. source=\(flattenedSource.shape[0]) mask=\(targetIndices.count)"
+            "Masked scatter shape mismatch. source=\(flattenedSource.dim(0)) mask=\(targetIndices.count)"
         )
     }
 
@@ -193,7 +193,8 @@ private func gemma4AdjustAttentionMask(
 ) -> MLXFast.ScaledDotProductAttentionMaskMode {
     switch mask {
     case .array(let maskArray):
-        guard let maskLength = maskArray.shape.last, maskLength > keyLength else {
+        let maskLength = maskArray.dim(-1)
+        guard maskLength > keyLength else {
             return mask
         }
         let start = maskLength - keyLength
@@ -1812,10 +1813,6 @@ public struct Gemma4Processor: UserInputProcessor {
 
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
-            let imagePlaceholderCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let boiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let eoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
             }
@@ -1840,10 +1837,6 @@ public struct Gemma4Processor: UserInputProcessor {
                 }
             }
             promptTokens = expandedTokens
-
-            let expandedImageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let expandedBoiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let expandedEoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)

@@ -697,8 +697,8 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         var segments = [MLXArray]()
         var start_idx = 0
 
-        let chunkSize = imageFeatures.shape[1]  // 64
-        let chunkCount = imagePositions.count / chunkSize  // Should be imageFeatures.shape[0]
+        let chunkSize = imageFeatures.dim(1)  // 64
+        let chunkCount = imagePositions.count / chunkSize  // Should be imageFeatures.dim(0)
         let chunks = (0 ..< chunkCount).map { startIndex in
             let start = startIndex * chunkSize
             let end = start + chunkSize

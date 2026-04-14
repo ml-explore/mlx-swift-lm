@@ -1087,8 +1087,8 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
 
         let (_, imageFeatures, _) = visionModel(pixelValues.transposed(0, 2, 3, 1))
         let (B, H, W, C) = (
-            imageFeatures.shape[0], imageFeatures.shape[1], imageFeatures.shape[2],
-            imageFeatures.shape[3]
+            imageFeatures.dim(0), imageFeatures.dim(1), imageFeatures.dim(2),
+            imageFeatures.dim(3)
         )
         let mmInputs = multimodalProjector(imageFeatures.reshaped(B, H * W, C))
         let finalEmbeddings = prepareInputsForMultimodal(

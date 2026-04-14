@@ -408,7 +408,7 @@ public class MiMoV2FlashModel: Module, LLMModel, KVCacheDimensionProvider {
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
             let dtype = weight.dtype
             let bs = 128
-            let (m, n) = (weight.shape[0], weight.shape[1])
+            let (m, n) = (weight.dim(0), weight.dim(1))
             let padBottom = bs * scaleInv.dim(0) - m
             let padSide = bs * scaleInv.dim(1) - n
 

@@ -385,7 +385,7 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
             var sanitizedParam = param
 
             if name.contains("conv.weight") {
-                if param.shape[param.shape.count - 1] > param.shape[1] {
+                if param.shape[param.shape.count - 1] > param.dim(1) {
                     sanitizedParam = param.transposed(0, 2, 1)
                 }
             }

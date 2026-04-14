@@ -306,7 +306,7 @@ private class Gemma4Attention: Module {
         var adjustedMask = mask
         if case .array(let maskArray) = mask {
             let keysSeqLen = keys.dim(2)
-            if maskArray.shape.last! != keysSeqLen {
+            if maskArray.dim(-1) != keysSeqLen {
                 adjustedMask = .array(maskArray[.ellipsis, 0 ..< keysSeqLen])
             }
         }

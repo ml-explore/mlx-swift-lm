@@ -441,7 +441,7 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
         for (name, param) in weights {
             var tensor = param
             if name.contains("conv.weight") {
-                if tensor.shape.last! > tensor.shape[1] {
+                if tensor.dim(-1) > tensor.dim(1) {
                     tensor = tensor.transposed(0, 2, 1)
                 }
             }
