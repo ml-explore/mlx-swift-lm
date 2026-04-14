@@ -170,8 +170,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .glm4
         }
 
-        // Gemma
-        if type == "gemma" {
+        // Gemma family (gemma, gemma4, gemma4_text, etc.)
+        if type.hasPrefix("gemma") {
             return .gemma
         }
 

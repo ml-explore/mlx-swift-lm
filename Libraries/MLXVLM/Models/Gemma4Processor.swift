@@ -31,7 +31,8 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        processorClass = try c.decodeIfPresent(String.self, forKey: .processorClass) ?? "Gemma4Processor"
+        processorClass =
+            try c.decodeIfPresent(String.self, forKey: .processorClass) ?? "Gemma4Processor"
         patchSize = try c.decodeIfPresent(Int.self, forKey: .patchSize) ?? 16
         maxSoftTokens = try c.decodeIfPresent(Int.self, forKey: .maxSoftTokens) ?? 280
         poolingKernelSize = try c.decodeIfPresent(Int.self, forKey: .poolingKernelSize) ?? 3
@@ -80,11 +81,15 @@ public struct Gemma4Processor: UserInputProcessor {
             targetW = config.sideMult
         } else if targetH == 0 {
             targetH = config.sideMult
-            let maxSide = (config.maxSoftTokens / (config.poolingKernelSize * config.poolingKernelSize)) * config.sideMult
+            let maxSide =
+                (config.maxSoftTokens / (config.poolingKernelSize * config.poolingKernelSize))
+                * config.sideMult
             targetW = min(Int(floor(w / h)) * config.sideMult, maxSide)
         } else if targetW == 0 {
             targetW = config.sideMult
-            let maxSide = (config.maxSoftTokens / (config.poolingKernelSize * config.poolingKernelSize)) * config.sideMult
+            let maxSide =
+                (config.maxSoftTokens / (config.poolingKernelSize * config.poolingKernelSize))
+                * config.sideMult
             targetH = min(Int(floor(h / w)) * config.sideMult, maxSide)
         }
 
@@ -118,8 +123,8 @@ public struct Gemma4Processor: UserInputProcessor {
         let tH = Int(target.height)
         let tW = Int(target.width)
         // Sanity check: actual tensor dims must match target (shapes are evaluated lazily)
-        assert(bchw.dim(0) == 1,  "Expected batch=1, got \(bchw.dim(0))")
-        assert(bchw.dim(1) == 3,  "Expected 3 RGB channels, got \(bchw.dim(1))")
+        assert(bchw.dim(0) == 1, "Expected batch=1, got \(bchw.dim(0))")
+        assert(bchw.dim(1) == 3, "Expected 3 RGB channels, got \(bchw.dim(1))")
         assert(bchw.dim(2) == tH, "Expected H=\(tH), got \(bchw.dim(2))")
         assert(bchw.dim(3) == tW, "Expected W=\(tW), got \(bchw.dim(3))")
         return (bchw, THW(1, tH, tW))
@@ -127,20 +132,114 @@ public struct Gemma4Processor: UserInputProcessor {
 
     // MARK: - Chat Formatting
 
+    /// Gemma 4 escape token for strings in tool definitions.
+    private static let escapeToken = "<|\"|>"
+
+    /// Format a single tool into Gemma4 declaration format:
+    /// `<|tool>declaration:name{description:...parameters:{...}}<tool|>`
+    private func formatTool(_ tool: [String: any Sendable]) -> String {
+        guard let function = tool["function"] as? [String: any Sendable],
+            let name = function["name"] as? String
+        else {
+            return ""
+        }
+
+        var result = "<|tool>"
+
+        // Declaration and description
+        result += "declaration:\(name){"
+        if let description = function["description"] as? String {
+            result += "description:\(Self.escapeToken)\(description)\(Self.escapeToken)"
+        }
+
+        // Parameters
+        if let parameters = function["parameters"] as? [String: any Sendable] {
+            result += ",parameters:{"
+
+            // Properties
+            if let properties = parameters["properties"] as? [String: any Sendable] {
+                result += "properties:{"
+                var firstProp = true
+                for (propName, propValue) in properties {
+                    if !firstProp { result += "," }
+                    firstProp = false
+                    result += "\(propName):{"
+                    if let propDict = propValue as? [String: any Sendable] {
+                        if let type = propDict["type"] as? String {
+                            result +=
+                                "type:\(Self.escapeToken)\(type.uppercased())\(Self.escapeToken)"
+                        }
+                    }
+                    result += "}"
+                }
+                result += "},"
+            }
+
+            // Required
+            if let required = parameters["required"] as? [String] {
+                result += "required:["
+                for (i, req) in required.enumerated() {
+                    if i > 0 { result += "," }
+                    result += "\(Self.escapeToken)\(req)\(Self.escapeToken)"
+                }
+                result += "],"
+            }
+
+            result += "}"
+        }
+
+        result += "}<tool|>"
+        return result
+    }
+
+    /// Format tools into the Gemma4 system block format.
+    private func formatTools(_ tools: [[String: any Sendable]]?) -> String {
+        guard let tools = tools, !tools.isEmpty else { return "" }
+        var result = ""
+        for tool in tools {
+            result += formatTool(tool)
+        }
+        return result
+    }
+
     /// Format plain-text messages (no images) into the Gemma4 turn-based format:
     /// `<bos><|turn>role\ncontent<turn|>\n...<|turn>model\n`
     ///
     /// This avoids the Jinja chat template, which uses Jinja2 features
     /// (namespace, dictsort) that the Swift Jinja library does not support.
-    private func formatPrompt(messages: [[String: any Sendable]]) -> String {
+    private func formatPrompt(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?)
+        -> String
+    {
         var result = "<bos>"
+
+        // System/developer block with tools (if provided)
+        let hasSystemMessage = messages.contains { $0["role"] as? String == "system" }
+        let toolsBlock = formatTools(tools)
+
+        if hasSystemMessage || !toolsBlock.isEmpty {
+            result += "<|turn>system\n"
+            if let systemMsg = messages.first(where: { $0["role"] as? String == "system" }),
+                let content = systemMsg["content"] as? String
+            {
+                result += content
+            }
+            if !toolsBlock.isEmpty {
+                result += toolsBlock
+            }
+            result += "<turn|>\n"
+        }
+
+        // Regular messages
         for message in messages {
             guard let role = message["role"] as? String,
-                  let content = message["content"] as? String else { continue }
+                let content = message["content"] as? String
+            else { continue }
+            if role == "system" { continue }  // Already handled above
             // Map "assistant" → "model" per Gemma4 convention
             let gemmaRole = role == "assistant" ? "model" : role
             result += "<|turn>\(gemmaRole)\n\(content)<turn|>\n"
         }
+
         // Append the start-of-model-turn prompt
         result += "<|turn>model\n"
         return result
@@ -160,6 +259,13 @@ public struct Gemma4Processor: UserInputProcessor {
 
             // Build the formatted string inserting N boi tokens before each message's content.
             var result = "<bos>"
+
+            // System block with tools (if provided)
+            let toolsBlock = formatTools(input.tools)
+            if !toolsBlock.isEmpty {
+                result += "<|turn>system\n\(toolsBlock)<turn|>\n"
+            }
+
             for message in chatMessages {
                 let gemmaRole = message.role == .assistant ? "model" : message.role.rawValue
                 let imagePrefixes = String(repeating: boiStr, count: message.images.count)
@@ -169,7 +275,7 @@ public struct Gemma4Processor: UserInputProcessor {
             promptTokens = tokenizer.encode(text: result, addSpecialTokens: false)
         } else {
             let messages = DefaultMessageGenerator().generate(from: input)
-            let formatted = formatPrompt(messages: messages)
+            let formatted = formatPrompt(messages: messages, tools: input.tools)
             promptTokens = tokenizer.encode(text: formatted, addSpecialTokens: false)
         }
 
@@ -188,7 +294,8 @@ public struct Gemma4Processor: UserInputProcessor {
             var imageInfos: [(pixels: MLXArray, nSoftTokens: Int, frame: THW)] = []
             for userImage in input.images {
                 let ciImage = try userImage.asCIImage()
-                let (pixels, frame) = try preprocess(images: [ciImage], processing: input.processing)
+                let (pixels, frame) = try preprocess(
+                    images: [ciImage], processing: input.processing)
                 let tH = Int(pixels.shape[2])
                 let tW = Int(pixels.shape[3])
                 let n = numSoftTokens(targetH: tH, targetW: tW)
@@ -212,7 +319,8 @@ public struct Gemma4Processor: UserInputProcessor {
             promptTokens = expandedTokens
             if !allPixels.isEmpty {
                 let concatenatedPixels = concatenated(allPixels, axis: 0)
-                processedImage = LMInput.ProcessedImage(pixels: concatenatedPixels, frames: allFrames)
+                processedImage = LMInput.ProcessedImage(
+                    pixels: concatenatedPixels, frames: allFrames)
             }
         }
 
