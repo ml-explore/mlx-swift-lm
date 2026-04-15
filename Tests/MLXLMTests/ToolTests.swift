@@ -456,7 +456,8 @@ struct ToolTests {
     @Test("Test Gemma Format via ToolCallProcessor")
     func testGemmaFormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma)
-        let content = "<start_function_call>call:calculator{expression:2+2}<end_function_call>"
+        // Use Gemma 4 format (<|tool_call> tags) which is the primary format for GemmaFunctionParser
+        let content = "<|tool_call>call:calculator{expression:2+2}<tool_call|>"
 
         _ = processor.processChunk(content)
 

@@ -170,8 +170,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .glm4
         }
 
-        // Gemma family (explicit list to avoid over-matching future model families)
-        if ["gemma", "gemma2", "gemma3", "gemma3n", "gemma4", "gemma4_text"].contains(type) {
+        // Gemma family (gemma, gemma2, gemma3, gemma3n, gemma4, etc.)
+        if type.hasPrefix("gemma") {
             return .gemma
         }
 
