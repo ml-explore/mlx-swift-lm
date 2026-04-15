@@ -318,24 +318,22 @@ public struct Gemma4Processor: UserInputProcessor {
             var allPixels: [MLXArray] = []
             var allFrames: [THW] = []
 
-            // Process all images first to get their soft token counts
-            var imageInfos: [(pixels: MLXArray, nSoftTokens: Int, frame: THW)] = []
+            // Process all images - use fixed maxSoftTokens for token expansion
+            // (the vision encoder produces maxSoftTokens features regardless of image size)
+            var imageInfos: [(pixels: MLXArray, frame: THW)] = []
             for userImage in input.images {
                 let ciImage = try userImage.asCIImage()
                 let (pixels, frame) = try preprocess(
                     images: [ciImage], processing: input.processing)
-                let tH = Int(pixels.shape[2])
-                let tW = Int(pixels.shape[3])
-                let n = numSoftTokens(targetH: tH, targetW: tW)
-                imageInfos.append((pixels: pixels, nSoftTokens: n, frame: frame))
+                imageInfos.append((pixels: pixels, frame: frame))
             }
 
-            // Expand tokens: replace each boi_token_id with n × image_token_id
+            // Expand tokens: replace each boi_token_id with maxSoftTokens × image_token_id
             var imageIdx = 0
             for token in promptTokens {
                 if token == boiTokenId && imageIdx < imageInfos.count {
-                    let n = imageInfos[imageIdx].nSoftTokens
-                    expandedTokens.append(contentsOf: Array(repeating: imageTokenId, count: n))
+                    expandedTokens.append(
+                        contentsOf: Array(repeating: imageTokenId, count: config.maxSoftTokens))
                     allPixels.append(imageInfos[imageIdx].pixels)
                     allFrames.append(imageInfos[imageIdx].frame)
                     imageIdx += 1
