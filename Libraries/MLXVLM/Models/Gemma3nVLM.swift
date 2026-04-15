@@ -583,10 +583,12 @@ public class Gemma3nAudioVLMProcessor: UserInputProcessor, @unchecked Sendable {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        // Text-only tokenization for now. Audio embedding injection happens at the
-        // model level via callAsFunction(inputsEmbeds:) — the processor does not
-        // handle audio because LMInput.ProcessedAudio is not yet available.
-        let text = LMInput.Text(tokens: MLXArray(Int32(0)).reshaped(1, 1))
-        return LMInput(text: text)
+        // Audio mel spectrogram preprocessing is not yet implemented.
+        // The full pipeline (raw audio → 16kHz resample → mel spectrogram → LMInput)
+        // will land in a follow-up PR once LMInput.ProcessedAudio is available.
+        preconditionFailure(
+            "Gemma3nAudioVLMProcessor.prepare() is not yet implemented. "
+            + "Audio preprocessing requires LMInput.ProcessedAudio support."
+        )
     }
 }
