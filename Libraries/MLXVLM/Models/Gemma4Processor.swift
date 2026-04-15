@@ -42,10 +42,38 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     }
 
     /// Max patches allowed (= maxSoftTokens × poolingKernelSize²).
-    var maxPatches: Int { maxSoftTokens * poolingKernelSize * poolingKernelSize }
+    public var maxPatches: Int { maxSoftTokens * poolingKernelSize * poolingKernelSize }
 
     /// Side multiplier (must divide target H and W).
-    var sideMult: Int { poolingKernelSize * patchSize }
+    public var sideMult: Int { poolingKernelSize * patchSize }
+}
+
+// MARK: - Message Generator
+
+public struct Gemma4MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        if message.role == .system {
+            [
+                "role": message.role.rawValue,
+                "content": message.content,
+            ]
+        } else {
+            [
+                "role": message.role.rawValue,
+                "content": message.images.map { _ in
+                    ["type": "image"]
+                }
+                    + message.videos.map { _ in
+                        ["type": "video"]
+                    }
+                    + [
+                        ["type": "text", "text": message.content]
+                    ],
+            ]
+        }
+    }
 }
 
 // MARK: - Gemma4 Processor

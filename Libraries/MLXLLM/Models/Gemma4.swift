@@ -35,8 +35,6 @@ public struct Gemma4Configuration: Codable, Sendable {
             Gemma4TextConfiguration.self, forKey: .textConfig)
         {
             self.textConfig = textConfig
-            // Propagate vocab_size into text config
-            self.textConfig.vocabSize = self.vocabSize
         } else {
             self.textConfig = try Gemma4TextConfiguration(from: decoder)
         }

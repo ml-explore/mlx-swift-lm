@@ -131,7 +131,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
 // MARK: - RMSNorm Variants
 
 /// RMSNorm with no learnable scale parameter.
-class Gemma4RMSNormNoScale: Module, UnaryLayer {
+private class Gemma4RMSNormNoScale: Module, UnaryLayer {
     let eps: Float
 
     init(eps: Float = 1e-6) {
@@ -145,7 +145,7 @@ class Gemma4RMSNormNoScale: Module, UnaryLayer {
 }
 
 /// RMSNorm where weight is used directly (no +1 offset, unlike Gemma.RMSNorm).
-class Gemma4RMSNormZeroShift: Module, UnaryLayer {
+private class Gemma4RMSNormZeroShift: Module, UnaryLayer {
     @ModuleInfo var weight: MLXArray
     let eps: Float
 
@@ -162,7 +162,7 @@ class Gemma4RMSNormZeroShift: Module, UnaryLayer {
 
 // MARK: - MLP
 
-class Gemma4MLP: Module, UnaryLayer {
+private class Gemma4MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -181,7 +181,7 @@ class Gemma4MLP: Module, UnaryLayer {
 
 // MARK: - Attention
 
-class Gemma4Attention: Module {
+private class Gemma4Attention: Module {
     let isSliding: Bool
     let isKvSharedLayer: Bool
     let useKEqV: Bool
@@ -320,7 +320,7 @@ class Gemma4Attention: Module {
 
 // MARK: - Decoder Layer
 
-class Gemma4DecoderLayer: Module {
+private class Gemma4DecoderLayer: Module {
     let hasPerLayerInput: Bool
 
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma4Attention
@@ -423,7 +423,7 @@ class Gemma4DecoderLayer: Module {
 
 // MARK: - Text Model
 
-class Gemma4Model: Module {
+private class Gemma4TextModelInner: Module {
     let config: Gemma4TextConfiguration
     let firstKvSharedLayerIdx: Int
     let firstFullCacheIdx: Int
@@ -619,7 +619,7 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    @ModuleInfo var model: Gemma4Model
+    @ModuleInfo fileprivate var model: Gemma4TextModelInner
 
     private let config: Gemma4TextConfiguration
     private let finalLogitSoftcapping: Float?
@@ -632,7 +632,7 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
         let layerTypes = config.effectiveLayerTypes
         self.kvHeads = layerTypes.map { _ in config.numKeyValueHeads }
 
-        _model.wrappedValue = Gemma4Model(config)
+        _model.wrappedValue = Gemma4TextModelInner(config)
         super.init()
     }
 
