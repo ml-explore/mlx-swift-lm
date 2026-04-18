@@ -64,7 +64,9 @@ Use `WiredMemoryUtils.tune(...)` to measure real runtime costs and then size pol
 ### Text-only Measurement
 
 ```swift
-let context = try await LLMModelFactory.shared.load(configuration: config)
+let context = try await loadModel(
+    from: downloader, using: tokenizerLoader, configuration: config
+)
 let parameters = GenerateParameters(maxTokens: 128, prefillStepSize: 512)
 
 let measurement = try await WiredMemoryUtils.tune(
@@ -88,29 +90,6 @@ let measurement = try await WiredMemoryUtils.tune(
     context: context,
     parameters: parameters
 )
-```
-
-## CPU and Unsupported Backends
-
-When wired limit control is unavailable, keep policy math and admission active:
-
-```swift
-await WiredMemoryManager.shared.updateConfiguration { configuration in
-    configuration.policyOnlyWhenUnsupported = true
-}
-```
-
-## Debug Event Stream
-
-In DEBUG builds, observe manager events for policy stacking and limit changes.
-In release builds, stream is a no-op.
-
-```swift
-Task {
-    for await event in WiredMemoryManager.shared.events() {
-        print(event)
-    }
-}
 ```
 
 ## Practical Guidance

@@ -66,7 +66,7 @@ let params = GenerateParameters(
     quantizedKVStart: 0  // Start quantizing after N tokens
 )
 
-// Or create directly
+// Or create directly (default bits is 8; toQuantized() defaults to 4)
 let cache = QuantizedKVCache(
     groupSize: 64,
     bits: 4,

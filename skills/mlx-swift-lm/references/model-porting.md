@@ -365,8 +365,8 @@ If you need custom keys, override `loraDefaultKeys`.
 
 ```swift
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,        // any Downloader (e.g. #hubDownloader() from MLXHuggingFace)
+    using: tokenizerLoader,  // any TokenizerLoader (e.g. #huggingFaceTokenizerLoader())
     configuration: ModelConfiguration(id: "mlx-community/YourModel-4bit")
 )
 

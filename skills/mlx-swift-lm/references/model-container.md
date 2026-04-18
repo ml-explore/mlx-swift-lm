@@ -24,24 +24,19 @@
 
 ```swift
 // Via factory (recommended)
+// Requires a Downloader and TokenizerLoader — e.g. from MLXHuggingFace:
+//   let downloader = #hubDownloader()
+//   let tokenizerLoader = #huggingFaceTokenizerLoader()
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,
+    using: tokenizerLoader,
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
-)
-
-// With custom hub (from MLXLMHuggingFace)
-let hub = HubClient(token: "hf_...")
-let container = try await LLMModelFactory.shared.loadContainer(
-    from: hub,
-    using: TokenizersLoader(),
-    configuration: .init(id: "private/model")
 )
 
 // With progress tracking
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: downloader,
+    using: tokenizerLoader,
     configuration: config,
     progressHandler: { progress in
         print("Downloaded: \(progress.fractionCompleted)")
@@ -92,12 +87,7 @@ let streamWithTicket = try await container.generate(
 
 // Encode/decode
 let tokens = await container.encode("Hello world")
-let text = await container.decode(tokens: [1, 2, 3])
-
-// Apply chat template
-let tokens = try await container.applyChatTemplate(messages: [
-    ["role": "user", "content": "Hello"]
-])
+let text = await container.decode(tokenIds: [1, 2, 3])
 ```
 
 ### Generation + Wired Memory
@@ -160,10 +150,9 @@ let config = ModelConfiguration(
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `id` | `Identifier` | `.id(String)` or `.directory(URL)` |
+| `id` | `Identifier` | `.id(String, revision:)` or `.directory(URL)` |
 | `name` | `String` | Human-readable name |
-| `tokenizerId` | `String?` | Pull tokenizer from different repo |
-| `overrideTokenizer` | `String?` | Force tokenizer class |
+| `tokenizerSource` | `TokenizerSource?` | Alternate tokenizer source (`.id`, `.directory`, or `nil` for model dir) |
 | `defaultPrompt` | `String` | Default prompt for testing |
 | `extraEOSTokens` | `Set<String>` | Additional stop tokens (as strings) |
 | `eosTokenIds` | `Set<Int>` | EOS token IDs (loaded from config) |
@@ -179,8 +168,8 @@ let factory = LLMModelFactory.shared
 
 // Load container
 let container = try await factory.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: downloader,
+    using: tokenizerLoader,
     configuration: LLMRegistry.llama3_2_3B_4bit
 )
 
@@ -197,8 +186,8 @@ let customFactory = LLMModelFactory(
 let factory = VLMModelFactory.shared
 
 let container = try await factory.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: downloader,
+    using: tokenizerLoader,
     configuration: VLMRegistry.qwen2VL2BInstruct4Bit
 )
 ```
@@ -227,12 +216,14 @@ Map `model_type` from config.json to model initializers:
 
 ```swift
 // LLMTypeRegistry supports (partial list):
-// "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3",
-// "phi", "phi3", "deepseek_v3", "glm4", "lfm2", ...
+// "llama", "mistral", "qwen2", "qwen3", "qwen3_moe", "qwen3_5",
+// "gemma", "gemma2", "gemma3", "gemma3n", "phi", "phi3",
+// "deepseek_v3", "glm4", "lfm2", "lfm2_moe", ...
 
 // VLMTypeRegistry supports:
-// "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "paligemma", "gemma3",
-// "idefics3", "smolvlm", "pixtral", "mistral3", ...
+// "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "paligemma",
+// "gemma3", "idefics3", "smolvlm", "pixtral", "mistral3",
+// "lfm2_vl", "glm_ocr", ...
 ```
 
 ## Loading Flow
@@ -249,11 +240,11 @@ Map `model_type` from config.json to model initializers:
 // Download location
 let resolved = try await resolve(
     configuration: configuration,
-    from: HubClient.default,
+    from: downloader,
+    useLatest: false,
     progressHandler: { _ in }
 )
 let modelDir = resolved.modelDirectory
-// ~/.cache/huggingface/hub/models--mlx-community--Model-Name/...
 ```
 
 ## Memory Management

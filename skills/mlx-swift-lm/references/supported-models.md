@@ -32,7 +32,7 @@ LLMRegistry.mistralNeMo4bit       // mlx-community/Mistral-Nemo-Instruct-2407-4b
 ### Qwen
 
 ```swift
-// model_type: "qwen2", "qwen3", "qwen3_moe"
+// model_type: "qwen2", "qwen3", "qwen3_moe", "qwen3_next", "qwen3_5", "qwen3_5_moe", "qwen3_5_text"
 LLMRegistry.qwen2_5_7b            // mlx-community/Qwen2.5-7B-Instruct-4bit
 LLMRegistry.qwen2_5_1_5b          // mlx-community/Qwen2.5-1.5B-Instruct-4bit
 LLMRegistry.qwen3_4b_4bit         // mlx-community/Qwen3-4B-4bit
@@ -103,6 +103,12 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 | `bailing_moe` | Bailing MoE |
 | `gpt_oss` | GPT OSS |
 | `minicpm` | MiniCPM |
+| `acereason` | AceReason (uses Qwen2 architecture) |
+| `baichuan_m1` | Baichuan M1 |
+| `qwen3_next` | Qwen3 Next |
+| `qwen3_5`, `qwen3_5_moe`, `qwen3_5_text` | Qwen3.5 |
+| `mistral3` | Mistral 3 (text-only) |
+| `lille-130m` | Lille 130M |
 
 ## VLM Families
 
@@ -141,6 +147,8 @@ VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 | `pixtral` | Pixtral |
 | `mistral3` | Mistral 3 VLM |
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
+| `qwen3_5`, `qwen3_5_moe` | Qwen3.5 VLM |
+| `glm_ocr` | GLM OCR |
 
 ## Loading Any Model
 
@@ -150,8 +158,8 @@ Models not in registries can be loaded by ID:
 // Any mlx-community model
 let config = ModelConfiguration(id: "mlx-community/SomeModel-4bit")
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,        // any Downloader (e.g. #hubDownloader() from MLXHuggingFace)
+    using: tokenizerLoader,  // any TokenizerLoader (e.g. #huggingFaceTokenizerLoader())
     configuration: config
 )
 
@@ -207,19 +215,19 @@ let config = ModelConfiguration(
 // Most models use default .json format (auto-detected)
 ```
 
-### Tokenizer Overrides
+### Tokenizer Source
 
 ```swift
-// Override tokenizer class
-let config = ModelConfiguration(
-    id: "...",
-    overrideTokenizer: "PreTrainedTokenizer"
-)
-
-// Use tokenizer from different model
+// Use tokenizer from a different model repository
 let config = ModelConfiguration(
     id: "model-without-tokenizer",
-    tokenizerId: "different-model-with-tokenizer"
+    tokenizerSource: .id("different-model-with-tokenizer")
+)
+
+// Use tokenizer from a local directory
+let config = ModelConfiguration(
+    id: "...",
+    tokenizerSource: .directory(URL(filePath: "/path/to/tokenizer"))
 )
 ```
 

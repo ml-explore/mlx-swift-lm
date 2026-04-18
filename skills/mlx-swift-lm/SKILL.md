@@ -65,12 +65,11 @@ MLXEmbedders    - Embedding models and pooling utilities
 ```swift
 import MLXLLM
 import MLXLMCommon
-import MLXLMHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers   // from swift-tokenizers-mlx
+import MLXHuggingFace  // provides #hubDownloader() and #huggingFaceTokenizerLoader()
 
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
@@ -89,12 +88,11 @@ for try await chunk in session.streamResponse(to: "Explain structured concurrenc
 ```swift
 import MLXVLM
 import MLXLMCommon
-import MLXLMHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers   // from swift-tokenizers-mlx
+import MLXHuggingFace  // provides #hubDownloader() and #huggingFaceTokenizerLoader()
 
 let modelContainer = try await VLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 )
 
@@ -112,12 +110,11 @@ let response = try await session.respond(
 
 ```swift
 import MLXEmbedders
-import MLXEmbeddersHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers          // from swift-tokenizers-mlx
+import MLXHuggingFace  // provides #hubDownloader() and #huggingFaceTokenizerLoader()
 
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: ModelConfiguration(id: "mlx-community/bge-small-en-v1.5-mlx")
 )
 
@@ -234,10 +231,16 @@ let params = GenerateParameters(
     kvBits: 4,                  // Quantized cache (4 or 8)
     kvGroupSize: 64,            // Quantization group size
     quantizedKVStart: 0,        // Token index to start KV quantization
-    temperature: 0.7,           // 0 = greedy / argmax
+    temperature: 0.6,           // 0 = greedy / argmax
     topP: 0.9,                  // Nucleus sampling
+    topK: 0,                    // Top-k sampling (0 disables)
+    minP: 0.0,                  // Min-p threshold (0 disables)
     repetitionPenalty: 1.1,     // Penalize repeats
     repetitionContextSize: 20,  // Penalty window
+    presencePenalty: nil,        // Additive presence penalty
+    presenceContextSize: 20,    // Presence penalty window
+    frequencyPenalty: nil,       // Additive frequency penalty
+    frequencyContextSize: 20,   // Frequency penalty window
     prefillStepSize: 512        // Prompt prefill chunk size
 )
 ```

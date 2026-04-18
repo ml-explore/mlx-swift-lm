@@ -50,10 +50,13 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 ```swift
 import MLXEmbedders
 
+// Requires a Downloader and TokenizerLoader — e.g. from MLXHuggingFace:
+//   let downloader = #hubDownloader()
+//   let tokenizerLoader = #huggingFaceTokenizerLoader()
 let config = ModelConfiguration.bge_small
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,
+    using: tokenizerLoader,
     configuration: config
 )
 ```
@@ -63,8 +66,8 @@ let container = try await loadModelContainer(
 ```swift
 let config = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: downloader,
+    using: tokenizerLoader,
     configuration: config
 )
 ```
@@ -74,7 +77,7 @@ let container = try await loadModelContainer(
 ```swift
 let container = try await loadModelContainer(
     from: localModelURL,
-    using: TokenizersLoader()
+    using: tokenizerLoader
 )
 ```
 
@@ -82,12 +85,13 @@ let container = try await loadModelContainer(
 
 ```swift
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
-    configuration: config
-) { progress in
-    print("Download progress: \(progress.fractionCompleted)")
-}
+    from: downloader,
+    using: tokenizerLoader,
+    configuration: config,
+    progressHandler: { progress in
+        print("Download progress: \(progress.fractionCompleted)")
+    }
+)
 ```
 
 ## Generating Embeddings
@@ -168,8 +172,8 @@ public enum Strategy {
 // Create custom pooler
 let pooler = Pooling(strategy: .mean, dimension: 384)
 
-// Or from configuration file
-let pooler = loadPooling(modelDirectory: modelDir)
+// Or from configuration file (falls back to model's built-in strategy)
+let pooler = loadPooling(modelDirectory: modelDir, model: model)
 // Reads from 1_Pooling/config.json
 ```
 
@@ -189,6 +193,7 @@ let pooled = pooler(
 ```swift
 public protocol EmbeddingModel: Module {
     var vocabularySize: Int { get }
+    var poolingStrategy: Pooling.Strategy? { get }  // nil by default
 
     func callAsFunction(
         _ inputs: MLXArray,
@@ -257,31 +262,32 @@ print("Similarity: \(similarity)")  // ~0.85
 
 ## Model Configuration
 
+Note: `MLXEmbedders` defines its own `ModelConfiguration` type, separate from `MLXLMCommon.ModelConfiguration`.
+
 ```swift
 public struct ModelConfiguration: Sendable {
     public enum Identifier: Sendable {
-        case id(String)          // HuggingFace ID
-        case directory(URL)      // Local path
+        case id(String, revision: String = "main")  // Hub ID with optional revision
+        case directory(URL)                          // Local path
     }
 
     public var id: Identifier
     public var name: String
-    public let tokenizerId: String?       // Alternate tokenizer
-    public let overrideTokenizer: String? // Override tokenizer class
+    public let tokenizerSource: TokenizerSource?    // Alternate tokenizer source
 }
 ```
 
 ### Registry
 
 ```swift
-// Get registered model
-let config = await ModelConfiguration.configuration(id: "bge-small")
+// Get registered model (@MainActor)
+let config = ModelConfiguration.configuration(id: "bge-small")
 
-// List all models
-let models = await ModelConfiguration.models
+// List all models (@MainActor)
+let models = ModelConfiguration.models
 
-// Register custom model
-await ModelConfiguration.register(configurations: [myConfig])
+// Register custom model (@MainActor)
+ModelConfiguration.register(configurations: [myConfig])
 ```
 
 ## Supported Architectures
@@ -289,8 +295,14 @@ await ModelConfiguration.register(configurations: [myConfig])
 | Architecture | model_type |
 |-------------|------------|
 | BERT | `bert` |
+| RoBERTa | `roberta` |
+| XLM-RoBERTa | `xlm-roberta` |
+| DistilBERT | `distilbert` |
 | Nomic BERT | `nomic_bert` |
 | Qwen3 | `qwen3` |
+| Gemma3 | `gemma3` |
+| Gemma3 Text | `gemma3_text` |
+| Gemma3n | `gemma3n` |
 
 ## Memory Considerations
 

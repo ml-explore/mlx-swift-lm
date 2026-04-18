@@ -7,18 +7,7 @@ Tokenizers convert text to/from token IDs and apply chat templates for multi-tur
 **Files:**
 - `Libraries/MLXLMCommon/Tokenizer.swift`
 - `Libraries/MLXLMCommon/Chat.swift`
-
-## Quick Reference
-
-| Type | Purpose |
-|------|---------|
-| `Tokenizer` | Protocol from swift-transformers |
-| `PreTrainedTokenizer` | Standard tokenizer implementation |
-| `Chat.Message` | Structured chat message |
-| `Chat.Message.Role` | user, assistant, system, tool |
-| `MessageGenerator` | Convert Chat.Message to raw dicts |
-| `StreamingDetokenizer` | Incremental token-to-text |
-| `NaiveStreamingDetokenizer` | Default streaming implementation |
+- `Libraries/MLXLMCommon/ChatSession.swift`
 
 ## Tokenizer Loading
 
@@ -27,9 +16,12 @@ Tokenizers convert text to/from token IDs and apply chat templates for multi-tur
 Tokenizers are loaded automatically by model factories:
 
 ```swift
+// Requires a Downloader and TokenizerLoader — e.g. from MLXHuggingFace:
+//   let downloader = #hubDownloader()
+//   let tokenizerLoader = #huggingFaceTokenizerLoader()
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,
+    using: tokenizerLoader,
     configuration: config
 )
 let tokenizer = await container.tokenizer
@@ -41,8 +33,8 @@ Tokenizer loading is handled by the `TokenizerLoader` protocol. Each integration
 package provides a concrete loader:
 
 ```swift
-// Using TokenizersLoader from MLXLMTokenizers (swift-tokenizers-mlx)
-let loader = TokenizersLoader()
+// Implement the TokenizerLoader protocol or use a macro from MLXHuggingFace:
+let loader = #huggingFaceTokenizerLoader()  // from MLXHuggingFace
 let tokenizer = try await loader.load(from: modelDirectory)
 ```
 
@@ -55,7 +47,7 @@ let tokenizer = try await loader.load(from: modelDirectory)
 let tokens: [Int] = tokenizer.encode(text: "Hello, world!")
 
 // Decode tokens to text
-let text: String = tokenizer.decode(tokens: tokens)
+let text: String = tokenizer.decode(tokenIds: tokens)
 ```
 
 ### Chat Template
@@ -63,7 +55,7 @@ let text: String = tokenizer.decode(tokens: tokens)
 Apply model-specific chat formatting:
 
 ```swift
-let messages: [[String: String]] = [
+let messages: [[String: any Sendable]] = [
     ["role": "system", "content": "You are helpful"],
     ["role": "user", "content": "Hello"]
 ]
@@ -85,11 +77,11 @@ let tokens = try tokenizer.applyChatTemplate(
 
 ```swift
 // EOS token
-tokenizer.eosToken        // String, e.g., "</s>"
+tokenizer.eosToken        // String?, e.g., "</s>"
 tokenizer.eosTokenId      // Int?, e.g., 2
 
 // Unknown token
-tokenizer.unknownToken    // String
+tokenizer.unknownToken    // String?
 tokenizer.unknownTokenId  // Int?
 
 // Convert between tokens and IDs
@@ -274,20 +266,6 @@ if let chunk = detokenizer.next() {
     // Complete character(s) ready
 }
 // nil means waiting for more tokens
-```
-
-## Tokenizer Replacement Registry
-
-Override tokenizer classes for compatibility:
-
-```swift
-// Built-in replacements
-// "Qwen2Tokenizer" -> "PreTrainedTokenizer"
-// "InternLM2Tokenizer" -> "PreTrainedTokenizer"
-// etc.
-
-// Add custom replacement
-replacementTokenizers["CustomTokenizer"] = "PreTrainedTokenizer"
 ```
 
 ## Deprecated Patterns

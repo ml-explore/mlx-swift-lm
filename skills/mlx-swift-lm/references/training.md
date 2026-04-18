@@ -49,9 +49,12 @@ import MLXLLM
 import MLXLMCommon
 
 // Load base model
+// Requires a Downloader and TokenizerLoader — e.g. from MLXHuggingFace:
+//   let downloader = #hubDownloader()
+//   let tokenizerLoader = #huggingFaceTokenizerLoader()
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,
+    using: tokenizerLoader,
     configuration: .init(id: "mlx-community/Llama-3.2-3B-Instruct-4bit")
 )
 
@@ -347,8 +350,8 @@ import MLXOptimizers
 func trainAdapter() async throws {
     // Load model
     let container = try await LLMModelFactory.shared.loadContainer(
-        from: HubClient.default,
-        using: TokenizersLoader(),
+        from: downloader,
+        using: tokenizerLoader,
         configuration: .init(id: "mlx-community/Llama-3.2-1B-Instruct-4bit")
     )
 

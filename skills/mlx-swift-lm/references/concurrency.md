@@ -11,8 +11,6 @@ mlx-swift-lm uses Swift concurrency with specialized utilities to handle the uni
 | Type | Purpose |
 |------|---------|
 | `SerialAccessContainer<T>` | Exclusive async access to wrapped state |
-| `AsyncMutex` | Lock that works with async blocks |
-| `SendableBox<T>` | Transfer non-Sendable values across isolation |
 | `ModelContainer` | Thread-safe model wrapper (uses SerialAccessContainer) |
 | `ChatSession` | NOT thread-safe (single task only) |
 
@@ -23,8 +21,8 @@ Provides exclusive access to state across `async` calls:
 ```swift
 // Unlike actors, this guarantees exclusive access for entire async operation
 final class SerialAccessContainer<T>: @unchecked Sendable {
-    func read<R>(_ body: (T) async throws -> R) async rethrows -> R
-    func update<R>(_ body: (inout T) async throws -> R) async rethrows -> R
+    func read<R>(_ body: @Sendable (T) async throws -> sending R) async rethrows -> sending R
+    func update<R>(_ body: @Sendable (inout T) async throws -> sending R) async rethrows -> sending R
 }
 ```
 
@@ -69,9 +67,11 @@ await container.update { state in
 }
 ```
 
-## SendableBox
+## SendableBox (Internal)
 
-Transfer non-Sendable values across isolation boundaries:
+`SendableBox<T>` is an internal utility for transferring non-Sendable values across isolation
+boundaries. It is not part of the public API, but is used extensively in the implementation
+of `ModelContainer` and generation functions.
 
 ```swift
 // Problem: LMInput is not Sendable
@@ -80,33 +80,12 @@ Task {
     use(input)  // Compiler error!
 }
 
-// Solution: Use SendableBox
+// Inside the library, SendableBox wraps the value:
 let box = SendableBox(input)
 Task {
-    let input = box.consume()  // Transfer ownership
+    let input = box.consume()  // Transfer ownership (single use)
     use(input)
 }
-```
-
-### Pattern: Consuming Parameters
-
-```swift
-func processAsync(input: consuming LMInput) async throws -> Result {
-    let boxed = SendableBox(input)
-
-    return try await container.read { context in
-        let input = boxed.consume()  // Consume inside closure
-        return try process(input, context: context)
-    }
-}
-```
-
-### Important: Single Consume
-
-```swift
-let box = SendableBox(value)
-let v1 = box.consume()  // OK
-let v2 = box.consume()  // fatalError: "value already consumed"
 ```
 
 ## ModelContainer Thread Safety
@@ -119,8 +98,8 @@ public final class ModelContainer: Sendable {
 
     // Thread-safe access
     public func perform<R: Sendable>(
-        _ action: @Sendable (ModelContext) async throws -> R
-    ) async rethrows -> R
+        _ action: @Sendable (ModelContext) async throws -> sending R
+    ) async rethrows -> sending R
 }
 ```
 
@@ -129,8 +108,8 @@ public final class ModelContainer: Sendable {
 ```swift
 // Multiple tasks can call perform() safely
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: downloader,        // any Downloader (e.g. #hubDownloader() from MLXHuggingFace)
+    using: tokenizerLoader,  // any TokenizerLoader (e.g. #huggingFaceTokenizerLoader())
     id: "mlx-community/Qwen3-4B-4bit"
 )
 

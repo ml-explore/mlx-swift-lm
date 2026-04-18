@@ -25,8 +25,10 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 import MLXLLM
 import MLXLMCommon
 
-let context = try await LLMModelFactory.shared.load(
-    configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
+let context = try await loadModel(
+    from: downloader,        // any Downloader (e.g. #hubDownloader() from MLXHuggingFace)
+    using: tokenizerLoader,  // any TokenizerLoader (e.g. #huggingFaceTokenizerLoader())
+    id: "mlx-community/Qwen3-4B-4bit"
 )
 
 let userInput = UserInput(prompt: "Explain actor isolation in Swift.")
