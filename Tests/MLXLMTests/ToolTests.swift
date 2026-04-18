@@ -453,10 +453,53 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("hello, world!"))
     }
 
+    @Test("Test Gemma Function Parser - Gemma 4 Format")
+    func testGemmaParserGemma4Format() throws {
+        let parser = GemmaFunctionParser()
+        // Gemma 4 uses <|tool_call>/<tool_call|> tags with <|\"|> escape markers
+        let content = "<|tool_call>call:get_weather{location:Paris,unit:celsius}<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Gemma Function Parser - Gemma 4 Format with Escaped Strings")
+    func testGemmaParserGemma4EscapedStrings() throws {
+        let parser = GemmaFunctionParser()
+        // Gemma 4 uses <|\"|> for escaping
+        let content = "<|tool_call>call:search{query:<|\"|>hello, world!<|\"|>}<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("hello, world!"))
+    }
+
+    @Test("Test Gemma Function Parser - Auto-Detects Gemma 3 vs Gemma 4 Format")
+    func testGemmaParserAutoDetection() throws {
+        let parser = GemmaFunctionParser()
+
+        // Gemma 3 format
+        let gemma3Content = "<start_function_call>call:func3{arg1:value1}<end_function_call>"
+        let gemma3Result = try #require(parser.parse(content: gemma3Content, tools: nil))
+        #expect(gemma3Result.function.name == "func3")
+        #expect(gemma3Result.function.arguments["arg1"] == .string("value1"))
+
+        // Gemma 4 format
+        let gemma4Content = "<|tool_call>call:func4{arg2:value2}<tool_call|>"
+        let gemma4Result = try #require(parser.parse(content: gemma4Content, tools: nil))
+        #expect(gemma4Result.function.name == "func4")
+        #expect(gemma4Result.function.arguments["arg2"] == .string("value2"))
+    }
+
     @Test("Test Gemma Format via ToolCallProcessor")
     func testGemmaFormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma)
-        let content = "<start_function_call>call:calculator{expression:2+2}<end_function_call>"
+        // Use Gemma 4 format (<|tool_call> tags) which is the primary format for GemmaFunctionParser
+        let content = "<|tool_call>call:calculator{expression:2+2}<tool_call|>"
 
         _ = processor.processChunk(content)
 
@@ -628,9 +671,14 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "glm4_5") == .glm4)
         #expect(ToolCallFormat.infer(from: "GLM4_5") == .glm4)
 
-        // Gemma models
+        // Gemma models (prefix matching for all variants)
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma2") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma3") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma3n") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma4") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma4_text") == .gemma)
 
         // Nemotron models (prefix matching)
         #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)
