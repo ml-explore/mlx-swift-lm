@@ -148,7 +148,8 @@ struct ToolTests {
 
         #expect(toolCall.function.name == "search_many")
         #expect(toolCall.function.arguments["limit"] == .int(2))
-        #expect(toolCall.function.arguments["queries"] == .array([.string("swift"), .string("mlx")]))
+        #expect(
+            toolCall.function.arguments["queries"] == .array([.string("swift"), .string("mlx")]))
     }
 
     // MARK: - Pythonic Format Tests (LFM2/LFM2.5)

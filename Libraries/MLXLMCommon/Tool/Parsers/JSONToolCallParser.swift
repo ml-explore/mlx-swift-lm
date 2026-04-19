@@ -39,7 +39,8 @@ public struct JSONToolCallParser: ToolCallParser, Sendable {
     }
 
     private func normalizedToolCallData(from data: Data) -> Data? {
-        guard var jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard var jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
             return nil
         }
 
