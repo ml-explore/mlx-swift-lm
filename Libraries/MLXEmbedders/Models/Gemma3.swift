@@ -472,12 +472,21 @@ public class EmbeddingGemma: Module, EmbeddingModel {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
 
-        // Initialize projection head if weights are present
+        // Initialize projection head if weights are present.
+        //
+        // We cannot use `self._dense.wrappedValue = [...]`: after init
+        // ran, `_dense.module` is non-nil (set to `[]`), and re-assigning
+        // the wrapped value routes through `@ModuleInfo.wrappedValue.set`,
+        // which `fatalError`s in that case to keep the module's item cache
+        // consistent. `update(modules:)` goes through `TypeErasedSetter`,
+        // which accepts `[Module]` and updates the cache in lockstep.
         if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
-            self._dense.wrappedValue = [
-                Linear(config.hiddenSize, config.intermediateSize, bias: false),
-                Linear(config.intermediateSize, config.hiddenSize, bias: false),
-            ]
+            update(
+                modules: .unflattened([
+                    ("dense.0", Linear(config.hiddenSize, config.intermediateSize, bias: false)),
+                    ("dense.1", Linear(config.intermediateSize, config.hiddenSize, bias: false)),
+                ])
+            )
         }
 
         // Truncate vocab if weights were trained with extra padding tokens
