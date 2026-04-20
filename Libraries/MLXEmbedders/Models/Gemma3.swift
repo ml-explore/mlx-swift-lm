@@ -474,17 +474,36 @@ public class EmbeddingGemma: Module, EmbeddingModel {
 
         // Initialize projection head if weights are present.
         //
-        // We cannot use `self._dense.wrappedValue = [...]`: after init
-        // ran, `_dense.module` is non-nil (set to `[]`), and re-assigning
-        // the wrapped value routes through `@ModuleInfo.wrappedValue.set`,
-        // which `fatalError`s in that case to keep the module's item cache
+        // The dense head's hidden dimension is NOT `config.intermediateSize`
+        // (which is the MLP hidden size for the backbone). For
+        // `embeddinggemma-300m` the dense head expands to `4 * hiddenSize`
+        // (3072 for a 768-hidden model) and the checkpoint does not declare
+        // it in `config.json`. Read it off `dense.0.weight` so the shape is
+        // always correct whatever the upstream publishes. `.weight` first
+        // dim is the output dim for both float and 4-bit quantized layers.
+        //
+        // We cannot use `self._dense.wrappedValue = [...]`: after init ran,
+        // `_dense.module` is non-nil (set to `[]`), and re-assigning the
+        // wrapped value routes through `@ModuleInfo.wrappedValue.set`, which
+        // `fatalError`s in that case to keep the module's item cache
         // consistent. `update(modules:)` goes through `TypeErasedSetter`,
         // which accepts `[Module]` and updates the cache in lockstep.
         if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
+            guard let dense0Weight = processedWeights["dense.0.weight"] else {
+                // Malformed checkpoint: `dense.*` keys exist but no
+                // `dense.0.weight` to read the hidden dim from. Skip
+                // dense-head setup and let `loadWeights` raise a shape
+                // mismatch against the (still-empty) `_dense` array.
+                return processedWeights.filter { (key, _) in
+                    !key.contains("self_attn.rotary_emb.inv_freq")
+                        && !key.contains("lm_head")
+                }
+            }
+            let denseHiddenSize = dense0Weight.dim(0)
             update(
                 modules: .unflattened([
-                    ("dense.0", Linear(config.hiddenSize, config.intermediateSize, bias: false)),
-                    ("dense.1", Linear(config.intermediateSize, config.hiddenSize, bias: false)),
+                    ("dense.0", Linear(config.hiddenSize, denseHiddenSize, bias: false)),
+                    ("dense.1", Linear(denseHiddenSize, config.hiddenSize, bias: false)),
                 ])
             )
         }
