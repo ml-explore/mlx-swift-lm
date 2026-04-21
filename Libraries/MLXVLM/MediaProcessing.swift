@@ -13,7 +13,12 @@ public struct ProcessedFrames {
     public let totalDuration: CMTime
 }
 
-private let context = CIContext()
+// `.cacheIntermediates: false` prevents CoreImage from holding IOSurface-backed
+// GPU textures between frames. With the default (caching) context, a large-library
+// scan accumulates thousands of cached intermediate surfaces and hits the
+// per-process IOSurface limit of 16384, crashing the render pipeline.
+// Batch-processing never re-renders the same frame twice, so the cache buys nothing.
+private let context = CIContext(options: [.cacheIntermediates: false])
 
 /// Collection of methods for processing media (images, video, etc.).
 ///
