@@ -499,9 +499,9 @@ private final class Gemma4TextMLP: Module, UnaryLayer {
 
 private final class Gemma4TextRouter: Module {
     let topKExperts: Int
+    let config: Gemma4TextConfiguration
     private let rootSize: Float
 
-    @ModuleInfo(key: "norm") var norm: Gemma4RMSNormNoScale
     @ModuleInfo(key: "proj") var proj: Linear
     @ParameterInfo(key: "scale") var scale: MLXArray
     @ParameterInfo(key: "per_expert_scale") var perExpertScale: MLXArray
@@ -512,9 +512,9 @@ private final class Gemma4TextRouter: Module {
         }
 
         self.topKExperts = topKExperts
+        self.config = config
         self.rootSize = pow(Float(config.hiddenSize), -0.5)
 
-        self._norm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
         self._proj.wrappedValue = Linear(config.hiddenSize, numExperts, bias: false)
         self._scale.wrappedValue = MLXArray.ones([config.hiddenSize])
         self._perExpertScale.wrappedValue = MLXArray.ones([numExperts])
@@ -522,18 +522,16 @@ private final class Gemma4TextRouter: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        var x = norm(x)
-        x = x * MLXArray(rootSize, dtype: x.dtype)
-        x = x * scale.asType(x.dtype)
+        let normed = MLXFast.rmsNorm(
+            x, weight: (scale * rootSize).asType(x.dtype), eps: config.rmsNormEps)
 
-        let expertScores = proj(x)
-        let routerProbabilities = MLX.softmax(expertScores, axis: -1, precise: true)
+        let scores = proj(normed)
 
-        let topKIndices = MLX.argPartition(-expertScores, kth: topKExperts - 1, axis: -1)[
-            .ellipsis, ..<topKExperts,
+        let topKIndices = MLX.argPartition(scores, kth: -topKExperts, axis: -1)[
+            .ellipsis, (-topKExperts)...,
         ]
-        var topKWeights = MLX.takeAlong(routerProbabilities, topKIndices, axis: -1)
-        topKWeights = topKWeights / MLX.sum(topKWeights, axis: -1, keepDims: true)
+        var topKWeights = MLX.takeAlong(scores, topKIndices, axis: -1)
+        topKWeights = MLX.softmax(topKWeights, axis: -1)
         topKWeights = topKWeights * perExpertScale[topKIndices].asType(topKWeights.dtype)
         return (topKIndices, topKWeights)
     }
