@@ -921,6 +921,10 @@ enum Qwen35Language {
             imageGridTHW: [THW]? = nil,
             videoGridTHW: [THW]? = nil
         ) -> LMOutput {
+            // Ensure inputs is 2D [batch, seq]. Text-only callers (e.g.
+            // WiredMemoryUtils, TokenIterator) may pass 1D token arrays.
+            let inputs = inputs.ndim == 1 ? inputs.expandedDimensions(axis: 0) : inputs
+
             if pixelValues != nil {
                 precomputedPositionIds = nil
                 ropeDeltas = nil
