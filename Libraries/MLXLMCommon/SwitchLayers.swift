@@ -86,6 +86,69 @@ public class SwitchGLU: Module {
     }
 }
 
+// MARK: - FusedGateUpSwitchGLU
+
+/// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
+/// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
+/// `gate_proj` / `up_proj`. Used by Gemma 4 26B MoE.
+public class FusedGateUpSwitchGLU: Module {
+    @ModuleInfo(key: "gate_up_proj") var gateUpProj: SwitchLinear
+    @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
+
+    let inputDims: Int
+    let hiddenDims: Int
+    let numExperts: Int
+    let activation: (MLXArray) -> MLXArray
+
+    public init(
+        inputDims: Int,
+        hiddenDims: Int,
+        numExperts: Int,
+        activation: @escaping (MLXArray) -> MLXArray = MLXNN.silu,
+        bias: Bool = false
+    ) {
+        self.inputDims = inputDims
+        self.hiddenDims = hiddenDims
+        self.numExperts = numExperts
+        self.activation = activation
+
+        self._gateUpProj.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
+        self._downProj.wrappedValue = SwitchLinear(
+            inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: bias)
+
+        super.init()
+    }
+
+    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+        var x = MLX.expandedDimensions(x, axes: [-2, -3])
+
+        let doSort = indices.size >= 64
+
+        var idx = indices
+        var inverseOrder = MLXArray()
+
+        if doSort {
+            (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
+        }
+
+        let gateUp = gateUpProj(x, idx, sortedIndices: doSort)
+        let parts = MLX.split(gateUp, parts: 2, axis: -1)
+        x = downProj(
+            activation(parts[0]) * parts[1],
+            idx,
+            sortedIndices: doSort)
+
+        if doSort {
+            x = scatterUnsort(x: x, invOrder: inverseOrder, shape: indices.shape)
+        }
+
+        return MLX.squeezed(x, axis: -2)
+    }
+}
+
+// MARK: - SwitchLinear
+
 public class SwitchLinear: Module, Quantizable {
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "bias") var bias: MLXArray?
