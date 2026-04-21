@@ -36,7 +36,7 @@ let package = Package(
             targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
+        .package(url: "https://github.com/ekryski/mlx-swift", branch: "alpha"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -145,6 +145,14 @@ let package = Package(
                 "MLXLMCommon",
             ],
             path: "Libraries/MLXHuggingFace"
+        ),
+        .executableTarget(
+            name: "Gemma4MoETest",
+            dependencies: [
+                "MLXLLM", "MLXLMCommon", "BenchmarkHelpers",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Tools/Gemma4MoETest"
         ),
     ]
 )
