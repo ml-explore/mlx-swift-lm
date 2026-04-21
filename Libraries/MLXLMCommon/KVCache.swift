@@ -1776,14 +1776,37 @@ public func quantizedScaledDotProductAttention(
 ///   - kvBits: Number of bits for quantization (nil = no quantization)
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
+/// Resolve a kvScheme string to (bits, groupSize) for affine quantization.
+/// Returns nil for unrecognized schemes (custom schemes handle their own caches).
+public func resolveAffineScheme(_ scheme: String?) -> (bits: Int, groupSize: Int)? {
+    switch scheme {
+    case "affine4": return (4, 64)
+    case "affine8": return (8, 64)
+    default: return nil
+    }
+}
+
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    kvScheme: String? = nil
 ) {
-    guard let kvBits = kvBits,
-        !cache.isEmpty,
+    // Resolve effective bits: kvScheme overrides kvBits
+    let effectiveBits: Int
+    let effectiveGroupSize: Int
+    if let scheme = kvScheme, let resolved = resolveAffineScheme(scheme) {
+        effectiveBits = resolved.bits
+        effectiveGroupSize = resolved.groupSize
+    } else if let kvBits {
+        effectiveBits = kvBits
+        effectiveGroupSize = kvGroupSize
+    } else {
+        return
+    }
+
+    guard !cache.isEmpty,
         !(cache[0] is QuantizedKVCache),
         cache[0].offset > quantizedKVStart
     else {
@@ -1791,12 +1814,9 @@ public func maybeQuantizeKVCache(
     }
 
     for i in 0 ..< cache.count {
-        // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            cache[i] = simpleCache.toQuantized(groupSize: effectiveGroupSize, bits: effectiveBits)
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-        // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
-        // MambaCache and CacheList don't use traditional KV quantization
     }
 }
