@@ -212,6 +212,7 @@ class AttentionBlock: Module {
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
         let D = headDim
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
 
         var q = qProj(x).reshaped(B, L, -1, D).swappedAxes(1, 2)
         var k = kProj(x).reshaped(B, L, -1, D).swappedAxes(1, 2)
@@ -229,8 +230,8 @@ class AttentionBlock: Module {
             if sinksActive {
                 fatalError("Quantized attention does not support non-zero sinks.")
             }
-            q = applyRotaryPosition(rope, to: q, cache: cache)
-            k = applyRotaryPosition(rope, to: k, cache: cache)
+            q = applyRotaryPosition(rope, to: q, offset: ropeOffset)
+            k = applyRotaryPosition(rope, to: k, offset: ropeOffset)
 
             let (qKeys, qValues) = qcache.updateQuantized(keys: k, values: v)
             let vHat = quantizedScaledDotProductAttention(
@@ -247,8 +248,8 @@ class AttentionBlock: Module {
             return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
         }
 
-        q = applyRotaryPosition(rope, to: q, cache: cache)
-        k = applyRotaryPosition(rope, to: k, cache: cache)
+        q = applyRotaryPosition(rope, to: q, offset: ropeOffset)
+        k = applyRotaryPosition(rope, to: k, offset: ropeOffset)
 
         if let cache {
             (k, v) = cache.update(keys: k, values: v)

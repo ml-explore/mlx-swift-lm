@@ -175,33 +175,6 @@ private class ScaledLinear: Module {
     }
 }
 
-private enum Gemma4PositionOffset {
-    case scalar(Int)
-    case batch(MLXArray)
-}
-
-private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
-    if let batchCache = cache as? BatchPositionedKVCache {
-        // Snapshot the per-sequence offsets before cache.update(...) advances them.
-        .batch(batchCache.batchOffset + 0)
-    } else {
-        .scalar(cache?.offset ?? 0)
-    }
-}
-
-private func gemma4ApplyRotaryPosition<R: RoPELayer>(
-    _ rope: R,
-    to x: MLXArray,
-    offset: Gemma4PositionOffset
-) -> MLXArray {
-    switch offset {
-    case .scalar(let value):
-        rope(x, offset: value)
-    case .batch(let values):
-        rope(x, offset: values)
-    }
-}
-
 // MARK: - Attention
 
 private class Gemma4Attention: Module {
@@ -283,8 +256,8 @@ private class Gemma4Attention: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
         sharedKV: (MLXArray, MLXArray)? = nil,
-        positionOffset: Gemma4PositionOffset? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray), Gemma4PositionOffset) {
+        positionOffset: RoPEOffset? = nil
+    ) -> (MLXArray, (MLXArray, MLXArray), RoPEOffset) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x).reshaped(B, L, nHeads, effectiveHeadDim)
@@ -292,7 +265,7 @@ private class Gemma4Attention: Module {
 
         let keys: MLXArray
         let values: MLXArray
-        let activePositionOffset = positionOffset ?? gemma4CapturePositionOffset(from: cache)
+        let activePositionOffset = positionOffset ?? (cache?.ropeOffset ?? .scalar(0))
 
         if let (sharedK, sharedV) = sharedKV {
             // KV-shared layers use pre-computed KV from an earlier layer
@@ -302,7 +275,7 @@ private class Gemma4Attention: Module {
             var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             k = kNorm(k)
             k = k.transposed(0, 2, 1, 3)
-            k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
+            k = applyRotaryPosition(rope, to: k, offset: activePositionOffset)
 
             var v: MLXArray
             if let vProj {
@@ -324,7 +297,7 @@ private class Gemma4Attention: Module {
         }
 
         queries = queries.transposed(0, 2, 1, 3)
-        queries = gemma4ApplyRotaryPosition(rope, to: queries, offset: activePositionOffset)
+        queries = applyRotaryPosition(rope, to: queries, offset: activePositionOffset)
 
         // Adjust mask if cache size differs from mask size
         var adjustedMask = mask
@@ -435,8 +408,8 @@ private class Gemma4DecoderLayer: Module {
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
         sharedKV: (MLXArray, MLXArray)? = nil,
-        positionOffset: Gemma4PositionOffset? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray), Gemma4PositionOffset) {
+        positionOffset: RoPEOffset? = nil
+    ) -> (MLXArray, (MLXArray, MLXArray), RoPEOffset) {
         let residual = x
 
         let h = inputLayernorm(x)
@@ -605,7 +578,7 @@ private class Gemma4TextModelInner: Module {
         }
 
         // Forward through layers, tracking intermediate KV pairs for sharing
-        var intermediates = [(kv: (MLXArray, MLXArray)?, positionOffset: Gemma4PositionOffset?)](
+        var intermediates = [(kv: (MLXArray, MLXArray)?, positionOffset: RoPEOffset?)](
             repeating: (nil, nil), count: config.numHiddenLayers)
 
         for (idx, layer) in layers.enumerated() {

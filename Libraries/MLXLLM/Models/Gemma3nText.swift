@@ -258,10 +258,13 @@ class Gemma3nAttention: Module {
         cache: KVCache? = nil
     ) -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
 
         var queries = qProj(x)
         queries = queries.reshaped(B, L, -1, headDim)
         queries = qNorm(queries)
+        queries = queries.transposed(0, 2, 1, 3)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
 
         var keys: MLXArray
         var values: MLXArray
@@ -275,7 +278,7 @@ class Gemma3nAttention: Module {
                 keys = kProj(x).reshaped(B, L, -1, headDim)
                 keys = kNorm(keys)
                 keys = keys.transposed(0, 2, 1, 3)
-                keys = applyRotaryPosition(rope, to: keys, cache: cache)
+                keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
                 values = vProj(x).reshaped(B, L, -1, headDim)
                 values = vNorm(values)
@@ -289,7 +292,7 @@ class Gemma3nAttention: Module {
             keys = kProj(x).reshaped(B, L, -1, headDim)
             keys = kNorm(keys)
             keys = keys.transposed(0, 2, 1, 3)
-            keys = applyRotaryPosition(rope, to: keys, cache: cache)
+            keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
             values = vProj(x).reshaped(B, L, -1, headDim)
             values = vNorm(values)
@@ -299,9 +302,6 @@ class Gemma3nAttention: Module {
                 (keys, values) = cache.update(keys: keys, values: values)
             }
         }
-
-        queries = queries.transposed(0, 2, 1, 3)
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
 
         var adjustedMask = mask
         if case .array(let maskArray) = mask {

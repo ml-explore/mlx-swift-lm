@@ -70,8 +70,9 @@ class GLM4MoEAttention: Module {
         keys = keys.transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
+        keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
         let output = attentionWithCacheUpdate(
             queries: queries,

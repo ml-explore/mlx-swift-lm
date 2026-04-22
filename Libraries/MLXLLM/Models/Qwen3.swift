@@ -77,8 +77,9 @@ class Qwen3Attention: Module {
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
         // Apply RoPE positioning
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
+        keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
         // Use the automatic attention router that handles both quantized and regular caches
         let output = attentionWithCacheUpdate(

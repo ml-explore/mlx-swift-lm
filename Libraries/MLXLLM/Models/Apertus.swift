@@ -223,8 +223,9 @@ private class ApertusAttention: Module {
         values = values.transposed(0, 2, 1, 3)
 
         // 4. RoPE
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
+        keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
         if let cache = cache {
             // Update cache (expects [B, H, L, D])

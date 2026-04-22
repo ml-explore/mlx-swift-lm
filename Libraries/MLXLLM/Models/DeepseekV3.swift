@@ -197,8 +197,9 @@ class DeepseekV3Attention: Module {
 
         var (kNope, values) = (splitKv[0], splitKv[1])
 
-        qPe = applyRotaryPosition(rope, to: qPe, cache: cache)
-        kPe = applyRotaryPosition(rope, to: kPe, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        qPe = applyRotaryPosition(rope, to: qPe, offset: ropeOffset)
+        kPe = applyRotaryPosition(rope, to: kPe, offset: ropeOffset)
         kPe = repeated(kPe, count: numHeads, axis: 1)
 
         var keys: MLXArray

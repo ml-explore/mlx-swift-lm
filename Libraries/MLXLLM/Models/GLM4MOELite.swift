@@ -254,8 +254,9 @@ class GLM4MoELiteAttention: Module {
         kPe = kPe.reshaped(B, L, 1, qkRopeHeadDim).transposed(0, 2, 1, 3)
         var kvLatent = kvALayerNorm(compressedKv)
 
-        qPe = applyRotaryPosition(rope, to: qPe, cache: cache)
-        kPe = applyRotaryPosition(rope, to: kPe, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        qPe = applyRotaryPosition(rope, to: qPe, offset: ropeOffset)
+        kPe = applyRotaryPosition(rope, to: kPe, offset: ropeOffset)
 
         // Expand kvLatent for attention: [B, L, kvLoraRank] -> [B, 1, L, kvLoraRank]
         kvLatent = expandedDimensions(kvLatent, axis: 1)

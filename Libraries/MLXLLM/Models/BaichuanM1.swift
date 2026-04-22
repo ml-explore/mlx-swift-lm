@@ -130,8 +130,9 @@ class BaichuanM1Attention: Module {
         keys = customConvolution(keys, convK, state: lastK)
         values = customConvolution(values, convV, state: lastV)
 
-        queries = applyRotaryPosition(rope, to: queries, cache: kvSubCache)
-        keys = applyRotaryPosition(rope, to: keys, cache: kvSubCache)
+        let ropeOffset = kvSubCache?.ropeOffset ?? .scalar(0)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
+        keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
         if let cache = cache as? CacheList {
             let kvCache = cache[1]

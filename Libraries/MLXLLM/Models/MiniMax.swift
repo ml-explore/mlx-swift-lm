@@ -77,8 +77,9 @@ class MiniMaxAttention: Module {
         var k = keys.reshaped(B, L, numKeyValueHeads, -1).transposed(0, 2, 1, 3)
         let v = values.reshaped(B, L, numKeyValueHeads, -1).transposed(0, 2, 1, 3)
 
-        q = applyRotaryPosition(rope, to: q, cache: cache)
-        k = applyRotaryPosition(rope, to: k, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        q = applyRotaryPosition(rope, to: q, offset: ropeOffset)
+        k = applyRotaryPosition(rope, to: k, offset: ropeOffset)
 
         let output = attentionWithCacheUpdate(
             queries: q,

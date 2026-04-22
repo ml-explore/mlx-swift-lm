@@ -87,8 +87,9 @@ class Mistral3Attention: Module {
         values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
 
         // Apply RoPE
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let ropeOffset = cache?.ropeOffset ?? .scalar(0)
+        queries = applyRotaryPosition(rope, to: queries, offset: ropeOffset)
+        keys = applyRotaryPosition(rope, to: keys, offset: ropeOffset)
 
         // Apply attention scaling
         queries = queries * attnScale
