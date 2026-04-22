@@ -418,6 +418,16 @@ public func loadParoQuantModel(
     let verify: Module.VerifyUpdate = [.allModelKeysSet, .shapeMismatch]
     try model.update(parameters: parameters, verify: verify)
 
+    // 10b. Finalize rotation-derived state. Must run *after* the checkpoint
+    //      update (so theta / pairs / channel_scales hold real values) and
+    //      *before* any forward pass. `prepareDerivedRotationState()`
+    //      eval(...)s its own derived arrays because they live in underscore-
+    //      prefixed private fields that Module reflection — and therefore
+    //      step 12's eval(model) — skips.
+    for (_, layer) in rotationLeafModules(model: model) {
+        (layer as? RotateQuantizedLinear)?.prepareDerivedRotationState()
+    }
+
     // 11. Quantize IO embedding path from FP16 weights
     quantize(model: model) { path, module in
         guard isParoQuantIOLayer(path: path, module: module) else {
@@ -426,7 +436,7 @@ public func loadParoQuantModel(
         return (paroConfig.groupSize, paroConfig.bits, .affine)
     }
 
-    // 12. Materialize
+    // 12. Materialize the @ParameterInfo tensors
     eval(model)
     logger.info("ParoQuant model loaded and evaluated")
 

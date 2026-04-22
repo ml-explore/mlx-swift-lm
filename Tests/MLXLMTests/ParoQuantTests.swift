@@ -170,6 +170,54 @@ public class ParoQuantTests: XCTestCase {
         eval(y4)
         XCTAssertEqual(y4.shape, [4, 64])
     }
+
+    /// Regression gate for PR #164 C1 + C4 — the old implementation had a
+    /// `nonisolated(unsafe)` kernel cache and an eval-time `CachedRotation?`
+    /// field that mutated on the first forward pass. Both are unsafe under
+    /// the multi-threaded usage that `ModelContainer.perform { ... }`
+    /// allows in production.
+    ///
+    /// Uses `DispatchQueue.concurrentPerform` (the same dispatch primitive
+    /// the model container path ends up on via its worker queue) so the
+    /// layer is hit from several threads simultaneously without any
+    /// isolation in between. Mixes batch=1 and batch=4 so both tile sizes
+    /// race into the kernel cache on the first iteration.
+    func testRotateQuantizedLinearConcurrentSafe() throws {
+        let layer = try makeTestLayer(hasBias: true)
+        let numTasks = 8
+        let buffer = SynchronizedShapeBuffer()
+
+        DispatchQueue.concurrentPerform(iterations: numTasks) { i in
+            let batch = i % 2 == 0 ? 1 : 4
+            let x = MLXRandom.normal([batch, 128]).asType(.float16)
+            let y = layer(x)
+            eval(y)
+            buffer.append(y.shape)
+        }
+
+        let shapes = buffer.snapshot()
+        XCTAssertEqual(shapes.count, numTasks)
+        for shape in shapes {
+            XCTAssertTrue(
+                shape == [1, 64] || shape == [4, 64],
+                "Unexpected output shape under concurrent load: \(shape)")
+        }
+    }
+}
+
+/// Thread-safe `[[Int]]` accumulator used by `testRotateQuantizedLinearConcurrentSafe`.
+/// `@unchecked Sendable` because all mutation is serialised by the internal lock.
+private final class SynchronizedShapeBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shapes: [[Int]] = []
+
+    func append(_ shape: [Int]) {
+        lock.withLock { shapes.append(shape) }
+    }
+
+    func snapshot() -> [[Int]] {
+        lock.withLock { shapes }
+    }
 }
 
 // MARK: - Test Helpers
@@ -207,6 +255,9 @@ private func makeTestLayer(hasBias: Bool) throws -> RotateQuantizedLinear {
         params["bias"] = MLXRandom.normal([testOutDim]).asType(.float16)
     }
     try layer.update(parameters: ModuleParameters.unflattened(params), verify: [])
+    // Mirror the loader contract: derive rotation state after the checkpoint
+    // params are loaded, before any forward pass.
+    layer.prepareDerivedRotationState()
     eval(layer)
     return layer
 }

@@ -146,21 +146,20 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
     let pairs: MLXArray
     @ParameterInfo(key: "channel_scales") var channelScales: MLXArray
 
-    /// Pre-computed rotation data, lazily initialized on first forward pass.
-    private struct CachedRotation {
-        let cos: MLXArray
-        let sin: MLXArray
-        let packedPairs: MLXArray
-        let scalesFlat: MLXArray
-        let dim: Int
-        let halfGroup: Int
-        let numGroups: Int
-        let krot: Int
-    }
-
-    private var cached: CachedRotation?
-    private var cachedParams: MLXArray?
-    private var cachedBatch: Int = -1
+    // Rotation-derived state. Populated once by `prepareDerivedRotationState()`
+    // after the checkpoint parameters are loaded (see ParoQuantLoader), and
+    // never mutated afterwards. Underscore-prefixed private properties are
+    // ignored by Module reflection — see Documentation.docc/porting.md
+    // "Computed vs Loaded Parameters" — so they don't participate in weight
+    // loading, which keeps the loader's strict `verify: [.allModelKeysSet]`
+    // contract intact.
+    //
+    // Kept out of the forward pass's `eval` graph by materialising them
+    // explicitly inside `prepareDerivedRotationState()`.
+    private var _cosTheta: MLXArray
+    private var _sinTheta: MLXArray
+    private var _packedPairs: MLXArray
+    private var _scalesFlat: MLXArray
 
     public init(
         inputDims: Int, outputDims: Int, hasBias: Bool,
@@ -176,6 +175,15 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
         // fails with `keyNotFound`. Pattern matches `LoRA+Layers.swift`.
         self._channelScales.wrappedValue = MLXArray.ones([1, inputDims])
 
+        // Placeholder values — `prepareDerivedRotationState()` overwrites
+        // these with real derived tensors after checkpoint load. Shapes are
+        // correct so a forward pass before finalize would be degenerate
+        // (identity-ish rotation) rather than crash.
+        self._cosTheta = MLXArray.ones([krot, inputDims / 2])
+        self._sinTheta = MLXArray.zeros([krot, inputDims / 2])
+        self._packedPairs = MLXArray.zeros([krot, inputDims / 2], type: Int32.self)
+        self._scalesFlat = MLXArray.ones([inputDims])
+
         super.init(
             weight: MLXArray.zeros([outputDims, inputDims * bits / 32], type: UInt32.self),
             bias: hasBias ? MLXArray.zeros([outputDims]) : nil,
@@ -186,47 +194,48 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
         )
     }
 
-    private func ensureCached() -> CachedRotation {
-        if let c = cached { return c }
-        let dim = theta.dim(1) * 2
-        let cosTheta = MLX.cos(theta)
-        let sinTheta = MLX.sin(theta)
-        let packed = packPairs(pairs, groupSize: groupSize)
-        let flat = channelScales.reshaped(-1)
-
-        // Force GPU materialization so rotation constants are resident
-        // and not recomputed as part of each forward pass graph.
-        eval(cosTheta, sinTheta, packed, flat)
-
-        let c = CachedRotation(
-            cos: cosTheta,
-            sin: sinTheta,
-            packedPairs: packed,
-            scalesFlat: flat,
-            dim: dim,
-            halfGroup: groupSize / 2,
-            numGroups: dim / groupSize,
-            krot: theta.dim(0)
-        )
-        cached = c
-        return c
+    /// Compute rotation-derived tensors from the loaded checkpoint parameters.
+    ///
+    /// Must be called once, after `update(parameters:)` populates
+    /// `theta` / `pairs` / `channelScales`, and before any forward pass.
+    /// Must not be called concurrently with forward passes — the loader
+    /// owns this call, nothing else should.
+    ///
+    /// Each forward pass previously generated this state lazily on first
+    /// call and cached it in a mutable `CachedRotation?` field. That pattern
+    /// is unsafe under multi-threaded inference (issue #157 — a shared model
+    /// container is driven by multiple tasks simultaneously), so derivation
+    /// is now done explicitly at load time.
+    ///
+    /// The four derived arrays are `eval(...)`ed here because underscore-
+    /// prefixed private fields are invisible to Module reflection — the
+    /// loader's later `eval(model)` walks `@ParameterInfo` tensors only, so
+    /// these would otherwise stay unmaterialised promises until the first
+    /// forward pass, and materialisation would then become part of that
+    /// pass's graph (exactly the eval-time state we're eliminating).
+    public func prepareDerivedRotationState() {
+        _cosTheta = MLX.cos(theta)
+        _sinTheta = MLX.sin(theta)
+        _packedPairs = packPairs(pairs, groupSize: groupSize)
+        _scalesFlat = channelScales.reshaped(-1)
+        eval(_cosTheta, _sinTheta, _packedPairs, _scalesFlat)
     }
 
-    private func rotate(_ x: MLXArray, cache c: CachedRotation) -> MLXArray {
+    private func rotate(_ x: MLXArray) -> MLXArray {
+        let dim = _scalesFlat.dim(0)
+        let halfGroup = groupSize / 2
+        let numGroups = dim / groupSize
+        let krot = theta.dim(0)
+
         let batch = x.dim(0)
         let tile = batch <= 1 ? 1 : 4
+        let gridX = ((batch + tile - 1) / tile) * halfGroup
+        let params = MLXArray([Int32(batch), Int32(dim), Int32(krot), Int32(groupSize)])
 
-        // Cache params array — batch rarely changes during autoregressive generation
-        if batch != cachedBatch {
-            cachedParams = MLXArray([Int32(batch), Int32(c.dim), Int32(c.krot), Int32(groupSize)])
-            cachedBatch = batch
-        }
-
-        let gridX = ((batch + tile - 1) / tile) * c.halfGroup
         return getRotationKernel(tile: tile)(
-            [x, c.packedPairs, c.cos, c.sin, c.scalesFlat, cachedParams!],
-            grid: (gridX, c.numGroups, 1),
-            threadGroup: (c.halfGroup, 1, 1),
+            [x, _packedPairs, _cosTheta, _sinTheta, _scalesFlat, params],
+            grid: (gridX, numGroups, 1),
+            threadGroup: (halfGroup, 1, 1),
             outputShapes: [x.shape],
             outputDTypes: [x.dtype]
         )[0]
@@ -235,11 +244,11 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
     /// Forward pass: applies pairwise Givens rotation then quantized matmul.
     ///
     /// Computes `y = quantizedMM(rotate(x), W)` where `rotate(x)` fuses channel
-    /// scaling and Givens rotations in a single Metal kernel.
+    /// scaling and Givens rotations in a single Metal kernel. No mutable
+    /// state is read or written by this method.
     open override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let c = ensureCached()
         let shape = x.shape
-        let rotated = rotate(x.reshaped(-1, c.dim), cache: c)
+        let rotated = rotate(x.reshaped(-1, _scalesFlat.dim(0)))
 
         var y = quantizedMM(
             rotated.reshaped(shape), weight,
