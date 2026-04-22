@@ -139,10 +139,12 @@ nonisolated private func packPairs(_ pairs: MLXArray, groupSize: Int) -> MLXArra
 /// the quantization-friendly properties of the original weights.
 nonisolated open class RotateQuantizedLinear: QuantizedLinear {
 
-    // Rotation parameters — discovered by Module reflection for update(parameters:)
+    // Rotation parameters — discovered by Module reflection for update(parameters:).
+    // `channelScales` uses @ParameterInfo so it can keep the snake_case checkpoint
+    // key while having a Swift-idiomatic property name.
     let theta: MLXArray
     let pairs: MLXArray
-    let channel_scales: MLXArray  // swiftlint:disable:this identifier_name
+    @ParameterInfo(key: "channel_scales") var channelScales: MLXArray
 
     /// Pre-computed rotation data, lazily initialized on first forward pass.
     private struct CachedRotation {
@@ -166,7 +168,13 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
     ) {
         self.theta = MLXArray.zeros([krot, inputDims / 2])
         self.pairs = MLXArray.zeros([krot, inputDims], type: Int16.self)
-        self.channel_scales = MLXArray.ones([1, inputDims])
+        // Assign through `.wrappedValue` so the `@ParameterInfo(key:)` metadata
+        // survives init. Replacing the wrapper with `.init(wrappedValue:)` drops
+        // the `key: "channel_scales"` annotation — Module reflection then looks
+        // up the parameter by the Swift property name `channelScales`, which
+        // doesn't exist in the checkpoint, and `update(parameters:verify:)`
+        // fails with `keyNotFound`. Pattern matches `LoRA+Layers.swift`.
+        self._channelScales.wrappedValue = MLXArray.ones([1, inputDims])
 
         super.init(
             weight: MLXArray.zeros([outputDims, inputDims * bits / 32], type: UInt32.self),
@@ -184,7 +192,7 @@ nonisolated open class RotateQuantizedLinear: QuantizedLinear {
         let cosTheta = MLX.cos(theta)
         let sinTheta = MLX.sin(theta)
         let packed = packPairs(pairs, groupSize: groupSize)
-        let flat = channel_scales.reshaped(-1)
+        let flat = channelScales.reshaped(-1)
 
         // Force GPU materialization so rotation constants are resident
         // and not recomputed as part of each forward pass graph.
