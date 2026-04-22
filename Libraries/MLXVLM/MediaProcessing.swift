@@ -74,27 +74,327 @@ public enum MediaProcessing {
 
     /// Resample the image using Lanczos interpolation.
     static public func resampleLanczos(_ image: CIImage, to size: CGSize) -> CIImage {
-        // Create a bicubic scale filter
-
-        let yScale = size.height / image.extent.height
-        let xScale = size.width / image.extent.width
+        // clampedToExtent replicates edge pixels, matching PIL's clamp boundary mode.
+        let extent = image.extent
+        let yScale = size.height / extent.height
+        let xScale = size.width / extent.width
 
         let filter = CIFilter.lanczosScaleTransform()
-        filter.inputImage = image
+        filter.inputImage = image.clampedToExtent()
         filter.scale = Float(yScale)
         filter.aspectRatio = Float(xScale / yScale)
         let scaledImage = filter.outputImage!
 
-        // Create a rect with the exact dimensions we want
-        let exactRect = CGRect(
-            x: 0,
-            y: 0,
-            width: size.width,
-            height: size.height
-        )
+        return scaledImage.cropped(to: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+    }
 
-        // Crop to ensure exact dimensions
-        return scaledImage.cropped(to: exactRect)
+    /// PIL-matching Lanczos resampler, bit-identical to `PIL.Image.LANCZOS` (a=3,
+    /// separable, clamp boundary, int32 fixed-point with PRECISION_BITS=22).
+    ///
+    /// Apple's Lanczos family (Core Image / MPS / vImage) all share the same
+    /// underlying implementation that diverges from PIL on high-frequency
+    /// content — enough to shift VLM grounding bboxes by tens of pixels. This
+    /// function is a direct port of Pillow 10.4.0's `Resample.c` 8bpc fast path.
+    ///
+    /// Also bypasses Core Graphics' automatic ICC-profile conversion: macOS
+    /// screenshots are tagged Display P3, and ImageIO would otherwise convert
+    /// P3→sRGB on load, producing different uint8 bytes than `PIL.Image.open`
+    /// sees (which ignores the ICC tag). We retag without converting.
+    static public func resamplePILLanczos(_ image: CIImage, to size: CGSize) -> CIImage {
+        let tw = Int(size.width)
+        let th = Int(size.height)
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+
+        // Read raw uint8 bytes WITHOUT ICC conversion. If the source CIImage
+        // was built from a CGImage with a tagged colorspace (Display P3, etc.),
+        // we retag as sRGB so CoreGraphics treats the bytes as already-sRGB.
+        let iw: Int
+        let ih: Int
+        var src: [UInt8]
+        if let cg = image.cgImage, let provider = cg.dataProvider {
+            iw = cg.width
+            ih = cg.height
+            let retagged = CGImage(
+                width: iw, height: ih,
+                bitsPerComponent: cg.bitsPerComponent,
+                bitsPerPixel: cg.bitsPerPixel,
+                bytesPerRow: cg.bytesPerRow,
+                space: srgb, bitmapInfo: cg.bitmapInfo,
+                provider: provider, decode: nil,
+                shouldInterpolate: false, intent: .defaultIntent) ?? cg
+            src = [UInt8](repeating: 0, count: ih * iw * 4)
+            let cgctx = CGContext(
+                data: &src, width: iw, height: ih,
+                bitsPerComponent: 8, bytesPerRow: iw * 4,
+                space: srgb,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue)!
+            cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
+        } else {
+            iw = Int(image.extent.width)
+            ih = Int(image.extent.height)
+            src = [UInt8](repeating: 0, count: ih * iw * 4)
+            let cictx = CIContext(options: [.workingColorSpace: srgb])
+            cictx.render(image, toBitmap: &src, rowBytes: iw * 4,
+                         bounds: image.extent, format: CIFormat.RGBA8,
+                         colorSpace: srgb)
+        }
+
+        // --- Pillow 10.4.0 Resample.c port ---
+
+        let PRECISION_BITS: Int32 = 22
+        let ROUND_BIAS: Int32 = 1 << (PRECISION_BITS - 1)
+        let ONE = Double(Int32(1) << PRECISION_BITS)
+        let a = 3.0
+
+        @inline(__always) func sinc(_ x: Double) -> Double {
+            if x == 0 { return 1 }
+            let p = Double.pi * x
+            return Foundation.sin(p) / p
+        }
+        @inline(__always) func kernel(_ x: Double) -> Double {
+            if abs(x) >= a { return 0 }
+            return sinc(x) * sinc(x / a)
+        }
+        func precompute(_ inSize: Int, _ outSize: Int) -> ([Int], [Int], [[Int32]]) {
+            let scale = Double(inSize) / Double(outSize)
+            let fs = max(1.0, scale)
+            let support = a * fs
+            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
+            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
+            for i in 0 ..< outSize {
+                let c = (Double(i) + 0.5) * scale
+                let l = max(Int(floor(c - support + 0.5)), 0)
+                let r = min(Int(floor(c + support + 0.5)), inSize)
+                var w = [Double](repeating: 0, count: r - l)
+                var sum = 0.0
+                for k in 0 ..< (r - l) {
+                    let x = (Double(l + k) + 0.5 - c) / fs
+                    let v = kernel(x); w[k] = v; sum += v
+                }
+                if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
+                // Quantize to int32 with 22-bit precision. C's (int) truncates toward zero.
+                let q = w.map { weight -> Int32 in
+                    let s = weight * ONE
+                    let b = s < 0 ? -0.5 + s : 0.5 + s
+                    return Int32(b.rounded(.towardZero))
+                }
+                lo.append(l); hi.append(r); qq.append(q)
+            }
+            return (lo, hi, qq)
+        }
+
+        @inline(__always) func clip8(_ ss: Int32) -> UInt8 {
+            let s = ss >> PRECISION_BITS
+            if s < 0 { return 0 }
+            if s > 255 { return 255 }
+            return UInt8(s)
+        }
+
+        let (hlo, hhi, hw) = precompute(iw, tw)
+        let (vlo, vhi, vw) = precompute(ih, th)
+
+        // Horizontal pass: uint8 → uint8 at (ih, tw).
+        var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
+        for y in 0 ..< ih {
+            for x in 0 ..< tw {
+                let l = hlo[x], r = hhi[x], w = hw[x]
+                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                for k in 0 ..< (r - l) {
+                    let p = y * iw * 4 + (l + k) * 4
+                    let kw = w[k]
+                    s0 &+= Int32(src[p + 0]) &* kw
+                    s1 &+= Int32(src[p + 1]) &* kw
+                    s2 &+= Int32(src[p + 2]) &* kw
+                    s3 &+= Int32(src[p + 3]) &* kw
+                }
+                let o = (y * tw + x) * 4
+                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
+                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
+            }
+        }
+
+        // Vertical pass: uint8 → uint8 at (tw, th).
+        var dst = [UInt8](repeating: 0, count: th * tw * 4)
+        for y in 0 ..< th {
+            let l = vlo[y], r = vhi[y], w = vw[y]
+            for x in 0 ..< tw {
+                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                for k in 0 ..< (r - l) {
+                    let p = ((l + k) * tw + x) * 4
+                    let kw = w[k]
+                    s0 &+= Int32(horiz[p + 0]) &* kw
+                    s1 &+= Int32(horiz[p + 1]) &* kw
+                    s2 &+= Int32(horiz[p + 2]) &* kw
+                    s3 &+= Int32(horiz[p + 3]) &* kw
+                }
+                let o = (y * tw + x) * 4
+                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
+                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
+            }
+        }
+
+        return CIImage(bitmapData: Data(dst), bytesPerRow: tw * 4,
+                       size: CGSize(width: tw, height: th),
+                       format: .RGBA8, colorSpace: srgb)
+    }
+
+    /// PIL-matching Lanczos that returns raw uint8 RGBA bytes (no CIImage
+    /// round-trip). Internal helper used by both `resamplePILLanczos` (which
+    /// re-wraps as CIImage) and `resamplePILLanczosToArray` (which normalizes
+    /// directly to MLXArray). Splitting this out avoids a round-trip through
+    /// CIImage that would re-encode the bytes via the working colorspace.
+    internal static func _pilLanczosCore(
+        _ image: CIImage, to size: CGSize
+    ) -> (bytes: [UInt8], tw: Int, th: Int) {
+        let tw = Int(size.width), th = Int(size.height)
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+
+        let iw: Int, ih: Int
+        var src: [UInt8]
+        if let cg = image.cgImage, let provider = cg.dataProvider {
+            iw = cg.width
+            ih = cg.height
+            let retagged = CGImage(
+                width: iw, height: ih,
+                bitsPerComponent: cg.bitsPerComponent,
+                bitsPerPixel: cg.bitsPerPixel,
+                bytesPerRow: cg.bytesPerRow,
+                space: srgb, bitmapInfo: cg.bitmapInfo,
+                provider: provider, decode: nil,
+                shouldInterpolate: false, intent: .defaultIntent) ?? cg
+            src = [UInt8](repeating: 0, count: ih * iw * 4)
+            let cgctx = CGContext(
+                data: &src, width: iw, height: ih,
+                bitsPerComponent: 8, bytesPerRow: iw * 4,
+                space: srgb,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue)!
+            cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
+        } else {
+            iw = Int(image.extent.width)
+            ih = Int(image.extent.height)
+            src = [UInt8](repeating: 0, count: ih * iw * 4)
+            CIContext(options: [.workingColorSpace: srgb]).render(
+                image, toBitmap: &src, rowBytes: iw * 4,
+                bounds: image.extent, format: CIFormat.RGBA8, colorSpace: srgb)
+        }
+
+        // PIL Lanczos int32 fixed-point (Pillow 10.4.0 Resample.c port).
+        let PRECISION_BITS: Int32 = 22
+        let ROUND_BIAS: Int32 = 1 << (PRECISION_BITS - 1)
+        let ONE = Double(Int32(1) << PRECISION_BITS)
+        let a = 3.0
+        @inline(__always) func sinc(_ x: Double) -> Double {
+            if x == 0 { return 1 }
+            let p = Double.pi * x
+            return Foundation.sin(p) / p
+        }
+        @inline(__always) func kernel(_ x: Double) -> Double {
+            if abs(x) >= a { return 0 }
+            return sinc(x) * sinc(x / a)
+        }
+        func precompute(_ inSize: Int, _ outSize: Int) -> ([Int], [Int], [[Int32]]) {
+            let scale = Double(inSize) / Double(outSize)
+            let fs = max(1.0, scale)
+            let support = a * fs
+            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
+            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
+            for i in 0 ..< outSize {
+                let c = (Double(i) + 0.5) * scale
+                let l = max(Int(floor(c - support + 0.5)), 0)
+                let r = min(Int(floor(c + support + 0.5)), inSize)
+                var w = [Double](repeating: 0, count: r - l)
+                var sum = 0.0
+                for k in 0 ..< (r - l) {
+                    let x = (Double(l + k) + 0.5 - c) / fs
+                    let v = kernel(x); w[k] = v; sum += v
+                }
+                if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
+                let q = w.map { weight -> Int32 in
+                    let s = weight * ONE
+                    let b = s < 0 ? -0.5 + s : 0.5 + s
+                    return Int32(b.rounded(.towardZero))
+                }
+                lo.append(l); hi.append(r); qq.append(q)
+            }
+            return (lo, hi, qq)
+        }
+        @inline(__always) func clip8(_ ss: Int32) -> UInt8 {
+            let s = ss >> PRECISION_BITS
+            if s < 0 { return 0 }
+            if s > 255 { return 255 }
+            return UInt8(s)
+        }
+        let (hlo, hhi, hw) = precompute(iw, tw)
+        let (vlo, vhi, vw) = precompute(ih, th)
+
+        var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
+        for y in 0 ..< ih {
+            for x in 0 ..< tw {
+                let l = hlo[x], r = hhi[x], w = hw[x]
+                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                for k in 0 ..< (r - l) {
+                    let p = y * iw * 4 + (l + k) * 4
+                    let kw = w[k]
+                    s0 &+= Int32(src[p + 0]) &* kw
+                    s1 &+= Int32(src[p + 1]) &* kw
+                    s2 &+= Int32(src[p + 2]) &* kw
+                    s3 &+= Int32(src[p + 3]) &* kw
+                }
+                let o = (y * tw + x) * 4
+                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
+                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
+            }
+        }
+        var dst = [UInt8](repeating: 0, count: th * tw * 4)
+        for y in 0 ..< th {
+            let l = vlo[y], r = vhi[y], w = vw[y]
+            for x in 0 ..< tw {
+                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                for k in 0 ..< (r - l) {
+                    let p = ((l + k) * tw + x) * 4
+                    let kw = w[k]
+                    s0 &+= Int32(horiz[p + 0]) &* kw
+                    s1 &+= Int32(horiz[p + 1]) &* kw
+                    s2 &+= Int32(horiz[p + 2]) &* kw
+                    s3 &+= Int32(horiz[p + 3]) &* kw
+                }
+                let o = (y * tw + x) * 4
+                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
+                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
+            }
+        }
+        return (dst, tw, th)
+    }
+
+    /// Full PIL-matching preprocess: raw CGImage → PIL Lanczos → normalize →
+    /// `[1, 3, H, W]` float32 MLXArray. Zero CIImage round-trip.
+    static public func resamplePILLanczosToArray(
+        _ image: CIImage, to size: CGSize,
+        mean: (CGFloat, CGFloat, CGFloat),
+        std: (CGFloat, CGFloat, CGFloat)
+    ) -> MLXArray {
+        let (u8, tw, th) = _pilLanczosCore(image, to: size)
+        let rm = Float(mean.0), gm = Float(mean.1), bm = Float(mean.2)
+        let rs = Float(std.0),  gs = Float(std.1),  bs = Float(std.2)
+        let inv255: Float = 1.0 / 255.0
+        let n = tw * th
+        var planar = [Float](repeating: 0, count: 3 * n)
+        for y in 0 ..< th {
+            for x in 0 ..< tw {
+                let p = (y * tw + x) * 4
+                let i = y * tw + x
+                planar[i]         = (Float(u8[p + 0]) * inv255 - rm) / rs
+                planar[i + n]     = (Float(u8[p + 1]) * inv255 - gm) / gs
+                planar[i + 2 * n] = (Float(u8[p + 2]) * inv255 - bm) / bs
+            }
+        }
+        return MLXArray(planar, [1, 3, th, tw])
     }
 
     /// Resample the image using bicubic interpolation.
@@ -341,7 +641,7 @@ public enum MediaProcessing {
     static public func asProcessedSequence(
         _ video: UserInput.Video,
         samplesPerSecond: Int,
-        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
+        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
     ) async throws -> ProcessedFrames {
         return try await asProcessedSequence(
             video,

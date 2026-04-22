@@ -909,18 +909,14 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        // Qwen 2 / 2.5 VL chat template expects vision tokens before text.
+        // Emitting text first drifts the trained attention pattern.
         [
             "role": message.role.rawValue,
-            "content": [
-                ["type": "text", "text": message.content]
-            ]
-                // Messages format for Qwen 2 VL, Qwen 2.5 VL. May need to be adapted for other models.
-                + message.images.map { _ in
-                    ["type": "image"]
-                }
-                + message.videos.map { _ in
-                    ["type": "video"]
-                },
+            "content":
+                message.images.map { _ in ["type": "image"] as [String: String] }
+                + message.videos.map { _ in ["type": "video"] as [String: String] }
+                + [["type": "text", "text": message.content]],
         ]
     }
 }
