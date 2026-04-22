@@ -416,19 +416,9 @@ public class Gemma3TextModel: Module, LLMModel {
         return caches
     }
 
-    /// Handles prompt processing for sequences
     public func prepare(
         _ input: LMInput, cache: [KVCache], windowSize: Int? = nil
     ) throws -> PrepareResult {
-        let promptTokens = input.text.tokens
-        let promptCount = promptTokens.dim(0)
-
-        guard promptCount > 0 else {
-            print("Warning: Preparing with empty prompt tokens.")
-            let emptyToken = MLXArray(Int32(0))[0 ..< 0]
-            return .tokens(.init(tokens: emptyToken))
-        }
-
         return .tokens(input.text)
     }
 }

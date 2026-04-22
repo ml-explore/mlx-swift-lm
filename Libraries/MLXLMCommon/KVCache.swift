@@ -1368,6 +1368,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
+    case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
     default: return "KVCache"
@@ -1519,6 +1520,22 @@ private func restoreCacheFromMetaState(
     case "ArraysCache":
         let cache = ArraysCache(size: 0)
         cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return cache
+
+    case "TurboQuantKVCache":
+        guard metaState.count >= 5,
+            let bits = Int(metaState[1]),
+            let keyBits = Int(metaState[2]),
+            let valueBits = Int(metaState[3]),
+            let seed = UInt64(metaState[4])
+        else {
+            throw KVCacheError(
+                message: "Invalid TurboQuantKVCache metaState")
+        }
+        let cache = TurboQuantKVCache(
+            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
+        cache.state = state
+        cache.metaState = metaState
         return cache
 
     case "CacheList":
@@ -1776,14 +1793,73 @@ public func quantizedScaledDotProductAttention(
 ///   - kvBits: Number of bits for quantization (nil = no quantization)
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
+/// Resolve a kvScheme string to cache configuration.
+/// Returns nil for unrecognized schemes.
+public func resolveKVScheme(_ scheme: String?) -> (type: String, keyBits: Int, valueBits: Int)? {
+    switch scheme {
+    case "affine4": return ("affine", 4, 4)
+    case "affine8": return ("affine", 8, 8)
+    case "turbo2": return ("turbo", 2, 2)
+    case "turbo3": return ("turbo", 3, 3)
+    case "turbo4": return ("turbo", 4, 4)
+    case "turbo8": return ("turbo", 8, 8)
+    case "turbo4v2": return ("turbo", 4, 2)  // asymmetric: 4-bit K, 2-bit V
+    case "turbo4v3": return ("turbo", 4, 3)
+    case "turbo0v2": return ("turbo", 0, 2)  // raw K (FP16), 2-bit V
+    case "turbo0v4": return ("turbo", 0, 4)  // raw K (FP16), 4-bit V
+    default: return nil
+    }
+}
+
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    kvScheme: String? = nil
 ) {
-    guard let kvBits = kvBits,
-        !cache.isEmpty,
+    // TurboQuant schemes: compress KVCacheSimple layers, skip MambaCache/CacheList
+    if let scheme = kvScheme, let resolved = resolveKVScheme(scheme), resolved.type == "turbo" {
+        guard !cache.isEmpty else { return }
+        // Check if any KVCacheSimple layer is ready for compression
+        let hasCompressible = cache.contains { $0 is KVCacheSimple && $0.offset > quantizedKVStart }
+        guard hasCompressible else { return }
+
+        for i in 0 ..< cache.count {
+            if cache[i] is KVCacheSimple, cache[i].offset > quantizedKVStart {
+                let turbo = TurboQuantKVCache(
+                    bits: resolved.keyBits,
+                    keyBits: resolved.keyBits,
+                    valueBits: resolved.valueBits
+                )
+                // Transfer existing KV data, trimmed to actual offset
+                let actualOffset = cache[i].offset
+                let state = cache[i].innerState()
+                if state.count >= 2, actualOffset > 0 {
+                    let keys = state[0][.ellipsis, ..<actualOffset, 0...]
+                    let values = state[1][.ellipsis, ..<actualOffset, 0...]
+                    let _ = turbo.update(keys: keys, values: values)
+                }
+                cache[i] = turbo
+            }
+        }
+        return
+    }
+
+    // Affine quantization (existing behavior)
+    let effectiveBits: Int
+    let effectiveGroupSize: Int
+    if let scheme = kvScheme, let resolved = resolveKVScheme(scheme) {
+        effectiveBits = resolved.keyBits
+        effectiveGroupSize = kvGroupSize
+    } else if let kvBits {
+        effectiveBits = kvBits
+        effectiveGroupSize = kvGroupSize
+    } else {
+        return
+    }
+
+    guard !cache.isEmpty,
         !(cache[0] is QuantizedKVCache),
         cache[0].offset > quantizedKVStart
     else {
@@ -1791,12 +1867,8 @@ public func maybeQuantizeKVCache(
     }
 
     for i in 0 ..< cache.count {
-        // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            cache[i] = simpleCache.toQuantized(groupSize: effectiveGroupSize, bits: effectiveBits)
         }
-        // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-        // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
-        // MambaCache and CacheList don't use traditional KV quantization
     }
 }
