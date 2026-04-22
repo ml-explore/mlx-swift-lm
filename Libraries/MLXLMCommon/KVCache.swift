@@ -1368,6 +1368,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
+    case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
     default: return "KVCache"
@@ -1519,6 +1520,22 @@ private func restoreCacheFromMetaState(
     case "ArraysCache":
         let cache = ArraysCache(size: 0)
         cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return cache
+
+    case "TurboQuantKVCache":
+        guard metaState.count >= 5,
+            let bits = Int(metaState[1]),
+            let keyBits = Int(metaState[2]),
+            let valueBits = Int(metaState[3]),
+            let seed = UInt64(metaState[4])
+        else {
+            throw KVCacheError(
+                message: "Invalid TurboQuantKVCache metaState")
+        }
+        let cache = TurboQuantKVCache(
+            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
+        cache.state = state
+        cache.metaState = metaState
         return cache
 
     case "CacheList":

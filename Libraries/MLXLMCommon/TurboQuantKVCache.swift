@@ -1154,6 +1154,18 @@ public class TurboQuantKVCache: BaseKVCache {
         }
     }
 
+    override public var metaState: [String] {
+        get {
+            ["\(offset)", "\(bits)", "\(keyBits)", "\(valueBits)", "\(seed)"]
+        }
+        set {
+            guard newValue.count >= 5,
+                let o = Int(newValue[0])
+            else { return }
+            offset = o
+        }
+    }
+
     @discardableResult
     override public func trim(_ n: Int) -> Int {
         guard n > 0, offset > 0 else { return 0 }

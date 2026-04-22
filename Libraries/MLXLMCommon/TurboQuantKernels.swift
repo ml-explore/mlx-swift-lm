@@ -19,7 +19,7 @@ enum TurboQuantMetalKernels {
         float sq = val * val;
         float norm_sq = simd_sum(sq);
         // For Dim > 32, need threadgroup reduction
-        threadgroup float shared_norm[4];  // up to 4 SIMD groups
+        threadgroup float shared_norm[(Dim + 31) / 32];
         uint sg_id = d / 32;
         if (d % 32 == 0) {
             shared_norm[sg_id] = norm_sq;
@@ -1041,7 +1041,10 @@ public enum TurboQuantKernelOps {
         let totalQ = rotatedQueries.dim(0)
         let nr0 = flashNR0
 
+        // NR0 multi-row: only safe when L is divisible by NR0, otherwise
+        // grouped queries can span KV head boundaries within a group.
         let useNR0 = nr0 > 1 && totalQ % nr0 == 0 && totalQ >= nr0
+            && queryChunkLength % nr0 == 0
 
         let oPartials: MLXArray
         let mPartials: MLXArray
