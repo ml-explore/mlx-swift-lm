@@ -394,18 +394,19 @@ public func loadParoQuantModel(
     var config = ModelConfiguration(directory: directory, toolCallFormat: toolCallFormat)
     config.eosTokenIds = eosTokenIds
 
-    // 5. Load raw safetensors
+    // 5. Load raw safetensors (top-level only; do not recurse into
+    //    subdirectories, otherwise nested artefacts like an HF snapshot
+    //    cache under the checkpoint dir would be pulled in).
     var weights = [String: MLXArray]()
-    let enumerator = FileManager.default.enumerator(
-        at: directory, includingPropertiesForKeys: nil)!
-    while let url = enumerator.nextObject() as? URL {
-        if url.pathExtension == "safetensors",
-            url.lastPathComponent != "prerotated_cache.safetensors"
-        {
-            let w = try loadArrays(url: url)
-            for (key, value) in w {
-                weights[key] = value
-            }
+    let contents = try FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    for url in contents
+    where url.pathExtension == "safetensors"
+        && url.lastPathComponent != "prerotated_cache.safetensors"
+    {
+        let w = try loadArrays(url: url)
+        for (key, value) in w {
+            weights[key] = value
         }
     }
 
