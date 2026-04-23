@@ -73,7 +73,7 @@ public enum LLMTypeRegistry {
         "nanochat": create(NanoChatConfiguration.self, NanoChatModel.init),
         "nemotron_h": create(NemotronHConfiguration.self, NemotronHModel.init),
         "afmoe": create(AfMoEConfiguration.self, AfMoEModel.init),
-        "jamba_3b": create(JambaConfiguration.self, JambaModel.init),
+        "jamba": create(JambaConfiguration.self, JambaModel.init),
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
     ])
@@ -237,6 +237,16 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Why is the sky blue?"
     )
 
+    static public let qwen3_5_2b_4bit = ModelConfiguration(
+        id: "mlx-community/Qwen3.5-2B-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
+    static public let qwen3_6_27b_4bit = ModelConfiguration(
+        id: "mlx-community/Qwen3.6-27B-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
     static public let openelm270m4bit = ModelConfiguration(
         id: "mlx-community/OpenELM-270M-Instruct",
         // https://huggingface.co/apple/OpenELM
@@ -361,8 +371,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Why is the sky blue?"
     )
 
-    static public let jamba_3b = ModelConfiguration(
-        id: "mlx-community/AI21-Jamba-Reasoning-3B-bf16",
+    static public let jamba_3b_4bit = ModelConfiguration(
+        id: "mlx-community/AI21-Jamba-Reasoning-3B-4bit",
         defaultPrompt: ""
     )
 
@@ -400,6 +410,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_4b_4bit,
             qwen3_8b_4bit,
             qwen3MoE_30b_a3b_4bit,
+            qwen3_5_2b_4bit,
+            qwen3_6_27b_4bit,
             smolLM_135M_4bit,
             deepseek_r1_4bit,
             mimo_7b_sft_4bit,
@@ -418,7 +430,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             lfm2_8b_a1b_3bit_mlx,
             nanochat_d20_mlx,
             gpt_oss_20b_MXFP4_Q8,
-            jamba_3b,
+            jamba_3b_4bit,
         ]
     }
 

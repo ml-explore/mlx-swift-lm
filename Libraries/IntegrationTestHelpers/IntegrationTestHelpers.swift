@@ -54,6 +54,7 @@ public actor IntegrationTestModels {
     private var mistral3Task: Task<LLModelContainer, Error>?
     private var nemotronTask: Task<LLModelContainer, Error>?
     private var qwen35Task: Task<LLModelContainer, Error>?
+    private var llmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
 
     public init(downloader: any Downloader, tokenizerLoader: any TokenizerLoader) {
         self.downloader = downloader
@@ -204,6 +205,31 @@ public actor IntegrationTestModels {
             return container
         }
         qwen35Task = task
+        return try await task.value
+    }
+
+    /// Load an arbitrary LLM container, cached by `configuration.name` so the same
+    /// model is only loaded once per test run.
+    public func llmContainer(for configuration: ModelConfiguration) async throws
+        -> LLModelContainer
+    {
+        let key = configuration.name
+        if let task = llmTasksByName[key] {
+            return try await task.value
+        }
+        let downloader = self.downloader
+        let tokenizerLoader = self.tokenizerLoader
+        let task = Task {
+            print("Loading LLM: \(key)")
+            let container = try await LLMModelFactory.shared.loadContainer(
+                from: downloader, using: tokenizerLoader,
+                configuration: configuration,
+                progressHandler: logProgress(key)
+            )
+            print("Loaded LLM: \(key)")
+            return container
+        }
+        llmTasksByName[key] = task
         return try await task.value
     }
 
@@ -367,6 +393,26 @@ public enum ChatSessionTests {
         try check(
             result.lowercased().contains("wed") || result.lowercased().contains("wednesday"),
             "Expected 'Wed' or 'Wednesday' in response, got: \(result)"
+        )
+    }
+
+    public static func planetsCoherence(container: LLModelContainer) async throws {
+        let session = ChatSession(
+            container,
+            generateParameters: GenerateParameters(maxTokens: 3000, temperature: 0))
+        let result = try await streamAndCollect(
+            session.streamResponse(
+                to: "List all the planets in our solar system in order from the Sun."),
+            label: "Response")
+
+        let expected = [
+            "Mercury", "Venus", "Earth", "Mars",
+            "Jupiter", "Saturn", "Uranus", "Neptune",
+        ]
+        let missing = expected.filter { !result.contains($0) }
+        try check(
+            missing.isEmpty,
+            "Expected all planets in response, missing: \(missing). Got: \(result)"
         )
     }
 
