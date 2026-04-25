@@ -685,33 +685,31 @@ public struct Qwen25VLProcessor: UserInputProcessor {
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        // First apply the user requested resizing, etc. if any
-        let images = images.map { MediaProcessing.apply($0, processing: processing) }
-
-        // image_processing_qwen2_vl._preprocess
-        let size = images[0].extent.size
-        let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
-            height: Int(size.height), width: Int(size.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
+        // Cap longest side at 1280 and snap to multiples of (patchSize *
+        // mergeSize), matching mlx-vlm's default min_pixels / max_pixels.
+        // Upstream's QwenVL.targetSize uses config.size.maxPixels which on
+        // Qwen2.5-VL defaults to 12,845,056 (a 3584x3584 cap) -- much larger
+        // than Python mlx-vlm's effective default, producing different patch
+        // grids and bbox outputs.
+        let orig = images[0].extent.size
+        let factor = config.patchSize * config.mergeSize
+        let maxLong: CGFloat = 1280.0
+        let ratio = min(maxLong / max(orig.width, orig.height), 1.0)
+        let resizedWidth = max(Int(orig.width * ratio) / factor * factor, factor)
+        let resizedHeight = max(Int(orig.height * ratio) / factor * factor, factor)
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
-        // Process images
-        let processedImages =
-            images
-            .map {
-                MediaProcessing.inSRGBToneCurveSpace($0)
-            }
-            .map {
-                return MediaProcessing.resampleBicubic($0, to: resizedSize)
-            }
-            .map {
-                MediaProcessing.normalize(
-                    $0, mean: config.imageMeanTuple, std: config.imageStdTuple)
-            }
-            .map {
-                MediaProcessing.asMLXArray($0)
-            }
+        // PIL-matching preprocess: raw PNG bytes (no ICC conv) -> PIL Lanczos ->
+        // normalize -> [1, 3, H, W] MLXArray. Bypasses the CIImage downstream
+        // chain entirely, which otherwise introduces gamma-encoding drift +
+        // Lanczos kernel differences vs PIL that shift VLM bbox coordinates
+        // away from the Python reference (verified bit-exact on a 3.28 MB
+        // image via direct byte-diff vs PIL.Image.resize(LANCZOS)).
+        let processedImages = images.map {
+            MediaProcessing.resamplePILLanczosToArray(
+                $0, to: resizedSize,
+                mean: config.imageMeanTuple, std: config.imageStdTuple)
+        }
 
         return try QwenVL.patchify(
             images: processedImages, mergeSize: config.mergeSize, patchSize: config.patchSize,
