@@ -970,6 +970,18 @@ private final class Gemma4TextBackbone: Module {
         cache: [KVCache?]? = nil,
         perLayerInputs: MLXArray? = nil
     ) -> MLXArray {
+        // Tolerate callers that hand us a 1D `(L,)` token array instead
+        // of the canonical 2D `(B, L)` produced by `Gemma4Processor.prepare`.
+        // The downstream `perLayerInputs` indexing path (`finalPerLayerInputs[
+        // 0..., 0..., idx, 0...]`) requires 4D shapes; with 1D inputs the
+        // model otherwise crashes inside `MLXArray.subscript.getter`
+        // → `mlx_array_dim` → `_mlx_error`. This expansion is zero-copy
+        // and behaves identically when the caller already passed 2D.
+        let inputs = inputs.map { $0.ndim == 1 ? $0.expandedDimensions(axis: 0) : $0 }
+        let inputsEmbeds = inputsEmbeds.map {
+            $0.ndim == 2 ? $0.expandedDimensions(axis: 0) : $0
+        }
+
         let h0: MLXArray
         if let inputsEmbeds {
             h0 = inputsEmbeds
