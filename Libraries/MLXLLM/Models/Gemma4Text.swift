@@ -160,7 +160,14 @@ private class RMSNormNoScale: Module {
     }
 }
 
-private class ScaledLinear: Module {
+/// `Linear`-equivalent that scales the matmul output by a fixed scalar.
+///
+/// Conforms to `Quantizable` so `nn.quantize(model:)` can swap it for a
+/// `QuantizedScaledLinear` at load time. Without this, a quantized Gemma 4
+/// `per_layer_model_projection` checkpoint (where the weight is stored in
+/// packed `[N, K/8]` uint32 form) would fail the load with a shape mismatch
+/// against the dequantized `[N, K]` shape declared here.
+private class ScaledLinear: Module, Quantizable {
     let weight: MLXArray
     let scalar: Float
 
@@ -170,8 +177,50 @@ private class ScaledLinear: Module {
         super.init()
     }
 
+    /// Subclass entry point — used by `QuantizedScaledLinear`.
+    fileprivate init(weight: MLXArray, scalar: Float) {
+        self.weight = weight
+        self.scalar = scalar
+        super.init()
+    }
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         matmul(x, weight.T) * scalar
+    }
+
+    func toQuantized(groupSize: Int, bits: Int, mode: QuantizationMode) -> Module {
+        QuantizedScaledLinear(self, groupSize: groupSize, bits: bits, mode: mode)
+    }
+}
+
+/// Quantized counterpart of `ScaledLinear`. Same `output * scalar` shape,
+/// but the matmul runs against a quantized weight via `quantizedMM`.
+private class QuantizedScaledLinear: ScaledLinear, Quantized {
+    let groupSize: Int
+    let bits: Int
+    let mode: QuantizationMode
+    let scales: MLXArray
+    let biases: MLXArray?
+
+    init(_ other: ScaledLinear, groupSize: Int, bits: Int, mode: QuantizationMode) {
+        self.groupSize = groupSize
+        self.bits = bits
+        self.mode = mode
+        let (qw, scales, biases) = MLX.quantized(
+            other.weight, groupSize: groupSize, bits: bits, mode: mode)
+        self.scales = scales
+        self.biases = biases
+        super.init(weight: qw, scalar: other.scalar)
+        freeze()
+    }
+
+    override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let y = MLX.quantizedMM(
+            x, weight,
+            scales: scales, biases: biases,
+            transpose: true,
+            groupSize: groupSize, bits: bits, mode: mode)
+        return y * scalar
     }
 }
 
