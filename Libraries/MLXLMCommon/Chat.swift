@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+import Foundation
+
 public enum Chat {
     public struct Message {
         /// The role of the message sender.
@@ -14,14 +16,24 @@ public enum Chat {
         /// Array of video data associated with the message.
         public var videos: [UserInput.Video]
 
+        /// For `.tool` messages: the id of the tool call this message answers.
+        public var toolCallId: String?
+
+        /// For `.assistant` messages: the tool calls this turn emitted.
+        public var toolCalls: [ToolCall]?
+
         public init(
             role: Role, content: String, images: [UserInput.Image] = [],
-            videos: [UserInput.Video] = []
+            videos: [UserInput.Video] = [],
+            toolCallId: String? = nil,
+            toolCalls: [ToolCall]? = nil
         ) {
             self.role = role
             self.content = content
             self.images = images
             self.videos = videos
+            self.toolCallId = toolCallId
+            self.toolCalls = toolCalls
         }
 
         public static func system(
@@ -31,9 +43,12 @@ public enum Chat {
         }
 
         public static func assistant(
-            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
+            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = [],
+            toolCalls: [ToolCall]? = nil
         ) -> Self {
-            Self(role: .assistant, content: content, images: images, videos: videos)
+            Self(
+                role: .assistant, content: content, images: images, videos: videos,
+                toolCalls: toolCalls)
         }
 
         public static func user(
@@ -42,8 +57,8 @@ public enum Chat {
             Self(role: .user, content: content, images: images, videos: videos)
         }
 
-        public static func tool(_ content: String) -> Self {
-            Self(role: .tool, content: content)
+        public static func tool(_ content: String, id: String? = nil) -> Self {
+            Self(role: .tool, content: content, toolCallId: id)
         }
 
         public enum Role: String, Sendable {
@@ -81,10 +96,27 @@ public protocol MessageGenerator: Sendable {
 extension MessageGenerator {
 
     public func generate(message: Chat.Message) -> Message {
-        [
+        var dict: Message = [
             "role": message.role.rawValue,
             "content": message.content,
         ]
+        if let id = message.toolCallId {
+            dict["tool_call_id"] = id
+        }
+        if let calls = message.toolCalls {
+            dict["tool_calls"] = calls.map { call -> [String: any Sendable] in
+                var entry: [String: any Sendable] = [
+                    "type": "function",
+                    "function": [
+                        "name": call.function.name,
+                        "arguments": call.function.arguments.mapValues { $0.sendableValue },
+                    ] as [String: any Sendable],
+                ]
+                if let id = call.id { entry["id"] = id }
+                return entry
+            }
+        }
+        return dict
     }
 
     public func generate(messages: [Chat.Message]) -> [Message] {
@@ -111,7 +143,7 @@ extension MessageGenerator {
 }
 
 /// Default implementation of ``MessageGenerator`` that produces a
-/// `role` and `content`.
+/// `role`, `content`, `tool_call_id`, and `tool_calls` using default implementation.
 ///
 /// ```swift
 /// [
@@ -121,13 +153,6 @@ extension MessageGenerator {
 /// ```
 public struct DefaultMessageGenerator: MessageGenerator {
     public init() {}
-
-    public func generate(message: Chat.Message) -> Message {
-        [
-            "role": message.role.rawValue,
-            "content": message.content,
-        ]
-    }
 }
 
 /// Implementation of ``MessageGenerator`` that produces a
