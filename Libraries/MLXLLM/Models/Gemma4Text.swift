@@ -300,16 +300,22 @@ private class Gemma4Attention: Module {
             values = sharedV
         } else {
             var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
-            k = kNorm(k)
-            k = k.transposed(0, 2, 1, 3)
-            k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
 
+            // K-eq-V (attention_k_eq_v=true): values come from the raw k_proj
+            // output, BEFORE k_norm and the (B, H, L, D) transpose / RoPE.
+            // v_norm is then applied to that raw k_proj output, matching the
+            // Python reference (mlx_lm/models/gemma4_text.py).
             var v: MLXArray
             if let vProj {
                 v = vProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             } else {
                 v = k
             }
+
+            k = kNorm(k)
+            k = k.transposed(0, 2, 1, 3)
+            k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
+
             v = vNorm(v)
             v = v.transposed(0, 2, 1, 3)
 
