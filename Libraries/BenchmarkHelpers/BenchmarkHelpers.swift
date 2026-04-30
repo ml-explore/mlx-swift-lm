@@ -462,3 +462,144 @@ public func benchmarkDownloadCacheHit(
 
     return BenchmarkStats(times: times)
 }
+
+// MARK: - LLM Generation Benchmarks
+
+/// Combined prefill and decode timing for an LLM generation run.
+public struct LLMGenerationStats: Sendable {
+    public let promptTokenCount: Int
+    public let generationTokenCount: Int
+    /// Prefill latency per run, in milliseconds.
+    public let promptTimeStats: BenchmarkStats
+    /// Decode latency per run, in milliseconds (covers all generated tokens).
+    public let generateTimeStats: BenchmarkStats
+
+    public init(
+        promptTokenCount: Int,
+        generationTokenCount: Int,
+        promptTimeStats: BenchmarkStats,
+        generateTimeStats: BenchmarkStats
+    ) {
+        self.promptTokenCount = promptTokenCount
+        self.generationTokenCount = generationTokenCount
+        self.promptTimeStats = promptTimeStats
+        self.generateTimeStats = generateTimeStats
+    }
+
+    /// Median prefill throughput in tokens per second.
+    public var prefillTokensPerSecond: Double {
+        Double(promptTokenCount) / (promptTimeStats.median / 1000.0)
+    }
+
+    /// Median decode throughput in tokens per second.
+    public var decodeTokensPerSecond: Double {
+        Double(generationTokenCount) / (generateTimeStats.median / 1000.0)
+    }
+
+    public func printSummary(label: String) {
+        print("\(label) results:")
+        print(
+            "  Prefill: \(promptTokenCount) tokens, "
+                + "\(String(format: "%.2f", prefillTokensPerSecond)) tok/s "
+                + "(median \(String(format: "%.1f", promptTimeStats.median))ms, "
+                + "stddev \(String(format: "%.1f", promptTimeStats.stdDev))ms)"
+        )
+        print(
+            "  Decode:  \(generationTokenCount) tokens, "
+                + "\(String(format: "%.2f", decodeTokensPerSecond)) tok/s "
+                + "(median \(String(format: "%.1f", generateTimeStats.median))ms, "
+                + "stddev \(String(format: "%.1f", generateTimeStats.stdDev))ms)"
+        )
+    }
+}
+
+public enum LLMGenerationBenchmarkError: LocalizedError {
+    case missingCompletionInfo
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingCompletionInfo:
+            return
+                "LLM generation stream completed without emitting GenerateCompletionInfo."
+        }
+    }
+}
+
+/// Benchmark prefill and decode performance for an LLM. Performs a warm-up run
+/// (loading + first generation) to reach steady-state, then measures `runs` timed
+/// trials and reports prefill/decode throughput.
+///
+/// Uses ``BenchmarkDefaults/textSource`` for the prompt by default; pass an
+/// explicit `prompt` to override. `temperature` defaults to 0 so trials are
+/// deterministic and tps comparisons are reproducible across runs.
+public func benchmarkLLMGeneration(
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    modelId: String = "mlx-community/Qwen3-0.6B-4bit",
+    prompt: String? = nil,
+    promptCharacterCount: Int = 4_000,
+    maxTokens: Int = 64,
+    runs: Int = BenchmarkDefaults.loadingRuns
+) async throws -> LLMGenerationStats {
+    let configuration = MLXLMCommon.ModelConfiguration(id: modelId)
+    let container = try await LLMModelFactory.shared.loadContainer(
+        from: downloader, using: tokenizerLoader, configuration: configuration
+    ) { _ in }
+
+    let benchmarkPrompt: String
+    if let prompt = prompt {
+        benchmarkPrompt = prompt
+    } else {
+        benchmarkPrompt = try await loadBenchmarkText(characterCount: promptCharacterCount)
+    }
+
+    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+    // Warm-up: prime caches and weights. UserInput is `sending`, so build a
+    // fresh instance for each call.
+    do {
+        let warmInput = try await container.prepare(input: UserInput(prompt: benchmarkPrompt))
+        let warmStream = try await container.generate(
+            input: warmInput, parameters: parameters)
+        for await _ in warmStream {}
+    }
+
+    var promptTimes: [Double] = []
+    var generateTimes: [Double] = []
+    var promptTokenCount = 0
+    var generationTokenCount = 0
+
+    for i in 1 ... runs {
+        let input = try await container.prepare(input: UserInput(prompt: benchmarkPrompt))
+        let stream = try await container.generate(input: input, parameters: parameters)
+        var info: GenerateCompletionInfo?
+        for await item in stream {
+            if case .info(let i) = item { info = i }
+        }
+        guard let completion = info else {
+            throw LLMGenerationBenchmarkError.missingCompletionInfo
+        }
+        promptTokenCount = completion.promptTokenCount
+        generationTokenCount = completion.generationTokenCount
+        let promptMs = completion.promptTime * 1000
+        let generateMs = completion.generateTime * 1000
+        promptTimes.append(promptMs)
+        generateTimes.append(generateMs)
+        print(
+            "Generation run \(i): "
+                + "prefill \(completion.promptTokenCount) tok / "
+                + "\(String(format: "%.1f", promptMs))ms "
+                + "(\(String(format: "%.2f", completion.promptTokensPerSecond)) tok/s), "
+                + "decode \(completion.generationTokenCount) tok / "
+                + "\(String(format: "%.1f", generateMs))ms "
+                + "(\(String(format: "%.2f", completion.tokensPerSecond)) tok/s)"
+        )
+    }
+
+    return LLMGenerationStats(
+        promptTokenCount: promptTokenCount,
+        generationTokenCount: generationTokenCount,
+        promptTimeStats: BenchmarkStats(times: promptTimes),
+        generateTimeStats: BenchmarkStats(times: generateTimes)
+    )
+}
