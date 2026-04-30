@@ -334,19 +334,24 @@ struct TokenRing {
 
     /// Bulk-load from a prompt. Keeps the last `capacity` tokens.
     mutating func loadPrompt(_ prompt: MLXArray) {
-        let n = prompt.dim(0)
-        let promptTokens = prompt.asType(.int32)
+        // Flatten first so 2D `(B, L)` prompts are treated as length `L` rather
+        // than `B`. Without this, 2D prompts (which is the standard shape from
+        // `*Processor.prepare`) underflow capacity, leaving `buffer` shaped
+        // `(L,)` instead of `(capacity,)` and breaking `append()`'s
+        // mask broadcast.
+        let promptTokens = prompt.asType(.int32).reshaped(-1)
+        let n = promptTokens.dim(0)
         if n <= capacity {
             if n < capacity {
                 let padding = MLXArray.zeros([capacity - n], type: Int32.self)
-                buffer = concatenated([promptTokens.reshaped(-1), padding])
+                buffer = concatenated([promptTokens, padding])
             } else {
-                buffer = promptTokens.reshaped(-1)
+                buffer = promptTokens
             }
             count = n
             writeIndex = n % capacity
         } else {
-            buffer = promptTokens[(-capacity)...].reshaped(-1)
+            buffer = promptTokens[(-capacity)...]
             count = capacity
             writeIndex = 0
         }
