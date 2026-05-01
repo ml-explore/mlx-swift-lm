@@ -404,6 +404,7 @@ public struct Gemma4Configuration: Codable, Sendable {
     public let eoiTokenId: Int?
     public let visionSoftTokensPerImage: Int
     public let visionSoftTokensPerVideoFrame: Int
+    public let videoFrameChunkSize: Int
     public let tieWordEmbeddings: Bool
 
     private let _vocabularySize: Int?
@@ -426,6 +427,7 @@ public struct Gemma4Configuration: Codable, Sendable {
         case eoiTokenId = "eoi_token_id"
         case visionSoftTokensPerImage = "vision_soft_tokens_per_image"
         case visionSoftTokensPerVideoFrame = "vision_soft_tokens_per_video_frame"
+        case videoFrameChunkSize = "video_frame_chunk_size"
         case tieWordEmbeddings = "tie_word_embeddings"
         case _vocabularySize = "vocab_size"
         case _hiddenSize = "hidden_size"
@@ -456,6 +458,12 @@ public struct Gemma4Configuration: Codable, Sendable {
         visionSoftTokensPerVideoFrame =
             try c.decodeIfPresent(Int.self, forKey: CodingKeys.visionSoftTokensPerVideoFrame)
             ?? 64
+        // Default 4 caps the vision tower batch size when running video so
+        // peak Metal memory stays manageable on iPhone-class devices. Set
+        // higher (or to the full frame count) on M-series Macs for slightly
+        // faster prefill.
+        videoFrameChunkSize =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoFrameChunkSize) ?? 4
         tieWordEmbeddings =
             try c.decodeIfPresent(Bool.self, forKey: CodingKeys.tieWordEmbeddings)
             ?? textConfiguration.tieWordEmbeddings
@@ -1752,10 +1760,35 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                 throw Gemma4Error.missingVideoTokenId
             }
 
-            var videoFeatures = visionTower(
-                pixelValuesVideos, outputLength: config.visionSoftTokensPerVideoFrame)
-            videoFeatures = embedVision(videoFeatures)
-            videoFeatures = videoFeatures.asType(inputsEmbeds.dtype)
+            // Run the vision tower in small chunks instead of one big batch.
+            // The tower allocates an attention mask of shape
+            // (batch, 1, maxPatches, maxPatches); for maxPatches=2520 the mask
+            // alone is ~13 MB per frame, so a 32-frame batch peaks at ~400 MB
+            // before any layer activations — enough to OOM an iPhone running
+            // gemma4-E2B alongside the language model. Chunking caps peak
+            // memory regardless of how many frames the user supplies.
+            let totalFrames = pixelValuesVideos.dim(0)
+            let chunkSize = max(1, config.videoFrameChunkSize)
+            var chunkFeatures: [MLXArray] = []
+            chunkFeatures.reserveCapacity((totalFrames + chunkSize - 1) / chunkSize)
+            var idx = 0
+            while idx < totalFrames {
+                let end = min(idx + chunkSize, totalFrames)
+                let chunk = pixelValuesVideos[idx ..< end]
+                var feats = visionTower(
+                    chunk, outputLength: config.visionSoftTokensPerVideoFrame)
+                feats = embedVision(feats)
+                feats = feats.asType(inputsEmbeds.dtype)
+                // Force evaluation so intermediates (in particular the per-chunk
+                // attention mask) can be released before the next chunk.
+                eval(feats)
+                chunkFeatures.append(feats)
+                idx = end
+            }
+            let videoFeatures =
+                chunkFeatures.count == 1
+                ? chunkFeatures[0]
+                : concatenated(chunkFeatures, axis: 0)
 
             let videoMask = inputIds .== videoTokenId
             let expectedVideoTokens = videoMask.asType(.int32).sum().item(Int.self)
@@ -1899,15 +1932,19 @@ public struct Gemma4Processor: UserInputProcessor {
     }
 
     private func processVideoFrame(_ frame: CIImage, processing: UserInput.Processing?) -> CIImage {
+        // Mirror the SmolVLM2 video frame chain (toSRGB → resampled → normalized)
+        // rather than going through `MediaProcessing.apply`. `apply` performs a
+        // best-fit `transformed(by:)` scale that leaves `extent` non-(0,0,W,H);
+        // the resulting CIImage round-trips fine in most paths but breaks the
+        // bitmap rendering inside `asMLXArray` on iOS with
+        // "verify_image_parameters: invalid image bits/pixel or bytes/row".
         let targetSize = config.videoFrameFixedSize
-        var userProcessing = processing ?? UserInput.Processing()
-        userProcessing.resize = targetSize
-        var working = MediaProcessing.apply(frame, processing: userProcessing)
-        working = MediaProcessing.inSRGBToneCurveSpace(working)
-        working = MediaProcessing.resampleBicubic(working, to: targetSize)
+        var working = frame
+            .toSRGB()
+            .resampled(to: targetSize, method: .bicubic)
         if config.doNormalize {
-            working = MediaProcessing.normalize(
-                working, mean: config.imageMeanTuple, std: config.imageStdTuple)
+            working = working.normalized(
+                mean: config.imageMeanTuple, std: config.imageStdTuple)
         }
         return working
     }
@@ -2084,7 +2121,11 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         videoSeqLength = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoSeqLength) ?? 64
         videoFrameSize = try c.decodeIfPresent(
             Gemma3ProcessorConfiguration.ImageSize.self, forKey: CodingKeys.videoFrameSize)
-        videoMaxFrames = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoMaxFrames) ?? 32
+        // 16 frames at 384x384 is the iOS-safe default. Each frame's vision
+        // tower forward pass allocates an attention mask of shape
+        // (batch, 1, 2520, 2520) plus per-layer activations; 32 frames in a
+        // single batch reliably OOMs an iPhone running gemma4-E2B + KV cache.
+        videoMaxFrames = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoMaxFrames) ?? 16
         videoFps = try c.decodeIfPresent(Float.self, forKey: CodingKeys.videoFps) ?? 2.0
         boiTokenString =
             try c.decodeIfPresent(String.self, forKey: CodingKeys.boiTokenString)
