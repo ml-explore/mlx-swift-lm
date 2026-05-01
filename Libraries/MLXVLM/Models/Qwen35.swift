@@ -1095,6 +1095,11 @@ public class Qwen35: Module, VLMModel {
                         of: "model.language_model", with: "language_model.model")
                 } else if key.contains("model.visual") {
                     key = key.replacingOccurrences(of: "model.visual", with: "vision_tower")
+                } else if key.hasPrefix("model.") {
+                    // Unified Qwen 3.5 checkpoints (e.g. Qwen3.5-0.8B-MLX-4bit) ship
+                    // language model tensors at bare `model.*` paths instead of
+                    // `model.language_model.*`. Mirror the LLM-side fallback.
+                    key = "language_model." + key
                 }
             } else if key.contains("lm_head") {
                 key = key.replacingOccurrences(of: "lm_head", with: "language_model.lm_head")
