@@ -234,16 +234,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         verifyInts.append(contentsOf: candidates.map { Int32($0) })
         let verifyArr = MLXArray(verifyInts).reshaped([1, effectiveBlock])
 
-        // Run the verify forward on a dedicated stream — mirrors mlx-vlm's
-        // `with mx.stream(generation_stream):` around `lm(verify_input, ...)`.
-        // Without this, MLX-Swift's default-stream evaluation interleaves verify
-        // ops with drafter ops in a way that produces ε-different SDPA / matmul
-        // reductions vs the no-drafter baseline (which runs single-token forwards
-        // on the default stream alone), causing argmax flips on narrow-margin
-        // tokens.
-        let (vLogits, vHidden) = Stream.withNewDefaultStream {
-            target.forwardWithHidden(verifyArr, cache: cache)
-        }
+        // [debug] force eval to break any lazy graph fusion that might span
+        // verify + drafter. Mirrors Python ref's `mx.async_eval(...)` call
+        // pattern between draft_block and verify forward.
+        let (vLogits, vHidden) = target.forwardWithHidden(verifyArr, cache: cache)
+        eval(vLogits, vHidden)
         // vLogits: [1, effectiveBlock, V], vHidden: [1, effectiveBlock, H]
 
         // Greedy: argmax over vocab dim.
