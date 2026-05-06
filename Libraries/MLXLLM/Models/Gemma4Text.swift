@@ -556,6 +556,17 @@ private class Gemma4TextModelInner: Module {
         _ inputs: MLXArray,
         cache: [KVCache]? = nil
     ) -> MLXArray {
+        callCapturingPreNorm(inputs, cache: cache).postNorm
+    }
+
+    /// Variant that exposes both the post-norm hidden (used for the LM head)
+    /// and the pre-norm hidden — the latter being what HF captures via
+    /// ``_can_record_outputs={"hidden_states": Gemma4TextDecoderLayer}`` and
+    /// what the MTP drafter's ``pre_projection`` was trained against.
+    func callCapturingPreNorm(
+        _ inputs: MLXArray,
+        cache: [KVCache]?
+    ) -> (postNorm: MLXArray, preNorm: MLXArray) {
         let inputEmbeddings = embedTokens(inputs)
         var h = inputEmbeddings * embedScale
 
@@ -640,7 +651,9 @@ private class Gemma4TextModelInner: Module {
             intermediates[idx] = (kvPair, positionOffset)
         }
 
-        return norm(h)
+        let preNorm = h
+        let postNorm = norm(h)
+        return (postNorm, preNorm)
     }
 }
 
@@ -760,20 +773,21 @@ extension Gemma4TextModel {
         return nil
     }
 
-    /// Forward pass returning both the soft-capped logits and the post-norm
-    /// last-layer hidden state. The hidden state is required by the MTP
-    /// drafter's input concatenation.
+    /// Forward pass returning both the soft-capped logits and the **pre-norm**
+    /// last-layer hidden state. The MTP drafter's ``pre_projection`` was
+    /// trained against the hidden BEFORE the final RMSNorm — HF captures
+    /// `hidden_states` at decoder-layer output, before `model.norm`.
     public func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (
         logits: MLXArray, hidden: MLXArray
     ) {
-        let hidden = model(inputs, cache: cache)
+        let (postNorm, preNorm) = model.callCapturingPreNorm(inputs, cache: cache)
         var logits: MLXArray
         if let lmHead {
-            logits = lmHead(hidden)
+            logits = lmHead(postNorm)
         } else {
-            logits = model.embedTokens.asLinear(hidden)
+            logits = model.embedTokens.asLinear(postNorm)
         }
         logits = tanh(logits / config.finalLogitSoftcapping) * config.finalLogitSoftcapping
-        return (logits, hidden)
+        return (logits, preNorm)
     }
 }
