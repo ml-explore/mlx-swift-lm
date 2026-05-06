@@ -105,3 +105,21 @@ extension Gemma4Model: LoRAModel {
         languageModel.loraLayers
     }
 }
+
+// MARK: - MTP drafter support
+
+extension Gemma4Model {
+    public var backboneHiddenSize: Int { languageModel.backboneHiddenSize }
+    public var inputEmbeddings: Embedding { languageModel.inputEmbeddings }
+    public var inputEmbedScale: Float { languageModel.inputEmbedScale }
+    public var layerTypes: [String] { languageModel.layerTypes }
+    public var slidingWindow: Int { languageModel.slidingWindow }
+    public var lastFullAttentionLayerIndex: Int? { languageModel.lastFullAttentionLayerIndex }
+    public var lastSlidingAttentionLayerIndex: Int? { languageModel.lastSlidingAttentionLayerIndex }
+
+    public func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (
+        logits: MLXArray, hidden: MLXArray
+    ) {
+        languageModel.forwardWithHidden(inputs, cache: cache)
+    }
+}

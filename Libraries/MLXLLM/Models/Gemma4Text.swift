@@ -147,7 +147,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
 
 // MARK: - Helper Modules
 
-private class RMSNormNoScale: Module {
+class RMSNormNoScale: Module {
     let eps: Float
 
     init(eps: Float = 1e-6) {
@@ -175,12 +175,12 @@ private class ScaledLinear: Module {
     }
 }
 
-private enum Gemma4PositionOffset {
+enum Gemma4PositionOffset {
     case scalar(Int)
     case batch(MLXArray)
 }
 
-private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
+func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
     if let batchCache = cache as? BatchPositionedKVCache {
         // Snapshot the per-sequence offsets before cache.update(...) advances them.
         .batch(batchCache.batchOffset + 0)
@@ -189,7 +189,7 @@ private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4Position
     }
 }
 
-private func gemma4ApplyRotaryPosition<R: RoPELayer>(
+func gemma4ApplyRotaryPosition<R: RoPELayer>(
     _ rope: R,
     to x: MLXArray,
     offset: Gemma4PositionOffset
@@ -204,7 +204,7 @@ private func gemma4ApplyRotaryPosition<R: RoPELayer>(
 
 // MARK: - Attention
 
-private class Gemma4Attention: Module {
+class Gemma4Attention: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
     let layerType: String
@@ -351,7 +351,7 @@ private class Gemma4Attention: Module {
 
 // MARK: - MLP
 
-private class Gemma4MLP: Module {
+class Gemma4MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -376,7 +376,7 @@ private class Gemma4MLP: Module {
 
 // MARK: - Decoder Layer
 
-private class Gemma4DecoderLayer: Module {
+class Gemma4DecoderLayer: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
     let layerType: String
@@ -700,5 +700,66 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
 extension Gemma4TextModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers.map { $0.selfAttn }
+    }
+}
+
+// MARK: - MTP drafter support
+
+/// Hooks consumed by the Multi-Token Prediction (MTP) drafter to share K/V and
+/// last-layer hidden state with this target model. Additive: standard generate
+/// paths do not invoke these.
+extension Gemma4TextModel {
+
+    /// Backbone hidden size (drafter's pre/post projection target dim).
+    public var backboneHiddenSize: Int { config.hiddenSize }
+
+    /// Target's input embedding table — reused by the drafter for token embeds.
+    public var inputEmbeddings: Embedding { model.embedTokens }
+
+    /// Embedding scale (Gemma scales by sqrt(hidden_size)).
+    public var inputEmbedScale: Float { model.embedScale }
+
+    /// Layer types per layer (e.g. "full_attention" / "sliding_attention").
+    public var layerTypes: [String] { config.layerTypes }
+
+    /// Sliding window for SWA layers.
+    public var slidingWindow: Int { config.slidingWindow }
+
+    /// Index in ``newCache(parameters:)`` of the last full-attention layer.
+    /// Returns nil if no full-attention layer exists in the non-shared range.
+    public var lastFullAttentionLayerIndex: Int? {
+        let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        let upper = firstKvShared > 0 ? firstKvShared : config.numHiddenLayers
+        for i in stride(from: upper - 1, through: 0, by: -1) {
+            if config.layerTypes[i] == "full_attention" { return i }
+        }
+        return nil
+    }
+
+    /// Index in ``newCache(parameters:)`` of the last sliding-attention layer.
+    public var lastSlidingAttentionLayerIndex: Int? {
+        let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        let upper = firstKvShared > 0 ? firstKvShared : config.numHiddenLayers
+        for i in stride(from: upper - 1, through: 0, by: -1) {
+            if config.layerTypes[i] == "sliding_attention" { return i }
+        }
+        return nil
+    }
+
+    /// Forward pass returning both the soft-capped logits and the post-norm
+    /// last-layer hidden state. The hidden state is required by the MTP
+    /// drafter's input concatenation.
+    public func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (
+        logits: MLXArray, hidden: MLXArray
+    ) {
+        let hidden = model(inputs, cache: cache)
+        var logits: MLXArray
+        if let lmHead {
+            logits = lmHead(hidden)
+        } else {
+            logits = model.embedTokens.asLinear(hidden)
+        }
+        logits = tanh(logits / config.finalLogitSoftcapping) * config.finalLogitSoftcapping
+        return (logits, hidden)
     }
 }
