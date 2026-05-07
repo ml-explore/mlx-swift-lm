@@ -156,7 +156,7 @@ public final class ModelContainer: Sendable {
         return try await processor.prepare(input: input)
     }
 
-    /// Generate tokens from prepared input, returning an AsyncStream.
+    /// Generate tokens from prepared input, returning an AsyncThrowingStream.
     ///
     /// This method provides a thread-safe way to generate tokens without
     /// needing to use closure-based `perform` calls.
@@ -165,7 +165,7 @@ public final class ModelContainer: Sendable {
     /// ```swift
     /// let input = try await modelContainer.prepare(input: userInput)
     /// let stream = try modelContainer.generate(input: input, parameters: parameters)
-    /// for await generation in stream {
+    /// for try await generation in stream {
     ///     switch generation {
     ///     case .chunk(let text): print(text)
     ///     case .info(let info): print(info.tokensPerSecond)
@@ -178,14 +178,14 @@ public final class ModelContainer: Sendable {
     ///   - input: Prepared language model input (transferred via `sending`)
     ///   - parameters: Generation parameters
     ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination
-    /// - Returns: An AsyncStream of generation events
+    /// - Returns: An AsyncThrowingStream of generation events
     /// - Note: The `sending` parameter indicates the input is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
     public func generate(
         input: consuming sending LMInput,
         parameters: GenerateParameters,
         wiredMemoryTicket: WiredMemoryTicket? = nil
-    ) async throws -> AsyncStream<Generation> {
+    ) async throws -> AsyncThrowingStream<Generation, Error> {
         let input = SendableBox(input)
 
         // Note: this is only visiting the model exclusively
@@ -209,23 +209,25 @@ public final class ModelContainer: Sendable {
     ///
     /// - Parameter tokenIds: Array of token IDs
     /// - Returns: Decoded string
-    public func decode(tokenIds: [Int]) async -> String {
+    /// - Throws: Errors propagated from the tokenizer's decode call.
+    public func decode(tokenIds: [Int]) async throws -> String {
         let tokenizer = await self.tokenizer
-        return tokenizer.decode(tokenIds: tokenIds)
+        return try tokenizer.decode(tokenIds: tokenIds)
     }
 
     @available(*, deprecated, renamed: "decode(tokenIds:)")
-    public func decode(tokens: [Int]) async -> String {
-        await decode(tokenIds: tokens)
+    public func decode(tokens: [Int]) async throws -> String {
+        try await decode(tokenIds: tokens)
     }
 
     /// Encode a string to token IDs.
     ///
     /// - Parameter text: Text to encode
     /// - Returns: Array of token IDs
-    public func encode(_ text: String) async -> [Int] {
+    /// - Throws: Errors propagated from the tokenizer's encode call.
+    public func encode(_ text: String) async throws -> [Int] {
         let tokenizer = await self.tokenizer
-        return tokenizer.encode(text: text)
+        return try tokenizer.encode(text: text)
     }
 
     /// Apply chat template to messages and return token IDs.

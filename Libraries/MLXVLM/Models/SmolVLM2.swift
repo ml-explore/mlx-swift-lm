@@ -240,7 +240,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let promptTokens = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools,
                 additionalContext: input.additionalContext)
-            let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
+            let decoded = try tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
             let image = try input.images[0].asCIImage().toSRGB()
             let (tiles, imageRows, imageCols) = tiles(from: image)
@@ -271,7 +271,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             )
 
             let prompt = decoded.replacingOccurrences(of: imageToken, with: imagePromptString)
-            let finalPromptTokens = tokenizer.encode(text: prompt)
+            let finalPromptTokens = try tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray)
@@ -307,7 +307,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
             let promptTokens = try tokenizer.applyChatTemplate(
                 messages: messagesWithSystem(messages))
-            let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
+            let decoded = try tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
             let video = input.videos[0]
 
@@ -353,7 +353,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 // Fallback if the expected marker is not present
                 prompt = decoded + "\n" + videoPromptString
             }
-            let finalPromptTokens = tokenizer.encode(text: prompt)
+            let finalPromptTokens = try tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: promptArray)

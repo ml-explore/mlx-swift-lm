@@ -9,22 +9,20 @@ import MLXOptimizers
 /// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
 struct LoRABatchIterator: Sequence, IteratorProtocol {
 
-    let dataset: [String]
+    let encodedDataset: [[Int]]
     let batchSize: Int
-    let tokenizer: Tokenizer
 
     let train: Bool
 
     var indices: [Int]
     var index = 0
 
-    public init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) {
-        self.dataset = dataset
+    public init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) throws {
+        self.encodedDataset = try dataset.map { try tokenizer.encode(text: $0) }
         self.batchSize = batchSize
-        self.tokenizer = tokenizer
         self.train = train
 
-        self.indices = Array(0 ..< dataset.count)
+        self.indices = Array(0 ..< encodedDataset.count)
         if train {
             indices.shuffle()
         }
@@ -43,7 +41,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
         let endIndex = Swift.min(index + batchSize, indices.count)
 
         let batch = (index ..< endIndex)
-            .map { tokenizer.encode(text: dataset[indices[$0]]) }
+            .map { encodedDataset[indices[$0]] }
         let lengths = batch.map { $0.count }
         let maxLength = lengths.max() ?? 0
 
@@ -185,11 +183,11 @@ public enum LoRATrain {
     public static func evaluate(
         model: Module, dataset: [String], loss: LoraLossFunction = loss, tokenizer: Tokenizer,
         batchSize: Int, batchCount: Int
-    ) -> Float {
+    ) throws -> Float {
         var allLosses = [Float]()
         var tokenCount = 0
 
-        for (iteration, (inputs, targets, lengths)) in LoRABatchIterator(
+        for (iteration, (inputs, targets, lengths)) in try LoRABatchIterator(
             dataset: dataset, tokenizer: tokenizer, batchSize: batchSize, train: false
         ).enumerated() {
             let (losses, tokens) = loss(model, inputs, targets, lengths)
@@ -272,7 +270,7 @@ public enum LoRATrain {
 
         var start = Date.timeIntervalSinceReferenceDate
 
-        for (iteration, (inputs, targets, lengths)) in LoRABatchIterator(
+        for (iteration, (inputs, targets, lengths)) in try LoRABatchIterator(
             dataset: train, tokenizer: tokenizer, batchSize: parameters.batchSize, train: true
         ).enumerated() {
             // forward and backward pass
@@ -313,7 +311,7 @@ public enum LoRATrain {
             // report validation loss
             if iteration == 0 || (iteration + 1) % parameters.stepsPerEval == 0 {
                 let validationStart = Date.timeIntervalSinceReferenceDate
-                let validationLoss = evaluate(
+                let validationLoss = try evaluate(
                     model: model, dataset: validate, loss: loss, tokenizer: tokenizer,
                     batchSize: parameters.batchSize, batchCount: parameters.validationBatches)
                 let now = Date.timeIntervalSinceReferenceDate

@@ -1003,12 +1003,12 @@ public struct FastVLMProcessor: UserInputProcessor {
         let promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools,
             additionalContext: input.additionalContext)
-        let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
+        let decoded = try tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
         // Find <image> and replace with token id -200
         let pieces = decoded.split(separator: imageToken)
         let tokens = Array(
-            pieces.map { tokenizer.encode(text: String($0)) }.joined(separator: [-200]))
+            try pieces.map { try tokenizer.encode(text: String($0)) }.joined(separator: [-200]))
 
         let image = try input.images[0]
             .asCIImage()

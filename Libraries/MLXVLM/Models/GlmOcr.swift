@@ -799,7 +799,7 @@ public struct GlmOcrProcessor: UserInputProcessor {
         in promptTokens: [Int], frames: [THW]
     ) throws -> [Int] {
         let paddingToken = "<|image|>"
-        let placeholderTokens = tokenizer.encode(
+        let placeholderTokens = try tokenizer.encode(
             text: "<|begin_of_image|>\(paddingToken)<|end_of_image|>")
         let placeholderRanges = promptTokens.ranges(of: placeholderTokens)
         guard placeholderRanges.count == frames.count else {
@@ -808,9 +808,9 @@ public struct GlmOcrProcessor: UserInputProcessor {
             )
         }
         let mergeLength = config.mergeSize * config.mergeSize
-        let replacementSequences = frames.map { frame in
+        let replacementSequences = try frames.map { frame in
             let paddingCount = frame.product / mergeLength
-            return tokenizer.encode(
+            return try tokenizer.encode(
                 text:
                     "<|begin_of_image|>\(Array(repeating: paddingToken, count: paddingCount).joined())<|end_of_image|>"
             )

@@ -167,7 +167,7 @@ load models, if needed.
 - UserInput
 - LMInput
 - generate()
-    - NaiveStreamingDetokenizer
+    - StreamingDetokenizer
     - TokenIterator
 
 ## Using a Model
@@ -200,22 +200,19 @@ let result = try await modelContainer.perform { [input] context in
 ```
 
 Given that `input` we can call `generate()` to produce a stream
-of tokens. In this example we use a `NaiveStreamingDetokenizer`
+of tokens. In this example we use a `StreamingDetokenizer`
 to assist in converting a stream of tokens into text and print it.
 The stream is stopped after we hit a maximum number of tokens:
 
 ```
-    var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+    let detokenizer = context.tokenizer.streamingDetokenizer()
 
     return try MLXLMCommon.generate(
         input: input, parameters: generateParameters, context: context
     ) { tokens in
 
-        if let last = tokens.last {
-            detokenizer.append(token: last)
-        }
-
-        if let new = detokenizer.next() {
+        if let last = tokens.last,
+           let new = try? detokenizer.consume(last) {
             print(new, terminator: "")
             fflush(stdout)
         }

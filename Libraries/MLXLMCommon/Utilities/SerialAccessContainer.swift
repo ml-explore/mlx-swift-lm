@@ -78,7 +78,7 @@ package final class SerialAccessContainer<T>: @unchecked Sendable {
 /// public func generateTask(
 ///     input: consuming LMInput, context: consuming ModelContext,
 ///     iterator: consuming TokenIterator
-/// ) -> (AsyncStream<Generation>, Task<Void, Never>) {
+/// ) -> (AsyncThrowingStream<Generation, Error>, Task<Void, Never>) {
 ///     let context = SendableBox(context)
 ///     let iterator = SendableBox(iterator)
 ///

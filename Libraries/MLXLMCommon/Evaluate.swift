@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXNN
+import os
 
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
@@ -499,7 +500,7 @@ protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element == Int 
 
 /// Generator of tokens.
 ///
-/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>`.
+/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>`.
 ///
 /// To use it directly:
 ///
@@ -708,7 +709,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 /// Generator of tokens using speculative decoding.
 ///
 /// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
-/// returning `AsyncStream<Generation>`.
+/// returning `AsyncThrowingStream<Generation, Error>`.
 ///
 /// To use it directly:
 ///
@@ -1144,7 +1145,7 @@ private func runSynchronousGenerationLoop(
 
 /// Given prompt tokens generate text using the given model and parameters.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>` is the preferred call.
 ///
 /// - Parameters:
 ///   - promptTokens: tokenized prompt
@@ -1156,7 +1157,7 @@ private func runSynchronousGenerationLoop(
 @available(
     *, deprecated,
     message:
-        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+        "Use the AsyncThrowingStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
 public func generate(
     promptTokens: [Int], parameters: GenerateParameters, model: any LanguageModel,
@@ -1176,14 +1177,14 @@ public func generate(
         configuration: configuration, model: model, processor: StandInUserInputProcessor(),
         tokenizer: tokenizer)
 
-    return generate(
+    return try generate(
         input: input, context: context, iterator: iterator,
         didGenerate: didGenerate)
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1194,7 +1195,7 @@ public func generate(
 @available(
     *, deprecated,
     message:
-        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+        "Use the AsyncThrowingStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
@@ -1202,14 +1203,14 @@ public func generate(
 ) throws -> GenerateResult {
     let iterator = try TokenIterator(
         input: input, model: context.model, parameters: parameters)
-    return generate(
+    return try generate(
         input: input, context: context, iterator: iterator,
         didGenerate: didGenerate)
 }
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1220,13 +1221,13 @@ public func generate(
 @available(
     *, deprecated,
     message:
-        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+        "Use the AsyncThrowingStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
 public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
     didGenerate: ([Int]) -> GenerateDisposition
-) -> GenerateResult {
+) throws -> GenerateResult {
     let result = runSynchronousGenerationLoop(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
@@ -1237,7 +1238,7 @@ public func generate(
 
     return GenerateResult(
         inputText: input.text, tokenIds: result.generatedTokenIds,
-        output: context.tokenizer.decode(tokenIds: result.generatedTokenIds),
+        output: try context.tokenizer.decode(tokenIds: result.generatedTokenIds),
         promptTime: result.promptTime + result.promptPrefillTime,
         generateTime: result.generateTime
     )
@@ -1245,7 +1246,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1256,7 +1257,7 @@ public func generate(
 @available(
     *, deprecated,
     message:
-        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+        "Use the AsyncThrowingStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
 public func generate(
     input: LMInput, parameters: GenerateParameters, context: ModelContext,
@@ -1271,7 +1272,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:wiredMemoryTicket:)`` returning `AsyncThrowingStream<Generation, Error>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1282,7 +1283,7 @@ public func generate(
 @available(
     *, deprecated,
     message:
-        "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
+        "Use the AsyncThrowingStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
 public func generate(
     input: LMInput, context: ModelContext,
@@ -1327,7 +1328,7 @@ public func generate(
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
-/// - Returns: An `AsyncStream` that emits `Generation` values, including generated text chunks (`.chunk`),
+/// - Returns: An `AsyncThrowingStream` that emits `Generation` values, including generated text chunks (`.chunk`),
 ///   tool calls (`.toolCall`), and completion information (`.info`).
 /// - Throws: An error if the `TokenIterator` initialization fails due to invalid input or model configuration.
 ///
@@ -1344,7 +1345,7 @@ public func generate(
 /// let stream = try generate(input: lmInput, parameters: generateParameters, context: context)
 ///
 /// // Process the stream asynchronously to handle text chunks and completion info.
-/// for await generation in stream {
+/// for try await generation in stream {
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
@@ -1358,7 +1359,7 @@ public func generate(
 public func generate(
     input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> AsyncStream<Generation> {
+) throws -> AsyncThrowingStream<Generation, Error> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
@@ -1392,7 +1393,7 @@ public func generate(
 ///     input: lmInput, parameters: generateParameters,
 ///     context: mainContext, draftModel: draftModel)
 ///
-/// for await generation in stream {
+/// for try await generation in stream {
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
@@ -1413,7 +1414,7 @@ public func generate(
 ///   - draftCache: optional ``KVCache`` for the draft model.
 ///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
-/// - Returns: An `AsyncStream` that emits `Generation` values.
+/// - Returns: An `AsyncThrowingStream` that emits `Generation` values.
 /// - Throws: An error if the iterator initialization fails.
 public func generate(
     input: LMInput,
@@ -1424,7 +1425,7 @@ public func generate(
     draftCache: [KVCache]? = nil,
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> AsyncStream<Generation> {
+) throws -> AsyncThrowingStream<Generation, Error> {
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -1456,7 +1457,7 @@ public func generate(
     input: LMInput, context: ModelContext,
     iterator: TokenIterator,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) -> AsyncStream<Generation> {
+) -> AsyncThrowingStream<Generation, Error> {
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -1467,7 +1468,7 @@ public func generate(
 }
 
 /// Low-level token generation using a ``TokenIterator``, returning an
-/// `AsyncStream<Generation>` and a `Task`.
+/// `AsyncThrowingStream<Generation, Error>` and a `Task`.
 ///
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  Callers can await
@@ -1479,14 +1480,14 @@ public func generate(
 ///   - tokenizer: tokenizer (for EOS id, unknown token id, and detokenization)
 ///   - iterator: token iterator
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
-/// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
+/// - Returns: An `AsyncThrowingStream` that emits `Generation` values and a `Task`
 public func generateTask(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) -> (AsyncStream<Generation>, Task<Void, Never>) {
+) -> (AsyncThrowingStream<Generation, Error>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -1514,7 +1515,7 @@ public func generateTask(
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
-/// - Returns: An `AsyncStream` that emits `TokenGeneration` values.
+/// - Returns: An `AsyncThrowingStream` that emits `TokenGeneration` values.
 public func generateTokens(
     input: LMInput,
     cache: [KVCache]? = nil,
@@ -1522,7 +1523,7 @@ public func generateTokens(
     context: ModelContext,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> AsyncStream<TokenGeneration> {
+) throws -> AsyncThrowingStream<TokenGeneration, Error> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTokenTask(
@@ -1552,7 +1553,7 @@ public func generateTokens(
 ///   - draftCache: optional ``KVCache`` for the draft model.
 ///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
-/// - Returns: An `AsyncStream` that emits `TokenGeneration` values.
+/// - Returns: An `AsyncThrowingStream` that emits `TokenGeneration` values.
 /// - Throws: An error if the iterator initialization fails.
 public func generateTokens(
     input: LMInput,
@@ -1563,7 +1564,7 @@ public func generateTokens(
     draftCache: [KVCache]? = nil,
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> AsyncStream<TokenGeneration> {
+) throws -> AsyncThrowingStream<TokenGeneration, Error> {
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -1589,7 +1590,7 @@ public func generateTokens(
 /// Prefer this overload if you want to be able to observe when the underlying generation work is finished
 /// (especially if the consumer terminates the stream early).
 ///
-/// - Returns: An `AsyncStream` that emits `TokenGeneration` values and a `Task`.
+/// - Returns: An `AsyncThrowingStream` that emits `TokenGeneration` values and a `Task`.
 ///
 /// - Parameters:
 ///   - input: The input for the language model.
@@ -1607,7 +1608,7 @@ public func generateTokensTask(
     context: ModelContext,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+) throws -> (AsyncThrowingStream<TokenGeneration, Error>, Task<Void, Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     return generateTokenTask(
@@ -1621,7 +1622,7 @@ public func generateTokensTask(
 }
 
 /// Low-level raw token generation using a `TokenIterator`, returning an
-/// `AsyncStream<TokenGeneration>` and a `Task`.
+/// `AsyncThrowingStream<TokenGeneration, Error>` and a `Task`.
 ///
 /// This is useful for parsers that need access to the token IDs directly (e.g. Harmony parsing)
 /// without detokenization or tool-call parsing.
@@ -1635,7 +1636,7 @@ public func generateTokensTask(
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
-/// - Returns: An `AsyncStream` that emits token IDs and a final `.info`, plus a `Task`.
+/// - Returns: An `AsyncThrowingStream` that emits token IDs and a final `.info`, plus a `Task`.
 public func generateTokenTask(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
@@ -1643,7 +1644,7 @@ public func generateTokenTask(
     iterator: consuming TokenIterator,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+) -> (AsyncThrowingStream<TokenGeneration, Error>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -1655,7 +1656,7 @@ public func generateTokenTask(
     )
 }
 
-private func generateLoopTask<Handler: TokenLoopHandler>(
+internal func generateLoopTask<Handler: TokenLoopHandler>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
@@ -1663,9 +1664,9 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     includeStopToken: Bool = false,
     handler: consuming Handler
-) -> (AsyncStream<Handler.Output>, Task<Void, Never>) {
+) -> (AsyncThrowingStream<Handler.Output, Error>, Task<Void, Never>) {
 
-    let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
+    let (stream, continuation) = AsyncThrowingStream<Handler.Output, Error>.makeStream()
 
     let iterator = SendableBox(iterator)
     let handler = SendableBox(handler)
@@ -1681,42 +1682,48 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             var tokenCount = 0
             var stopReason: GenerateStopReason?
 
-            let stopTokenIds = buildStopTokenIds(
-                modelConfiguration: modelConfiguration,
-                tokenizer: tokenizer
-            )
+            do {
+                let stopTokenIds = buildStopTokenIds(
+                    modelConfiguration: modelConfiguration,
+                    tokenizer: tokenizer
+                )
 
-            for token in iterator {
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                    break
-                }
-
-                if promptTime == 0 {
-                    let now = Date.timeIntervalSinceReferenceDate
-                    promptTime = now - start
-                    start = now
-                }
-
-                // Check for end-of-sequence tokens
-                if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
-                    if includeStopToken {
-                        tokenCount += 1
-                        if !handler.onStopToken(token, emit: continuation.yield) {
-                            stopReason = .cancelled
-                            break
-                        }
+                for token in iterator {
+                    // Check for cancellation on every loop iteration.
+                    if Task.isCancelled {
+                        stopReason = .cancelled
+                        break
                     }
-                    stopReason = .stop
-                    break
-                }
 
-                tokenCount += 1
-                if !handler.onToken(token, emit: continuation.yield) {
-                    stopReason = .cancelled
-                    break
+                    if promptTime == 0 {
+                        let now = Date.timeIntervalSinceReferenceDate
+                        promptTime = now - start
+                        start = now
+                    }
+
+                    // Check for end-of-sequence tokens
+                    if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
+                        if includeStopToken {
+                            tokenCount += 1
+                            if try !handler.onStopToken(token, emit: continuation.yield) {
+                                stopReason = .cancelled
+                                break
+                            }
+                        }
+                        stopReason = .stop
+                        break
+                    }
+
+                    tokenCount += 1
+                    if try !handler.onToken(token, emit: continuation.yield) {
+                        stopReason = .cancelled
+                        break
+                    }
                 }
+            } catch {
+                Stream().synchronize()
+                continuation.finish(throwing: error)
+                return
             }
 
             if stopReason == nil {
@@ -1928,24 +1935,25 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
-private protocol TokenLoopHandler: Sendable {
+internal protocol TokenLoopHandler: Sendable {
     associatedtype Output
 
-    /// Return false to stop the loop early.
+    /// Return false to stop the loop after the consumer terminates the stream;
+    /// throw to finish the stream with an error.
     mutating func onToken(
         _ token: Int,
-        emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
-    ) -> Bool
+        emit: (sending Output) -> AsyncThrowingStream<Output, Error>.Continuation.YieldResult
+    ) throws -> Bool
 
     /// Called only when includeStopToken == true and a stop token was hit.
     mutating func onStopToken(
         _ token: Int,
-        emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
-    ) -> Bool
+        emit: (sending Output) -> AsyncThrowingStream<Output, Error>.Continuation.YieldResult
+    ) throws -> Bool
 
     /// Called after the token loop finishes, before the info event.
     mutating func onGenerationEnd(
-        emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
+        emit: (sending Output) -> AsyncThrowingStream<Output, Error>.Continuation.YieldResult
     )
 
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
@@ -1954,20 +1962,43 @@ private protocol TokenLoopHandler: Sendable {
 private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     typealias Output = Generation
 
-    var detokenizer: NaiveStreamingDetokenizer
+    private static let logger = Logger(
+        subsystem: "com.apple.mlx-swift-lm", category: "TextToolTokenLoopHandler"
+    )
+
+    let tokenizer: any Tokenizer
+    let skipSpecialTokens: Bool
+    var detokenizer: StreamingDetokenizer
     let toolCallProcessor: ToolCallProcessor
 
     init(tokenizer: Tokenizer, format: ToolCallFormat) {
-        detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        self.tokenizer = tokenizer
+        self.skipSpecialTokens = false
+        detokenizer = StreamingDetokenizer(
+            tokenizer: tokenizer, skipSpecialTokens: skipSpecialTokens
+        )
         toolCallProcessor = ToolCallProcessor(format: format)
     }
 
     mutating func onToken(
         _ token: Int,
-        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
-    ) -> Bool {
-        detokenizer.append(token: token)
-        if let chunk = detokenizer.next() {
+        emit: (sending Generation) ->
+            AsyncThrowingStream<Generation, Error>.Continuation.YieldResult
+    ) throws -> Bool {
+        let chunk: String?
+        do {
+            chunk = try detokenizer.consume(token)
+        } catch TokenizerError.invalidStreamingPrefix(let tokenId, let prefix, let actual) {
+            Self.logger.warning(
+                "Resetting streaming detokenizer: \(TokenizerError.invalidStreamingPrefix(tokenId: tokenId, expectedPrefix: prefix, actualString: actual).localizedDescription, privacy: .public)"
+            )
+            detokenizer = StreamingDetokenizer(
+                tokenizer: tokenizer, skipSpecialTokens: skipSpecialTokens
+            )
+            chunk = try detokenizer.consume(token)
+        }
+
+        if let chunk {
             // Process chunk through the tool call processor.
             if let textToYield = toolCallProcessor.processChunk(chunk) {
                 if case .terminated = emit(.chunk(textToYield)) {
@@ -1988,13 +2019,15 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
 
     mutating func onStopToken(
         _ token: Int,
-        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
-    ) -> Bool {
+        emit: (sending Generation) ->
+            AsyncThrowingStream<Generation, Error>.Continuation.YieldResult
+    ) throws -> Bool {
         true
     }
 
     mutating func onGenerationEnd(
-        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
+        emit: (sending Generation) ->
+            AsyncThrowingStream<Generation, Error>.Continuation.YieldResult
     ) {
         toolCallProcessor.processEOS()
 
@@ -2015,8 +2048,9 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
 
     mutating func onToken(
         _ token: Int,
-        emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
-    ) -> Bool {
+        emit: (sending TokenGeneration) ->
+            AsyncThrowingStream<TokenGeneration, Error>.Continuation.YieldResult
+    ) throws -> Bool {
         if case .terminated = emit(.token(token)) {
             return false
         }
@@ -2025,8 +2059,9 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
 
     mutating func onStopToken(
         _ token: Int,
-        emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
-    ) -> Bool {
+        emit: (sending TokenGeneration) ->
+            AsyncThrowingStream<TokenGeneration, Error>.Continuation.YieldResult
+    ) throws -> Bool {
         if case .terminated = emit(.token(token)) {
             return false
         }
@@ -2034,7 +2069,8 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
     }
 
     mutating func onGenerationEnd(
-        emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
+        emit: (sending TokenGeneration) ->
+            AsyncThrowingStream<TokenGeneration, Error>.Continuation.YieldResult
     ) {}
 
     func infoEvent(_ info: GenerateCompletionInfo) -> TokenGeneration {

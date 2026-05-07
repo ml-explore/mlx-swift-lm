@@ -23,8 +23,8 @@ public struct NoOpTokenizerLoader: TokenizerLoader {
 }
 
 private struct NoOpTokenizer: Tokenizer {
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+    func encode(text: String, addSpecialTokens: Bool) throws -> [Int] { [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String { "" }
     func convertTokenToId(_ token: String) -> Int? { nil }
     func convertIdToToken(_ id: Int) -> String? { nil }
     var bosToken: String? { nil }
@@ -289,12 +289,12 @@ public func benchmarkTokenization(
         useLatest: useLatest
     )
 
-    _ = tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
+    _ = try tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
 
     var times: [Double] = []
     for i in 1 ... runs {
         let start = CFAbsoluteTimeGetCurrent()
-        let tokenIds = tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
+        let tokenIds = try tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
         times.append(elapsed)
         print(
@@ -325,16 +325,16 @@ public func benchmarkDecoding(
         configuration: configuration,
         useLatest: useLatest
     )
-    let tokenIds = tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
+    let tokenIds = try tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
 
-    _ = tokenizer.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+    _ = try tokenizer.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
 
     var times: [Double] = []
     for i in 1 ... runs {
         var decoded = ""
         let start = CFAbsoluteTimeGetCurrent()
         for _ in 0 ..< decodesPerRun {
-            decoded = tokenizer.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+            decoded = try tokenizer.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
         }
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000 / Double(decodesPerRun)
         times.append(elapsed)

@@ -619,7 +619,7 @@ let result = try await modelContainer.perform { [input] context in
     let input = try context.processor.prepare(input: input)
 
     return generate(input: input, parameters: generateParameters, context: context) { tokens in
-        // This could potentially use NaiveStreamingDetokenizer and print
+        // This could potentially use StreamingDetokenizer and print
         // text as it was generated
         if tokens.count >= 20 {
             return .stop

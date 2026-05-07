@@ -21,10 +21,10 @@ let searchInputs = [
 ]
 
 // Generate embeddings
-let resultEmbeddings = await modelContainer.perform {
+let resultEmbeddings = try await modelContainer.perform {
     (model: EmbeddingModel, tokenizer: Tokenizer, pooling: Pooling) -> [[Float]] in
-    let inputs = searchInputs.map {
-        tokenizer.encode(text: $0, addSpecialTokens: true)
+    let inputs = try searchInputs.map {
+        try tokenizer.encode(text: $0, addSpecialTokens: true)
     }
     // Pad to longest
     let maxLength = inputs.reduce(into: 16) { acc, elem in

@@ -87,12 +87,14 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
                         self.upstream = upstream
                     }
 
-                    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+                    // The protocol requires `throws`, but swift-transformers'
+                    // `encode` and `decode` never throw.
+                    func encode(text: String, addSpecialTokens: Bool) throws -> [Int] {
                         upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
                     }
 
                     // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
-                    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+                    func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
                         upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
                     }
 

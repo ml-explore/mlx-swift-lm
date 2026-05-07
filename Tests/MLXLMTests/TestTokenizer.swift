@@ -34,13 +34,13 @@ struct TestTokenizer: MLXLMCommon.Tokenizer {
         )
     }
 
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+    func encode(text: String, addSpecialTokens: Bool) throws -> [Int] {
         (0 ..< length).map { _ in
             Int.random(in: 1 ..< vocabularySize)
         }
     }
 
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
         var tokenIds = tokenIds
         if tokenIds.count > maxLength {
             tokenIds.append(_eosTokenId)
@@ -72,7 +72,7 @@ struct TestTokenizer: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        encode(text: "")
+        try encode(text: "")
     }
 
 }

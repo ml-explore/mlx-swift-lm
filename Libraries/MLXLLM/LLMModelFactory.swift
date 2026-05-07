@@ -457,7 +457,7 @@ private struct LLMUserInputProcessor: UserInputProcessor {
                 messages
                 .compactMap { $0["content"] as? String }
                 .joined(separator: "\n\n")
-            let promptTokens = tokenizer.encode(text: prompt)
+            let promptTokens = try tokenizer.encode(text: prompt)
             return LMInput(tokens: MLXArray(promptTokens))
         }
     }

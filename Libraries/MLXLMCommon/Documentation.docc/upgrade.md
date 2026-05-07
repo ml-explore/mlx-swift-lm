@@ -281,7 +281,7 @@ let container = try await loadModelContainer(
 let text = tokenizer.decode(tokens: ids)
 
 // After (3.0)
-let text = tokenizer.decode(tokenIds: ids)
+let text = try tokenizer.decode(tokenIds: ids)
 ```
 
 ## Breaking Changes

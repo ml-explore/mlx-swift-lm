@@ -1039,7 +1039,7 @@ public struct PixtralProcessor: UserInputProcessor {
         let prompt = prompt(from: input)
 
         if input.images.isEmpty {
-            let tokens = tokenizer.encode(text: prompt)
+            let tokens = try tokenizer.encode(text: prompt)
             let tokensArray = MLXArray(tokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -1103,7 +1103,7 @@ public struct PixtralProcessor: UserInputProcessor {
             let numImageTokens = numPatchesH * numPatchesW
 
             // Build prompt with image tokens
-            var promptTokens = tokenizer.encode(text: prompt)
+            var promptTokens = try tokenizer.encode(text: prompt)
 
             // Insert image tokens
             let imageTokens = Array(repeating: imageTokenId, count: numImageTokens)

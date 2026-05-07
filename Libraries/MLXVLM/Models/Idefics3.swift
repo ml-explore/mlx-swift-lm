@@ -838,7 +838,7 @@ public struct Idefics3Processor: UserInputProcessor {
         let prompt = prompt(from: input)
         if input.images.isEmpty {
             // No image scenario
-            let tokens = tokenizer.encode(text: prompt)
+            let tokens = try tokenizer.encode(text: prompt)
             let tokensArray = MLXArray(tokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -849,7 +849,7 @@ public struct Idefics3Processor: UserInputProcessor {
             }
 
             // Encode only the text part of the prompt, without <image>
-            var promptTokens = tokenizer.encode(text: prompt)
+            var promptTokens = try tokenizer.encode(text: prompt)
 
             let imageTokenIndex = promptTokens.count / 2
             promptTokens.insert(imageTokenId, at: imageTokenIndex)

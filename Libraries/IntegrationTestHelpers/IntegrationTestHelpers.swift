@@ -427,10 +427,10 @@ public enum EmbedderTests {
             "In the United States, PepsiCo Inc. is a leading soft drink company.",
         ]
 
-        let resultEmbeddings = await modelContainer.perform { context in
+        let resultEmbeddings = try await modelContainer.perform { context in
             let tokenizer = context.tokenizer
-            let encoded = inputs.map {
-                tokenizer.encode(text: $0, addSpecialTokens: true)
+            let encoded = try inputs.map {
+                try tokenizer.encode(text: $0, addSpecialTokens: true)
             }
             let maxLength = encoded.reduce(into: 1) { acc, elem in
                 acc = max(acc, elem.count)
@@ -490,11 +490,11 @@ public enum EmbedderTests {
             "search_document: Polar Bears",
         ]
 
-        let resultEmbeddings = await container.perform { context in
+        let resultEmbeddings = try await container.perform { context in
             let tokenizer = context.tokenizer
 
-            let inputs = searchInputs.map {
-                tokenizer.encode(text: $0, addSpecialTokens: true)
+            let inputs = try searchInputs.map {
+                try tokenizer.encode(text: $0, addSpecialTokens: true)
             }
             let maxLength = inputs.reduce(into: 16) { acc, elem in
                 acc = max(acc, elem.count)

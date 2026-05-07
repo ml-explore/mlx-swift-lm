@@ -477,7 +477,7 @@ public struct PaliGemmaProcessor: UserInputProcessor {
             Array(repeating: "<image>", count: count).joined() + (tokenizer.bosToken ?? "") + prompt
             + "\n"
 
-        let promptTokens = tokenizer.encode(text: prompt)
+        let promptTokens = try tokenizer.encode(text: prompt)
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
 

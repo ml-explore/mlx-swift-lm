@@ -63,14 +63,14 @@ struct SpeculativeDecodingTests {
         )
 
         var normalTokens: [Int] = []
-        for await generation in try generateTokens(
+        for try await generation in try generateTokens(
             input: modelInput, parameters: parameters, context: mainContext
         ) {
             if let token = generation.token { normalTokens.append(token) }
         }
 
         var speculativeTokens: [Int] = []
-        for await generation in try generateTokens(
+        for try await generation in try generateTokens(
             input: modelInput, parameters: parameters, context: mainContext,
             draftModel: draftContext.model, numDraftTokens: numDraftTokens
         ) {

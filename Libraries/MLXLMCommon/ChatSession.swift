@@ -426,7 +426,7 @@ public final class ChatSession {
 
                         var pendingToolCalls: [ToolCall] = []
 
-                        for await item in stream {
+                        for try await item in stream {
                             // collect tool calls for dispatch; if no
                             // toolDispatch the caller handles them via
                             // the transform (streamDetails path)

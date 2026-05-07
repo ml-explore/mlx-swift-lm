@@ -1026,7 +1026,7 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         )
 
         // Decode to find and replace image placeholder token
-        let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
+        let decoded = try tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
         // Process image to get dimensions
         let preprocessResult = try preprocessImage(
@@ -1046,7 +1046,7 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
 
             for (index, piece) in pieces.enumerated() {
                 if !piece.isEmpty {
-                    let pieceTokens = tokenizer.encode(text: piece)
+                    let pieceTokens = try tokenizer.encode(text: piece)
                     expandedTokens.append(contentsOf: pieceTokens)
                 }
                 // Add image tokens between pieces (not after the last one)

@@ -9,10 +9,10 @@ import MLXLMCommon
 /// the model and/or tokenizer (any values from the ``EmbedderModelContext``):
 ///
 /// ```swift
-/// let resultEmbeddings = await modelContainer.perform { context in
+/// let resultEmbeddings = try await modelContainer.perform { context in
 ///     let tokenizer = context.tokenizer
-///     let encoded = inputs.map {
-///         tokenizer.encode(text: $0, addSpecialTokens: true)
+///     let encoded = try inputs.map {
+///         try tokenizer.encode(text: $0, addSpecialTokens: true)
 ///     }
 ///     ...
 ///     let modelOutput = context.model(

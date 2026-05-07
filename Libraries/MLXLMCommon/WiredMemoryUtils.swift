@@ -35,7 +35,7 @@ public enum WiredMemoryUtils {
         count: Int,
         tokenizer: Tokenizer,
         seedText: String = " hello"
-    ) -> [Int] {
+    ) throws -> [Int] {
         guard count > 0 else { return [] }
 
         let pad = tokenizer.eosTokenId ?? tokenizer.unknownTokenId ?? 0
@@ -43,7 +43,7 @@ public enum WiredMemoryUtils {
 
         var chunk = seedText
         while tokens.count < count {
-            let newTokens = tokenizer.encode(text: chunk)
+            let newTokens = try tokenizer.encode(text: chunk)
             if newTokens.isEmpty {
                 tokens.append(pad)
             } else {
@@ -73,8 +73,8 @@ public enum WiredMemoryUtils {
         count: Int,
         tokenizer: Tokenizer,
         seedText: String = " hello"
-    ) -> LMInput {
-        let tokenIds = makeTokenIds(count: count, tokenizer: tokenizer, seedText: seedText)
+    ) throws -> LMInput {
+        let tokenIds = try makeTokenIds(count: count, tokenizer: tokenizer, seedText: seedText)
         return LMInput(tokens: MLXArray(tokenIds))
     }
 
@@ -143,7 +143,7 @@ public enum WiredMemoryUtils {
     ) async throws -> WiredMemoryMeasurement {
         let weights = context.model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
 
-        let input = makeTokenInput(
+        let input = try makeTokenInput(
             count: tokenCount,
             tokenizer: context.tokenizer,
             seedText: seedText
