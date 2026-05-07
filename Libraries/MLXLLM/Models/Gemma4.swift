@@ -98,6 +98,18 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
+// MARK: - MTP Backbone Support
+
+extension Gemma4Model: MTPBackboneModel {
+    public func forwardMTP(_ inputs: MLXArray, cache: [KVCache]?) -> MTPBackboneOutput {
+        languageModel.forwardMTP(inputs, cache: cache)
+    }
+
+    public var sharedEmbeddings: Embedding { languageModel.sharedEmbeddings }
+    public var embeddingScale: Float { languageModel.embeddingScale }
+    public var backboneLayerTypes: [String] { languageModel.backboneLayerTypes }
+}
+
 // MARK: - LoRA
 
 extension Gemma4Model: LoRAModel {

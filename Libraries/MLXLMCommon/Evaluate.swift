@@ -1655,7 +1655,7 @@ public func generateTokenTask(
     )
 }
 
-private func generateLoopTask<Handler: TokenLoopHandler>(
+func generateLoopTask<Handler: TokenLoopHandler>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
@@ -1928,7 +1928,7 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
-private protocol TokenLoopHandler: Sendable {
+protocol TokenLoopHandler: Sendable {
     associatedtype Output
 
     /// Return false to stop the loop early.
@@ -1951,7 +1951,7 @@ private protocol TokenLoopHandler: Sendable {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
-private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
+struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     typealias Output = Generation
 
     var detokenizer: NaiveStreamingDetokenizer
@@ -2010,7 +2010,7 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     }
 }
 
-private struct RawTokenLoopHandler: TokenLoopHandler {
+struct RawTokenLoopHandler: TokenLoopHandler {
     typealias Output = TokenGeneration
 
     mutating func onToken(
