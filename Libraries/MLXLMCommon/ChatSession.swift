@@ -418,7 +418,7 @@ public final class ChatSession {
                             parameters: generateParameters)
 
                         let (stream, task) = MLXLMCommon.generateTask(
-                            promptTokenCount: input.text.tokens.size,
+                            promptTokenIds: input.text.tokens.asArray(Int.self),
                             modelConfiguration: modelConfiguration,
                             tokenizer: tokenizer,
                             iterator: iterator

@@ -58,6 +58,25 @@ private struct MockTokenizer: MLXLMCommon.Tokenizer {
     ) throws -> [Int] { [] }
 }
 
+/// Thread-safe recorder for `decode` calls. The detokenizer runs on a Task,
+/// so the test fixture and the assertions live on different threads.
+private final class DecodeCallLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [[Int]] = []
+
+    func record(_ ids: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        _calls.append(ids)
+    }
+
+    var calls: [[Int]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _calls
+    }
+}
+
 @Suite("StreamingDetokenizer")
 struct StreamingDetokenizerSuite {
     /// "Hello" split into single-byte ASCII tokens.
@@ -154,6 +173,108 @@ struct StreamingDetokenizerSuite {
 
         // Trim after each emit keeps the buffer bounded regardless of stream length.
         #expect(stream.ids.count <= 1)
+    }
+
+    @Test
+    func seedingPreservesPromptBoundaryWhitespace() throws {
+        // SentencePiece/metaspace tokenizers strip a leading space at the
+        // start of the decoded sequence. An unseeded streaming detokenizer
+        // therefore loses the space at the prompt/generated boundary on
+        // the first generated chunk; seeding with the prompt IDs makes the
+        // first emit correctly include it. This mirrors what Rust
+        // `DecodeStream` and vLLM do by initializing with prompt token IDs.
+        struct MetaspaceTokenizer: MLXLMCommon.Tokenizer {
+            func encode(text: String, addSpecialTokens: Bool) throws -> [Int] { [] }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
+                var out = ""
+                for id in tokenIds {
+                    switch id {
+                    case 1: out += "prompt"
+                    case 2: out += " hello"
+                    default: break
+                    }
+                }
+                if out.hasPrefix(" ") { out.removeFirst() }
+                return out
+            }
+            func convertTokenToId(_ token: String) -> Int? { nil }
+            func convertIdToToken(_ id: Int) -> String? { nil }
+            var bosToken: String? { nil }
+            var eosToken: String? { nil }
+            var unknownToken: String? { nil }
+            func applyChatTemplate(
+                messages: [[String: any Sendable]],
+                tools: [[String: any Sendable]]?,
+                additionalContext: [String: any Sendable]?
+            ) throws -> [Int] { [] }
+        }
+
+        let tokenizer = MetaspaceTokenizer()
+
+        let unseeded = tokenizer.streamingDetokenizer()
+        #expect(try unseeded.consume(2) == "hello")
+
+        let seeded = tokenizer.streamingDetokenizer(initialTokenIds: [1])
+        #expect(try seeded.consume(2) == " hello")
+    }
+
+    @Test
+    func seededStreamMatchesFullDecodeMinusPromptPrefix() throws {
+        // Equivalence: streaming with the prompt as seed must produce
+        // exactly the suffix of the full decode beyond the prompt prefix.
+        // Mirrors `test_decode_stream_copy_and_prefix_ids` in
+        // huggingface/tokenizers' Python binding and `test_decode_streaming`
+        // in vLLM.
+        struct MetaspaceTokenizer: MLXLMCommon.Tokenizer {
+            static let pieces: [Int: String] = [
+                1: "Q",
+                2: ":",
+                3: " hello",
+                4: " world",
+                5: "?",
+            ]
+            func encode(text: String, addSpecialTokens: Bool) throws -> [Int] { [] }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
+                var out = ""
+                for id in tokenIds {
+                    if let piece = Self.pieces[id] { out += piece }
+                }
+                if out.hasPrefix(" ") { out.removeFirst() }
+                return out
+            }
+            func convertTokenToId(_ token: String) -> Int? { nil }
+            func convertIdToToken(_ id: Int) -> String? { nil }
+            var bosToken: String? { nil }
+            var eosToken: String? { nil }
+            var unknownToken: String? { nil }
+            func applyChatTemplate(
+                messages: [[String: any Sendable]],
+                tools: [[String: any Sendable]]?,
+                additionalContext: [String: any Sendable]?
+            ) throws -> [Int] { [] }
+        }
+
+        let tokenizer = MetaspaceTokenizer()
+        let promptIds = [1, 2]
+        let generatedIds = [3, 4, 5]
+
+        let fullDecode = try tokenizer.decode(
+            tokenIds: promptIds + generatedIds, skipSpecialTokens: false
+        )
+        let promptDecode = try tokenizer.decode(
+            tokenIds: promptIds, skipSpecialTokens: false
+        )
+        let expectedSuffix = String(fullDecode.dropFirst(promptDecode.count))
+
+        let stream = tokenizer.streamingDetokenizer(initialTokenIds: promptIds)
+        var streamed = ""
+        for id in generatedIds {
+            if let chunk = try stream.consume(id) {
+                streamed.append(chunk)
+            }
+        }
+
+        #expect(streamed == expectedSuffix)
     }
 
     @Test
@@ -436,6 +557,151 @@ struct StreamingDetokenizerSuite {
         } catch is InjectedFailure {
             // Expected.
         }
+    }
+
+    @Test
+    func handlerSlicesSeedToLastSevenPromptTokens() async throws {
+        // The handler must seed with the last seven prompt tokens (vLLM
+        // precedent for defeating decoder cleanup at the boundary). Here
+        // the prompt is ten tokens; the first seed-decode must hit only
+        // the last seven.
+        struct MockIterator: TokenIteratorProtocol {
+            var remaining: [Int]
+            var maxTokens: Int? { nil }
+            var tokenCount: Int { 0 }
+            var promptPrefillTime: TimeInterval { 0 }
+            mutating func next() -> Int? {
+                guard !remaining.isEmpty else { return nil }
+                return remaining.removeFirst()
+            }
+        }
+
+        struct LinearTokenizer: MLXLMCommon.Tokenizer {
+            let log: DecodeCallLog
+            func encode(text: String, addSpecialTokens: Bool) throws -> [Int] { [] }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
+                log.record(tokenIds)
+                return tokenIds.map { String(Character(UnicodeScalar(0x60 + $0)!)) }.joined()
+            }
+            func convertTokenToId(_ token: String) -> Int? { nil }
+            func convertIdToToken(_ id: Int) -> String? { nil }
+            var bosToken: String? { nil }
+            var eosToken: String? { nil }
+            var unknownToken: String? { nil }
+            func applyChatTemplate(
+                messages: [[String: any Sendable]],
+                tools: [[String: any Sendable]]?,
+                additionalContext: [String: any Sendable]?
+            ) throws -> [Int] { [] }
+        }
+
+        let log = DecodeCallLog()
+        let tokenizer = LinearTokenizer(log: log)
+        let promptIds = Array(1 ... 10)
+        let handler = TextToolTokenLoopHandler(
+            tokenizer: tokenizer,
+            format: .json,
+            promptTokenIds: promptIds
+        )
+        let modelConfiguration = ModelConfiguration(id: "test")
+        let (stream, task) = generateLoopTask(
+            promptTokenCount: promptIds.count,
+            modelConfiguration: modelConfiguration,
+            tokenizer: tokenizer,
+            iterator: MockIterator(remaining: [20]),
+            handler: handler
+        )
+
+        for try await _ in stream {}
+        await task.value
+
+        let firstSeedDecode = log.calls.first { !$0.isEmpty && $0.count <= 7 }
+        #expect(firstSeedDecode == [4, 5, 6, 7, 8, 9, 10])
+    }
+
+    @Test
+    func handlerDropsSeedOnInvalidPrefixReset() async throws {
+        // After `invalidStreamingPrefix`, the handler rebuilds the
+        // detokenizer without the prompt seed (matches vLLM's recovery
+        // path). Verifies that no decode call after the throw contains
+        // any prompt token ID.
+        struct MockIterator: TokenIteratorProtocol {
+            var remaining: [Int]
+            var maxTokens: Int? { nil }
+            var tokenCount: Int { 0 }
+            var promptPrefillTime: TimeInterval { 0 }
+            mutating func next() -> Int? {
+                guard !remaining.isEmpty else { return nil }
+                return remaining.removeFirst()
+            }
+        }
+
+        // Tokenizer where the seed is "P", appending 100 produces "Pa",
+        // and appending 200 produces a strictly-longer prefix-violating
+        // string ("xyz" does not start with "a"), which raises
+        // `invalidStreamingPrefix`. After the reset, decode([200]) is "xyz".
+        struct ResettingTokenizer: MLXLMCommon.Tokenizer {
+            let log: DecodeCallLog
+            static let promptId = 1
+            static let validId = 100
+            static let invalidId = 200
+            func encode(text: String, addSpecialTokens: Bool) throws -> [Int] { [] }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) throws -> String {
+                log.record(tokenIds)
+                switch tokenIds {
+                case [Self.promptId]: return "P"
+                case [Self.promptId, Self.validId]: return "Pa"
+                case [Self.validId]: return "a"
+                case [Self.validId, Self.invalidId]: return "xyz"
+                case [Self.invalidId]: return "xyz"
+                default: return ""
+                }
+            }
+            func convertTokenToId(_ token: String) -> Int? { nil }
+            func convertIdToToken(_ id: Int) -> String? { nil }
+            var bosToken: String? { nil }
+            var eosToken: String? { nil }
+            var unknownToken: String? { nil }
+            func applyChatTemplate(
+                messages: [[String: any Sendable]],
+                tools: [[String: any Sendable]]?,
+                additionalContext: [String: any Sendable]?
+            ) throws -> [Int] { [] }
+        }
+
+        let log = DecodeCallLog()
+        let tokenizer = ResettingTokenizer(log: log)
+        let handler = TextToolTokenLoopHandler(
+            tokenizer: tokenizer,
+            format: .json,
+            promptTokenIds: [ResettingTokenizer.promptId]
+        )
+        let modelConfiguration = ModelConfiguration(id: "test")
+        let (stream, task) = generateLoopTask(
+            promptTokenCount: 1,
+            modelConfiguration: modelConfiguration,
+            tokenizer: tokenizer,
+            iterator: MockIterator(remaining: [
+                ResettingTokenizer.validId,
+                ResettingTokenizer.invalidId,
+            ]),
+            handler: handler
+        )
+
+        for try await _ in stream {}
+        await task.value
+
+        // The post-reset decode must be `[invalidId]` alone — no prompt seed.
+        // Equivalently: no decode call after the throw should contain `promptId`.
+        let calls = log.calls
+        let throwIndex = calls.firstIndex(of: [
+            ResettingTokenizer.validId,
+            ResettingTokenizer.invalidId,
+        ])
+        #expect(throwIndex != nil)
+        let postResetCalls = throwIndex.map { Array(calls[($0 + 1)...]) } ?? []
+        #expect(!postResetCalls.isEmpty)
+        #expect(postResetCalls.allSatisfy { !$0.contains(ResettingTokenizer.promptId) })
     }
 
     @Test

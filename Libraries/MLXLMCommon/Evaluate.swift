@@ -1317,7 +1317,7 @@ public func generate(
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
 /// one-shot calls, but for "chat session" type calls consider using
-/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:)``
+/// ``generateTask(promptTokenIds:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:)``
 /// so that the end of the generation task can be observed.
 ///
 /// - Parameters:
@@ -1363,7 +1363,7 @@ public func generate(
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
-        promptTokenCount: input.text.tokens.size,
+        promptTokenIds: input.text.tokens.asArray(Int.self),
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
@@ -1443,7 +1443,8 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
-            format: context.configuration.toolCallFormat ?? .json
+            format: context.configuration.toolCallFormat ?? .json,
+            promptTokenIds: input.text.tokens.asArray(Int.self)
         )
     )
     return stream
@@ -1459,7 +1460,7 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> AsyncThrowingStream<Generation, Error> {
     let (stream, _) = generateTask(
-        promptTokenCount: input.text.tokens.size,
+        promptTokenIds: input.text.tokens.asArray(Int.self),
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
@@ -1475,28 +1476,31 @@ public func generate(
 /// the `task` to observe when the use of the parameters is complete.
 ///
 /// - Parameters:
-///   - promptTokenCount: number of tokens in the prompt
+///   - promptTokenIds: prompt token IDs, used for stats and to seed the
+///     streaming detokenizer at the prompt/generated boundary so the first
+///     generated chunk decodes correctly for SentencePiece/metaspace tokenizers.
 ///   - modelConfiguration: model configuration (for EOS/extra EOS tokens and tool-call format)
 ///   - tokenizer: tokenizer (for EOS id, unknown token id, and detokenization)
 ///   - iterator: token iterator
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
 /// - Returns: An `AsyncThrowingStream` that emits `Generation` values and a `Task`
 public func generateTask(
-    promptTokenCount: Int,
+    promptTokenIds: [Int],
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncThrowingStream<Generation, Error>, Task<Void, Never>) {
     generateLoopTask(
-        promptTokenCount: promptTokenCount,
+        promptTokenCount: promptTokenIds.count,
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
-            format: modelConfiguration.toolCallFormat ?? .json
+            format: modelConfiguration.toolCallFormat ?? .json,
+            promptTokenIds: promptTokenIds
         )
     )
 }
@@ -1527,7 +1531,7 @@ public func generateTokens(
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTokenTask(
-        promptTokenCount: input.text.tokens.size,
+        promptTokenIds: input.text.tokens.asArray(Int.self),
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
@@ -1612,7 +1616,7 @@ public func generateTokensTask(
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     return generateTokenTask(
-        promptTokenCount: input.text.tokens.size,
+        promptTokenIds: input.text.tokens.asArray(Int.self),
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
@@ -1628,7 +1632,8 @@ public func generateTokensTask(
 /// without detokenization or tool-call parsing.
 ///
 /// - Parameters:
-///   - promptTokenCount: number of tokens in the prompt
+///   - promptTokenIds: prompt token IDs (used for stats reporting; raw-token generation
+///     does not detokenize, so seeding does not apply here).
 ///   - modelConfiguration: model configuration (for EOS/extra EOS tokens)
 ///   - tokenizer: tokenizer (for EOS id and unknown token id)
 ///   - iterator: token iterator
@@ -1638,7 +1643,7 @@ public func generateTokensTask(
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
 /// - Returns: An `AsyncThrowingStream` that emits token IDs and a final `.info`, plus a `Task`.
 public func generateTokenTask(
-    promptTokenCount: Int,
+    promptTokenIds: [Int],
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
@@ -1646,7 +1651,7 @@ public func generateTokenTask(
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncThrowingStream<TokenGeneration, Error>, Task<Void, Never>) {
     generateLoopTask(
-        promptTokenCount: promptTokenCount,
+        promptTokenCount: promptTokenIds.count,
         modelConfiguration: modelConfiguration,
         tokenizer: tokenizer,
         iterator: iterator,
@@ -1959,7 +1964,7 @@ internal protocol TokenLoopHandler: Sendable {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
-private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
+internal struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     typealias Output = Generation
 
     private static let logger = Logger(
@@ -1971,11 +1976,15 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
     var detokenizer: StreamingDetokenizer
     let toolCallProcessor: ToolCallProcessor
 
-    init(tokenizer: Tokenizer, format: ToolCallFormat) {
+    init(tokenizer: Tokenizer, format: ToolCallFormat, promptTokenIds: [Int]) {
         self.tokenizer = tokenizer
         self.skipSpecialTokens = false
+        // Seed with the prompt tail — enough to defeat decoder cleanup at
+        // the prompt/generated boundary (vLLM uses `prompt_ids[-7:]`).
         detokenizer = StreamingDetokenizer(
-            tokenizer: tokenizer, skipSpecialTokens: skipSpecialTokens
+            tokenizer: tokenizer,
+            skipSpecialTokens: skipSpecialTokens,
+            initialTokenIds: Array(promptTokenIds.suffix(7))
         )
         toolCallProcessor = ToolCallProcessor(format: format)
     }
@@ -1992,8 +2001,12 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
             Self.logger.warning(
                 "Resetting streaming detokenizer: \(TokenizerError.invalidStreamingPrefix(tokenId: tokenId, expectedPrefix: prefix, actualString: actual).localizedDescription, privacy: .public)"
             )
+            // Recovery is mid-stream, so the prompt boundary is no longer
+            // adjacent to the next chunk: rebuild without the seed (matches
+            // vLLM's recovery path).
             detokenizer = StreamingDetokenizer(
-                tokenizer: tokenizer, skipSpecialTokens: skipSpecialTokens
+                tokenizer: tokenizer,
+                skipSpecialTokens: skipSpecialTokens
             )
             chunk = try detokenizer.consume(token)
         }
