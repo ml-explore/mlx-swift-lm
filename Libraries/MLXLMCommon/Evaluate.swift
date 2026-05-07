@@ -1940,7 +1940,7 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
-internal protocol TokenLoopHandler: Sendable {
+internal protocol TokenLoopHandler {
     associatedtype Output
 
     /// Return false to stop the loop after the consumer terminates the stream;
@@ -1964,7 +1964,7 @@ internal protocol TokenLoopHandler: Sendable {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
-internal struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
+internal struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
     private static let logger = Logger(
