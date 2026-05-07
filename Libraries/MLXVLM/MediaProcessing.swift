@@ -13,8 +13,6 @@ public struct ProcessedFrames {
     public let totalDuration: CMTime
 }
 
-private let context = CIContext()
-
 /// Collection of methods for processing media (images, video, etc.).
 ///
 /// A typical image preparation pipeline might look like this:
@@ -169,11 +167,12 @@ public enum MediaProcessing {
         let bytesPerRow = w * bytesPerPixel
 
         var data = Data(count: w * h * bytesPerPixel)
+        let renderContext = CIContext()
         data.withUnsafeMutableBytes { ptr in
-            context.render(
+            renderContext.render(
                 image, toBitmap: ptr.baseAddress!, rowBytes: bytesPerRow, bounds: image.extent,
                 format: format, colorSpace: colorSpace)
-            context.clearCaches()
+            renderContext.clearCaches()
         }
 
         var array = MLXArray(data, [h, w, 4], type: Float32.self)
