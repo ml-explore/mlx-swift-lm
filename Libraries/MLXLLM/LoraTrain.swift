@@ -7,28 +7,34 @@ import MLXNN
 import MLXOptimizers
 
 /// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
-struct LoRABatchIterator: Sequence, IteratorProtocol {
+///
+/// Tokenization is lazy: each call to `nextBatch()` encodes only the strings
+/// in the batch it returns, so a caller that stops early (e.g. via
+/// `batchCount` in `evaluate`) doesn't pay to encode unused rows.
+struct LoRABatchIterator {
 
-    let encodedDataset: [[Int]]
+    let dataset: [String]
     let batchSize: Int
+    let tokenizer: Tokenizer
 
     let train: Bool
 
     var indices: [Int]
     var index = 0
 
-    public init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) throws {
-        self.encodedDataset = try dataset.map { try tokenizer.encode(text: $0) }
+    public init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) {
+        self.dataset = dataset
         self.batchSize = batchSize
+        self.tokenizer = tokenizer
         self.train = train
 
-        self.indices = Array(0 ..< encodedDataset.count)
+        self.indices = Array(0 ..< dataset.count)
         if train {
             indices.shuffle()
         }
     }
 
-    mutating public func next() -> (MLXArray, MLXArray, MLXArray)? {
+    mutating public func nextBatch() throws -> (MLXArray, MLXArray, MLXArray)? {
         if index >= indices.count {
             if !train {
                 return nil
@@ -40,8 +46,8 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 
         let endIndex = Swift.min(index + batchSize, indices.count)
 
-        let batch = (index ..< endIndex)
-            .map { encodedDataset[indices[$0]] }
+        let batch = try (index ..< endIndex)
+            .map { try tokenizer.encode(text: dataset[indices[$0]]) }
         let lengths = batch.map { $0.count }
         let maxLength = lengths.max() ?? 0
 
@@ -187,9 +193,10 @@ public enum LoRATrain {
         var allLosses = [Float]()
         var tokenCount = 0
 
-        for (iteration, (inputs, targets, lengths)) in try LoRABatchIterator(
-            dataset: dataset, tokenizer: tokenizer, batchSize: batchSize, train: false
-        ).enumerated() {
+        var batchIterator = LoRABatchIterator(
+            dataset: dataset, tokenizer: tokenizer, batchSize: batchSize, train: false)
+        var iteration = 0
+        while let (inputs, targets, lengths) = try batchIterator.nextBatch() {
             let (losses, tokens) = loss(model, inputs, targets, lengths)
             allLosses.append((losses * tokens).item(Float.self))
             tokenCount += tokens.item(Int.self)
@@ -197,6 +204,7 @@ public enum LoRATrain {
             if batchCount != 0 && iteration + 1 >= batchCount {
                 break
             }
+            iteration += 1
         }
 
         return (sum(MLXArray(allLosses), stream: .cpu) / tokenCount).item(Float.self)
@@ -270,9 +278,10 @@ public enum LoRATrain {
 
         var start = Date.timeIntervalSinceReferenceDate
 
-        for (iteration, (inputs, targets, lengths)) in try LoRABatchIterator(
-            dataset: train, tokenizer: tokenizer, batchSize: parameters.batchSize, train: true
-        ).enumerated() {
+        var batchIterator = LoRABatchIterator(
+            dataset: train, tokenizer: tokenizer, batchSize: parameters.batchSize, train: true)
+        var iteration = 0
+        while let (inputs, targets, lengths) = try batchIterator.nextBatch() {
             // forward and backward pass
             let (resultArray, grad) = lossValueGrad(model, [inputs, targets, lengths])
             let lvalue = resultArray[0]
@@ -341,6 +350,7 @@ public enum LoRATrain {
             if iteration + 1 >= parameters.iterations {
                 break
             }
+            iteration += 1
         }
     }
 }
