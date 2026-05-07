@@ -147,3 +147,24 @@ extension Tokenizer {
         )
     }
 }
+
+@available(
+    *, unavailable,
+    message:
+        "Replaced by StreamingDetokenizer. Use tokenizer.streamingDetokenizer() and try consume(_:) in place of append(token:)/next(). See PR #271."
+)
+public struct NaiveStreamingDetokenizer {
+    public init(tokenizer: any Tokenizer) {}
+
+    @available(
+        *, unavailable,
+        message: "Use try StreamingDetokenizer.consume(_:) instead of append(token:)/next()."
+    )
+    public mutating func append(token: Int) {}
+
+    @available(
+        *, unavailable,
+        message: "Use try StreamingDetokenizer.consume(_:) instead of append(token:)/next()."
+    )
+    public mutating func next() -> String? { nil }
+}
