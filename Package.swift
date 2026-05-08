@@ -146,6 +146,14 @@ let package = Package(
             ],
             path: "Libraries/MLXHuggingFace"
         ),
+        .executableTarget(
+            name: "Gemma4MoETest",
+            dependencies: [
+                "MLXLLM", "MLXLMCommon", "BenchmarkHelpers",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Tools/Gemma4MoETest"
+        ),
     ]
 )
 
