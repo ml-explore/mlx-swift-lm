@@ -350,6 +350,7 @@ private class Gemma4AssistantDecoderLayer: Module {
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayernorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayernorm: RMSNorm
+    @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
 
     init(_ config: Gemma4AssistantTextConfiguration, layerIdx: Int) {
         self.layerType = config.layerTypes[layerIdx]
@@ -363,6 +364,7 @@ private class Gemma4AssistantDecoderLayer: Module {
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
         self._postFeedforwardLayernorm.wrappedValue = RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._layerScalar.wrappedValue = MLXArray.ones([1], dtype: .float16)
         super.init()
     }
 
@@ -382,6 +384,8 @@ private class Gemma4AssistantDecoderLayer: Module {
         out = mlp(out)
         out = postFeedforwardLayernorm(out)
         out = residual2 + out
+
+        out = out * layerScalar
 
         return out
     }
