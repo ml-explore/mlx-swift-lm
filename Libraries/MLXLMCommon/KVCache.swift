@@ -422,24 +422,40 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     ///
     /// Use `updateQuantized()` and `quantizedScaledDotProductAttention()` for zero-overhead operation.
     public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
-        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits)
-        quantizedCache.offset = self.offset
-
         if let keys = self.keys, let values = self.values {
             // Quantize the current keys and values
             let currentKeys = keys[.ellipsis, ..<offset, 0...]
             let currentValues = values[.ellipsis, ..<offset, 0...]
+            guard
+                let effectiveGroupSize = resolvedKVQuantizationGroupSize(
+                    requested: groupSize,
+                    keyHeadDim: currentKeys.dim(3),
+                    valueHeadDim: currentValues.dim(3)
+                )
+            else {
+                fatalError(
+                    "KV cache quantization requires head dimensions divisible by one of the supported group sizes (32, 64, 128). Requested group size: \(groupSize). Key head dim: \(currentKeys.dim(3)). Value head dim: \(currentValues.dim(3))."
+                )
+            }
+            let quantizedCache = QuantizedKVCache(groupSize: effectiveGroupSize, bits: bits)
+            quantizedCache.offset = self.offset
 
-            let quantizedKeys = quantized(currentKeys, groupSize: groupSize, bits: bits)
-            let quantizedValues = quantized(currentValues, groupSize: groupSize, bits: bits)
+            let quantizedKeys = quantized(
+                currentKeys, groupSize: effectiveGroupSize, bits: bits)
+            let quantizedValues = quantized(
+                currentValues, groupSize: effectiveGroupSize, bits: bits)
 
             // Set the quantized state
             quantizedCache.state = [
                 quantizedKeys.wq, quantizedKeys.scales, quantizedKeys.biases,
                 quantizedValues.wq, quantizedValues.scales, quantizedValues.biases,
             ].compactMap { $0 }
+
+            return quantizedCache
         }
 
+        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits)
+        quantizedCache.offset = self.offset
         return quantizedCache
     }
 
@@ -741,12 +757,32 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
+private func resolvedKVQuantizationGroupSize(
+    requested: Int,
+    keyHeadDim: Int,
+    valueHeadDim: Int
+) -> Int? {
+    let requested = max(1, requested)
+    let compatible = [32, 64, 128].filter {
+        keyHeadDim.isMultiple(of: $0) && valueHeadDim.isMultiple(of: $0)
+    }
+    guard !compatible.isEmpty else { return nil }
+    return compatible.min { lhs, rhs in
+        let lhsDistance = abs(lhs - requested)
+        let rhsDistance = abs(rhs - requested)
+        if lhsDistance == rhsDistance {
+            return lhs < rhs
+        }
+        return lhsDistance < rhsDistance
+    }
+}
+
 /// Quantized KV cache for memory efficiency using MLX quantization
 public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     private var keys: (MLXArray, MLXArray, MLXArray?)?
     private var values: (MLXArray, MLXArray, MLXArray?)?
     private let step: Int
-    public let groupSize: Int
+    public private(set) var groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
 
@@ -839,6 +875,24 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         let kHeadDim = keys.dim(3)
         let vHeadDim = values.dim(3)
         let prev = offset
+        let effectiveGroupSize = resolvedKVQuantizationGroupSize(
+            requested: groupSize,
+            keyHeadDim: kHeadDim,
+            valueHeadDim: vHeadDim
+        )
+        if let effectiveGroupSize,
+            effectiveGroupSize != groupSize,
+            self.keys == nil,
+            self.values == nil,
+            offset == 0
+        {
+            self.groupSize = effectiveGroupSize
+        }
+        guard effectiveGroupSize != nil else {
+            fatalError(
+                "KV cache quantization requires head dimensions divisible by one of the supported group sizes (32, 64, 128). Requested group size: \(groupSize). Key head dim: \(kHeadDim). Value head dim: \(vHeadDim)."
+            )
+        }
 
         // Check if we need to expand the cache
         if self.keys == nil || (prev + numSteps) > self.keys!.0.dim(-2) {
@@ -1812,6 +1866,20 @@ public func maybeQuantizeKVCache(
     for i in 0 ..< cache.count {
         // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
+            let state = simpleCache.state
+            if state.count == 2 {
+                let keyHeadDim = state[0].dim(3)
+                let valueHeadDim = state[1].dim(3)
+                guard
+                    resolvedKVQuantizationGroupSize(
+                        requested: kvGroupSize,
+                        keyHeadDim: keyHeadDim,
+                        valueHeadDim: valueHeadDim
+                    ) != nil
+                else {
+                    continue
+                }
+            }
             cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.

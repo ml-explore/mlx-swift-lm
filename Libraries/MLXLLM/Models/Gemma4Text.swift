@@ -175,6 +175,53 @@ private class ScaledLinear: Module {
     }
 }
 
+private enum Gemma4PositionOffset {
+    case scalar(Int)
+    case batch(MLXArray)
+}
+
+private enum Gemma4TextKVState {
+    case regular(keys: MLXArray, values: MLXArray)
+    case quantized(
+        keys: (MLXArray, MLXArray, MLXArray?),
+        values: (MLXArray, MLXArray, MLXArray?),
+        groupSize: Int,
+        bits: Int,
+        mode: QuantizationMode
+    )
+
+    var sequenceLength: Int {
+        switch self {
+        case .regular(let keys, _):
+            keys.dim(2)
+        case .quantized(let keys, _, _, _, _):
+            keys.0.dim(-2)
+        }
+    }
+}
+
+private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
+    if let batchCache = cache as? BatchPositionedKVCache {
+        // Snapshot the per-sequence offsets before cache.update(...) advances them.
+        .batch(batchCache.batchOffset + 0)
+    } else {
+        .scalar(cache?.offset ?? 0)
+    }
+}
+
+private func gemma4ApplyRotaryPosition<R: RoPELayer>(
+    _ rope: R,
+    to x: MLXArray,
+    offset: Gemma4PositionOffset
+) -> MLXArray {
+    switch offset {
+    case .scalar(let value):
+        rope(x, offset: value)
+    case .batch(let values):
+        rope(x, offset: values)
+    }
+}
+
 // MARK: - Attention
 
 private class Gemma4Attention: Module {
@@ -255,27 +302,25 @@ private class Gemma4Attention: Module {
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
-        sharedKV: (MLXArray, MLXArray)? = nil,
-        positionOffset: RoPEOffset? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray), RoPEOffset?) {
+        sharedKV: Gemma4TextKVState? = nil,
+        positionOffset: Gemma4PositionOffset? = nil
+    ) -> (MLXArray, Gemma4TextKVState, Gemma4PositionOffset) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x).reshaped(B, L, nHeads, effectiveHeadDim)
         queries = qNorm(queries)
 
-        let keys: MLXArray
-        let values: MLXArray
-        let activePositionOffset = positionOffset ?? cache?.ropeOffset
+        let activePositionOffset = positionOffset ?? gemma4CapturePositionOffset(from: cache)
+        let kvState: Gemma4TextKVState
 
-        if let (sharedK, sharedV) = sharedKV {
-            // KV-shared layers use pre-computed KV from an earlier layer
-            keys = sharedK
-            values = sharedV
+        if let sharedKV {
+            // KV-shared layers use pre-computed KV from an earlier layer.
+            kvState = sharedKV
         } else {
-            var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
-            k = kNorm(k)
+            let kRaw = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
+            var k = kNorm(kRaw)
             k = k.transposed(0, 2, 1, 3)
-            k = applyRotaryPosition(rope, to: k, offset: activePositionOffset)
+            k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
 
             var v: MLXArray
             if let vProj {
@@ -283,44 +328,69 @@ private class Gemma4Attention: Module {
                 v = vNorm(v)
                 v = v.transposed(0, 2, 1, 3)
             } else {
-                // k is already transposed to (B, nKvHeads, L, head_dim);
-                // skip the second transpose to avoid reversing it.
-                v = vNorm(k)
+                v = vNorm(kRaw)
+                v = v.transposed(0, 2, 1, 3)
             }
 
-            if let cache {
+            if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+                let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
+                    keys: k, values: v)
+                kvState = .quantized(
+                    keys: quantizedKeys,
+                    values: quantizedValues,
+                    groupSize: quantizedCache.groupSize,
+                    bits: quantizedCache.bits,
+                    mode: quantizedCache.mode
+                )
+            } else if let cache {
                 let (updatedK, updatedV) = cache.update(keys: k, values: v)
-                keys = updatedK
-                values = updatedV
+                kvState = .regular(keys: updatedK, values: updatedV)
             } else {
-                keys = k
-                values = v
+                kvState = .regular(keys: k, values: v)
             }
         }
 
         queries = queries.transposed(0, 2, 1, 3)
-        queries = applyRotaryPosition(rope, to: queries, offset: activePositionOffset)
+        queries = gemma4ApplyRotaryPosition(rope, to: queries, offset: activePositionOffset)
 
         // Adjust mask if cache size differs from mask size
         var adjustedMask = mask
         if case .array(let maskArray) = mask {
-            let keysSeqLen = keys.dim(2)
+            let keysSeqLen = kvState.sequenceLength
             if maskArray.dim(-1) != keysSeqLen {
                 adjustedMask = .array(maskArray[.ellipsis, 0 ..< keysSeqLen])
             }
         }
 
-        let output = MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            scale: scale,
-            mask: adjustedMask ?? .none
-        )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
+        let attentionOutput: MLXArray =
+            switch kvState {
+            case .regular(let keys, let values):
+                MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    scale: scale,
+                    mask: adjustedMask ?? .none
+                )
+            case .quantized(let keys, let values, let groupSize, let bits, let mode):
+                quantizedScaledDotProductAttention(
+                    queries: queries,
+                    quantizedKeys: keys,
+                    quantizedValues: values,
+                    scale: scale,
+                    mask: adjustedMask ?? .none,
+                    groupSize: groupSize,
+                    bits: bits,
+                    mode: mode
+                )
+            }
 
-        return (oProj(output), (keys, values), activePositionOffset)
+        let output =
+            attentionOutput
+            .transposed(0, 2, 1, 3)
+            .reshaped(B, L, -1)
+
+        return (oProj(output), kvState, activePositionOffset)
     }
 }
 
@@ -409,9 +479,9 @@ private class Gemma4DecoderLayer: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
-        sharedKV: (MLXArray, MLXArray)? = nil,
-        positionOffset: RoPEOffset? = nil
-    ) -> (MLXArray, (MLXArray, MLXArray), RoPEOffset?) {
+        sharedKV: Gemma4TextKVState? = nil,
+        positionOffset: Gemma4PositionOffset? = nil
+    ) -> (MLXArray, Gemma4TextKVState, Gemma4PositionOffset) {
         let residual = x
 
         let h = inputLayernorm(x)
@@ -580,7 +650,7 @@ private class Gemma4TextModelInner: Module {
         }
 
         // Forward through layers, tracking intermediate KV pairs for sharing
-        var intermediates = [(kv: (MLXArray, MLXArray)?, positionOffset: RoPEOffset?)](
+        var intermediates = [(kv: Gemma4TextKVState?, positionOffset: Gemma4PositionOffset?)](
             repeating: (nil, nil), count: config.numHiddenLayers)
 
         for (idx, layer) in layers.enumerated() {
