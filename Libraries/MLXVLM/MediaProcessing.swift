@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import AVFoundation
-import CoreImage.CIFilterBuiltins
+@preconcurrency import CoreImage.CIFilterBuiltins
 import MLX
 import MLXLMCommon
 
@@ -12,6 +12,8 @@ public struct ProcessedFrames {
     public let timestamps: [CMTime]
     public let totalDuration: CMTime
 }
+
+private let context = CIContext()
 
 /// Collection of methods for processing media (images, video, etc.).
 ///
@@ -167,12 +169,11 @@ public enum MediaProcessing {
         let bytesPerRow = w * bytesPerPixel
 
         var data = Data(count: w * h * bytesPerPixel)
-        let renderContext = CIContext()
         data.withUnsafeMutableBytes { ptr in
-            renderContext.render(
+            context.render(
                 image, toBitmap: ptr.baseAddress!, rowBytes: bytesPerRow, bounds: image.extent,
                 format: format, colorSpace: colorSpace)
-            renderContext.clearCaches()
+            context.clearCaches()
         }
 
         var array = MLXArray(data, [h, w, 4], type: Float32.self)
