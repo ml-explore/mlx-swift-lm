@@ -1034,8 +1034,10 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             batchInputIds = `where`(
                 mask[batchIdx, 0...] .== 1, batchInputIds, zeros(like: batchInputIds))
 
-            let imageNums = ((batchInputIds .== MLXArray(imageTokenId)).asType(.int32).sum()).item(Int.self)
-            let videoNums = ((batchInputIds .== MLXArray(videoTokenId)).asType(.int32).sum()).item(Int.self)
+            let imageNums = ((batchInputIds .== MLXArray(imageTokenId)).asType(.int32).sum()).item(
+                Int.self)
+            let videoNums = ((batchInputIds .== MLXArray(videoTokenId)).asType(.int32).sum()).item(
+                Int.self)
 
             let inputTokens = batchInputIds.asArray(Int32.self).map { Int($0) }
             var llmPosIdsList: [MLXArray] = []
