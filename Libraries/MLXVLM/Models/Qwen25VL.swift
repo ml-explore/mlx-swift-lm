@@ -45,9 +45,10 @@ private enum Language {
         let scale: Float
         let mropeSection: [Int]      // cumulative section indices (for half-dim split)
         let mropeSectionRaw: [Int]   // raw section sizes [16, 24, 24] (for full-dim split)
-        // Wrapped in a class to hide from Module's weight loading (not a trained weight)
-        private class InvFreqBox { let value: MLXArray; init(_ v: MLXArray) { value = v } }
-        private let _invFreqBox: InvFreqBox
+        // Leading underscore makes Module's weight loader skip this property —
+        // invFreq is computed from ropeTheta+headDim, not a trained weight.
+        // (See `parameterIsValid(_:)` in mlx-swift's Module.)
+        private let _invFreq: MLXArray
 
         @ModuleInfo(key: "q_proj") var wq: Linear
         @ModuleInfo(key: "k_proj") var wk: Linear
@@ -89,7 +90,7 @@ private enum Language {
             // inv_freq = 1.0 / (theta ^ (arange(0, dim, 2) / dim))
             let freqIndices = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
             let base = MLXArray(args.ropeTheta)
-            self._invFreqBox = InvFreqBox(1.0 / pow(base, freqIndices / Float(headDim)))
+            self._invFreq = 1.0 / pow(base, freqIndices / Float(headDim))
 
             self._rotaryEmbedding.wrappedValue = RoPE(
                 dimensions: headDim, traditional: args.ropeTraditional, base: args.ropeTheta)
@@ -99,7 +100,7 @@ private enum Language {
         /// Matches Python apply_mrope: start with temporal, overwrite H/W ranges
         private func mropeCosSin(positionIds: MLXArray) -> (MLXArray, MLXArray) {
             // positionIds: [3, batch, seq]
-            let invFreqExpanded = _invFreqBox.value.reshaped(1, 1, -1, 1)  // [1, 1, dim/2, 1]
+            let invFreqExpanded = _invFreq.reshaped(1, 1, -1, 1)  // [1, 1, dim/2, 1]
             let posExpanded = positionIds[0..., 0..., .newAxis, 0...].asType(.float32)  // [3, batch, 1, seq]
             var freqs = matmul(invFreqExpanded, posExpanded)  // [3, batch, dim/2, seq]
             freqs = freqs.transposed(0, 1, 3, 2)  // [3, batch, seq, dim/2]
