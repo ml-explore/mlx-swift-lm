@@ -364,6 +364,18 @@ class Gemma4Attention: Module {
 
 // MARK: - MLP
 
+/// Compiled geglu fusion that matches Python mlx-vlm's `@partial(mx.compile)`-wrapped
+/// `geglu(gate, x) = gelu_approx(gate) * x`. Without compile-level fusion the gelu
+/// output is materialised in bf16 between gelu and the elementwise multiply, which
+/// over 35 decoder layers adds up to a token-divergent drift versus the Python
+/// reference. Wrapping the whole expression in `compile` keeps the gelu output in
+/// fp32 registers across the multiply, matching Python's fused kernel.
+private let compiledGemma4Geglu: @Sendable (MLXArray, MLXArray) -> MLXArray = {
+    compile(shapeless: true) { gate, x in
+        geluApproximate(gate) * x
+    }
+}()
+
 class Gemma4MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -383,7 +395,7 @@ class Gemma4MLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(geluApproximate(gateProj(x)) * upProj(x))
+        downProj(compiledGemma4Geglu(gateProj(x), upProj(x)))
     }
 }
 
