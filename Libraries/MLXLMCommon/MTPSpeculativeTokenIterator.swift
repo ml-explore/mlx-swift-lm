@@ -77,6 +77,17 @@ public protocol MTPDrafterModel {
         positionOffset: Int,
         blockSize: Int
     ) -> [Int]
+
+    /// Lazy variant of ``draftBlock`` returning a `[1, blockSize - 1]` token
+    /// tensor. The iterator uses this to keep the entire draft + verify path
+    /// pipelined (one CPU sync per round instead of two).
+    func draftBlockArray(
+        bonusToken: MLXArray,
+        targetLastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionOffset: Int,
+        blockSize: Int
+    ) -> MLXArray
 }
 
 /// Generator of tokens using Multi-Token Prediction (MTP) speculative decoding.
@@ -221,30 +232,44 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let sharedKV = extractSharedKV()
 
-        let candidates = drafter.draftBlock(
-            bonusToken: bonusToken,
+        // Drafter runs entirely lazily on the default stream — no per-step
+        // CPU round-trip. Mirrors Python mlx-vlm's pattern of issuing the
+        // drafter then immediately starting the verify forward without first
+        // materialising drafter tokens.
+        let bonusArr = MLXArray([Int32(bonusToken)]).reshaped([1, 1])
+        let draftTokensBL = drafter.draftBlockArray(
+            bonusToken: bonusArr,
             targetLastHidden: lastHidden,
             sharedKV: sharedKV,
             positionOffset: positionOffset,
             blockSize: effectiveBlock
         )
+        // [1, effectiveBlock - 1]
+        asyncEval(draftTokensBL)
 
-        // Verify input: [bonus, c0, ..., c_{K-2}] of length effectiveBlock
-        var verifyInts: [Int32] = [Int32(bonusToken)]
-        verifyInts.append(contentsOf: candidates.map { Int32($0) })
-        let verifyArr = MLXArray(verifyInts).reshaped([1, effectiveBlock])
-
-        // [debug] force eval to break any lazy graph fusion that might span
-        // verify + drafter. Mirrors Python ref's `mx.async_eval(...)` call
-        // pattern between draft_block and verify forward.
+        // Verify input chains directly off the drafter's lazy output —
+        // [bonus, c0, ..., c_{K-2}] of length effectiveBlock.
+        let verifyArr = concatenated(
+            [bonusArr.asType(draftTokensBL.dtype), draftTokensBL], axis: -1)
         let (vLogits, vHidden) = target.forwardWithHidden(verifyArr, cache: cache)
-        eval(vLogits, vHidden)
-        // vLogits: [1, effectiveBlock, V], vHidden: [1, effectiveBlock, H]
+        // Don't force-materialise vLogits ([1, effectiveBlock, 262 144]) —
+        // chain argMax and let the backend fuse the reduction into the forward
+        // tail. Only the [1, effectiveBlock] argmax tokens need to land on
+        // the CPU for the speculative-walk decision.
+        let mainTokensArr = argMax(vLogits, axis: -1)
+        asyncEval(mainTokensArr, vHidden)
 
-        // Greedy: argmax over vocab dim.
-        let mainTokensArr = argMax(vLogits, axis: -1)  // [1, effectiveBlock]
-        asyncEval(mainTokensArr)
-        let mainTokens = mainTokensArr.reshaped([effectiveBlock]).asArray(Int.self)
+        // Single CPU sync — concatenate draft + main tokens and materialise
+        // them together so the round only crosses the GPU/CPU boundary once.
+        let combined = concatenated(
+            [
+                draftTokensBL.reshaped([effectiveBlock - 1]).asType(.int32),
+                mainTokensArr.reshaped([effectiveBlock]).asType(.int32),
+            ],
+            axis: 0
+        ).asArray(Int.self)
+        let candidates = Array(combined[0 ..< (effectiveBlock - 1)])
+        let mainTokens = Array(combined[(effectiveBlock - 1)...])
 
         var accepted = 0
         for i in 0 ..< (effectiveBlock - 1) {

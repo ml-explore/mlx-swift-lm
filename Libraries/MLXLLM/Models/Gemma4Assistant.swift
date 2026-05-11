@@ -209,42 +209,60 @@ private final class Gemma4AssistantMaskedEmbedder: Module {
     /// hidden: [B, L, hidden_size], lmHeadWeight: [vocab_size, hidden_size]
     /// Returns: [B, L, vocab_size]
     func callAsFunction(_ hidden: MLXArray, lmHeadWeight: MLXArray) -> MLXArray {
+        let (selectedLogits, selectedCanonical) = candidateLogits(
+            hidden, lmHeadWeight: lmHeadWeight)
         let B = hidden.dim(0)
         let L = hidden.dim(1)
 
-        // Cluster scores → top-K cluster indices.
-        let centroidLogits = centroids(hidden)  // [B, L, num_centroids]
+        // Lazy mask fill: keep `min(selected) - 1` as an MLXArray so the entire
+        // graph remains pipelined. Eagerly extracting the scalar via `.item()`
+        // forces a GPU sync per drafter step, serialising the loop.
+        let maskValue = selectedLogits.min() - 1.0
+        let scatterIdx = selectedCanonical.reshaped([B, L, -1])
+        let outArr = broadcast(maskValue.asType(hidden.dtype), to: [B, L, vocabSize])
+        return putAlong(outArr, scatterIdx, values: selectedLogits, axis: -1)
+    }
+
+    /// Greedy short-circuit: returns the top-1 canonical token id directly,
+    /// skipping the full-vocab scatter. Drafter callers that only need argmax
+    /// avoid materialising a `[B, L, vocab_size]` tensor (262 144-wide for
+    /// Gemma 4) every drafter step.
+    func argMaxToken(_ hidden: MLXArray, lmHeadWeight: MLXArray) -> MLXArray {
+        let (selectedLogits, selectedCanonical) = candidateLogits(
+            hidden, lmHeadWeight: hidden.dtype == .float32 ? lmHeadWeight : lmHeadWeight)
+        // selectedLogits: [B, L, top_k*vsc], selectedCanonical: [B, L, top_k, vsc]
+        let argIdx = argMax(selectedLogits, axis: -1)  // [B, L]
+        let flatCanonical = selectedCanonical.reshaped([
+            selectedCanonical.dim(0), selectedCanonical.dim(1), -1,
+        ])  // [B, L, top_k*vsc]
+        return takeAlong(flatCanonical, argIdx.expandedDimensions(axis: -1), axis: -1)
+            .squeezed(axis: -1)  // [B, L]
+    }
+
+    private func candidateLogits(_ hidden: MLXArray, lmHeadWeight: MLXArray) -> (
+        logits: MLXArray, canonical: MLXArray
+    ) {
+        let B = hidden.dim(0)
+        let L = hidden.dim(1)
+
+        let centroidLogits = centroids(hidden)
         let topkIdx = MLX.argPartition(
             centroidLogits, kth: numCentroids - topK, axis: -1)[
                 .ellipsis, (numCentroids - topK)...
-            ]  // [B, L, top_k]
-
-        // Reshape ordering to [num_centroids, vocab_size_per_centroid].
+            ]
         let ordering = tokenOrdering.reshaped([numCentroids, vocabSizePerCentroid])
-
-        // selected_canonical: [B, L, top_k, vsc]
         let selectedCanonical = ordering[topkIdx]
 
-        // Gather embeddings: lmHeadWeight[selected_canonical] → [B, L, top_k * vsc, hidden]
         let flatIdx = selectedCanonical.reshaped([-1])
         let selectedEmb =
             lmHeadWeight[flatIdx]
             .reshaped([B, L, topK * vocabSizePerCentroid, hiddenSize])
 
-        // selected_logits = h @ E.T
-        let h4 = hidden.expandedDimensions(axis: -2)  // [B, L, 1, hidden]
-        let eT = selectedEmb.swappedAxes(-1, -2)  // [B, L, hidden, top_k*vsc]
-        let selectedLogits = matmul(h4, eT).squeezed(axis: -2)  // [B, L, top_k*vsc]
+        let h4 = hidden.expandedDimensions(axis: -2)
+        let eT = selectedEmb.swappedAxes(-1, -2)
+        let selectedLogits = matmul(h4, eT).squeezed(axis: -2)
 
-        let maskValue = selectedLogits.min().item(Float.self) - 1.0
-
-        let scatterIdx = selectedCanonical.reshaped([B, L, -1])  // [B, L, top_k*vsc]
-        let outArr = MLXArray.full(
-            [B, L, vocabSize],
-            values: MLXArray(maskValue).asType(hidden.dtype),
-            dtype: hidden.dtype
-        )
-        return putAlong(outArr, scatterIdx, values: selectedLogits, axis: -1)
+        return (selectedLogits, selectedCanonical)
     }
 }
 
@@ -340,6 +358,20 @@ public class Gemma4AssistantDraftModel: Module, BaseLanguageModel {
         return lmHead!(hidden)
     }
 
+    /// Greedy short-circuit: returns the argmax token directly. When the
+    /// drafter is wired with a centroid-routed `masked_embedding` head, this
+    /// avoids materialising a `[B, L, vocab_size]` tensor (262 144-wide for
+    /// Gemma 4) every drafter step — the full-vocab scatter inside
+    /// `Gemma4AssistantMaskedEmbedder.callAsFunction` is the dominant per-step
+    /// cost when sampling is greedy and only the argmax matters.
+    private func argMaxToken(_ hidden: MLXArray) -> MLXArray {
+        if let masked = maskedEmbedding {
+            return masked.argMaxToken(hidden, lmHeadWeight: model.embedTokens.weight)
+        }
+        let logits = computeLogits(hidden)
+        return argMax(logits, axis: -1)
+    }
+
     /// One drafter forward.
     ///
     /// - Parameters:
@@ -356,17 +388,58 @@ public class Gemma4AssistantDraftModel: Module, BaseLanguageModel {
         sharedKV: [String: (MLXArray, MLXArray)],
         positionOffset: Int
     ) -> (MLXArray, MLXArray) {
+        let normed = forwardHidden(
+            inputsEmbeds: inputsEmbeds,
+            sharedKV: sharedKV,
+            positionOffset: positionOffset
+        )
+        let lastHidden = postProjection(normed)
+        let logits = computeLogits(normed)
+        return (lastHidden, logits)
+    }
+
+    /// Greedy variant: returns `(newLastHidden, predictedTokenId)` skipping the
+    /// full-vocab logits materialisation when ``maskedEmbedding`` is wired.
+    fileprivate func forwardGreedy(
+        inputsEmbeds: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionOffset: Int,
+        masks: [String: MLXFast.ScaledDotProductAttentionMaskMode]? = nil
+    ) -> (MLXArray, MLXArray) {
+        let normed = forwardHidden(
+            inputsEmbeds: inputsEmbeds,
+            sharedKV: sharedKV,
+            positionOffset: positionOffset,
+            masks: masks
+        )
+        let lastHidden = postProjection(normed)
+        let nextTok = argMaxToken(normed)
+        return (lastHidden, nextTok)
+    }
+
+    private func forwardHidden(
+        inputsEmbeds: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionOffset: Int,
+        masks: [String: MLXFast.ScaledDotProductAttentionMaskMode]? = nil
+    ) -> MLXArray {
         let textCfg = config.textConfig
         var h = preProjection(inputsEmbeds)
         let queryLen = h.dim(1)
 
-        let masks = makeDrafterMasks(
-            sharedKV: sharedKV,
-            queryLen: queryLen,
-            queryOffset: positionOffset,
-            slidingWindow: textCfg.slidingWindow,
-            dtype: h.dtype
-        )
+        // Mask shape depends only on (sharedKV layer-type lengths, queryLen,
+        // positionOffset, sliding window, dtype) — all constant within a draft
+        // block. Allow callers to pre-compute it once and reuse across the
+        // `blockSize - 1` per-step forwards inside ``draftBlock``.
+        let activeMasks =
+            masks
+            ?? makeDrafterMasks(
+                sharedKV: sharedKV,
+                queryLen: queryLen,
+                queryOffset: positionOffset,
+                slidingWindow: textCfg.slidingWindow,
+                dtype: h.dtype
+            )
 
         let offset = Gemma4PositionOffset.scalar(positionOffset)
         for layer in model.layers {
@@ -374,7 +447,7 @@ public class Gemma4AssistantDraftModel: Module, BaseLanguageModel {
             guard let kv = sharedKV[lt] else {
                 fatalError("Drafter layer of type \(lt) has no shared KV provided")
             }
-            let mask = masks[lt] ?? .none
+            let mask = activeMasks[lt] ?? .none
             let (out, _, _) = layer(
                 h,
                 mask: mask,
@@ -386,25 +459,70 @@ public class Gemma4AssistantDraftModel: Module, BaseLanguageModel {
             h = out
         }
 
-        let normed = model.norm(h)
-        let lastHidden = postProjection(normed)
-        let logits = computeLogits(normed)
-        return (lastHidden, logits)
+        return model.norm(h)
     }
 
-    /// Autoregressive K-step drafting.
+    /// Autoregressive K-step drafting (returns lazy MLXArray).
     ///
-    /// - Parameters:
-    ///   - bonusToken: most recently accepted target token (will be the first
-    ///     verify position, not drafted here).
-    ///   - targetLastHidden: `[B, 1, backboneHiddenSize]` — target's last
-    ///     hidden state at the bonus token's position.
-    ///   - sharedKV: target's last full-/sliding-attention K/V.
-    ///   - positionOffset: bonus token's absolute position (used as RoPE
-    ///     position for all draft steps within this block).
-    ///   - blockSize: total verify-block size; the drafter generates
-    ///     `blockSize - 1` candidate tokens.
-    /// - Returns: drafted token IDs `[Int]` of length `blockSize - 1` (greedy).
+    /// Mirrors Python mlx-vlm's ``Gemma4AssistantDraftModel.draft_block``.
+    /// Returns a `[1, blockSize - 1]` token tensor that the iterator can
+    /// concatenate with the bonus token without materialising it on the CPU.
+    /// Keeping the result lazy lets the verify forward issue on a separate
+    /// stream concurrently — see ``MTPSpeculativeTokenIterator`` — instead of
+    /// blocking the round on a per-block CPU round-trip.
+    public func draftBlockArray(
+        bonusToken: MLXArray,
+        targetLastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionOffset: Int,
+        blockSize: Int
+    ) -> MLXArray {
+        precondition(blockSize >= 2, "blockSize must be ≥ 2")
+        guard let inputEmbed = targetEmbedTokens else {
+            fatalError("bind(target:) must be called before draftBlock(...)")
+        }
+
+        var hPrev = targetLastHidden
+        var tok = bonusToken
+        var tokenArrays: [MLXArray] = []
+        tokenArrays.reserveCapacity(blockSize - 1)
+
+        // Mask depends only on per-block-constant inputs (sharedKV lengths,
+        // positionOffset, sliding window, dtype). Build it once and reuse for
+        // every per-step forward instead of rebuilding `blockSize - 1` times.
+        let blockMasks = makeDrafterMasks(
+            sharedKV: sharedKV,
+            queryLen: 1,
+            queryOffset: positionOffset,
+            slidingWindow: config.textConfig.slidingWindow,
+            dtype: targetLastHidden.dtype
+        )
+
+        // Keep tokens as lazy MLXArrays across all draft steps. Use the greedy
+        // short-circuit so the centroid-routed lm head returns the predicted
+        // token directly instead of materialising a 262 144-wide vocab tensor.
+        for _ in 0 ..< (blockSize - 1) {
+            let tokEmbed = inputEmbed(tok) * targetEmbedScale
+            let inputsEmbeds = concatenated([tokEmbed, hPrev], axis: -1)
+            let (newHidden, nextTokBL) = forwardGreedy(
+                inputsEmbeds: inputsEmbeds,
+                sharedKV: sharedKV,
+                positionOffset: positionOffset,
+                masks: blockMasks
+            )
+            // nextTokBL is [B, L]; we want the last position as [B, 1].
+            let nextTok = nextTokBL[0..., (nextTokBL.dim(-1) - 1)...]
+            tokenArrays.append(nextTok)
+            hPrev = newHidden
+            tok = nextTok
+        }
+
+        // [B, blockSize - 1] — entirely lazy. Caller decides when to sync.
+        return concatenated(tokenArrays, axis: -1)
+    }
+
+    /// Eager-int variant retained for callers (e.g. tests) that want the CPU
+    /// list. The iterator should prefer ``draftBlockArray`` for pipelining.
     public func draftBlock(
         bonusToken: Int,
         targetLastHidden: MLXArray,
@@ -412,32 +530,16 @@ public class Gemma4AssistantDraftModel: Module, BaseLanguageModel {
         positionOffset: Int,
         blockSize: Int
     ) -> [Int] {
-        precondition(blockSize >= 2, "blockSize must be ≥ 2")
-        guard let inputEmbed = targetEmbedTokens else {
-            fatalError("bind(target:) must be called before draftBlock(...)")
-        }
-
-        var hPrev = targetLastHidden
-        var tok = MLXArray([Int32(bonusToken)]).reshaped([1, 1])
-        var out: [Int] = []
-        out.reserveCapacity(blockSize - 1)
-
-        for _ in 0 ..< (blockSize - 1) {
-            let tokEmbed = inputEmbed(tok) * targetEmbedScale
-            let inputsEmbeds = concatenated([tokEmbed, hPrev], axis: -1)
-            let (newHidden, logits) = forward(
-                inputsEmbeds: inputsEmbeds,
-                sharedKV: sharedKV,
-                positionOffset: positionOffset
-            )
-            let nextTok = argMax(logits[0..., -1, 0...], axis: -1)
-            asyncEval(nextTok)
-            let id = nextTok.item(Int.self)
-            out.append(id)
-            hPrev = newHidden
-            tok = MLXArray([Int32(id)]).reshaped([1, 1])
-        }
-        return out
+        let bonusArr = MLXArray([Int32(bonusToken)]).reshaped([1, 1])
+        let tokens = draftBlockArray(
+            bonusToken: bonusArr,
+            targetLastHidden: targetLastHidden,
+            sharedKV: sharedKV,
+            positionOffset: positionOffset,
+            blockSize: blockSize
+        )
+        asyncEval(tokens)
+        return tokens.reshaped([-1]).asArray(Int.self)
     }
 
     /// Sanitize HF / mlx-community checkpoint weights.
