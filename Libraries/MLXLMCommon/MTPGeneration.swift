@@ -160,17 +160,18 @@ public struct MTPVerifier {
                 let residual = maximum(targetProbs - draftProbs, MLXArray(0.0))
                 let residualSum = residual.sum().item(Float.self)
                 if residualSum > epsilon {
-                    nextToken = categorical(residual / residualSum).item(Int.self)
+                    let normalized = residual / residualSum
+                    nextToken = categorical(log(normalized + epsilon)).item(Int.self)
                 } else {
-                    nextToken = categorical(targetProbs).item(Int.self)
+                    nextToken = categorical(log(targetProbs + epsilon)).item(Int.self)
                 }
                 break
             }
         }
 
         if nextToken == nil {
-            let bonusLogits = targetLogits[n].asType(.float32)
-            nextToken = categorical(softmax(bonusLogits / temperature)).item(Int.self)
+            let bonusLogits = targetLogits[n].asType(.float32).squeezed()
+            nextToken = categorical(bonusLogits / temperature).item(Int.self)
         }
 
         return MTPVerificationResult(
@@ -303,7 +304,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
             // Forward the remaining tokens through MTP-capable path to get hidden states
             let mtpOutput = backbone.forwardMTP(y[text: .newAxis].tokens, cache: cache)
-            lastHiddenState = mtpOutput.hiddenStates
+            // Keep only the last position — the drafter needs [1, 1, hidden_size]
+            let lastPos = mtpOutput.hiddenStates.dim(1) - 1
+            lastHiddenState = mtpOutput.hiddenStates[0..., lastPos..<(lastPos + 1), 0...]
 
             var logits = mtpOutput.logits[0..., -1, 0...]
             logits = processor?.process(logits: logits) ?? logits
