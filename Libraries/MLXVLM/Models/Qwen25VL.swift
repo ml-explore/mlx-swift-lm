@@ -798,10 +798,15 @@ public struct Qwen25VLProcessor: UserInputProcessor {
 
         // image_processing_qwen2_vl._preprocess
         let size = images[0].extent.size
+        let factor = config.patchSize * config.mergeSize
+        // Qwen2.5-VL ships a very large max_pixels; default to the budget the
+        // model card recommends (1280 * 28 * 28), override-able via `processing`.
+        let maxPixels = processing?.maxPixels ?? min(config.size.maxPixels, 1280 * factor * factor)
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(size.height), width: Int(size.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
+            factor: factor,
+            minPixels: processing?.minPixels ?? config.size.minPixels,
+            maxPixels: maxPixels)
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         let processedImages =

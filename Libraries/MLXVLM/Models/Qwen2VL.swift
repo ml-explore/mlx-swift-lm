@@ -540,12 +540,16 @@ public struct Qwen2VLProcessor: UserInputProcessor {
         let images = images.map { MediaProcessing.apply($0, processing: processing) }
 
         // image_processing_qwen2_vl._preprocess
-
         let size = images[0].extent.size
+        let factor = config.patchSize * config.mergeSize
+        // Default to the image budget the model card recommends
+        // (1280 * 28 * 28), override-able via `processing`.
+        let maxPixels = processing?.maxPixels ?? min(config.maxPixels, 1280 * factor * factor)
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(size.height), width: Int(size.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.minPixels, maxPixels: config.maxPixels)
+            factor: factor,
+            minPixels: processing?.minPixels ?? config.minPixels,
+            maxPixels: maxPixels)
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         let processedImages = images.map { image in
