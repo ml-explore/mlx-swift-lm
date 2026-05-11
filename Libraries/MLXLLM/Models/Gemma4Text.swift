@@ -147,7 +147,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
 
 // MARK: - Helper Modules
 
-private class RMSNormNoScale: Module {
+class RMSNormNoScale: Module {
     let eps: Float
 
     init(eps: Float = 1e-6) {
@@ -175,12 +175,12 @@ private class ScaledLinear: Module {
     }
 }
 
-private enum Gemma4PositionOffset {
+enum Gemma4PositionOffset {
     case scalar(Int)
     case batch(MLXArray)
 }
 
-private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
+func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4PositionOffset {
     if let batchCache = cache as? BatchPositionedKVCache {
         // Snapshot the per-sequence offsets before cache.update(...) advances them.
         .batch(batchCache.batchOffset + 0)
@@ -189,7 +189,7 @@ private func gemma4CapturePositionOffset(from cache: KVCache?) -> Gemma4Position
     }
 }
 
-private func gemma4ApplyRotaryPosition<R: RoPELayer>(
+func gemma4ApplyRotaryPosition<R: RoPELayer>(
     _ rope: R,
     to x: MLXArray,
     offset: Gemma4PositionOffset
@@ -204,7 +204,7 @@ private func gemma4ApplyRotaryPosition<R: RoPELayer>(
 
 // MARK: - Attention
 
-private class Gemma4Attention: Module {
+class Gemma4Attention: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
     let layerType: String
@@ -213,24 +213,26 @@ private class Gemma4Attention: Module {
     let nHeads: Int
     let nKvHeads: Int
     let useKeqV: Bool
+    let kvSharedOnly: Bool
     let scale: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
-    @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
+    @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale?
 
     @ModuleInfo var rope: RoPELayer
 
-    init(_ config: Gemma4TextConfiguration, layerIdx: Int) {
+    init(_ config: Gemma4TextConfiguration, layerIdx: Int, kvSharedOnly: Bool = false) {
         self.config = config
         self.layerIdx = layerIdx
         self.layerType = config.layerTypes[layerIdx]
         self.isSliding = layerType == "sliding_attention"
+        self.kvSharedOnly = kvSharedOnly
 
         // Full attention uses globalHeadDim, sliding uses headDim
         self.effectiveHeadDim =
@@ -250,15 +252,22 @@ private class Gemma4Attention: Module {
         self.scale = 1.0
 
         self._qProj.wrappedValue = Linear(dim, nHeads * effectiveHeadDim, bias: false)
-        self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        if !useKeqV {
-            self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        }
         self._oProj.wrappedValue = Linear(nHeads * effectiveHeadDim, dim, bias: false)
-
         self._qNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
+
+        // K / V projections + norms are skipped when this layer always reads
+        // K/V from another source (MTP drafter mode).
+        if !kvSharedOnly {
+            self._kProj.wrappedValue = Linear(
+                dim, nKvHeads * effectiveHeadDim, bias: false)
+            if !useKeqV {
+                self._vProj.wrappedValue = Linear(
+                    dim, nKvHeads * effectiveHeadDim, bias: false)
+            }
+            self._kNorm.wrappedValue = RMSNorm(
+                dimensions: effectiveHeadDim, eps: config.rmsNormEps)
+            self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
+        }
 
         // RoPE: sliding uses default, full uses proportional with partial rotation
         if isSliding {
@@ -298,9 +307,13 @@ private class Gemma4Attention: Module {
             // KV-shared layers use pre-computed KV from an earlier layer
             keys = sharedK
             values = sharedV
+        } else if kvSharedOnly {
+            fatalError(
+                "Gemma4Attention initialised with kvSharedOnly=true requires sharedKV "
+                    + "to be passed for every forward call.")
         } else {
-            var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
-            k = kNorm(k)
+            var k = kProj!(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
+            k = kNorm!(k)
             k = k.transposed(0, 2, 1, 3)
             k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
 
@@ -310,7 +323,7 @@ private class Gemma4Attention: Module {
             } else {
                 v = k
             }
-            v = vNorm(v)
+            v = vNorm!(v)
             v = v.transposed(0, 2, 1, 3)
 
             if let cache {
@@ -351,7 +364,19 @@ private class Gemma4Attention: Module {
 
 // MARK: - MLP
 
-private class Gemma4MLP: Module {
+/// Compiled geglu fusion that matches Python mlx-vlm's `@partial(mx.compile)`-wrapped
+/// `geglu(gate, x) = gelu_approx(gate) * x`. Without compile-level fusion the gelu
+/// output is materialised in bf16 between gelu and the elementwise multiply, which
+/// over 35 decoder layers adds up to a token-divergent drift versus the Python
+/// reference. Wrapping the whole expression in `compile` keeps the gelu output in
+/// fp32 registers across the multiply, matching Python's fused kernel.
+private let compiledGemma4Geglu: @Sendable (MLXArray, MLXArray) -> MLXArray = {
+    compile(shapeless: true) { gate, x in
+        geluApproximate(gate) * x
+    }
+}()
+
+class Gemma4MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -370,13 +395,13 @@ private class Gemma4MLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(geluApproximate(gateProj(x)) * upProj(x))
+        downProj(compiledGemma4Geglu(gateProj(x), upProj(x)))
     }
 }
 
 // MARK: - Decoder Layer
 
-private class Gemma4DecoderLayer: Module {
+class Gemma4DecoderLayer: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
     let layerType: String
@@ -397,13 +422,14 @@ private class Gemma4DecoderLayer: Module {
     // Per-layer scalar
     @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
 
-    init(_ config: Gemma4TextConfiguration, layerIdx: Int) {
+    init(_ config: Gemma4TextConfiguration, layerIdx: Int, kvSharedOnly: Bool = false) {
         self.config = config
         self.layerIdx = layerIdx
         self.layerType = config.layerTypes[layerIdx]
         self.hiddenSizePerLayerInput = config.hiddenSizePerLayerInput
 
-        self._selfAttn.wrappedValue = Gemma4Attention(config, layerIdx: layerIdx)
+        self._selfAttn.wrappedValue = Gemma4Attention(
+            config, layerIdx: layerIdx, kvSharedOnly: kvSharedOnly)
         self._mlp.wrappedValue = Gemma4MLP(config, layerIdx: layerIdx)
 
         self._inputLayernorm.wrappedValue = RMSNorm(
@@ -542,6 +568,17 @@ private class Gemma4TextModelInner: Module {
         _ inputs: MLXArray,
         cache: [KVCache]? = nil
     ) -> MLXArray {
+        callCapturingPreNorm(inputs, cache: cache).postNorm
+    }
+
+    /// Variant that exposes both the post-norm hidden (used for the LM head)
+    /// and the pre-norm hidden — the latter being what HF captures via
+    /// ``_can_record_outputs={"hidden_states": Gemma4TextDecoderLayer}`` and
+    /// what the MTP drafter's ``pre_projection`` was trained against.
+    func callCapturingPreNorm(
+        _ inputs: MLXArray,
+        cache: [KVCache]?
+    ) -> (postNorm: MLXArray, preNorm: MLXArray) {
         let inputEmbeddings = embedTokens(inputs)
         var h = inputEmbeddings * embedScale
 
@@ -626,7 +663,9 @@ private class Gemma4TextModelInner: Module {
             intermediates[idx] = (kvPair, positionOffset)
         }
 
-        return norm(h)
+        let preNorm = h
+        let postNorm = norm(h)
+        return (postNorm, preNorm)
     }
 }
 
@@ -700,5 +739,67 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
 extension Gemma4TextModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers.map { $0.selfAttn }
+    }
+}
+
+// MARK: - MTP drafter support
+
+/// Hooks consumed by the Multi-Token Prediction (MTP) drafter to share K/V and
+/// last-layer hidden state with this target model. Additive: standard generate
+/// paths do not invoke these.
+extension Gemma4TextModel {
+
+    /// Backbone hidden size (drafter's pre/post projection target dim).
+    public var backboneHiddenSize: Int { config.hiddenSize }
+
+    /// Target's input embedding table — reused by the drafter for token embeds.
+    public var inputEmbeddings: Embedding { model.embedTokens }
+
+    /// Embedding scale (Gemma scales by sqrt(hidden_size)).
+    public var inputEmbedScale: Float { model.embedScale }
+
+    /// Layer types per layer (e.g. "full_attention" / "sliding_attention").
+    public var layerTypes: [String] { config.layerTypes }
+
+    /// Sliding window for SWA layers.
+    public var slidingWindow: Int { config.slidingWindow }
+
+    /// Index in ``newCache(parameters:)`` of the last full-attention layer.
+    /// Returns nil if no full-attention layer exists in the non-shared range.
+    public var lastFullAttentionLayerIndex: Int? {
+        let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        let upper = firstKvShared > 0 ? firstKvShared : config.numHiddenLayers
+        for i in stride(from: upper - 1, through: 0, by: -1) {
+            if config.layerTypes[i] == "full_attention" { return i }
+        }
+        return nil
+    }
+
+    /// Index in ``newCache(parameters:)`` of the last sliding-attention layer.
+    public var lastSlidingAttentionLayerIndex: Int? {
+        let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        let upper = firstKvShared > 0 ? firstKvShared : config.numHiddenLayers
+        for i in stride(from: upper - 1, through: 0, by: -1) {
+            if config.layerTypes[i] == "sliding_attention" { return i }
+        }
+        return nil
+    }
+
+    /// Forward pass returning both the soft-capped logits and the **pre-norm**
+    /// last-layer hidden state. The MTP drafter's ``pre_projection`` was
+    /// trained against the hidden BEFORE the final RMSNorm — HF captures
+    /// `hidden_states` at decoder-layer output, before `model.norm`.
+    public func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (
+        logits: MLXArray, hidden: MLXArray
+    ) {
+        let (postNorm, preNorm) = model.callCapturingPreNorm(inputs, cache: cache)
+        var logits: MLXArray
+        if let lmHead {
+            logits = lmHead(postNorm)
+        } else {
+            logits = model.embedTokens.asLinear(postNorm)
+        }
+        logits = tanh(logits / config.finalLogitSoftcapping) * config.finalLogitSoftcapping
+        return (logits, preNorm)
     }
 }
