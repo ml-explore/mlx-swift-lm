@@ -668,6 +668,35 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
+// MARK: - MTP Backbone Support
+
+extension Gemma4TextModel: MTPBackboneModel {
+    /// Forward pass returning both logits and the pre-logit hidden states.
+    ///
+    /// The hidden states are needed by the MTP drafter model which concatenates
+    /// them with token embeddings as input.
+    public func forwardMTP(_ inputs: MLXArray, cache: [KVCache]?) -> MTPBackboneOutput {
+        let hiddenStates = model(inputs, cache: cache)
+        var logits: MLXArray
+        if let lmHead {
+            logits = lmHead(hiddenStates)
+        } else {
+            logits = model.embedTokens.asLinear(hiddenStates)
+        }
+        logits = tanh(logits / config.finalLogitSoftcapping) * config.finalLogitSoftcapping
+        return MTPBackboneOutput(logits: logits, hiddenStates: hiddenStates)
+    }
+
+    public var sharedEmbeddings: Embedding { model.embedTokens }
+
+    public var embeddingScale: Float { model.embedScale }
+
+    public var backboneLayerTypes: [String] {
+        let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        return Array(config.layerTypes.prefix(firstKvShared))
+    }
+}
+
 // MARK: - LoRA
 
 extension Gemma4TextModel: LoRAModel {
