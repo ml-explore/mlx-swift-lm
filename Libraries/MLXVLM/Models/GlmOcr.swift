@@ -13,6 +13,11 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private let precomputedPositionIdsKey = LMOutput.Key<MLXArray>(
+    "glmocr.precomputedPositionIds")
+private let ropeDeltasKey = LMOutput.Key<MLXArray>(
+    "glmocr.ropeDeltas")
+
 // MARK: - Language
 
 private enum Language {
@@ -327,8 +332,6 @@ private enum Language {
         @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
         var kvHeads: [Int]
-        var _positionIds: MLXArray?
-        var _ropeDeltas: MLXArray?
 
         public init(_ args: GlmOcrConfiguration.TextConfiguration) {
             self.model = GlmOcrTextModel(args)
@@ -342,8 +345,10 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ inputs: MLXArray?, cache: [KVCache]? = nil, inputEmbedding: MLXArray? = nil
+            _ inputs: MLXArray?, cache: [KVCache]? = nil, state: LMOutput.State? = nil,
+            inputEmbedding: MLXArray? = nil
         ) -> LMOutput {
+            let state = state ?? .init()
             var positionIds: MLXArray? = nil
 
             let cacheOffset: Int
@@ -353,7 +358,7 @@ private enum Language {
                 cacheOffset = 0
             }
 
-            if let storedPositionIds = _positionIds {
+            if let storedPositionIds = state[precomputedPositionIdsKey] {
                 let seqLen: Int
                 if let inputEmbedding {
                     seqLen = inputEmbedding.dim(inputEmbedding.ndim - 2)
@@ -371,7 +376,7 @@ private enum Language {
                             0..., 0..., cacheOffset ..< (cacheOffset + seqLen)]
                 } else {
                     // Autoregressive: compute sequential positions using rope_deltas
-                    let delta = _ropeDeltas ?? MLXArray(Int32(0))
+                    let delta = state[ropeDeltasKey] ?? MLXArray(Int32(0))
                     let batchSize = inputEmbedding?.dim(0) ?? inputs?.dim(0) ?? 1
                     var posArrays = [MLXArray]()
                     for _ in 0 ..< 3 {
@@ -392,7 +397,7 @@ private enum Language {
             } else {
                 out = model.embedTokens.asLinear(out)
             }
-            return LMOutput(logits: out)
+            return LMOutput(logits: out, state: state)
         }
     }
 }
@@ -986,12 +991,10 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     private func inputEmbeddings(inputIds: MLXArray, pixelValues: MLXArray?, frames: [THW]?)
-        -> MLXArray
+        -> (MLXArray, MLXArray?, MLXArray?)
     {
         guard let pixelValues, let frames else {
-            languageModel._positionIds = nil
-            languageModel._ropeDeltas = nil
-            return languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis])
+            return (languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]), nil, nil)
         }
 
         let inputEmbeds = languageModel.model.embedTokens(inputIds)
@@ -1007,13 +1010,10 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId)
 
-        // Pre-compute M-RoPE position IDs
         let (positionIds, ropeDeltas) = getRopeIndex(
             inputIds: inputIds, imageGridThw: frames)
-        languageModel._positionIds = positionIds
-        languageModel._ropeDeltas = ropeDeltas
 
-        return merged
+        return (merged, positionIds, ropeDeltas)
     }
 
     public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
@@ -1029,17 +1029,24 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
             allFrames.append(contentsOf: imageFrames)
         }
 
-        let inputEmbeddings = self.inputEmbeddings(
+        let (inputEmbeddings, positionIds, ropeDeltas) = self.inputEmbeddings(
             inputIds: input.text.tokens, pixelValues: allPixels,
             frames: allFrames.isEmpty ? nil : allFrames)
 
-        let result = languageModel(nil, cache: cache, inputEmbedding: inputEmbeddings)
+        var state = LMOutput.State()
+        state[precomputedPositionIdsKey] = positionIds
+        state[ropeDeltasKey] = ropeDeltas
+
+        let result = languageModel(
+            nil, cache: cache, state: state, inputEmbedding: inputEmbeddings)
 
         return .logits(result)
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
-        languageModel(inputs, cache: cache).logits
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        languageModel(input.tokens, cache: cache, state: state)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

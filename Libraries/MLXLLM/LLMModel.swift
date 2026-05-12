@@ -25,9 +25,11 @@ extension LLMModel {
         var y = input.text
 
         // Prepare the prompt in chunks if larger than the prefill size
+        var state: LMOutput.State?
         while y.tokens.size > prefillStepSize {
             let input = y[.newAxis, ..<prefillStepSize]
-            _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
+            let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
+            state = output.state
             eval(cache)
             y = y[prefillStepSize...]
         }

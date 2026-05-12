@@ -161,6 +161,7 @@ class AttentionBlock: Module {
     let numKeyValueHeads: Int
     let numKeyValueGroups: Int
     let smScale: Float
+    var sinksActive: Bool
 
     @ParameterInfo(key: "sinks") var sinks: MLXArray
     @ModuleInfo(key: "q_proj") var qProj: Linear
@@ -169,7 +170,6 @@ class AttentionBlock: Module {
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
     let rope: YarnRoPE
-    private var cachedSinksActive: Bool?
 
     public init(_ config: GPTOSSConfiguration) {
         self.headDim = config.headDim
@@ -178,6 +178,8 @@ class AttentionBlock: Module {
         self.numKeyValueGroups = config.attentionHeads / config.kvHeads
 
         _sinks.wrappedValue = zeros([config.attentionHeads])
+        self.sinksActive = false
+
         _qProj.wrappedValue = Linear(
             config.hiddenSize, config.attentionHeads * config.headDim, bias: true)
         _kProj.wrappedValue = Linear(config.hiddenSize, config.kvHeads * config.headDim, bias: true)
@@ -205,6 +207,20 @@ class AttentionBlock: Module {
         }
     }
 
+    open override func update(
+        parameters: ModuleParameters, verify: VerifyUpdate, path: [String] = [],
+        modulePath: [String] = []
+    ) throws -> Self {
+        try super.update(
+            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+
+        if parameters["sinks"] != nil {
+            self.sinksActive = (sinks * sinks).max().item(Float.self) > 0
+        }
+
+        return self
+    }
+
     public func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -216,13 +232,6 @@ class AttentionBlock: Module {
         var q = qProj(x).reshaped(B, L, -1, D).swappedAxes(1, 2)
         var k = kProj(x).reshaped(B, L, -1, D).swappedAxes(1, 2)
         var v = vProj(x).reshaped(B, L, -1, D).swappedAxes(1, 2)
-        let sinksActive =
-            cachedSinksActive
-            ?? {
-                let active = (sinks * sinks).max().item(Float.self) > 0
-                cachedSinksActive = active
-                return active
-            }()
 
         // Quantized cache path
         if let qcache = cache as? QuantizedKVCacheProtocol {

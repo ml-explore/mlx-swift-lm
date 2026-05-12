@@ -848,8 +848,11 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         // Draft generation: autoregressive loop with draft model
         var draftProcessor = processor  // Copy to discard later
         var draftTokens = [MLXArray]()
+        var draftState: LMOutput.State?
         for _ in 0 ..< numDraft {
-            let draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+            let draftResult = draftModel(
+                draftY[text: .newAxis], cache: draftCache, state: draftState)
+            draftState = draftResult.state
             var draftLogits = draftResult.logits[0..., -1, 0...]
             draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
             let draftToken = sampler.sample(logits: draftLogits)

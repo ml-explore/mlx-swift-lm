@@ -144,11 +144,30 @@ public struct LMOutput {
     /// optional ``State`` to carry forward into the next step
     public let state: State?
 
-    public struct State {
-        public let crossAttentionStates: MLXArray?
+    /// typed key for use in ``State``
+    public struct Key<T>: Identifiable, Sendable {
+        public let id: String
 
-        public init(crossAttentionStates: MLXArray? = nil) {
-            self.crossAttentionStates = crossAttentionStates
+        public init(_ id: String) {
+            self.id = id
+        }
+    }
+
+    /// Dictionary of typed ``Key`` to carry state between steps.
+    public struct State {
+        private var contents: [String: Any]
+
+        public init() {
+            self.contents = [:]
+        }
+
+        public subscript<T>(_ key: Key<T>) -> T? {
+            get {
+                contents[key.id] as? T
+            }
+            set {
+                contents[key.id] = newValue
+            }
         }
     }
 
