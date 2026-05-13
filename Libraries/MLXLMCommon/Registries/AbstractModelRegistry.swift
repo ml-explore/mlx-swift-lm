@@ -25,7 +25,7 @@ open class AbstractModelRegistry: @unchecked Sendable {
         }
     }
 
-    /// Returns configuration from ``ModelFactory/modelRegistry``.
+    /// Returns configuration from ``GenericModelFactory/modelRegistry``.
     ///
     /// - Note: If the id doesn't exists in the configuration, this will return a new instance of it.
     /// If you want to check if the configuration in model registry, you should use ``contains(id:)``.

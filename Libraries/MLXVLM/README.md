@@ -13,6 +13,7 @@ Using LLMs and VLMs from MLXLMCommon is as easy as:
 
 ```swift
 import MLXVLM
+import MLXLMCommon
 import MLXLMHuggingFace
 import MLXLMTokenizers
 

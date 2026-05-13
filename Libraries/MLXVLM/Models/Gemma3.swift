@@ -865,12 +865,12 @@ private func maskedScatter(
 
     // Scatter the scaled image features into the special image token positions
     let imagePositions = MLXArray(imagePositionIndices)
-    guard scaledImageFeaturesFlattened.shape[0] == imagePositions.shape[0] else {
+    guard scaledImageFeaturesFlattened.dim(0) == imagePositions.dim(0) else {
         fatalError(
             """
             Critical error in maskedScatter: Size mismatch between image features and positions.
-            Image features: \(scaledImageFeaturesFlattened.shape[0])
-            Image positions: \(imagePositions.shape[0])
+            Image features: \(scaledImageFeaturesFlattened.dim(0))
+            Image positions: \(imagePositions.dim(0))
             """)
     }
     finalEmbeddingFlattened[imagePositions] = scaledImageFeaturesFlattened

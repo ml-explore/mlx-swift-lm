@@ -509,7 +509,8 @@ public final class ChatSession {
                                 promptTokenCount: input.text.tokens.size,
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
-                                iterator: iterator
+                                iterator: iterator,
+                                tools: tools
                             )
                         } else {
                             // Standard path with no speculative decoding.
@@ -521,7 +522,8 @@ public final class ChatSession {
                                 promptTokenCount: input.text.tokens.size,
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
-                                iterator: iterator
+                                iterator: iterator,
+                                tools: tools
                             )
                         }
 

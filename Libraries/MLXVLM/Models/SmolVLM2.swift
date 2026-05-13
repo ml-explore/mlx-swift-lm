@@ -306,7 +306,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
             let promptTokens = try tokenizer.applyChatTemplate(
-                messages: messagesWithSystem(messages))
+                messages: messagesWithSystem(messages), tools: input.tools,
+                additionalContext: input.additionalContext)
             let decoded = tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
 
             let video = input.videos[0]

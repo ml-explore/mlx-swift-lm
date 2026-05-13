@@ -95,6 +95,33 @@ public class UserInputTests: XCTestCase {
         assertEqual(expected, messages)
     }
 
+    public func testGemma4ConversionText() {
+        let chat: [Chat.Message] = [
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
+        ]
+
+        let messages = Gemma4MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "system",
+                "content": "You are a useful agent.",
+            ],
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Tell me a story.",
+                    ]
+                ],
+            ],
+        ]
+
+        assertEqual(expected, messages)
+    }
+
     // MARK: - Mistral3 Message Generator Tests
 
     public func testMistral3ConversionText() {
@@ -228,6 +255,43 @@ public class UserInputTests: XCTestCase {
 
         let userInput = UserInput(chat: chat)
         XCTAssertEqual(userInput.images.count, 1)
+    }
+
+    public func testGemma4ConversionImage() {
+        let chat: [Chat.Message] = [
+            .system("You are a useful agent."),
+            .user(
+                "What is this?",
+                images: [
+                    .url(
+                        URL(
+                            string: "https://opensource.apple.com/images/projects/mlx.f5c59d8b.png")!
+                    )
+                ]),
+        ]
+
+        let messages = Gemma4MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "system",
+                "content": "You are a useful agent.",
+            ],
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "image"
+                    ],
+                    [
+                        "type": "text",
+                        "text": "What is this?",
+                    ],
+                ],
+            ],
+        ]
+
+        assertEqual(expected, messages)
     }
 
 }

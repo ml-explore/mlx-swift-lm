@@ -11,8 +11,8 @@ import MLXLMCommon
 import MLXVLM
 
 // Both MLXLMCommon and MLXEmbedders define ModelContainer.
-public typealias LMModelContainer = MLXLMCommon.ModelContainer
-public typealias EmbeddingModelContainer = MLXEmbedders.ModelContainer
+public typealias LLModelContainer = MLXLMCommon.ModelContainer
+public typealias EmbeddingModelContainer = MLXEmbedders.EmbedderModelContainer
 
 // MARK: - Error
 
@@ -35,6 +35,9 @@ public enum IntegrationTestModelIDs {
     public static let vlm = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     public static let lfm2 = "mlx-community/LFM2-2.6B-Exp-4bit"
     public static let glm4 = "mlx-community/GLM-4-9B-0414-4bit"
+    public static let mistral3 = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
+    public static let nemotron = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
+    public static let qwen35 = "mlx-community/Qwen3.5-2B-4bit"
 }
 
 // MARK: - Model Loading
@@ -44,111 +47,84 @@ public actor IntegrationTestModels {
     private let downloader: any Downloader
     private let tokenizerLoader: any TokenizerLoader
 
-    private var llmTask: Task<LMModelContainer, Error>?
-    private var vlmTask: Task<LMModelContainer, Error>?
-    private var lfm2Task: Task<LMModelContainer, Error>?
-    private var glm4Task: Task<LMModelContainer, Error>?
+    private var llmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
+    private var vlmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
+    private var embeddingTask: Task<EmbeddingModelContainer, Error>?
 
     public init(downloader: any Downloader, tokenizerLoader: any TokenizerLoader) {
         self.downloader = downloader
         self.tokenizerLoader = tokenizerLoader
     }
 
-    public func llmContainer() async throws -> LMModelContainer {
-        if let task = llmTask {
+    /// Load an arbitrary LLM container, cached by `configuration.name` so the same
+    /// model is only loaded once per `IntegrationTestModels` instance.
+    public func llmContainer(for configuration: ModelConfiguration) async throws
+        -> LLModelContainer
+    {
+        let key = configuration.name
+        if let task = llmTasksByName[key] {
             return try await task.value
         }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.llm
         let task = Task {
-            print("Loading LLM: \(id)")
+            print("Loading LLM: \(key)")
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
+                configuration: configuration,
+                progressHandler: logProgress(key)
             )
-            print("Loaded LLM: \(id)")
+            print("Loaded LLM: \(key)")
             return container
         }
-        llmTask = task
+        llmTasksByName[key] = task
         return try await task.value
     }
 
-    public func vlmContainer() async throws -> LMModelContainer {
-        if let task = vlmTask {
+    /// Load an arbitrary VLM container, cached by `configuration.name` so the same
+    /// model is only loaded once per `IntegrationTestModels` instance.
+    public func vlmContainer(for configuration: ModelConfiguration) async throws
+        -> LLModelContainer
+    {
+        let key = configuration.name
+        if let task = vlmTasksByName[key] {
             return try await task.value
         }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.vlm
         let task = Task {
-            print("Loading VLM: \(id)")
+            print("Loading VLM: \(key)")
             let container = try await VLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
+                configuration: configuration,
+                progressHandler: logProgress(key)
             )
-            print("Loaded VLM: \(id)")
+            print("Loaded VLM: \(key)")
             return container
         }
-        vlmTask = task
-        return try await task.value
-    }
-
-    public func lfm2Container() async throws -> LMModelContainer {
-        if let task = lfm2Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.lfm2
-        let task = Task {
-            print("Loading LFM2: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded LFM2: \(id)")
-            return container
-        }
-        lfm2Task = task
-        return try await task.value
-    }
-
-    public func glm4Container() async throws -> LMModelContainer {
-        if let task = glm4Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.glm4
-        let task = Task {
-            print("Loading GLM4: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded GLM4: \(id)")
-            return container
-        }
-        glm4Task = task
+        vlmTasksByName[key] = task
         return try await task.value
     }
 
     public func embeddingContainer() async throws -> EmbeddingModelContainer {
+        if let task = embeddingTask {
+            return try await task.value
+        }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
         let id = "nomic_text_v1_5"
-        print("Loading embedding model: \(id)")
-        let container = try await MLXEmbedders.loadModelContainer(
-            from: downloader, using: tokenizerLoader, configuration: .nomic_text_v1_5,
-            progressHandler: logProgress(id)
-        )
-        print("Loaded embedding model: \(id)")
-        return container
+        let task = Task {
+            print("Loading embedding model: \(id)")
+            let container = try await EmbedderModelFactory.shared.loadContainer(
+                from: downloader, using: tokenizerLoader,
+                configuration: EmbedderRegistry.nomic_text_v1_5,
+                progressHandler: logProgress(id)
+            )
+            print("Loaded embedding model: \(id)")
+            return container
+        }
+        embeddingTask = task
+        return try await task.value
     }
 }
 
@@ -158,7 +134,7 @@ private let generateParameters = GenerateParameters(maxTokens: 200, temperature:
 
 public enum ChatSessionTests {
 
-    public static func oneShot(container: LMModelContainer) async throws {
+    public static func oneShot(container: LLModelContainer) async throws {
         let session = ChatSession(container, generateParameters: generateParameters)
         let result = try await streamAndCollect(
             session.streamResponse(
@@ -169,7 +145,7 @@ public enum ChatSessionTests {
         )
     }
 
-    public static func oneShotStream(container: LMModelContainer) async throws {
+    public static func oneShotStream(container: LLModelContainer) async throws {
         let session = ChatSession(container, generateParameters: generateParameters)
         let result = try await streamAndCollect(
             session.streamResponse(
@@ -180,7 +156,7 @@ public enum ChatSessionTests {
         )
     }
 
-    public static func multiTurnConversation(container: LMModelContainer) async throws {
+    public static func multiTurnConversation(container: LLModelContainer) async throws {
         let session = ChatSession(
             container, instructions: "You are a helpful assistant. Keep responses brief.",
             generateParameters: generateParameters)
@@ -199,7 +175,7 @@ public enum ChatSessionTests {
         )
     }
 
-    public static func visionModel(container: LMModelContainer) async throws {
+    public static func visionModel(container: LLModelContainer) async throws {
         let session = ChatSession(container, generateParameters: generateParameters)
         let redImage = CIImage(color: .red).cropped(
             to: CGRect(x: 0, y: 0, width: 100, height: 100))
@@ -214,7 +190,7 @@ public enum ChatSessionTests {
         )
     }
 
-    public static func streamDetailsWithTools(container: LMModelContainer) async throws {
+    public static func streamDetailsWithTools(container: LLModelContainer) async throws {
         let tools: [ToolSpec] = [weatherToolSchema]
         let session = ChatSession(container, generateParameters: generateParameters, tools: tools)
 
@@ -265,7 +241,7 @@ public enum ChatSessionTests {
         }
     }
 
-    public static func toolInvocation(container: LMModelContainer) async throws {
+    public static func toolInvocation(container: LLModelContainer) async throws {
         struct EmptyInput: Codable {}
 
         struct TimeOutput: Codable {
@@ -300,7 +276,27 @@ public enum ChatSessionTests {
         )
     }
 
-    public static func promptRehydration(container: LMModelContainer) async throws {
+    public static func planetsCoherence(container: LLModelContainer) async throws {
+        let session = ChatSession(
+            container,
+            generateParameters: GenerateParameters(maxTokens: 3000, temperature: 0))
+        let result = try await streamAndCollect(
+            session.streamResponse(
+                to: "List all the planets in our solar system in order from the Sun."),
+            label: "Response")
+
+        let expected = [
+            "Mercury", "Venus", "Earth", "Mars",
+            "Jupiter", "Saturn", "Uranus", "Neptune",
+        ]
+        let missing = expected.filter { !result.contains($0) }
+        try check(
+            missing.isEmpty,
+            "Expected all planets in response, missing: \(missing). Got: \(result)"
+        )
+    }
+
+    public static func promptRehydration(container: LLModelContainer) async throws {
         let history: [Chat.Message] = [
             .system("You are a helpful assistant."),
             .user("My name is Bob."),
@@ -345,8 +341,9 @@ public enum EmbedderTests {
     ) async throws {
         let modelId = "mlx-community/gemma-3-1b-it-qat-4bit"
         print("Loading Gemma 3 embedding model: \(modelId)")
-        let modelContainer = try await MLXEmbedders.loadModelContainer(
-            from: downloader, using: tokenizerLoader, configuration: .init(id: modelId),
+        let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(id: modelId),
             progressHandler: logProgress(modelId)
         )
         print("Loaded Gemma 3 embedding model: \(modelId)")
@@ -356,8 +353,8 @@ public enum EmbedderTests {
             "In the United States, PepsiCo Inc. is a leading soft drink company.",
         ]
 
-        let resultEmbeddings = await modelContainer.perform {
-            (model: EmbeddingModel, tokenizer: Tokenizer, pooling: Pooling) -> [[Float]] in
+        let resultEmbeddings = await modelContainer.perform { context in
+            let tokenizer = context.tokenizer
             let encoded = inputs.map {
                 tokenizer.encode(text: $0, addSpecialTokens: true)
             }
@@ -377,10 +374,10 @@ public enum EmbedderTests {
             let mask = (padded .!= (tokenizer.eosTokenId ?? 0))
             let tokenTypes = MLXArray.zeros(like: padded)
 
-            let modelOutput = model(
+            let modelOutput = context.model(
                 padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask)
 
-            let result = pooling(
+            let result = context.pooling(
                 modelOutput,
                 normalize: true, applyLayerNorm: true
             )
@@ -419,8 +416,9 @@ public enum EmbedderTests {
             "search_document: Polar Bears",
         ]
 
-        let resultEmbeddings = await container.perform {
-            (model: EmbeddingModel, tokenizer: Tokenizer, pooling: Pooling) -> [[Float]] in
+        let resultEmbeddings = await container.perform { context in
+            let tokenizer = context.tokenizer
+
             let inputs = searchInputs.map {
                 tokenizer.encode(text: $0, addSpecialTokens: true)
             }
@@ -437,8 +435,9 @@ public enum EmbedderTests {
                 })
             let mask = (padded .!= tokenizer.eosTokenId ?? 0)
             let tokenTypes = MLXArray.zeros(like: padded)
-            let result = pooling(
-                model(padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask),
+            let result = context.pooling(
+                context.model(
+                    padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask),
                 normalize: true, applyLayerNorm: true
             )
             result.eval()
@@ -470,7 +469,7 @@ public enum EmbedderTests {
 
 public enum ToolCallTests {
 
-    public static func lfm2FormatAutoDetection(container: LMModelContainer) async throws {
+    public static func lfm2FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.lfm2,
@@ -478,7 +477,7 @@ public enum ToolCallTests {
         )
     }
 
-    public static func lfm2EndToEndGeneration(container: LMModelContainer) async throws {
+    public static func lfm2EndToEndGeneration(container: LLModelContainer) async throws {
         let (result, toolCalls) = try await generateWithTools(
             container: container,
             userMessage: "What's the weather in Tokyo?")
@@ -486,22 +485,22 @@ public enum ToolCallTests {
         print("LFM2 Output:", result)
         print("LFM2 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("tokyo"),
-                    "Expected location containing 'Tokyo', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
     }
 
-    public static func glm4FormatAutoDetection(container: LMModelContainer) async throws {
+    public static func glm4FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.glm4,
@@ -509,7 +508,7 @@ public enum ToolCallTests {
         )
     }
 
-    public static func glm4EndToEndGeneration(container: LMModelContainer) async throws {
+    public static func glm4EndToEndGeneration(container: LLModelContainer) async throws {
         let (result, toolCalls) = try await generateWithTools(
             container: container,
             userMessage: "What's the weather in Paris?")
@@ -517,42 +516,257 @@ public enum ToolCallTests {
         print("GLM4 Output:", result)
         print("GLM4 Tool Calls:", toolCalls)
 
-        if !toolCalls.isEmpty {
-            let toolCall = toolCalls[0]
-            try check(
-                toolCall.function.name == "get_weather",
-                "Expected tool name 'get_weather', got: \(toolCall.function.name)"
-            )
-            if case .string(let location) = toolCall.function.arguments["location"] {
-                try check(
-                    location.lowercased().contains("paris"),
-                    "Expected location containing 'Paris', got: \(location)"
-                )
-            }
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
         }
+        try check(
+            location.lowercased().contains("paris"),
+            "Expected location containing 'Paris', got: \(location)"
+        )
     }
 
-    private static func generateWithTools(
-        container: LMModelContainer,
-        userMessage: String
-    ) async throws -> (text: String, toolCalls: [ToolCall]) {
-        try await container.perform { context in
-            let input = UserInput(
-                chat: [
-                    .system(
-                        "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
-                    ),
-                    .user(userMessage),
-                ],
-                tools: [weatherToolSchema]
+    // MARK: Mistral3
+
+    public static func mistral3FormatAutoDetection(container: LLModelContainer) async throws {
+        let config = await container.configuration
+        try check(
+            config.toolCallFormat == ToolCallFormat.mistral,
+            "Expected .mistral tool call format, got: \(String(describing: config.toolCallFormat))"
+        )
+    }
+
+    public static func mistral3EndToEndGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: [weatherToolSchema]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 150)
+
+        print("Mistral3 Output:", result)
+        print("Mistral3 Tool Calls:", toolCalls)
+
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
+        }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
+    }
+
+    public static func mistral3MultiToolGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user("What's the weather in Tokyo and what time is it there?"),
+            ],
+            tools: multiToolSchemas
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 150)
+
+        print("Mistral3 Output:", result)
+        print("Mistral3 Calls:", toolCalls)
+
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            try check(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
             )
+        }
+
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
+    }
+
+    // MARK: Nemotron
+
+    public static func nemotronFormatAutoDetection(container: LLModelContainer) async throws {
+        let config = await container.configuration
+        try check(
+            config.toolCallFormat == ToolCallFormat.xmlFunction,
+            "Expected .xmlFunction tool call format, got: \(String(describing: config.toolCallFormat))"
+        )
+    }
+
+    public static func nemotronEndToEndGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: [weatherToolSchema],
+            additionalContext: ["enable_thinking": false]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 150)
+
+        print("Nemotron Output:", result)
+        print("Nemotron Tool Calls:", toolCalls)
+
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
+        }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
+    }
+
+    public static func nemotronMultiToolGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user("What's the weather in Tokyo and what time is it there?"),
+            ],
+            tools: multiToolSchemas,
+            additionalContext: ["enable_thinking": false]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 600)
+
+        print("Nemotron Output:", result)
+        print("Nemotron Calls:", toolCalls)
+
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            try check(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
+    }
+
+    // MARK: Qwen3.5
+
+    public static func qwen35FormatAutoDetection(container: LLModelContainer) async throws {
+        let config = await container.configuration
+        try check(
+            config.toolCallFormat == ToolCallFormat.xmlFunction,
+            "Expected .xmlFunction tool call format, got: \(String(describing: config.toolCallFormat))"
+        )
+    }
+
+    public static func qwen35EndToEndGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user("What's the weather in Tokyo?"),
+            ],
+            tools: [weatherToolSchema]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 150)
+
+        print("Qwen3.5 Output:", result)
+        print("Qwen3.5 Tool Calls:", toolCalls)
+
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
+        }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
+        )
+    }
+
+    public static func qwen35MultiToolGeneration(container: LLModelContainer) async throws {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                ),
+                .user("What's the weather in Tokyo and what time is it there?"),
+            ],
+            tools: multiToolSchemas,
+            additionalContext: ["enable_thinking": true]
+        )
+
+        let (result, toolCalls) = try await generateWithTools(
+            container: container, input: input, maxTokens: 300)
+
+        print("Qwen3.5 Output:", result)
+        print("Qwen3.5 Calls:", toolCalls)
+
+        let validNames: Set<String> = ["get_weather", "get_time"]
+        for toolCall in toolCalls {
+            try check(
+                validNames.contains(toolCall.function.name),
+                "Unexpected tool call: \(toolCall.function.name)"
+            )
+        }
+
+        try check(
+            toolCalls.count > 1,
+            "Expected multiple tool calls, got \(toolCalls.count)"
+        )
+    }
+
+    // MARK: Helpers
+
+    private static func generateWithTools(
+        container: LLModelContainer,
+        input: UserInput,
+        maxTokens: Int = 100
+    ) async throws -> (text: String, toolCalls: [ToolCall]) {
+        try await container.perform(nonSendable: input) { context, input in
             let lmInput = try await context.processor.prepare(input: input)
             let stream = try generate(
                 input: lmInput,
-                parameters: GenerateParameters(maxTokens: 100),
+                parameters: GenerateParameters(maxTokens: maxTokens),
                 context: context
             )
-
             var text = ""
             var toolCalls: [ToolCall] = []
             for try await generation in stream {
@@ -567,6 +781,23 @@ public enum ToolCallTests {
             }
             return (text, toolCalls)
         }
+    }
+
+    private static func generateWithTools(
+        container: LLModelContainer,
+        userMessage: String
+    ) async throws -> (text: String, toolCalls: [ToolCall]) {
+        let input = UserInput(
+            chat: [
+                .system(
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                ),
+                .user(userMessage),
+            ],
+            tools: [weatherToolSchema]
+        )
+        return try await generateWithTools(
+            container: container, input: input)
     }
 }
 
@@ -612,3 +843,23 @@ private let weatherToolSchema: ToolSpec = [
         ] as [String: any Sendable],
     ] as [String: any Sendable],
 ]
+
+private let timeToolSchema: ToolSpec = [
+    "type": "function",
+    "function": [
+        "name": "get_time",
+        "description": "Get the current time in a given timezone",
+        "parameters": [
+            "type": "object",
+            "properties": [
+                "timezone": [
+                    "type": "string",
+                    "description": "The timezone, e.g. America/New_York, Asia/Tokyo",
+                ] as [String: any Sendable]
+            ] as [String: any Sendable],
+            "required": ["timezone"],
+        ] as [String: any Sendable],
+    ] as [String: any Sendable],
+]
+
+private let multiToolSchemas: [ToolSpec] = [weatherToolSchema, timeToolSchema]
