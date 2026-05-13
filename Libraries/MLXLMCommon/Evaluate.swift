@@ -1934,7 +1934,7 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
-private protocol TokenLoopHandler: Sendable {
+private protocol TokenLoopHandler {
     associatedtype Output
 
     /// Return false to stop the loop early.
@@ -1957,7 +1957,7 @@ private protocol TokenLoopHandler: Sendable {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
-private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
+private struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
     var detokenizer: NaiveStreamingDetokenizer
