@@ -483,7 +483,8 @@ public final class ChatSession {
 
                         if let speculativeDecoding {
                             // Extract the draft model from its container (same pattern as the main model).
-                            let draftModel = await speculativeDecoding.draftModel.perform { context in
+                            let draftModel = await speculativeDecoding.draftModel.perform {
+                                context in
                                 SendableBox(context.model)
                             }.consume()
 
