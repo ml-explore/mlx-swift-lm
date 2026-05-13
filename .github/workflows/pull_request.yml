@@ -72,7 +72,7 @@ jobs:
   docs:
     needs: lint
     if: github.repository == 'ml-explore/mlx-swift-lm'
-    runs-on: [self-hosted, macos]
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
         with:
