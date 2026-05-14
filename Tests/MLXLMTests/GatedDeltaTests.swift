@@ -2,9 +2,8 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import XCTest
-
-@testable import MLXLLM
 
 public class GatedDeltaTests: XCTestCase {
 
