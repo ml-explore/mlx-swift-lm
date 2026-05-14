@@ -84,6 +84,12 @@ public final class ChatSession {
     /// When true, enables TurboQuant KV cache compression on each KVCacheSimple layer.
     public var turboQuantEnabled: Bool = false
 
+    /// Minimum token count before TurboQuant compression activates (default 2048).
+    public var turboMinActivationTokens: Int = 2048
+
+    /// Number of recent tokens kept in full fp16 precision (default 256).
+    public var turboHotWindowSize: Int = 256
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
@@ -421,7 +427,7 @@ public final class ChatSession {
                 model,
                 instructions, processing, tools, toolDispatch,
                 additionalContext, cache, generateParameters, speculativeDecoding,
-                turboQuantEnabled
+                turboQuantEnabled, turboMinActivationTokens, turboHotWindowSize
             ] in
             do {
                 try await cache.update { cache in
@@ -475,6 +481,8 @@ public final class ChatSession {
                         for layer in kvCache {
                             if let simple = layer as? KVCacheSimple {
                                 simple.turboQuantEnabled = true
+                                simple.turboMinActivationTokens = turboMinActivationTokens
+                                simple.turboHotWindowSize = turboHotWindowSize
                             }
                         }
                     }
