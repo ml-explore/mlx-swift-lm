@@ -81,6 +81,9 @@ public final class ChatSession {
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
+    /// When true, enables TurboQuant KV cache compression on each KVCacheSimple layer.
+    public var turboQuantEnabled: Bool = false
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
@@ -417,7 +420,8 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, generateParameters, speculativeDecoding
+                additionalContext, cache, generateParameters, speculativeDecoding,
+                turboQuantEnabled
             ] in
             do {
                 try await cache.update { cache in
@@ -465,6 +469,14 @@ public final class ChatSession {
                         kvCache = model.newCache(parameters: generateParameters)
                         cache = .kvcache(kvCache, draftKVCache: nil)
                         messages.append(contentsOf: history)
+                    }
+
+                    if turboQuantEnabled {
+                        for layer in kvCache {
+                            if let simple = layer as? KVCacheSimple {
+                                simple.turboQuantEnabled = true
+                            }
+                        }
                     }
 
                     // prepare the input
