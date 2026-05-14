@@ -2,83 +2,81 @@
 
 import Foundation
 import MLX
-import MLXLLM
-import MLXLMCommon
 import XCTest
+
+@testable import MLXLLM
 
 public class GatedDeltaTests: XCTestCase {
 
-    /// Decode a minimal Qwen35 config from JSON -- small dims for fast testing.
-    /// Exercises the GatedDelta kernel at T>1 during prefill.
-    private func makeTestConfig() throws -> Qwen35TextConfiguration {
-        let json = """
-            {
-                "model_type": "qwen3_5",
-                "hidden_size": 64,
-                "num_hidden_layers": 2,
-                "intermediate_size": 128,
-                "num_attention_heads": 4,
-                "num_key_value_heads": 2,
-                "linear_num_value_heads": 4,
-                "linear_num_key_heads": 2,
-                "linear_key_head_dim": 32,
-                "linear_value_head_dim": 16,
-                "linear_conv_kernel_dim": 4,
-                "rms_norm_eps": 1e-6,
-                "vocab_size": 100,
-                "full_attention_interval": 4
-            }
-            """
-        return try JSONDecoder().decode(
-            Qwen35TextConfiguration.self, from: json.data(using: .utf8)!)
+    private struct Inputs {
+        let q, k, v, a, b, aLog, dtBias: MLXArray
     }
 
-    /// Test that the GatedDelta kernel produces finite, non-zero output at T>1.
-    /// This catches the precision bug where bf16 state accumulation produced
-    /// divergent results across recurrence steps.
-    func testGatedDeltaMultiStepPrefill() throws {
-        let config = try makeTestConfig()
-        let model = Qwen35TextModel(config)
-
-        // T=8 triggers multi-step GDN recurrence (the kernel path at T>1)
-        let tokens = MLXArray(Array(repeating: Int32(1), count: 8))[.newAxis, .ellipsis]
-        let cache = model.newCache(parameters: nil)
-        let output = model(tokens, cache: cache)
-
-        eval(output)
-
-        let outputData = output.asArray(Float.self)
-        let hasNaN = outputData.contains(where: { $0.isNaN })
-        let hasInf = outputData.contains(where: { $0.isInfinite })
-        let allZero = outputData.allSatisfy { $0 == 0 }
-
-        XCTAssertFalse(hasNaN, "GDN kernel produced NaN at T>1")
-        XCTAssertFalse(hasInf, "GDN kernel produced Inf at T>1")
-        XCTAssertFalse(allZero, "GDN kernel produced all zeros at T>1")
-        XCTAssertEqual(output.shape, [1, 8, 100])
+    /// Build deterministic bf16 inputs shaped for the GDN entry points.
+    /// Hk/Hv/Dk/Dv stay tiny so the kernel dispatches but the test runs in ms.
+    private func makeInputs(
+        B: Int = 1, T: Int = 16, Hk: Int = 2, Dk: Int = 32,
+        Hv: Int = 4, Dv: Int = 16, seed: UInt64 = 42
+    ) -> Inputs {
+        MLXRandom.seed(seed)
+        let dtype = DType.bfloat16
+        let q = MLXRandom.normal([B, T, Hk, Dk]).asType(dtype)
+        let k = MLXRandom.normal([B, T, Hk, Dk]).asType(dtype)
+        let v = MLXRandom.normal([B, T, Hv, Dv]).asType(dtype)
+        let a = MLXRandom.normal([B, T, Hv]).asType(dtype)
+        let b = MLXRandom.normal([B, T, Hv]).asType(dtype)
+        let aLog = (MLXRandom.normal([Hv]) * MLXArray(0.1)).asType(dtype)
+        let dtBias = MLXRandom.normal([Hv]).asType(dtype)
+        return Inputs(q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias)
     }
 
-    /// Test that running the same input twice produces identical output.
-    /// Precision bugs in state accumulation cause non-determinism when
-    /// intermediate values overflow fp16 range.
-    func testGatedDeltaDeterministic() throws {
-        let config = try makeTestConfig()
-        let model = Qwen35TextModel(config)
+    /// Multi-chunk prefill must match single-chunk prefill at the same total T.
+    ///
+    /// Regression for the fp32-state fix. Pre-fix, `gatedDeltaKernel` wrote
+    /// `state_out` as `InT` (bf16) and `gatedDeltaUpdate` defaulted state to
+    /// `q.dtype` (bf16). When a second-chunk prefill reloaded that state, it
+    /// arrived bf16-quantized; the fp32 scratch recurrence then ran from a
+    /// degraded starting point. With this test's inputs the cross-chunk drift
+    /// vs a single full-length prefill is >10 max abs. Post-fix, state crosses
+    /// the chunk boundary as fp32 and the two paths match within bf16 input
+    /// quantization noise.
+    func testGatedDeltaMultiChunkMatchesSingleChunk() throws {
+        let T = 16
+        let inputs = makeInputs(T: T)
 
-        let tokens = MLXArray(Array(repeating: Int32(1), count: 8))[.newAxis, .ellipsis]
+        let (ySingle, _) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v,
+            a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias
+        )
+        eval(ySingle)
 
-        let cache1 = model.newCache(parameters: nil)
-        let output1 = model(tokens, cache: cache1)
-        eval(output1)
+        let mid = T / 2
+        let (y1, state1) = gatedDeltaUpdate(
+            q: inputs.q[0..., ..<mid], k: inputs.k[0..., ..<mid], v: inputs.v[0..., ..<mid],
+            a: inputs.a[0..., ..<mid], b: inputs.b[0..., ..<mid],
+            aLog: inputs.aLog, dtBias: inputs.dtBias
+        )
+        let (y2, _) = gatedDeltaUpdate(
+            q: inputs.q[0..., mid...], k: inputs.k[0..., mid...], v: inputs.v[0..., mid...],
+            a: inputs.a[0..., mid...], b: inputs.b[0..., mid...],
+            aLog: inputs.aLog, dtBias: inputs.dtBias,
+            state: state1
+        )
+        let yMulti = concatenated([y1, y2], axis: 1)
+        eval(yMulti)
 
-        let cache2 = model.newCache(parameters: nil)
-        let output2 = model(tokens, cache: cache2)
-        eval(output2)
-
-        let diff = abs(output1 - output2).max()
+        let diff = abs(ySingle.asType(.float32) - yMulti.asType(.float32)).max()
         eval(diff)
-
         let maxDiff = diff.item(Float.self)
-        XCTAssertEqual(maxDiff, 0.0, "GDN kernel not deterministic across runs")
+
+        // Pre-fix: bf16-cast at chunk boundary diverges by >10 max abs.
+        // Post-fix: fp32 state across the boundary leaves only bf16 input noise.
+        XCTAssertLessThan(
+            maxDiff, 1e-2,
+            "Multi-chunk GDN prefill diverged from single-chunk by \(maxDiff) max abs. "
+                + "Cross-chunk state must persist in fp32; bf16 cast loses precision."
+        )
     }
+
 }
