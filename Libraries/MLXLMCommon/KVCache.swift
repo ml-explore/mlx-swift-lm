@@ -783,7 +783,7 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     private var values: (MLXArray, MLXArray, MLXArray?)?
     private let step: Int
     public private(set) var groupSize: Int
-    public let bits: Int
+    public private(set) var bits: Int
     public let mode: QuantizationMode
 
     public init(groupSize: Int = 64, bits: Int = 8, mode: QuantizationMode = .affine) {
@@ -1009,8 +1009,17 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
             guard newValue.count == 4 else {
                 fatalError("QuantizedKVCache metaState must have exactly 4 values")
             }
+            guard
+                let offset = Int(newValue[1]),
+                let groupSize = Int(newValue[2]),
+                let bits = Int(newValue[3])
+            else {
+                fatalError("Failed to convert QuantizedKVCache metaState values to integers")
+            }
 
-            self.offset = Int(newValue[1]) ?? 0
+            self.offset = offset
+            self.groupSize = groupSize
+            self.bits = bits
         }
     }
 
