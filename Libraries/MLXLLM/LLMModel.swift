@@ -26,21 +26,15 @@ extension LLMModel {
 
         // Prepare the prompt in chunks if larger than the prefill size.
         // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
-        // chunk N. Python mlx-lm gets this pipelining for free because its bindings
-        // defer eval until a value is read. The previous `eval(cache)` call was a
-        // blocking sync that drained the GPU pipeline between chunks.
+        // chunk N.
         while y.tokens.size > prefillStepSize {
             let input = y[.newAxis, ..<prefillStepSize]
             _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
-
-            var cacheArrays: [MLXArray] = []
-            for c in cache { cacheArrays.append(contentsOf: c.innerState()) }
-            asyncEval(cacheArrays)
-
+            asyncEval(cache)
             y = y[prefillStepSize...]
         }
 
-        // Single sync after the loop — flush any remaining async work.
+        // Single sync after the loop to flush any remaining async work.
         eval(cache)
 
         return .tokens(y)
