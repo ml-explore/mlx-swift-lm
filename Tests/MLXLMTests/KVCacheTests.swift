@@ -133,8 +133,38 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     let turbo = try #require(cache[0] as? TurboQuantKVCache)
     #expect(turbo.preset == .turbo3_5)
     #expect(turbo.requestedBackend == .metalPolarQJL)
-    #expect(turbo.activeBackend == .mlxPacked)
-    #expect(turbo.backendFallbackReason != nil)
+    let expectedBackend: TurboQuantBackend =
+        TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+        ? .metalPolarQJL
+        : .mlxPacked
+    #expect(turbo.activeBackend == expectedBackend)
+    if expectedBackend == .mlxPacked {
+        #expect(turbo.backendFallbackReason != nil)
+    }
+}
+
+@Test func testTurboQuantCompressedAttentionStateWhenAvailable() throws {
+    guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else { return }
+
+    let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+    let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+    let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+    let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+    #expect(
+        cache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: .none
+        )
+    )
+    let (compressedKeys, compressedValues) = try cache.updateCompressed(keys: keys, values: values)
+
+    #expect(cache.compressedState != nil)
+    #expect(compressedKeys.layout.logicalLength == 2)
+    #expect(compressedValues.layout.logicalLength == 2)
+    #expect(cache.attentionDiagnostics.activeAttentionPath == .onlineFused)
 }
 
 // MARK: - MambaCache type preservation
