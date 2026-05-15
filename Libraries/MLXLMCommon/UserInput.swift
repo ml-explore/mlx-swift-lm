@@ -202,6 +202,9 @@ public struct UserInput {
         self.prompt = .chat([
             .user(prompt, images: images, videos: videos)
         ])
+        // note: prompt.didSet is not triggered in init
+        self.images = images
+        self.videos = videos
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -317,12 +320,18 @@ public struct UserInput {
         tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = prompt
+        // note: prompt.didSet is not triggered in init
         switch prompt {
         case .text, .messages:
             self.images = images
             self.videos = videos
-        case .chat:
-            break
+        case .chat(let messages):
+            self.images = messages.reduce(into: []) { result, message in
+                result.append(contentsOf: message.images)
+            }
+            self.videos = messages.reduce(into: []) { result, message in
+                result.append(contentsOf: message.videos)
+            }
         }
         self.processing = processing
         self.tools = tools

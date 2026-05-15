@@ -472,12 +472,16 @@ public class EmbeddingGemma: Module, EmbeddingModel {
             processedWeights = Dictionary(uniqueKeysWithValues: lm.flattened())
         }
 
-        // Initialize projection head if weights are present
-        if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
-            self._dense.wrappedValue = [
-                Linear(config.hiddenSize, config.intermediateSize, bias: false),
-                Linear(config.intermediateSize, config.hiddenSize, bias: false),
-            ]
+        // Dense head hidden dim is not in config, infer from checkpoint weight.
+        // Use update(modules:) to replace values with correct shape.
+        if let dense0Weight = processedWeights["dense.0.weight"] {
+            let denseHiddenSize = dense0Weight.dim(0)
+            update(
+                modules: .unflattened([
+                    ("dense.0", Linear(config.hiddenSize, denseHiddenSize, bias: false)),
+                    ("dense.1", Linear(denseHiddenSize, config.hiddenSize, bias: false)),
+                ])
+            )
         }
 
         // Truncate vocab if weights were trained with extra padding tokens

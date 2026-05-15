@@ -47,178 +47,84 @@ public actor IntegrationTestModels {
     private let downloader: any Downloader
     private let tokenizerLoader: any TokenizerLoader
 
-    private var llmTask: Task<LLModelContainer, Error>?
-    private var vlmTask: Task<LLModelContainer, Error>?
-    private var lfm2Task: Task<LLModelContainer, Error>?
-    private var glm4Task: Task<LLModelContainer, Error>?
-    private var mistral3Task: Task<LLModelContainer, Error>?
-    private var nemotronTask: Task<LLModelContainer, Error>?
-    private var qwen35Task: Task<LLModelContainer, Error>?
+    private var llmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
+    private var vlmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
+    private var embeddingTask: Task<EmbeddingModelContainer, Error>?
 
     public init(downloader: any Downloader, tokenizerLoader: any TokenizerLoader) {
         self.downloader = downloader
         self.tokenizerLoader = tokenizerLoader
     }
 
-    public func llmContainer() async throws -> LLModelContainer {
-        if let task = llmTask {
+    /// Load an arbitrary LLM container, cached by `configuration.name` so the same
+    /// model is only loaded once per `IntegrationTestModels` instance.
+    public func llmContainer(for configuration: ModelConfiguration) async throws
+        -> LLModelContainer
+    {
+        let key = configuration.name
+        if let task = llmTasksByName[key] {
             return try await task.value
         }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.llm
         let task = Task {
-            print("Loading LLM: \(id)")
+            print("Loading LLM: \(key)")
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
+                configuration: configuration,
+                progressHandler: logProgress(key)
             )
-            print("Loaded LLM: \(id)")
+            print("Loaded LLM: \(key)")
             return container
         }
-        llmTask = task
+        llmTasksByName[key] = task
         return try await task.value
     }
 
-    public func vlmContainer() async throws -> LLModelContainer {
-        if let task = vlmTask {
+    /// Load an arbitrary VLM container, cached by `configuration.name` so the same
+    /// model is only loaded once per `IntegrationTestModels` instance.
+    public func vlmContainer(for configuration: ModelConfiguration) async throws
+        -> LLModelContainer
+    {
+        let key = configuration.name
+        if let task = vlmTasksByName[key] {
             return try await task.value
         }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.vlm
         let task = Task {
-            print("Loading VLM: \(id)")
+            print("Loading VLM: \(key)")
             let container = try await VLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
+                configuration: configuration,
+                progressHandler: logProgress(key)
             )
-            print("Loaded VLM: \(id)")
+            print("Loaded VLM: \(key)")
             return container
         }
-        vlmTask = task
-        return try await task.value
-    }
-
-    public func lfm2Container() async throws -> LLModelContainer {
-        if let task = lfm2Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.lfm2
-        let task = Task {
-            print("Loading LFM2: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded LFM2: \(id)")
-            return container
-        }
-        lfm2Task = task
-        return try await task.value
-    }
-
-    public func glm4Container() async throws -> LLModelContainer {
-        if let task = glm4Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.glm4
-        let task = Task {
-            print("Loading GLM4: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded GLM4: \(id)")
-            return container
-        }
-        glm4Task = task
-        return try await task.value
-    }
-
-    public func mistral3Container() async throws -> LLModelContainer {
-        if let task = mistral3Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.mistral3
-        let task = Task {
-            print("Loading Mistral3: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded Mistral3: \(id)")
-            return container
-        }
-        mistral3Task = task
-        return try await task.value
-    }
-
-    public func nemotronContainer() async throws -> LLModelContainer {
-        if let task = nemotronTask {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.nemotron
-        let task = Task {
-            print("Loading Nemotron: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded Nemotron: \(id)")
-            return container
-        }
-        nemotronTask = task
-        return try await task.value
-    }
-
-    public func qwen35Container() async throws -> LLModelContainer {
-        if let task = qwen35Task {
-            return try await task.value
-        }
-        let downloader = self.downloader
-        let tokenizerLoader = self.tokenizerLoader
-        let id = IntegrationTestModelIDs.qwen35
-        let task = Task {
-            print("Loading Qwen3.5: \(id)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: .init(id: id),
-                progressHandler: logProgress(id)
-            )
-            print("Loaded Qwen3.5: \(id)")
-            return container
-        }
-        qwen35Task = task
+        vlmTasksByName[key] = task
         return try await task.value
     }
 
     public func embeddingContainer() async throws -> EmbeddingModelContainer {
+        if let task = embeddingTask {
+            return try await task.value
+        }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
         let id = "nomic_text_v1_5"
-        print("Loading embedding model: \(id)")
-        let container = try await EmbedderModelFactory.shared.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: EmbedderRegistry.nomic_text_v1_5,
-            progressHandler: logProgress(id)
-        )
-        print("Loaded embedding model: \(id)")
-        return container
+        let task = Task {
+            print("Loading embedding model: \(id)")
+            let container = try await EmbedderModelFactory.shared.loadContainer(
+                from: downloader, using: tokenizerLoader,
+                configuration: EmbedderRegistry.nomic_text_v1_5,
+                progressHandler: logProgress(id)
+            )
+            print("Loaded embedding model: \(id)")
+            return container
+        }
+        embeddingTask = task
+        return try await task.value
     }
 }
 
@@ -367,6 +273,26 @@ public enum ChatSessionTests {
         try check(
             result.lowercased().contains("wed") || result.lowercased().contains("wednesday"),
             "Expected 'Wed' or 'Wednesday' in response, got: \(result)"
+        )
+    }
+
+    public static func planetsCoherence(container: LLModelContainer) async throws {
+        let session = ChatSession(
+            container,
+            generateParameters: GenerateParameters(maxTokens: 3000, temperature: 0))
+        let result = try await streamAndCollect(
+            session.streamResponse(
+                to: "List all the planets in our solar system in order from the Sun."),
+            label: "Response")
+
+        let expected = [
+            "Mercury", "Venus", "Earth", "Mars",
+            "Jupiter", "Saturn", "Uranus", "Neptune",
+        ]
+        let missing = expected.filter { !result.contains($0) }
+        try check(
+            missing.isEmpty,
+            "Expected all planets in response, missing: \(missing). Got: \(result)"
         )
     }
 

@@ -294,4 +294,52 @@ public class UserInputTests: XCTestCase {
         assertEqual(expected, messages)
     }
 
+    // MARK: - Init self.images / self.videos sync (#182)
+
+    public func testInitFromPromptStringPopulatesImages() throws {
+        // Reproducer for #182: a `.chat` prompt is built from the parameters
+        // but `prompt.didSet` does not fire during init, so `self.images`
+        // used to stay empty.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let placeholder = CIImage(
+            color: CIColor(red: 0.5, green: 0.5, blue: 0.5, colorSpace: cs)!
+        ).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+
+        let input = UserInput(
+            prompt: "What is in this image?",
+            images: [.ciImage(placeholder)])
+        XCTAssertEqual(
+            input.images.count, 1,
+            "UserInput(prompt:images:) must surface the images parameter on self.images")
+        XCTAssertEqual(input.videos.count, 0)
+    }
+
+    public func testInitFromPromptEnumPopulatesImagesForChat() throws {
+        // The `init(prompt: Prompt, images:, videos:, ...)` overload also had
+        // `case .chat: break` and dropped the images parameter on the floor.
+        // After the fix it derives images from the chat messages instead.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let placeholder = CIImage(
+            color: CIColor(red: 0.5, green: 0.5, blue: 0.5, colorSpace: cs)!
+        ).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+
+        let chat: [Chat.Message] = [
+            .user("describe", images: [.ciImage(placeholder)])
+        ]
+        let input = UserInput(prompt: .chat(chat))
+        XCTAssertEqual(
+            input.images.count, 1,
+            "UserInput(prompt:.chat) must derive self.images from the chat messages")
+    }
+
+    public func testInitFromPromptStringPopulatesVideos() throws {
+        // Same bug, video edition.
+        let videoURL = URL(fileURLWithPath: "/tmp/nonexistent.mp4")
+        let input = UserInput(
+            prompt: "describe this video",
+            videos: [.url(videoURL)])
+        XCTAssertEqual(input.videos.count, 1)
+        XCTAssertEqual(input.images.count, 0)
+    }
+
 }

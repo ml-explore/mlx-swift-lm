@@ -315,8 +315,9 @@ class BitnetAttention: Module {
         keys = keys.reshaped(B, L, args.resolvedKvHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.resolvedKvHeads, -1).transposed(0, 2, 1, 3)
 
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let offset = cache?.ropeOffset
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
         if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
