@@ -82,6 +82,24 @@ private func gemma4OneHot(_ indices: MLXArray, numClasses: Int) -> MLXArray {
     expandedDimensions(indices, axis: -1) .== MLXArray(0 ..< numClasses)
 }
 
+/// Average-pool kernel for Gemma 4's vision pooler.
+///
+/// The padded patch tensor has length
+/// `paddedPatchCount = outputLength × pool²` where `pool` is the
+/// model's `pooling_kernel_size`. Recovering `pool` from these
+/// two values yields `floor(sqrt(paddedPatchCount / outputLength))`.
+///
+/// Matches HuggingFace's reference image processor (see
+/// `image_processing_gemma4.py`: `max_patches = max_soft_tokens *
+/// pooling_kernel_size**2`).
+internal func gemma4VisionPoolingKernel(
+    paddedPatchCount: Int, outputLength: Int
+) -> Int {
+    let safeLength = max(outputLength, 1)
+    let ratio = max(1, paddedPatchCount / safeLength)
+    return Int(sqrt(Double(ratio)))
+}
+
 private func gemma4RotateHalf(_ x: MLXArray) -> MLXArray {
     let half = x.shape[x.shape.count - 1] / 2
     let x1 = x[.ellipsis, ..<half]
@@ -1485,7 +1503,8 @@ private final class Gemma4VisionPooler: Module {
 
         let actualPositions = patchPositions[0, ..<validCount]
         let maxX = Int(actualPositions[0..., 0].max().item(Int32.self)) + 1
-        let kernel = Int(sqrt(Double(max(1, validCount / max(length, 1)))))
+        let kernel = gemma4VisionPoolingKernel(
+            paddedPatchCount: pooledHiddenStates.dim(1), outputLength: length)
         let divisor = max(kernel * kernel, 1)
         let pooledLength = max(length, 1)
 
