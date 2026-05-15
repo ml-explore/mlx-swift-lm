@@ -8,6 +8,8 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     { KVCacheSimple() },
     { RotatingKVCache(maxSize: 32) },
     { QuantizedKVCache() },
+    { TurboQuantKVCache() },
+    { RotatingTurboQuantKVCache(maxSize: 32) },
     { ChunkedKVCache(chunkSize: 16) },
     { ArraysCache(size: 2) },
     { MambaCache() },
@@ -45,6 +47,10 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         case let arrays as ArraysCache:
             arrays[0] = keys
             arrays[1] = values
+        case let turbo as TurboQuantKVCache:
+            _ = turbo.updateQuantized(keys: keys, values: values)
+        case let turbo as RotatingTurboQuantKVCache:
+            _ = turbo.updateQuantized(keys: keys, values: values)
         case let quantized as QuantizedKVCache:
             _ = quantized.updateQuantized(keys: keys, values: values)
         default:
@@ -105,6 +111,26 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     let restored = try #require(loaded[0] as? ArraysCache)
     #expect(restored.leftPaddingValues == [0, 5])
     assertArraysClose(restored.state, cache.state)
+}
+
+@Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {
+    var cache: [KVCache] = [KVCacheSimple()]
+    let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+    let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+    _ = cache[0].update(keys: keys, values: values)
+
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: nil,
+        kvGroupSize: 64,
+        quantizedKVStart: 0,
+        kvCacheStrategy: .turboQuant,
+        turboQuantPreset: .turbo3_5
+    )
+
+    #expect(cache[0] is TurboQuantKVCache)
+    let turbo = try #require(cache[0] as? TurboQuantKVCache)
+    #expect(turbo.preset == .turbo3_5)
 }
 
 // MARK: - MambaCache type preservation
@@ -228,6 +254,10 @@ func testCacheCopyIsIndependent(creator: (() -> any KVCache)) async throws {
     case let arrays as ArraysCache:
         arrays[0] = keys
         arrays[1] = values
+    case let turbo as TurboQuantKVCache:
+        _ = turbo.updateQuantized(keys: keys, values: values)
+    case let turbo as RotatingTurboQuantKVCache:
+        _ = turbo.updateQuantized(keys: keys, values: values)
     case let quantized as QuantizedKVCache:
         _ = quantized.updateQuantized(keys: keys, values: values)
     default:

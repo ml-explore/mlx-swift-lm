@@ -72,6 +72,12 @@ public struct GenerateParameters: Sendable {
     /// Step to begin using a quantized KV cache when kvBits is non-nil (default: 0)
     public var quantizedKVStart: Int
 
+    /// Strategy used to construct and dynamically convert KV caches.
+    public var kvCacheStrategy: KVCacheStrategy
+
+    /// TurboQuant preset used when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
+    public var turboQuantPreset: TurboQuantPreset
+
     /// Sampling temperature
     public var temperature: Float
 
@@ -108,6 +114,8 @@ public struct GenerateParameters: Sendable {
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
+        kvCacheStrategy: KVCacheStrategy = .mlxAffine,
+        turboQuantPreset: TurboQuantPreset = .turbo3_5,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -125,6 +133,8 @@ public struct GenerateParameters: Sendable {
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
+        self.kvCacheStrategy = kvCacheStrategy
+        self.turboQuantPreset = turboQuantPreset
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -536,6 +546,8 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvBits: Int?
     let kvGroupSize: Int
     let quantizedKVStart: Int
+    let kvCacheStrategy: KVCacheStrategy
+    let turboQuantPreset: TurboQuantPreset
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -564,6 +576,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
+        self.kvCacheStrategy = parameters.kvCacheStrategy
+        self.turboQuantPreset = parameters.turboQuantPreset
 
         self.promptPrefillTime = try measure {
             try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
@@ -597,6 +611,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
+        self.kvCacheStrategy = parameters.kvCacheStrategy
+        self.turboQuantPreset = parameters.turboQuantPreset
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -630,6 +646,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = nil
         self.kvGroupSize = 64
         self.quantizedKVStart = 0
+        self.kvCacheStrategy = .none
+        self.turboQuantPreset = .turbo3_5
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -680,7 +698,9 @@ public struct TokenIterator: TokenIteratorProtocol {
             cache: &cache,
             kvBits: kvBits,
             kvGroupSize: kvGroupSize,
-            quantizedKVStart: quantizedKVStart
+            quantizedKVStart: quantizedKVStart,
+            kvCacheStrategy: kvCacheStrategy,
+            turboQuantPreset: turboQuantPreset
         )
 
         return convertToToken(logits: result.logits)
@@ -798,7 +818,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvCacheStrategy: parameters.kvCacheStrategy,
+                turboQuantPreset: parameters.turboQuantPreset
             )
         }
 

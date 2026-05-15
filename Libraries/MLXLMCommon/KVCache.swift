@@ -1383,7 +1383,9 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
+    case is RotatingTurboQuantKVCache: return "RotatingTurboQuantKVCache"
     case is RotatingKVCache: return "RotatingKVCache"
+    case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
@@ -1522,6 +1524,33 @@ private func restoreCacheFromMetaState(
         cache.metaState = metaState
         return cache
 
+    case "TurboQuantKVCache":
+        let preset = metaState.last.flatMap(TurboQuantPreset.init(rawValue:)) ?? .turbo3_5
+        let cache = TurboQuantKVCache(preset: preset)
+        cache.state = state
+        cache.metaState = metaState
+        return cache
+
+    case "RotatingTurboQuantKVCache":
+        guard metaState.count >= 7 else {
+            throw KVCacheError(
+                message: "Invalid RotatingTurboQuantKVCache metaState - expected 7 values")
+        }
+        guard let maxSize = Int(metaState[1]) else {
+            throw KVCacheError(
+                message: "Failed to parse RotatingTurboQuantKVCache maxSize from: \(metaState[1])")
+        }
+        let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
+        let groupSize = Int(metaState[6]) ?? 64
+        let cache = RotatingTurboQuantKVCache(
+            maxSize: maxSize,
+            preset: preset,
+            groupSize: groupSize
+        )
+        cache.state = state
+        cache.metaState = metaState
+        return cache
+
     case "ChunkedKVCache":
         let cache = ChunkedKVCache()
         cache.state = state
@@ -1655,8 +1684,22 @@ public func makePromptCache(
 /// Use this when `makePromptCache` cannot determine the layer count automatically.
 public func makePromptCacheWithLayerCount(
     numLayers: Int,
-    maxKVSize: Int? = nil
+    maxKVSize: Int? = nil,
+    parameters: GenerateParameters? = nil
 ) -> [KVCache] {
+    if parameters?.kvCacheStrategy == .turboQuant {
+        let preset = parameters?.turboQuantPreset ?? .turbo3_5
+        let groupSize = parameters?.kvGroupSize ?? 64
+        if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+            return (0 ..< numLayers).map { _ in
+                RotatingTurboQuantKVCache(maxSize: maxKVSize, preset: preset, groupSize: groupSize)
+            }
+        }
+        return (0 ..< numLayers).map { _ in
+            TurboQuantKVCache(preset: preset, groupSize: groupSize)
+        }
+    }
+
     if let maxKVSize = maxKVSize {
         return (0 ..< numLayers).map { _ in
             RotatingKVCache(maxSize: maxKVSize, keep: 4)
@@ -1797,9 +1840,14 @@ public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    kvCacheStrategy: KVCacheStrategy = .mlxAffine,
+    turboQuantPreset: TurboQuantPreset = .turbo3_5
 ) {
-    guard let kvBits = kvBits, !cache.isEmpty else { return }
+    guard !cache.isEmpty else { return }
+    if kvCacheStrategy == .none { return }
+    let resolvedBits = kvCacheStrategy == .turboQuant ? turboQuantPreset.effectiveBits : kvBits
+    guard let kvBits = resolvedBits else { return }
 
     // Find the first quantizable (non-Mamba, non-already-quantized) cache entry
     guard let firstQuantizable = cache.first(where: { $0 is KVCacheSimple }),
@@ -1812,7 +1860,14 @@ public func maybeQuantizeKVCache(
     for i in 0 ..< cache.count {
         // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            if kvCacheStrategy == .turboQuant {
+                cache[i] = simpleCache.toTurboQuant(
+                    preset: turboQuantPreset,
+                    groupSize: kvGroupSize
+                )
+            } else {
+                cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            }
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
         // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
