@@ -108,7 +108,8 @@ public enum WiredMemoryUtils {
                 kvGroupSize: parameters.kvGroupSize,
                 quantizedKVStart: parameters.quantizedKVStart,
                 kvCacheStrategy: parameters.kvCacheStrategy,
-                turboQuantPreset: parameters.turboQuantPreset
+                turboQuantPreset: parameters.turboQuantPreset,
+                turboQuantBackend: parameters.turboQuantBackend
             )
             eval(result.logits)
         case .logits(let result):
@@ -118,7 +119,8 @@ public enum WiredMemoryUtils {
                 kvGroupSize: parameters.kvGroupSize,
                 quantizedKVStart: parameters.quantizedKVStart,
                 kvCacheStrategy: parameters.kvCacheStrategy,
-                turboQuantPreset: parameters.turboQuantPreset
+                turboQuantPreset: parameters.turboQuantPreset,
+                turboQuantBackend: parameters.turboQuantBackend
             )
             eval(result.logits)
         }

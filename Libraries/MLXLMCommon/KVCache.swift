@@ -1525,8 +1525,11 @@ private func restoreCacheFromMetaState(
         return cache
 
     case "TurboQuantKVCache":
-        let preset = metaState.last.flatMap(TurboQuantPreset.init(rawValue:)) ?? .turbo3_5
-        let cache = TurboQuantKVCache(preset: preset)
+        let preset =
+            metaState.count > 4 ? TurboQuantPreset(rawValue: metaState[4]) ?? .turbo3_5 : .turbo3_5
+        let backend =
+            metaState.count > 5 ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
+        let cache = TurboQuantKVCache(preset: preset, backend: backend)
         cache.state = state
         cache.metaState = metaState
         return cache
@@ -1542,10 +1545,13 @@ private func restoreCacheFromMetaState(
         }
         let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
         let groupSize = Int(metaState[6]) ?? 64
+        let backend =
+            metaState.count > 7 ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
             preset: preset,
-            groupSize: groupSize
+            groupSize: groupSize,
+            backend: backend
         )
         cache.state = state
         cache.metaState = metaState
@@ -1689,14 +1695,20 @@ public func makePromptCacheWithLayerCount(
 ) -> [KVCache] {
     if parameters?.kvCacheStrategy == .turboQuant {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
+        let backend = parameters?.turboQuantBackend ?? .mlxPacked
         let groupSize = parameters?.kvGroupSize ?? 64
         if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
             return (0 ..< numLayers).map { _ in
-                RotatingTurboQuantKVCache(maxSize: maxKVSize, preset: preset, groupSize: groupSize)
+                RotatingTurboQuantKVCache(
+                    maxSize: maxKVSize,
+                    preset: preset,
+                    groupSize: groupSize,
+                    backend: backend
+                )
             }
         }
         return (0 ..< numLayers).map { _ in
-            TurboQuantKVCache(preset: preset, groupSize: groupSize)
+            TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
         }
     }
 
@@ -1842,7 +1854,8 @@ public func maybeQuantizeKVCache(
     kvGroupSize: Int = 64,
     quantizedKVStart: Int = 0,
     kvCacheStrategy: KVCacheStrategy = .mlxAffine,
-    turboQuantPreset: TurboQuantPreset = .turbo3_5
+    turboQuantPreset: TurboQuantPreset = .turbo3_5,
+    turboQuantBackend: TurboQuantBackend = .mlxPacked
 ) {
     guard !cache.isEmpty else { return }
     if kvCacheStrategy == .none { return }
@@ -1863,7 +1876,8 @@ public func maybeQuantizeKVCache(
             if kvCacheStrategy == .turboQuant {
                 cache[i] = simpleCache.toTurboQuant(
                     preset: turboQuantPreset,
-                    groupSize: kvGroupSize
+                    groupSize: kvGroupSize,
+                    backend: turboQuantBackend
                 )
             } else {
                 cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)

@@ -78,6 +78,9 @@ public struct GenerateParameters: Sendable {
     /// TurboQuant preset used when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
     public var turboQuantPreset: TurboQuantPreset
 
+    /// TurboQuant backend requested when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
+    public var turboQuantBackend: TurboQuantBackend
+
     /// Sampling temperature
     public var temperature: Float
 
@@ -116,6 +119,7 @@ public struct GenerateParameters: Sendable {
         quantizedKVStart: Int = 0,
         kvCacheStrategy: KVCacheStrategy = .mlxAffine,
         turboQuantPreset: TurboQuantPreset = .turbo3_5,
+        turboQuantBackend: TurboQuantBackend = .mlxPacked,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -135,6 +139,7 @@ public struct GenerateParameters: Sendable {
         self.quantizedKVStart = quantizedKVStart
         self.kvCacheStrategy = kvCacheStrategy
         self.turboQuantPreset = turboQuantPreset
+        self.turboQuantBackend = turboQuantBackend
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -548,6 +553,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let quantizedKVStart: Int
     let kvCacheStrategy: KVCacheStrategy
     let turboQuantPreset: TurboQuantPreset
+    let turboQuantBackend: TurboQuantBackend
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -578,6 +584,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.quantizedKVStart = parameters.quantizedKVStart
         self.kvCacheStrategy = parameters.kvCacheStrategy
         self.turboQuantPreset = parameters.turboQuantPreset
+        self.turboQuantBackend = parameters.turboQuantBackend
 
         self.promptPrefillTime = try measure {
             try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
@@ -613,6 +620,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.quantizedKVStart = parameters.quantizedKVStart
         self.kvCacheStrategy = parameters.kvCacheStrategy
         self.turboQuantPreset = parameters.turboQuantPreset
+        self.turboQuantBackend = parameters.turboQuantBackend
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -648,6 +656,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.quantizedKVStart = 0
         self.kvCacheStrategy = .none
         self.turboQuantPreset = .turbo3_5
+        self.turboQuantBackend = .mlxPacked
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -700,7 +709,8 @@ public struct TokenIterator: TokenIteratorProtocol {
             kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart,
             kvCacheStrategy: kvCacheStrategy,
-            turboQuantPreset: turboQuantPreset
+            turboQuantPreset: turboQuantPreset,
+            turboQuantBackend: turboQuantBackend
         )
 
         return convertToToken(logits: result.logits)
@@ -820,7 +830,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 kvGroupSize: parameters.kvGroupSize,
                 quantizedKVStart: parameters.quantizedKVStart,
                 kvCacheStrategy: parameters.kvCacheStrategy,
-                turboQuantPreset: parameters.turboQuantPreset
+                turboQuantPreset: parameters.turboQuantPreset,
+                turboQuantBackend: parameters.turboQuantBackend
             )
         }
 

@@ -125,12 +125,16 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         kvGroupSize: 64,
         quantizedKVStart: 0,
         kvCacheStrategy: .turboQuant,
-        turboQuantPreset: .turbo3_5
+        turboQuantPreset: .turbo3_5,
+        turboQuantBackend: .metalPolarQJL
     )
 
     #expect(cache[0] is TurboQuantKVCache)
     let turbo = try #require(cache[0] as? TurboQuantKVCache)
     #expect(turbo.preset == .turbo3_5)
+    #expect(turbo.requestedBackend == .metalPolarQJL)
+    #expect(turbo.activeBackend == .mlxPacked)
+    #expect(turbo.backendFallbackReason != nil)
 }
 
 // MARK: - MambaCache type preservation

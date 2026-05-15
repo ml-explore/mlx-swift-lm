@@ -4,6 +4,8 @@ import Foundation
 import MLX
 
 public typealias TurboQuantPreset = MLX.TurboQuantPreset
+public typealias TurboQuantBackend = MLX.TurboQuantBackend
+public typealias TurboQuantKernelAvailability = MLX.TurboQuantKernelAvailability
 
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
@@ -11,27 +13,62 @@ public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case turboQuant
 }
 
+public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
+    public var preset: TurboQuantPreset
+    public var requestedBackend: TurboQuantBackend
+    public var activeBackend: TurboQuantBackend
+    public var fallbackReason: String?
+    public var groupSize: Int
+    public var bits: Int
+    public var maxSize: Int?
+}
+
 public final class TurboQuantKVCache: QuantizedKVCache {
     public let preset: TurboQuantPreset
+    public let requestedBackend: TurboQuantBackend
+    public let activeBackend: TurboQuantBackend
+    public let backendFallbackReason: String?
 
     public init(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
-        mode: QuantizationMode = .affine
+        mode: QuantizationMode = .affine,
+        backend: TurboQuantBackend = .mlxPacked
     ) {
         self.preset = preset
+        self.requestedBackend = backend
+        let availability = TurboQuantKernelAvailability.current
+        self.activeBackend = availability.runtimeBackend(for: backend)
+        self.backendFallbackReason = availability.fallbackReason(for: backend)
         super.init(groupSize: groupSize, bits: preset.effectiveBits, mode: mode)
     }
 
     public override var metaState: [String] {
-        get { super.metaState + [preset.rawValue] }
+        get { super.metaState + [preset.rawValue, requestedBackend.rawValue] }
         set {
             super.metaState = Array(newValue.prefix(4))
         }
     }
 
+    public var diagnostics: TurboQuantKVCacheDiagnostics {
+        TurboQuantKVCacheDiagnostics(
+            preset: preset,
+            requestedBackend: requestedBackend,
+            activeBackend: activeBackend,
+            fallbackReason: backendFallbackReason,
+            groupSize: groupSize,
+            bits: bits,
+            maxSize: nil
+        )
+    }
+
     public override func copy() -> any KVCache {
-        let new = TurboQuantKVCache(preset: preset, groupSize: groupSize, mode: mode)
+        let new = TurboQuantKVCache(
+            preset: preset,
+            groupSize: groupSize,
+            mode: mode,
+            backend: requestedBackend
+        )
         let s = self.state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
@@ -49,6 +86,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     private var packedValues: TurboQuantPackedTensor?
 
     public let preset: TurboQuantPreset
+    public let requestedBackend: TurboQuantBackend
+    public let activeBackend: TurboQuantBackend
+    public let backendFallbackReason: String?
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
@@ -63,10 +103,15 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         step: Int = 256,
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
-        mode: QuantizationMode = .affine
+        mode: QuantizationMode = .affine,
+        backend: TurboQuantBackend = .mlxPacked
     ) {
         self.rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
         self.preset = preset
+        self.requestedBackend = backend
+        let availability = TurboQuantKernelAvailability.current
+        self.activeBackend = availability.runtimeBackend(for: backend)
+        self.backendFallbackReason = availability.fallbackReason(for: backend)
         self.groupSize = groupSize
         self.bits = preset.effectiveBits
         self.mode = mode
@@ -80,9 +125,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         offset = rawCache.offset
 
         let keyConfiguration = TurboQuantConfiguration(
-            preset: preset, role: .key, groupSize: groupSize, mode: mode)
+            preset: preset, role: .key, groupSize: groupSize, mode: mode, backend: activeBackend)
         let valueConfiguration = TurboQuantConfiguration(
-            preset: preset, role: .value, groupSize: groupSize, mode: mode)
+            preset: preset, role: .value, groupSize: groupSize, mode: mode, backend: activeBackend)
         packedKeys = turboQuantized(cachedKeys, configuration: keyConfiguration)
         packedValues = turboQuantized(cachedValues, configuration: valueConfiguration)
 
@@ -119,7 +164,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public override var metaState: [String] {
-        get { rawCache.metaState + [preset.rawValue, String(groupSize)] }
+        get { rawCache.metaState + [preset.rawValue, String(groupSize), requestedBackend.rawValue] }
         set {
             rawCache.metaState = Array(newValue.prefix(5))
             offset = rawCache.offset
@@ -155,7 +200,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             maxSize: maxSize,
             preset: preset,
             groupSize: groupSize,
-            mode: mode
+            mode: mode,
+            backend: requestedBackend
         )
         let s = state
         if !s.isEmpty {
@@ -165,8 +211,20 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         return new
     }
 
+    public var diagnostics: TurboQuantKVCacheDiagnostics {
+        TurboQuantKVCacheDiagnostics(
+            preset: preset,
+            requestedBackend: requestedBackend,
+            activeBackend: activeBackend,
+            fallbackReason: backendFallbackReason,
+            groupSize: groupSize,
+            bits: bits,
+            maxSize: maxSize
+        )
+    }
+
     public var debugDescription: String {
-        "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue)"
+        "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue)"
     }
 }
 
@@ -174,17 +232,33 @@ public extension KVCacheSimple {
     func toTurboQuant(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
-        mode: QuantizationMode = .affine
+        mode: QuantizationMode = .affine,
+        backend: TurboQuantBackend = .mlxPacked
     ) -> TurboQuantKVCache {
-        let cache = TurboQuantKVCache(preset: preset, groupSize: groupSize, mode: mode)
+        let cache = TurboQuantKVCache(
+            preset: preset,
+            groupSize: groupSize,
+            mode: mode,
+            backend: backend
+        )
         cache.offset = self.offset
 
         let currentState = self.state
         if currentState.count == 2 {
             let keyConfiguration = TurboQuantConfiguration(
-                preset: preset, role: .key, groupSize: groupSize, mode: mode)
+                preset: preset,
+                role: .key,
+                groupSize: groupSize,
+                mode: mode,
+                backend: cache.activeBackend
+            )
             let valueConfiguration = TurboQuantConfiguration(
-                preset: preset, role: .value, groupSize: groupSize, mode: mode)
+                preset: preset,
+                role: .value,
+                groupSize: groupSize,
+                mode: mode,
+                backend: cache.activeBackend
+            )
             let keys = turboQuantized(currentState[0], configuration: keyConfiguration)
             let values = turboQuantized(currentState[1], configuration: valueConfiguration)
             cache.state = [
