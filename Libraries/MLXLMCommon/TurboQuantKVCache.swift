@@ -18,6 +18,7 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var requestedBackend: TurboQuantBackend
     public var activeBackend: TurboQuantBackend
     public var fallbackReason: String?
+    public var metalCodecAvailable: Bool
     public var groupSize: Int
     public var bits: Int
     public var maxSize: Int?
@@ -56,6 +57,7 @@ public final class TurboQuantKVCache: QuantizedKVCache {
             requestedBackend: requestedBackend,
             activeBackend: activeBackend,
             fallbackReason: backendFallbackReason,
+            metalCodecAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec,
             groupSize: groupSize,
             bits: bits,
             maxSize: nil
@@ -217,6 +219,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             requestedBackend: requestedBackend,
             activeBackend: activeBackend,
             fallbackReason: backendFallbackReason,
+            metalCodecAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec,
             groupSize: groupSize,
             bits: bits,
             maxSize: maxSize
