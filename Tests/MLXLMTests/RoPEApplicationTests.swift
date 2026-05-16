@@ -51,9 +51,6 @@ struct RoPEApplicationTests {
             // different offsets for keys/queries.
             let match = allClose(outputBatch, outputSeq, atol: 1e-4)
             eval(match)
-            print(outputBatch)
-            print(outputSeq)
-            print(abs(outputSeq - outputBatch))
             #expect(match.item(Bool.self))
         }
     }
