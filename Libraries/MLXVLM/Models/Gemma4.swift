@@ -990,8 +990,9 @@ final class Gemma4TextBackbone: Module {
         inputsEmbeds: MLXArray? = nil,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: [KVCache?]? = nil,
-        perLayerInputs: MLXArray? = nil
-    ) -> MLXArray {
+        perLayerInputs: MLXArray? = nil,
+        emitDrafterState: Bool = false
+    ) -> (hidden: MLXArray, sharedKV: [String: (MLXArray, MLXArray)]?) {
         let h0: MLXArray
         if let inputsEmbeds {
             h0 = inputsEmbeds
@@ -1072,7 +1073,34 @@ final class Gemma4TextBackbone: Module {
             h = output
             intermediates[idx] = (kvState, attentionOffset)
         }
-        return norm(h)
+        let finalHidden = norm(h)
+
+        guard emitDrafterState else {
+            return (finalHidden, nil)
+        }
+
+        // Walk intermediates from the last layer backward; for each unique
+        // `layer_type`, take the first `.regular` K/V encountered. Quantized
+        // cases are skipped — the iterator treats absent `sharedKV` as a
+        // signal to fall back to single-token generation (R8/R13 limitation,
+        // documented).
+        var sharedKV: [String: (MLXArray, MLXArray)] = [:]
+        var seenTypes = Set<String>()
+        let targetTypes: Set<String> = ["full_attention", "sliding_attention"]
+        for idx in stride(from: layers.count - 1, through: 0, by: -1) {
+            let layerType = layers[idx].layerType
+            guard targetTypes.contains(layerType), !seenTypes.contains(layerType) else {
+                continue
+            }
+            if case .regular(let keys, let values) = intermediates[idx].kv {
+                sharedKV[layerType] = (keys, values)
+                seenTypes.insert(layerType)
+            }
+            if seenTypes == targetTypes { break }
+        }
+        // Treat partial coverage (e.g. only one layer_type populated, or
+        // quantized cache for the other) as no-emit — iterator falls back.
+        return (finalHidden, seenTypes == targetTypes ? sharedKV : nil)
     }
 }
 
@@ -1124,23 +1152,35 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         cache: [KVCache]? = nil,
         inputsEmbeds: MLXArray? = nil,
         perLayerInputs: MLXArray? = nil,
-        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        emitDrafterState: Bool = false
     ) -> LMOutput {
-        let output = model(
+        let (hidden, sharedKV) = model(
             inputs, inputsEmbeds: inputsEmbeds, mask: mask, cache: cache?.map { $0 as KVCache? },
-            perLayerInputs: perLayerInputs
+            perLayerInputs: perLayerInputs,
+            emitDrafterState: emitDrafterState
         )
         let logits: MLXArray
         if let lmHead {
-            logits = lmHead(output)
+            logits = lmHead(hidden)
         } else {
-            logits = model.embedTokens.asLinear(output)
+            logits = model.embedTokens.asLinear(hidden)
         }
+        let softcappedLogits: MLXArray
         if let finalLogitSoftcapping, finalLogitSoftcapping > 0 {
             let scale = MLXArray(finalLogitSoftcapping)
-            return LMOutput(logits: tanh(logits / scale) * scale)
+            softcappedLogits = tanh(logits / scale) * scale
+        } else {
+            softcappedLogits = logits
         }
-        return LMOutput(logits: logits)
+
+        guard emitDrafterState, let sharedKV else {
+            return LMOutput(logits: softcappedLogits)
+        }
+        var state = LMOutput.State()
+        state[mtpLastHiddenStatesKey] = hidden
+        state[mtpSharedKVStatesKey] = sharedKV
+        return LMOutput(logits: softcappedLogits, state: state)
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -1771,6 +1811,22 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
         let logits = languageModel(inputs, cache: cache?.map { $0 })
         return logits.logits
+    }
+
+    /// MTP-aware ``LanguageModel`` entry point. Reads ``mtpEmitFlagKey`` from
+    /// the incoming `state` and threads it through to ``Gemma4TextLanguageModel``;
+    /// the returned ``LMOutput`` carries ``mtpLastHiddenStatesKey`` and
+    /// ``mtpSharedKVStatesKey`` populated when the flag is set, empty otherwise.
+    /// Overrides the protocol-extension default at ``LanguageModel`` which
+    /// would discard `state`.
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let emit = state?[mtpEmitFlagKey] ?? false
+        return languageModel(
+            input.tokens, cache: cache?.map { $0 },
+            emitDrafterState: emit
+        )
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
