@@ -101,3 +101,31 @@ public final class MTPDrafterContainer: Sendable {
         }
     }
 }
+
+// MARK: - Cross-model state keys
+//
+// Public ``LMOutput/Key`` declarations for MTP speculative decoding. The
+// target model (e.g. ``Gemma4`` in MLXVLM) writes these into its
+// ``LMOutput/state`` when the iterator opts in via ``mtpEmitFlagKey``; the
+// ``MTPSpeculativeTokenIterator`` reads them and threads them to the drafter
+// as method arguments. Public scope is required because writer and reader
+// live in different modules.
+
+/// Target writes its post-final-norm hidden state here (pre-lm_head,
+/// pre-softcap). ``MTPSpeculativeTokenIterator`` reads it and threads it to
+/// the drafter as `lastHidden`.
+public let mtpLastHiddenStatesKey =
+    LMOutput.Key<MLXArray>("mtp.lastHiddenStates")
+
+/// Target writes one `(keys, values)` tuple per `layer_type`
+/// (`"full_attention"`, `"sliding_attention"`) here, drawn from the last
+/// layer of each type. ``MTPSpeculativeTokenIterator`` reads it and threads
+/// it to the drafter as `sharedKV`.
+public let mtpSharedKVStatesKey =
+    LMOutput.Key<[String: (MLXArray, MLXArray)]>("mtp.sharedKVStates")
+
+/// The MTP iterator sets this key on the ``LMOutput/State`` it passes into
+/// the main model on each call to opt the target into emitting
+/// ``mtpLastHiddenStatesKey`` and ``mtpSharedKVStatesKey``. An absent key
+/// reads as `false` (no emit), so non-MTP callers are unaffected.
+public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
