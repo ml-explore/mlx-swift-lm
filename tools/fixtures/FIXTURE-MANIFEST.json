@@ -1,0 +1,73 @@
+{
+  "pinned_mlx_vlm_sha": "d49d428e9f570dc0387b9598b3b7e0ea391590d2",
+  "seed": 42,
+  "suites": {
+    "drafter_forward": [
+      {
+        "path": "drafter_forward/case_01_q1_kv32_baseline.safetensors",
+        "name": "case_01_q1_kv32_baseline",
+        "query_len": 1,
+        "kv_len": 32,
+        "queryLen": "1",
+        "kvLen": "32",
+        "vocabSize": "262144",
+        "backboneHiddenSize": "5376",
+        "drafterHiddenSize": "1024",
+        "targetModelId": "mlx-community/gemma-4-31b-it-8bit",
+        "drafterModelId": "mlx-community/gemma-4-31B-it-assistant-bf16"
+      },
+      {
+        "path": "drafter_forward/case_02_q1_kv64.safetensors",
+        "name": "case_02_q1_kv64",
+        "query_len": 1,
+        "kv_len": 64,
+        "queryLen": "1",
+        "kvLen": "64",
+        "vocabSize": "262144",
+        "backboneHiddenSize": "5376",
+        "drafterHiddenSize": "1024",
+        "targetModelId": "mlx-community/gemma-4-31b-it-8bit",
+        "drafterModelId": "mlx-community/gemma-4-31B-it-assistant-bf16"
+      },
+      {
+        "path": "drafter_forward/case_03_q1_kv128.safetensors",
+        "name": "case_03_q1_kv128",
+        "query_len": 1,
+        "kv_len": 128,
+        "queryLen": "1",
+        "kvLen": "128",
+        "vocabSize": "262144",
+        "backboneHiddenSize": "5376",
+        "drafterHiddenSize": "1024",
+        "targetModelId": "mlx-community/gemma-4-31b-it-8bit",
+        "drafterModelId": "mlx-community/gemma-4-31B-it-assistant-bf16"
+      },
+      {
+        "path": "drafter_forward/case_04_q2_kv32_multi_query.safetensors",
+        "name": "case_04_q2_kv32_multi_query",
+        "query_len": 2,
+        "kv_len": 32,
+        "queryLen": "2",
+        "kvLen": "32",
+        "vocabSize": "262144",
+        "backboneHiddenSize": "5376",
+        "drafterHiddenSize": "1024",
+        "targetModelId": "mlx-community/gemma-4-31b-it-8bit",
+        "drafterModelId": "mlx-community/gemma-4-31B-it-assistant-bf16"
+      },
+      {
+        "path": "drafter_forward/case_05_q1_kv256_long.safetensors",
+        "name": "case_05_q1_kv256_long",
+        "query_len": 1,
+        "kv_len": 256,
+        "queryLen": "1",
+        "kvLen": "256",
+        "vocabSize": "262144",
+        "backboneHiddenSize": "5376",
+        "drafterHiddenSize": "1024",
+        "targetModelId": "mlx-community/gemma-4-31b-it-8bit",
+        "drafterModelId": "mlx-community/gemma-4-31B-it-assistant-bf16"
+      }
+    ]
+  }
+}
