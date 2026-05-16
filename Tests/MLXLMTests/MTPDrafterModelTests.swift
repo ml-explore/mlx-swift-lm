@@ -96,3 +96,81 @@ private final class DummyLanguageModel: Module, LanguageModel, KVCacheDimensionP
         MLXArray.zeros([1, 1, 1])
     }
 }
+
+// MARK: - Cross-model state key round-trips
+
+@Test
+func testMTPLastHiddenStatesKeyRoundtrip() {
+    var state = LMOutput.State()
+    let hidden = MLXArray(
+        (0 ..< 8).map { Float($0) }, [1, 1, 8])
+
+    state[mtpLastHiddenStatesKey] = hidden
+
+    let recovered = state[mtpLastHiddenStatesKey]
+    #expect(recovered != nil)
+    #expect(recovered!.shape == [1, 1, 8])
+    // Sample-element identity at the boundaries.
+    #expect(recovered![0, 0, 0].item(Float.self) == Float(0))
+    #expect(recovered![0, 0, 7].item(Float.self) == Float(7))
+}
+
+@Test
+func testMTPSharedKVStatesKeyRoundtrip() {
+    var state = LMOutput.State()
+    let kFull = MLXArray.ones([1, 2, 4, 8])
+    let vFull = MLXArray.ones([1, 2, 4, 8]) * MLXArray(Float(2))
+    let kSlide = MLXArray.zeros([1, 2, 4, 8])
+    let vSlide = MLXArray.ones([1, 2, 4, 8]) * MLXArray(Float(3))
+
+    state[mtpSharedKVStatesKey] = [
+        "full_attention": (kFull, vFull),
+        "sliding_attention": (kSlide, vSlide),
+    ]
+
+    let recovered = state[mtpSharedKVStatesKey]
+    #expect(recovered != nil)
+    #expect(Set(recovered!.keys) == ["full_attention", "sliding_attention"])
+
+    let full = recovered!["full_attention"]!
+    #expect(full.0.shape == [1, 2, 4, 8])
+    #expect(full.1.shape == [1, 2, 4, 8])
+    #expect(full.0[0, 0, 0, 0].item(Float.self) == Float(1))
+    #expect(full.1[0, 0, 0, 0].item(Float.self) == Float(2))
+
+    let slide = recovered!["sliding_attention"]!
+    #expect(slide.0[0, 0, 0, 0].item(Float.self) == Float(0))
+    #expect(slide.1[0, 0, 0, 0].item(Float.self) == Float(3))
+}
+
+@Test
+func testMTPEmitFlagKeyDefaultsToFalse() {
+    let state = LMOutput.State()
+    // Absent key reads as nil; iterator-side code treats nil as false.
+    #expect(state[mtpEmitFlagKey] == nil)
+
+    var withTrue = LMOutput.State()
+    withTrue[mtpEmitFlagKey] = true
+    #expect(withTrue[mtpEmitFlagKey] == true)
+
+    var withFalse = LMOutput.State()
+    withFalse[mtpEmitFlagKey] = false
+    #expect(withFalse[mtpEmitFlagKey] == false)
+}
+
+@Test
+func testMTPStateKeysAreDistinct() {
+    var state = LMOutput.State()
+    let hidden = MLXArray.zeros([1, 1, 4])
+    let kv: [String: (MLXArray, MLXArray)] = [
+        "full_attention": (MLXArray.zeros([1, 1, 2, 4]), MLXArray.zeros([1, 1, 2, 4]))
+    ]
+
+    state[mtpLastHiddenStatesKey] = hidden
+    state[mtpSharedKVStatesKey] = kv
+    state[mtpEmitFlagKey] = true
+
+    #expect(state[mtpLastHiddenStatesKey]?.shape == [1, 1, 4])
+    #expect(state[mtpSharedKVStatesKey]?.count == 1)
+    #expect(state[mtpEmitFlagKey] == true)
+}
