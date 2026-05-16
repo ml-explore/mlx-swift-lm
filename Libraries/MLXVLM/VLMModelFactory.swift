@@ -56,6 +56,9 @@ private func create<C: Codable, M>(
 ) -> (Data) throws -> M {
     { data in
         let configuration = try JSONDecoder.json5().decode(C.self, from: data)
+        if let validating = configuration as? ModelConfigurationValidating {
+            try validating.validateModelConfiguration()
+        }
         return modelInit(configuration)
     }
 }
@@ -70,6 +73,9 @@ private func create<C: Codable, P>(
 ) -> (Data, any Tokenizer) throws -> P {
     { data, tokenizer in
         let configuration = try JSONDecoder.json5().decode(C.self, from: data)
+        if let validating = configuration as? ModelConfigurationValidating {
+            try validating.validateModelConfiguration()
+        }
         return processorInit(configuration, tokenizer)
     }
 }

@@ -38,18 +38,7 @@ class Qwen2Attention: Module {
         _wv.wrappedValue = Linear(dim, kvHeads * headDim, bias: true)
         _wo.wrappedValue = Linear(heads * headDim, dim, bias: false)
 
-        let ropeScale: Float
-        if let ropeScaling = args.ropeScaling, ropeScaling["type"] == .string("linear"),
-            let factor = ropeScaling["factor"]
-        {
-            if let v = factor.asFloat() {
-                ropeScale = 1 / v
-            } else {
-                fatalError("ropeScaling.factor must be a float")
-            }
-        } else {
-            ropeScale = 1
-        }
+        let ropeScale = linearRoPEScalingFactor(args.ropeScaling).map { 1 / $0 } ?? 1
 
         self.rope = RoPE(
             dimensions: headDim, traditional: args.ropeTraditional, base: args.ropeTheta,
@@ -265,6 +254,12 @@ public struct Qwen2Configuration: Codable, Sendable {
             [String: StringOrNumber].self, forKey: Qwen2Configuration.CodingKeys.ropeScaling)
         self.tieWordEmbeddings =
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+    }
+}
+
+extension Qwen2Configuration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen2Configuration.rope_scaling")
     }
 }
 

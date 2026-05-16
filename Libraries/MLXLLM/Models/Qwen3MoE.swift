@@ -44,18 +44,7 @@ class Qwen3MoEAttention: Module {
         _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
-        let ropeScale: Float
-        if let ropeScaling = args.ropeScaling, ropeScaling["type"] == .string("linear"),
-            let factor = ropeScaling["factor"]
-        {
-            if let v = factor.asFloat() {
-                ropeScale = 1 / v
-            } else {
-                fatalError("ropeScaling.factor must be a float")
-            }
-        } else {
-            ropeScale = 1
-        }
+        let ropeScale = linearRoPEScalingFactor(args.ropeScaling).map { 1 / $0 } ?? 1
 
         self.rope = RoPE(
             dimensions: headDim, traditional: false, base: args.ropeTheta,
@@ -348,6 +337,12 @@ public struct Qwen3MoEConfiguration: Codable, Sendable {
         self.normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? false
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
+    }
+}
+
+extension Qwen3MoEConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen3MoEConfiguration.rope_scaling")
     }
 }
 

@@ -92,10 +92,21 @@ func ssmUpdateKernel(
     let inputType = hiddenStates.dtype
     let (hb, ds) = (B.dim(-2), B.dim(-1))
 
+    let rawDt = dt
     let dt = computeDt(dt, dtBias, timeStepLimit)
 
     guard let kernel = SSMKernelManager.shared.ssmKernel else {
-        fatalError("SSM kernel not available")
+        return ssmAttn(
+            x: hiddenStates,
+            ALog: ALog,
+            B: B,
+            C: C,
+            D: D,
+            dt: rawDt,
+            dtBias: dtBias,
+            state: state,
+            timeStepLimit: timeStepLimit
+        )
     }
 
     let outputs = kernel(

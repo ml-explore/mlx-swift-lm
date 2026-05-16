@@ -64,19 +64,11 @@ private enum Language {
             self._wv.wrappedValue = Linear(dim, kvHeads * headDim, bias: true)
             self._wo.wrappedValue = Linear(heads * headDim, dim, bias: false)
 
-            if let v = args.ropeScaling?["mrope_section"], let array = v.asInts() {
+            if let array = args.ropeScaling?["mrope_section"]?.asInts(), array.count == 3 {
                 // mrope_section = np.cumsum(mrope_section * 2)[:-1].tolist()
-                self.mropeSection = sequence(state: (0, array.makeIterator())) { state in
-                    if let v = state.1.next() {
-                        // note the *2
-                        state.0 += v * 2
-                        return state.0
-                    } else {
-                        return nil
-                    }
-                }.dropLast()
+                self.mropeSection = cumulativeMROPESection(array)
             } else {
-                fatalError("rope_scaling['mrope_section'] must be an array of integers")
+                self.mropeSection = fallbackMROPESection(headDim: headDim)
             }
 
             self._rotaryEmbedding.wrappedValue = RoPE(
@@ -1050,6 +1042,14 @@ public struct Qwen25VLConfiguration: Codable, Sendable {
         // these are overlaid in the top level
         self.textConfiguration = try TextConfiguration(from: decoder)
         self.baseConfiguration = try BaseConfiguration(from: decoder)
+    }
+}
+
+extension Qwen25VLConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateMROPESection(
+            textConfiguration.ropeScaling,
+            context: "Qwen25VLConfiguration.rope_scaling")
     }
 }
 

@@ -32,9 +32,26 @@ private func attentionWithCacheUpdateAndSinks(
     }
 
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
-        precondition(sinks == nil, "Quantized SDPA does not support attention sinks.")
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
+        if sinks != nil {
+            let decodedKeys = dequantized(
+                quantizedKeys.0, scales: quantizedKeys.1, biases: quantizedKeys.2,
+                groupSize: quantizedKVCache.groupSize, bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode)
+            let decodedValues = dequantized(
+                quantizedValues.0, scales: quantizedValues.1, biases: quantizedValues.2,
+                groupSize: quantizedKVCache.groupSize, bits: quantizedKVCache.bits,
+                mode: quantizedKVCache.mode)
+            return MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: decodedKeys,
+                values: decodedValues,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            )
+        }
         return quantizedScaledDotProductAttention(
             queries: queries,
             quantizedKeys: quantizedKeys,

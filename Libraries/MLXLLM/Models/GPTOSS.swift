@@ -226,14 +226,28 @@ class AttentionBlock: Module {
 
         // Quantized cache path
         if let qcache = cache as? QuantizedKVCacheProtocol {
-            if sinksActive {
-                fatalError("Quantized attention does not support non-zero sinks.")
-            }
             let offset = cache?.ropeOffset
             q = applyRotaryPosition(rope, to: q, offset: offset)
             k = applyRotaryPosition(rope, to: k, offset: offset)
 
             let (qKeys, qValues) = qcache.updateQuantized(keys: k, values: v)
+            if sinksActive {
+                let keys = dequantized(
+                    qKeys.0, scales: qKeys.1, biases: qKeys.2,
+                    groupSize: qcache.groupSize, bits: qcache.bits, mode: qcache.mode)
+                let values = dequantized(
+                    qValues.0, scales: qValues.1, biases: qValues.2,
+                    groupSize: qcache.groupSize, bits: qcache.bits, mode: qcache.mode)
+                let vHat = MLXFast.scaledDotProductAttention(
+                    queries: q,
+                    keys: keys,
+                    values: values,
+                    scale: smScale,
+                    mask: mask,
+                    sinks: sinks
+                )
+                return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
+            }
             let vHat = quantizedScaledDotProductAttention(
                 queries: q,
                 quantizedKeys: qKeys,
