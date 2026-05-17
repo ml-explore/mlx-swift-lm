@@ -1595,6 +1595,93 @@ public func generateTokens(
     return stream
 }
 
+/// Generates tokens asynchronously using MTP speculative decoding.
+///
+/// Parallel to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// but for MTP drafters: the drafter shares K/V with the target model and
+/// produces a block of `blockSize - 1` candidate tokens per round in a
+/// single `draftBlock(...)` call. The drafter shares the target's
+/// tokenizer (via `context.tokenizer`).
+///
+/// - Parameters:
+///   - input: language model input for the main (verifier) model.
+///   - cache: optional ``KVCache`` for the main model.
+///   - parameters: generation parameters (sampling, max tokens, KV
+///     quantization, etc.).
+///   - context: model context for the main (verifier) model.
+///   - mtpDrafter: the ``MTPDrafterModel``. ``MTPDrafterModel/bind(target:)``
+///     is called exactly once by ``MTPSpeculativeTokenIterator``'s init.
+///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
+///     bonus from the previous verify). Mirrors mlx-vlm's
+///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
+///   - wiredMemoryTicket: optional wired memory ticket.
+/// - Returns: an `AsyncStream<Generation>` yielding chunks and tool calls.
+/// - Throws: an error if the iterator initialization fails.
+public func generate(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    blockSize: Int = 4,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<Generation> {
+    let iterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: mtpDrafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            format: context.configuration.toolCallFormat ?? .json
+        )
+    )
+    return stream
+}
+
+/// Generates raw token IDs asynchronously using MTP speculative decoding.
+///
+/// Parallels
+/// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// but for MTP drafters. Yields raw token IDs instead of decoded text or
+/// tool calls.
+public func generateTokens(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    blockSize: Int = 4,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<TokenGeneration> {
+    let iterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: mtpDrafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: RawTokenLoopHandler()
+    )
+    return stream
+}
+
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.
 ///
 /// Prefer this overload if you want to be able to observe when the underlying generation work is finished
