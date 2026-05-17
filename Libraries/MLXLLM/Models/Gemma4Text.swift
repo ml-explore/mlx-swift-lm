@@ -11,16 +11,21 @@ import MLXNN
 
 // MARK: - Compiled fusion fragments
 //
-// Gemma 4 uses a single rms_norm_eps (1e-6) for every RMSNorm in the model
-// (see Gemma4TextConfiguration.rmsNormEps default — all upstream Gemma 4
-// weights ship with this value). Hardcoding lets one compiled graph serve
-// every layer without per-layer specialization.
+// Gemma 4 ships with a single rms_norm_eps (1e-6) on every RMSNorm in the
+// model (see Gemma4TextConfiguration.rmsNormEps default — all upstream
+// Gemma 4 weights use this value). Hardcoding the constant lets one compiled
+// graph serve every layer without per-layer specialization. `Gemma4DecoderLayer.init`
+// asserts the config matches so a future checkpoint with a different eps fails
+// loudly instead of silently using the wrong value.
 //
 // Mirrors the upstream mlx-lm Python optimization
 // (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma4_text.py)
 // which fuses (residual + RMSNorm(x) * weight) and gelu(g) * other into a
-// single compiled graph. Measured ~+2.4% decode tps on M4 Max for
-// gemma-4-e2b-it-4bit at batch=1.
+// single compiled graph. The Python equivalent measured ~+2.4% decode tps on
+// M4 Max for gemma-4-e2b-it-4bit at batch=1; the Swift gain is larger
+// (~+23.8% on the same model and hardware) because Swift's per-op MLX
+// dispatch has more overhead, so consolidating ops via compile() recovers
+// more of that overhead. See PR description for the per-trial numbers.
 
 private let kRMSEps: Float = 1e-6
 
@@ -400,6 +405,14 @@ private class Gemma4DecoderLayer: Module {
     @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
 
     init(_ config: Gemma4TextConfiguration, layerIdx: Int) {
+        // _addRMSNorm bakes kRMSEps into its compiled graph. Catch a future
+        // checkpoint that ships a different rms_norm_eps before it reaches
+        // the fused path with the wrong constant.
+        precondition(
+            config.rmsNormEps == kRMSEps,
+            "Gemma4 fused decode path requires rmsNormEps == \(kRMSEps), got \(config.rmsNormEps)"
+        )
+
         self.config = config
         self.layerIdx = layerIdx
         self.layerType = config.layerTypes[layerIdx]
