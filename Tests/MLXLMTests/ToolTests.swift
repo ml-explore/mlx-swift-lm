@@ -468,7 +468,9 @@ struct ToolTests {
 
     @Test("Test Gemma Function Parser")
     func testGemmaParser() throws {
-        let parser = GemmaFunctionParser()
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
         let content =
             "<start_function_call>call:get_weather{location:Paris,unit:celsius}<end_function_call>"
 
@@ -481,7 +483,9 @@ struct ToolTests {
 
     @Test("Test Gemma Function Parser - Escaped Strings")
     func testGemmaParserEscapedStrings() throws {
-        let parser = GemmaFunctionParser()
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
         // Note: Gemma uses <escape> for both start and end markers (not </escape>)
         let content =
             "<start_function_call>call:search{query:<escape>hello, world!<escape>}<end_function_call>"
