@@ -161,7 +161,6 @@ class AttentionBlock: Module {
     let numKeyValueHeads: Int
     let numKeyValueGroups: Int
     let smScale: Float
-    var sinksActive: Bool
 
     @ParameterInfo(key: "sinks") var sinks: MLXArray
     @ModuleInfo(key: "q_proj") var qProj: Linear
@@ -178,7 +177,6 @@ class AttentionBlock: Module {
         self.numKeyValueGroups = config.attentionHeads / config.kvHeads
 
         _sinks.wrappedValue = zeros([config.attentionHeads])
-        self.sinksActive = false
 
         _qProj.wrappedValue = Linear(
             config.hiddenSize, config.attentionHeads * config.headDim, bias: true)
@@ -207,20 +205,6 @@ class AttentionBlock: Module {
         }
     }
 
-    open override func update(
-        parameters: ModuleParameters, verify: VerifyUpdate, path: [String] = [],
-        modulePath: [String] = []
-    ) throws -> Self {
-        try super.update(
-            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
-
-        if parameters["sinks"] != nil {
-            self.sinksActive = (sinks * sinks).max().item(Float.self) > 0
-        }
-
-        return self
-    }
-
     public func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -235,9 +219,6 @@ class AttentionBlock: Module {
 
         // Quantized cache path
         if let qcache = cache as? QuantizedKVCacheProtocol {
-            if sinksActive {
-                fatalError("Quantized attention does not support non-zero sinks.")
-            }
             let offset = cache?.ropeOffset
             q = applyRotaryPosition(rope, to: q, offset: offset)
             k = applyRotaryPosition(rope, to: k, offset: offset)
@@ -269,7 +250,7 @@ class AttentionBlock: Module {
             queries: q, keys: k, values: v,
             scale: smScale,
             mask: mask,
-            sinks: sinksActive ? sinks : nil)
+            sinks: sinks)
 
         return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
     }
