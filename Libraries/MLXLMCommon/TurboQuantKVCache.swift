@@ -1,5 +1,3 @@
-// Copyright © 2026 Schtack.
-
 import Foundation
 import MLX
 
