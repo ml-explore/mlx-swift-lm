@@ -1483,6 +1483,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
+            stopStrings: context.configuration.stopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )
@@ -1540,6 +1541,7 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
+            stopStrings: modelConfiguration.stopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
             tools: tools
         )
@@ -1679,6 +1681,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
+            stopStrings: context.configuration.stopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )
@@ -1821,7 +1824,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            while let token = iterator.next() {
+            tokenLoop: while let token = iterator.next() {
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
                     stopReason = .cancelled
@@ -1838,9 +1841,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if includeStopToken {
                         tokenCount += 1
-                        if !handler.onStopToken(token, emit: continuation.yield) {
-                            stopReason = .cancelled
+                        switch handler.onStopToken(token, emit: continuation.yield) {
+                        case .more:
                             break
+                        case .stop:
+                            stopReason = .stop
+                            break tokenLoop
+                        case .cancelled:
+                            stopReason = .cancelled
+                            break tokenLoop
                         }
                     } else {
                         iterator.discardGeneratedToken()
@@ -1850,9 +1859,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
 
                 tokenCount += 1
-                if !handler.onToken(token, emit: continuation.yield) {
-                    stopReason = .cancelled
+                switch handler.onToken(token, emit: continuation.yield) {
+                case .more:
                     break
+                case .stop:
+                    stopReason = .stop
+                    break tokenLoop
+                case .cancelled:
+                    stopReason = .cancelled
+                    break tokenLoop
                 }
             }
 
@@ -2098,20 +2113,26 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
+private enum TokenLoopDisposition {
+    case more
+    case stop
+    case cancelled
+}
+
 private protocol TokenLoopHandler {
     associatedtype Output
 
-    /// Return false to stop the loop early.
+    /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
     mutating func onToken(
         _ token: Int,
         emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
-    ) -> Bool
+    ) -> TokenLoopDisposition
 
     /// Called only when includeStopToken == true and a stop token was hit.
     mutating func onStopToken(
         _ token: Int,
         emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
-    ) -> Bool
+    ) -> TokenLoopDisposition
 
     /// Called after the token loop finishes, before the info event.
     mutating func onGenerationEnd(
@@ -2121,51 +2142,146 @@ private protocol TokenLoopHandler {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
+struct StopStringFilter {
+    let stopStrings: [String]
+    var buffer = ""
+    var stopped = false
+
+    init(stopStrings: Set<String>) {
+        self.stopStrings = stopStrings.filter { !$0.isEmpty }.sorted {
+            if $0.count == $1.count {
+                return $0 < $1
+            }
+            return $0.count > $1.count
+        }
+    }
+
+    var isEnabled: Bool {
+        !stopStrings.isEmpty
+    }
+
+    mutating func process(_ chunk: String) -> (text: String?, stopped: Bool) {
+        guard !stopped else {
+            return (nil, true)
+        }
+        guard isEnabled else {
+            return (chunk.isEmpty ? nil : chunk, false)
+        }
+
+        buffer += chunk
+
+        if let stopRange = earliestStopRange(in: buffer) {
+            let text = String(buffer[..<stopRange.lowerBound])
+            buffer = ""
+            stopped = true
+            return (text.isEmpty ? nil : text, true)
+        }
+
+        let suffixLength = longestStopPrefixSuffixLength(in: buffer)
+        let emitEnd = buffer.index(buffer.endIndex, offsetBy: -suffixLength)
+        let text = String(buffer[..<emitEnd])
+        buffer = String(buffer[emitEnd...])
+        return (text.isEmpty ? nil : text, false)
+    }
+
+    mutating func finish() -> String? {
+        guard isEnabled, !stopped, !buffer.isEmpty else {
+            return nil
+        }
+        let text = buffer
+        buffer = ""
+        return text
+    }
+
+    private func earliestStopRange(in text: String) -> Range<String.Index>? {
+        var earliest: Range<String.Index>?
+        for stopString in stopStrings {
+            guard let range = text.range(of: stopString) else {
+                continue
+            }
+            if let current = earliest {
+                if range.lowerBound < current.lowerBound {
+                    earliest = range
+                }
+            } else {
+                earliest = range
+            }
+        }
+        return earliest
+    }
+
+    private func longestStopPrefixSuffixLength(in text: String) -> Int {
+        var longest = 0
+        for stopString in stopStrings {
+            let maxLength = Swift.min(text.count, stopString.count - 1)
+            guard maxLength > longest else {
+                continue
+            }
+            for length in stride(from: maxLength, through: longest + 1, by: -1) {
+                if text.suffix(length) == stopString.prefix(length) {
+                    longest = length
+                    break
+                }
+            }
+        }
+        return longest
+    }
+}
+
 private struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
     var detokenizer: NaiveStreamingDetokenizer
+    var stopStringFilter: StopStringFilter
     let toolCallProcessor: ToolCallProcessor
 
-    init(tokenizer: Tokenizer, format: ToolCallFormat, tools: [[String: any Sendable]]? = nil) {
+    init(
+        tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
+        tools: [[String: any Sendable]]? = nil
+    ) {
         detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        stopStringFilter = StopStringFilter(stopStrings: stopStrings)
         toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
     }
 
     mutating func onToken(
         _ token: Int,
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
-    ) -> Bool {
+    ) -> TokenLoopDisposition {
         detokenizer.append(token: token)
         if let chunk = detokenizer.next() {
-            // Process chunk through the tool call processor.
-            if let textToYield = toolCallProcessor.processChunk(chunk) {
-                if case .terminated = emit(.chunk(textToYield)) {
-                    return false
+            let result = stopStringFilter.process(chunk)
+            if let text = result.text {
+                let disposition = processText(text, emit: emit)
+                if case .more = disposition {
+                } else {
+                    return disposition
                 }
             }
-
-            // Emit all complete tool calls in parse order.
-            for toolCall in toolCallProcessor.drainToolCalls() {
-                if case .terminated = emit(.toolCall(toolCall)) {
-                    return false
-                }
+            if result.stopped {
+                return .stop
             }
         }
 
-        return true
+        return .more
     }
 
     mutating func onStopToken(
         _ token: Int,
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
-    ) -> Bool {
-        true
+    ) -> TokenLoopDisposition {
+        .more
     }
 
     mutating func onGenerationEnd(
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) {
+        if let text = stopStringFilter.finish() {
+            guard case .more = processText(text, emit: emit) else {
+                return
+            }
+        }
+
         if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
             !bufferedText.isEmpty
         {
@@ -2184,6 +2300,29 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
     func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
         .info(info)
     }
+
+    private mutating func processText(
+        _ text: String,
+        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
+    ) -> TokenLoopDisposition {
+        guard !text.isEmpty else {
+            return .more
+        }
+
+        if let textToYield = toolCallProcessor.processChunk(text) {
+            if case .terminated = emit(.chunk(textToYield)) {
+                return .cancelled
+            }
+        }
+
+        for toolCall in toolCallProcessor.drainToolCalls() {
+            if case .terminated = emit(.toolCall(toolCall)) {
+                return .cancelled
+            }
+        }
+
+        return .more
+    }
 }
 
 private struct RawTokenLoopHandler: TokenLoopHandler {
@@ -2192,21 +2331,21 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
     mutating func onToken(
         _ token: Int,
         emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
-    ) -> Bool {
+    ) -> TokenLoopDisposition {
         if case .terminated = emit(.token(token)) {
-            return false
+            return .cancelled
         }
-        return true
+        return .more
     }
 
     mutating func onStopToken(
         _ token: Int,
         emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
-    ) -> Bool {
+    ) -> TokenLoopDisposition {
         if case .terminated = emit(.token(token)) {
-            return false
+            return .cancelled
         }
-        return true
+        return .more
     }
 
     mutating func onGenerationEnd(

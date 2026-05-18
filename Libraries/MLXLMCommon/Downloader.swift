@@ -72,6 +72,7 @@ public struct ResolvedModelConfiguration: Sendable {
     public var name: String
     public var defaultPrompt: String
     public var extraEOSTokens: Set<String>
+    public var stopStrings: Set<String>
     public var eosTokenIds: Set<Int>
     public var toolCallFormat: ToolCallFormat?
 
@@ -81,6 +82,7 @@ public struct ResolvedModelConfiguration: Sendable {
         name: String,
         defaultPrompt: String,
         extraEOSTokens: Set<String>,
+        stopStrings: Set<String> = [],
         eosTokenIds: Set<Int>,
         toolCallFormat: ToolCallFormat?
     ) {
@@ -89,6 +91,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.name = name
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
     }
@@ -104,6 +107,7 @@ extension ResolvedModelConfiguration {
                 + directory.lastPathComponent,
             defaultPrompt: "",
             extraEOSTokens: [],
+            stopStrings: [],
             eosTokenIds: [],
             toolCallFormat: nil)
     }
