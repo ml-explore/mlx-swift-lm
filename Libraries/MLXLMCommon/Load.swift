@@ -40,7 +40,7 @@ public func loadWeights(
     // quantized weight + scales + biases) vs. float-weight models that need
     // load-time quantization
     if hasPreQuantizedWeights(weights) {
-        try loadPreQuantizedWeights(model: model, weights: &weights)
+        try loadPreQuantizedWeights(model: model, weights: &weights, quantization: quantization)
     } else if quantization != nil || perLayerQuantization != nil {
         quantize(model: model) { path, module in
             if weights["\(path).scales"] != nil {
@@ -70,18 +70,31 @@ private func hasPreQuantizedWeights(_ weights: [String: MLXArray]) -> Bool {
 /// Load pre-quantized weights directly into QuantizedLinear layers.
 ///
 /// For each layer path that has `.scales` and `.biases` in the weights dict:
-/// 1. Create a `QuantizedLinear` with the pre-quantized weight, scales, and biases
-/// 2. Replace the corresponding `Linear` layer in the model
-/// 3. Remove all quantized weight keys from the dict
+/// - If the path corresponds to a `Linear` child in the model, replace it with
+///   a `QuantizedLinear`.
+/// - Otherwise (e.g. `Embedding`), dequantize the weights in-place so they can
+///   be applied via the normal parameter update path.
 private func loadPreQuantizedWeights(
-    model: BaseLanguageModel, weights: inout [String: MLXArray]
+    model: BaseLanguageModel, weights: inout [String: MLXArray],
+    quantization: BaseConfiguration.Quantization? = nil
 ) throws {
-    // Collect all quantized layer paths
+    // Use provided quantization config, or default to MXFP8 (groupSize=32, bits=8)
+    // which is the format used by models like MiniCPM-V 4.6.
+    let groupSize = quantization?.groupSize ?? 32
+    let bits = quantization?.bits ?? 8
+    let mode = quantization?.mode ?? .mxfp8
+    // Collect all quantized layer paths that exist as Linear children in the model.
+    let linearPaths = Set(model.leafModules().flattened().filter { $0.1 is Linear }.map { $0.0 })
     var quantizedPaths = Set<String>()
+    var nonLinearQuantizedPaths = Set<String>()
     for key in weights.keys {
         if key.hasSuffix(".scales") {
             let prefix = String(key.dropLast(".scales".count))
-            quantizedPaths.insert(prefix)
+            if linearPaths.contains(prefix) {
+                quantizedPaths.insert(prefix)
+            } else {
+                nonLinearQuantizedPaths.insert(prefix)
+            }
         }
     }
 
@@ -99,7 +112,7 @@ private func loadPreQuantizedWeights(
         let quantized = QuantizedLinear(
             weight: weight, bias: nil,
             scales: scales, biases: biases,
-            groupSize: 32, bits: 8, mode: .mxfp8
+            groupSize: groupSize, bits: bits, mode: mode
         )
         quantized.freeze()
         moduleReplacements[path] = quantized
@@ -109,6 +122,24 @@ private func loadPreQuantizedWeights(
     if !moduleReplacements.isEmpty {
         let children = ModuleChildren.unflattened(moduleReplacements)
         model.update(modules: children)
+    }
+
+    // For non-Linear quantized paths (e.g. Embedding), dequantize the weights
+    // in-place so they match the expected shape for the normal parameter update.
+    for path in nonLinearQuantizedPaths {
+        guard let weight = weights["\(path).weight"],
+              let scales = weights["\(path).scales"]
+        else {
+            continue
+        }
+        let biases = weights["\(path).biases"]
+        weights["\(path).weight"] = dequantized(
+            weight, scales: scales, biases: biases,
+            groupSize: groupSize, bits: bits, mode: mode
+        )
+        // Remove quantization metadata — no longer needed.
+        weights["\(path).scales"] = nil
+        weights["\(path).biases"] = nil
     }
 
     // Remove VLM-only keys from the weights dict.
