@@ -214,6 +214,7 @@ public struct UserInput {
     /// Additional values provided for the chat template rendering context
     public var additionalContext: [String: any Sendable]?
     public var processing: Processing = .init()
+    public var audioProcessing: AudioProcessing = .init()
 
     /// Initialize the `UserInput` with a single text prompt.
     ///
@@ -315,6 +316,7 @@ public struct UserInput {
     ///   - chat: structured content
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
+    ///   - audioProcessing: optional processing to be applied to audio
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
@@ -322,6 +324,7 @@ public struct UserInput {
     public init(
         chat: [Chat.Message],
         processing: Processing = .init(),
+        audioProcessing: AudioProcessing = .init(),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
@@ -339,6 +342,7 @@ public struct UserInput {
         }
 
         self.processing = processing
+        self.audioProcessing = audioProcessing
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -354,6 +358,7 @@ public struct UserInput {
     ///   - audios: optional audios
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
+    ///   - audioProcessing: optional processing to be applied to audio
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
@@ -364,6 +369,7 @@ public struct UserInput {
         videos: [Video] = [Video](),
         audios: [Audio] = [Audio](),
         processing: Processing = .init(),
+        audioProcessing: AudioProcessing = .init(),
         tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = prompt
@@ -385,6 +391,7 @@ public struct UserInput {
             }
         }
         self.processing = processing
+        self.audioProcessing = audioProcessing
         self.tools = tools
         self.additionalContext = additionalContext
     }

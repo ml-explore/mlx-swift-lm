@@ -445,7 +445,7 @@ public final class ChatSession {
         let task = Task {
             [
                 model,
-                instructions, processing, tools, toolDispatch,
+                instructions, processing, audioProcessing, tools, toolDispatch,
                 additionalContext, cache, generateParameters, speculativeDecoding
             ] in
             do {
@@ -502,7 +502,9 @@ public final class ChatSession {
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
                         let userInput = UserInput(
-                            chat: messages, processing: processing,
+                            chat: messages,
+                            processing: processing,
+                            audioProcessing: audioProcessing,
                             tools: tools, additionalContext: additionalContext)
                         let input = try await processor.prepare(input: userInput)
                         messages.removeAll()
