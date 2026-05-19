@@ -72,9 +72,11 @@ public struct TurboQuantKernelAvailability: Equatable, Codable, Sendable {
         case .mlxPacked:
             return nil
         case .polarQJLReference:
-            return "PolarQuant/QJL reference backend is not part of mlx-swift-lm; using MLX packed quantized lanes."
+            return
+                "PolarQuant/QJL reference backend is not part of mlx-swift-lm; using MLX packed quantized lanes."
         case .metalPolarQJL:
-            return "TurboQuant Metal kernels are not part of mlx-swift-lm; using MLX packed quantized lanes."
+            return
+                "TurboQuant Metal kernels are not part of mlx-swift-lm; using MLX packed quantized lanes."
         }
     }
 }
@@ -307,7 +309,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public override var metaState: [String] {
-        get { rawCache.metaState + [preset.rawValue, String(groupSize), requestedBackend.rawValue] }
+        get {
+            rawCache.metaState + [preset.rawValue, String(groupSize), requestedBackend.rawValue]
+        }
         set {
             rawCache.metaState = Array(newValue.prefix(5))
             offset = rawCache.offset
@@ -372,8 +376,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 }
 
-public extension KVCacheSimple {
-    func toTurboQuant(
+extension KVCacheSimple {
+    public func toTurboQuant(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,

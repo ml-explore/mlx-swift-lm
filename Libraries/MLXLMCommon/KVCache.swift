@@ -1549,7 +1549,8 @@ private func restoreCacheFromMetaState(
         let groupSize =
             metaState.count > 2 ? Int(metaState[2]) ?? 64 : 64
         let backend =
-            metaState.count > 5 ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
+            metaState.count > 5
+            ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
         let cache = TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
         cache.state = state
         cache.metaState = metaState
@@ -1567,7 +1568,8 @@ private func restoreCacheFromMetaState(
         let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
         let groupSize = Int(metaState[6]) ?? 64
         let backend =
-            metaState.count > 7 ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
+            metaState.count > 7
+            ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
             preset: preset,
