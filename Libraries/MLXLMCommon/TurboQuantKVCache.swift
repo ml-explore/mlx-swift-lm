@@ -1,9 +1,152 @@
 import Foundation
 import MLX
 
-public typealias TurboQuantPreset = MLX.TurboQuantPreset
-public typealias TurboQuantBackend = MLX.TurboQuantBackend
-public typealias TurboQuantKernelAvailability = MLX.TurboQuantKernelAvailability
+public enum TurboQuantPreset: String, Codable, Sendable, CaseIterable {
+    case turbo2_5
+    case turbo3_5
+
+    public var effectiveBits: Int {
+        switch self {
+        case .turbo2_5: 2
+        case .turbo3_5: 4
+        }
+    }
+}
+
+public enum TurboQuantBackend: String, Codable, Sendable, CaseIterable {
+    case mlxPacked
+    case polarQJLReference
+    case metalPolarQJL
+}
+
+public enum TurboQuantTensorRole: String, Codable, Sendable, CaseIterable {
+    case key
+    case value
+    case vector
+}
+
+public struct TurboQuantKernelAvailability: Equatable, Codable, Sendable {
+    public var supportsMLXPacked: Bool
+    public var supportsPolarQJLReference: Bool
+    public var supportsMetalPolarQJLCodec: Bool
+    public var supportsMetalPolarQJLAttention: Bool
+    public var supportsMetalPolarQJL: Bool
+
+    public init(
+        supportsMLXPacked: Bool = true,
+        supportsPolarQJLReference: Bool = false,
+        supportsMetalPolarQJLCodec: Bool = false,
+        supportsMetalPolarQJLAttention: Bool = false,
+        supportsMetalPolarQJL: Bool = false
+    ) {
+        self.supportsMLXPacked = supportsMLXPacked
+        self.supportsPolarQJLReference = supportsPolarQJLReference
+        self.supportsMetalPolarQJLCodec = supportsMetalPolarQJLCodec
+        self.supportsMetalPolarQJLAttention = supportsMetalPolarQJLAttention
+        self.supportsMetalPolarQJL = supportsMetalPolarQJL
+    }
+
+    public static var current: TurboQuantKernelAvailability {
+        TurboQuantKernelAvailability()
+    }
+
+    public func supports(_ backend: TurboQuantBackend) -> Bool {
+        switch backend {
+        case .mlxPacked:
+            supportsMLXPacked
+        case .polarQJLReference:
+            supportsPolarQJLReference
+        case .metalPolarQJL:
+            supportsMetalPolarQJL
+        }
+    }
+
+    public func runtimeBackend(for requestedBackend: TurboQuantBackend) -> TurboQuantBackend {
+        supports(requestedBackend) ? requestedBackend : .mlxPacked
+    }
+
+    public func fallbackReason(for requestedBackend: TurboQuantBackend) -> String? {
+        guard !supports(requestedBackend) else { return nil }
+
+        switch requestedBackend {
+        case .mlxPacked:
+            return nil
+        case .polarQJLReference:
+            return "PolarQuant/QJL reference backend is not part of mlx-swift-lm; using MLX packed quantized lanes."
+        case .metalPolarQJL:
+            return "TurboQuant Metal kernels are not part of mlx-swift-lm; using MLX packed quantized lanes."
+        }
+    }
+}
+
+public struct TurboQuantConfiguration: Hashable, Codable, Sendable {
+    public var preset: TurboQuantPreset
+    public var role: TurboQuantTensorRole
+    public var groupSize: Int
+    public var mode: QuantizationMode
+    public var backend: TurboQuantBackend
+
+    public init(
+        preset: TurboQuantPreset = .turbo3_5,
+        role: TurboQuantTensorRole = .vector,
+        groupSize: Int = 64,
+        mode: QuantizationMode = .affine,
+        backend: TurboQuantBackend = .mlxPacked
+    ) {
+        self.preset = preset
+        self.role = role
+        self.groupSize = groupSize
+        self.mode = mode
+        self.backend = backend
+    }
+
+    public var effectiveBits: Int { preset.effectiveBits }
+    public var runtimeBackend: TurboQuantBackend {
+        TurboQuantKernelAvailability.current.runtimeBackend(for: backend)
+    }
+    public var runtimeFallbackReason: String? {
+        TurboQuantKernelAvailability.current.fallbackReason(for: backend)
+    }
+}
+
+public typealias TurboQuantPackedTensor = (
+    weight: MLXArray,
+    scales: MLXArray,
+    biases: MLXArray?
+)
+
+public func turboQuantized(
+    _ array: MLXArray,
+    configuration: TurboQuantConfiguration = TurboQuantConfiguration(),
+    stream: StreamOrDevice = .cpu
+) -> TurboQuantPackedTensor {
+    let packed = quantized(
+        array,
+        groupSize: configuration.groupSize,
+        bits: configuration.effectiveBits,
+        mode: configuration.mode,
+        stream: stream
+    )
+    return (packed.wq, packed.scales, packed.biases)
+}
+
+public func turboDequantized(
+    _ packed: TurboQuantPackedTensor,
+    configuration: TurboQuantConfiguration = TurboQuantConfiguration(),
+    dtype: DType? = nil,
+    stream: StreamOrDevice = .cpu
+) -> MLXArray {
+    dequantized(
+        packed.weight,
+        scales: packed.scales,
+        biases: packed.biases,
+        groupSize: configuration.groupSize,
+        bits: configuration.effectiveBits,
+        mode: configuration.mode,
+        dtype: dtype,
+        stream: stream
+    )
+}
 
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
@@ -39,7 +182,7 @@ public final class TurboQuantKVCache: QuantizedKVCache {
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
-        super.init(groupSize: groupSize, bits: preset.effectiveBits, mode: mode)
+        super.init(groupSize: groupSize, bits: preset.effectiveBits, mode: mode, stream: .cpu)
     }
 
     public override var metaState: [String] {
@@ -106,7 +249,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .mlxPacked
     ) {
-        self.rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
+        self.rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step, stream: .cpu)
         self.preset = preset
         self.requestedBackend = backend
         let availability = TurboQuantKernelAvailability.current

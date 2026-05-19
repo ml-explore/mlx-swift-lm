@@ -53,8 +53,8 @@ private func withCPUTest(_ body: () async throws -> Void) async rethrows {
 func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     try withCPUTest {
         let cache = (0 ..< 10).map { _ in creator() }
-        let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16, stream: .cpu)
         for item in cache {
             switch item {
             case let arrays as ArraysCache:
@@ -90,8 +90,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testArraysCacheSparseSlots() throws {
     try withCPUTest {
         let cache = ArraysCache(size: 3)
-        let a = MLXArray.ones([2, 4], dtype: .float32) * 3.0
-        let b = MLXArray.ones([2, 4], dtype: .float32) * 7.0
+        let a = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 3.0
+        let b = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 7.0
         cache[0] = a
         // slot 1 stays nil
         cache[2] = b
@@ -116,8 +116,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testArraysCacheLeftPadding() throws {
     try withCPUTest {
         let cache = ArraysCache(size: 2, leftPadding: [0, 5])
-        let a = MLXArray.ones([2, 4], dtype: .float32)
-        let b = MLXArray.ones([2, 4], dtype: .float32) * 2.0
+        let a = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu)
+        let b = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 2.0
         cache[0] = a
         cache[1] = b
 
@@ -132,143 +132,135 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {
-    try withCPUTest {
-        var cache: [KVCache] = [KVCacheSimple()]
-        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        _ = cache[0].update(keys: keys, values: values)
+    var cache: [KVCache] = [KVCacheSimple(stream: .cpu)]
+    let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+    let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+    _ = cache[0].update(keys: keys, values: values)
 
-        maybeQuantizeKVCache(
-            cache: &cache,
-            kvBits: nil,
-            kvGroupSize: 64,
-            quantizedKVStart: 0,
-            kvCacheStrategy: .turboQuant,
-            turboQuantPreset: .turbo3_5,
-            turboQuantBackend: .metalPolarQJL
-        )
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: nil,
+        kvGroupSize: 64,
+        quantizedKVStart: 0,
+        kvCacheStrategy: .turboQuant,
+        turboQuantPreset: .turbo3_5,
+        turboQuantBackend: .metalPolarQJL
+    )
 
-        #expect(cache[0] is TurboQuantKVCache)
-        let turbo = try #require(cache[0] as? TurboQuantKVCache)
-        #expect(turbo.preset == .turbo3_5)
-        #expect(turbo.requestedBackend == .metalPolarQJL)
-        let expectedBackend: TurboQuantBackend =
-            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
-            ? .metalPolarQJL
-            : .mlxPacked
-        #expect(turbo.activeBackend == expectedBackend)
-        if expectedBackend == .mlxPacked {
-            #expect(turbo.backendFallbackReason != nil)
-        }
+    #expect(cache[0] is TurboQuantKVCache)
+    let turbo = try #require(cache[0] as? TurboQuantKVCache)
+    #expect(turbo.preset == .turbo3_5)
+    #expect(turbo.requestedBackend == .metalPolarQJL)
+    let expectedBackend: TurboQuantBackend =
+        TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+        ? .metalPolarQJL
+        : .mlxPacked
+    #expect(turbo.activeBackend == expectedBackend)
+    if expectedBackend == .mlxPacked {
+        #expect(turbo.backendFallbackReason != nil)
     }
 }
 
 @Test func testTurboQuantSimpleConversionKeepsUsableCompressedState() throws {
-    withCPUTest {
-        let simple = KVCacheSimple()
-        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16) * 2.0
-        _ = simple.update(keys: keys, values: values)
+    let simple = KVCacheSimple(stream: .cpu)
+    let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+    let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu) * 2.0
+    _ = simple.update(keys: keys, values: values)
 
-        let turbo = simple.toTurboQuant(
-            preset: .turbo3_5,
-            groupSize: 64,
-            backend: .metalPolarQJL
-        )
-        let state = turbo.state
-        eval(state)
+    let turbo = simple.toTurboQuant(
+        preset: .turbo3_5,
+        groupSize: 64,
+        backend: .metalPolarQJL
+    )
+    let state = turbo.state
+    eval(state)
 
-        #expect(turbo.offset == simple.offset)
-        #expect(state.count == 6)
-        #expect(byteCount(state) < byteCount(simple.state))
+    #expect(turbo.offset == simple.offset)
+    #expect(state.count == 6)
+    #expect(byteCount(state) < byteCount(simple.state))
 
-        let configuration = TurboQuantConfiguration(
-            preset: turbo.preset,
-            groupSize: turbo.groupSize,
-            backend: turbo.activeBackend
-        )
-        let decodedKeys = turboDequantized(
-            (weight: state[0], scales: state[1], biases: state[2]),
-            configuration: configuration,
-            dtype: .bfloat16
-        )
-        let decodedValues = turboDequantized(
-            (weight: state[3], scales: state[4], biases: state[5]),
-            configuration: configuration,
-            dtype: .bfloat16
-        )
-        eval([decodedKeys, decodedValues])
+    let configuration = TurboQuantConfiguration(
+        preset: turbo.preset,
+        groupSize: turbo.groupSize,
+        backend: turbo.activeBackend
+    )
+    let decodedKeys = turboDequantized(
+        (weight: state[0], scales: state[1], biases: state[2]),
+        configuration: configuration,
+        dtype: .bfloat16
+    )
+    let decodedValues = turboDequantized(
+        (weight: state[3], scales: state[4], biases: state[5]),
+        configuration: configuration,
+        dtype: .bfloat16
+    )
+    eval([decodedKeys, decodedValues])
 
-        #expect(decodedKeys.shape == keys.shape)
-        #expect(decodedValues.shape == values.shape)
-        #expect(allClose(decodedKeys, keys, rtol: 0.2, atol: 0.2).item(Bool.self))
-        #expect(allClose(decodedValues, values, rtol: 0.2, atol: 0.2).item(Bool.self))
-    }
+    #expect(decodedKeys.shape == keys.shape)
+    #expect(decodedValues.shape == values.shape)
+    #expect(allClose(decodedKeys, keys, rtol: 0.2, atol: 0.2).item(Bool.self))
+    #expect(allClose(decodedValues, values, rtol: 0.2, atol: 0.2).item(Bool.self))
 }
 
 @Test func testTurboQuantDiagnosticsMatchBackendAvailability() throws {
-    withCPUTest {
-        let cache = TurboQuantKVCache(
-            preset: .turbo3_5,
-            groupSize: 64,
-            backend: .metalPolarQJL
-        )
-        let diagnostics = cache.diagnostics
-        let availability = TurboQuantKernelAvailability.current
+    let cache = TurboQuantKVCache(
+        preset: .turbo3_5,
+        groupSize: 64,
+        backend: .metalPolarQJL
+    )
+    let diagnostics = cache.diagnostics
+    let availability = TurboQuantKernelAvailability.current
 
-        #expect(diagnostics.preset == .turbo3_5)
-        #expect(diagnostics.groupSize == 64)
-        #expect(diagnostics.bits == TurboQuantPreset.turbo3_5.effectiveBits)
-        #expect(diagnostics.requestedBackend == .metalPolarQJL)
-        #expect(diagnostics.activeBackend == availability.runtimeBackend(for: .metalPolarQJL))
-        #expect(diagnostics.fallbackReason == availability.fallbackReason(for: .metalPolarQJL))
-        #expect(diagnostics.metalCodecAvailable == availability.supportsMetalPolarQJLCodec)
-    }
+    #expect(diagnostics.preset == .turbo3_5)
+    #expect(diagnostics.groupSize == 64)
+    #expect(diagnostics.bits == TurboQuantPreset.turbo3_5.effectiveBits)
+    #expect(diagnostics.requestedBackend == .metalPolarQJL)
+    #expect(diagnostics.activeBackend == availability.runtimeBackend(for: .metalPolarQJL))
+    #expect(diagnostics.fallbackReason == availability.fallbackReason(for: .metalPolarQJL))
+    #expect(diagnostics.metalCodecAvailable == availability.supportsMetalPolarQJLCodec)
 }
 
 @Test func testRotatingTurboQuantMaintainsWindowAndClearsPackedStateOnMutation() throws {
-    withCPUTest {
-        let cache = RotatingTurboQuantKVCache(
-            maxSize: 6,
-            keep: 2,
-            step: 2,
-            preset: .turbo3_5,
-            groupSize: 64,
-            backend: .metalPolarQJL
-        )
+    let cache = RotatingTurboQuantKVCache(
+        maxSize: 6,
+        keep: 2,
+        step: 2,
+        preset: .turbo3_5,
+        groupSize: 64,
+        backend: .metalPolarQJL
+    )
 
-        for token in 0 ..< 10 {
-            let key = MLXArray(
-                Array(repeating: Float(token + 1), count: 64),
-                [1, 1, 1, 64]
-            ).asType(.bfloat16)
-            let value = MLXArray(
-                Array(repeating: Float(token + 2), count: 64),
-                [1, 1, 1, 64]
-            ).asType(.bfloat16)
-            _ = cache.updateQuantized(keys: key, values: value)
-        }
+    for token in 0 ..< 10 {
+        let key = MLXArray(
+            Array(repeating: Float(token + 1), count: 64),
+            [1, 1, 1, 64]
+        ).asType(.bfloat16, stream: .cpu)
+        let value = MLXArray(
+            Array(repeating: Float(token + 2), count: 64),
+            [1, 1, 1, 64]
+        ).asType(.bfloat16, stream: .cpu)
+        _ = cache.updateQuantized(keys: key, values: value)
+    }
 
-        let state = cache.state
-        eval(state)
+    let state = cache.state
+    eval(state)
 
-        #expect(cache.offset == 10)
-        #expect(cache.maxSize == 6)
-        #expect(state.count == 2)
-        #expect(state[0].shape == [1, 1, 6, 64])
-        #expect(state[1].shape == [1, 1, 6, 64])
+    #expect(cache.offset == 10)
+    #expect(cache.maxSize == 6)
+    #expect(state.count == 2)
+    #expect(state[0].shape == [1, 1, 6, 64])
+    #expect(state[1].shape == [1, 1, 6, 64])
 
-        guard let packed = cache.getQuantizedState() else {
-            Issue.record("Expected rotating TurboQuant cache to expose packed state")
-            return
-        }
-        #expect(packed.0.0.nbytes > 0)
-        #expect(packed.1.0.nbytes > 0)
+    guard let packed = cache.getQuantizedState() else {
+        Issue.record("Expected rotating TurboQuant cache to expose packed state")
+        return
+    }
+    #expect(packed.0.0.nbytes > 0)
+    #expect(packed.1.0.nbytes > 0)
 
-        cache.state = state
-        if cache.getQuantizedState() != nil {
-            Issue.record("Expected assigning raw state to invalidate packed TurboQuant state")
-        }
+    cache.state = state
+    if cache.getQuantizedState() != nil {
+        Issue.record("Expected assigning raw state to invalidate packed TurboQuant state")
     }
 }
 
@@ -277,8 +269,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testMambaCacheRoundTrip() throws {
     try withCPUTest {
         let cache = MambaCache()
-        let a = MLXArray.ones([2, 4], dtype: .float32) * 5.0
-        let b = MLXArray.ones([2, 4], dtype: .float32) * 9.0
+        let a = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 5.0
+        let b = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 9.0
         cache[0] = a
         cache[1] = b
 
@@ -300,8 +292,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         let simple = KVCacheSimple()
         let rotating = RotatingKVCache(maxSize: 32)
 
-        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
         _ = simple.update(keys: keys, values: values)
         _ = rotating.update(keys: keys * 2.0, values: values * 2.0)
 
@@ -327,12 +319,12 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testCacheListHybrid() throws {
     try withCPUTest {
         let mamba = MambaCache()
-        mamba[0] = MLXArray.ones([2, 4], dtype: .float32) * 3.0
-        mamba[1] = MLXArray.ones([2, 4], dtype: .float32) * 4.0
+        mamba[0] = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 3.0
+        mamba[1] = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 4.0
 
         let simple = KVCacheSimple()
-        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
         _ = simple.update(keys: keys, values: values)
 
         let cacheList = CacheList(mamba, simple)
@@ -356,8 +348,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testSimpleCacheRoundTrip() throws {
     try withCPUTest {
         let cache = KVCacheSimple()
-        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16, stream: .cpu)
         _ = cache.update(keys: keys, values: values)
 
         let url = tempURL()
@@ -373,8 +365,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 @Test func testArraysCacheFullyPopulated() throws {
     try withCPUTest {
         let cache = ArraysCache(size: 2)
-        cache[0] = MLXArray.ones([2, 4], dtype: .float32)
-        cache[1] = MLXArray.ones([2, 4], dtype: .float32) * 2.0
+        cache[0] = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu)
+        cache[1] = MLXArray.ones([2, 4], dtype: .float32, stream: .cpu) * 2.0
 
         let url = tempURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
@@ -396,8 +388,8 @@ func testCacheCopyIsIndependent(creator: (() -> any KVCache)) async throws {
     withCPUTest {
         let original = creator()
 
-        let keys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16, stream: .cpu)
 
         // populate the original
         switch original {
@@ -439,8 +431,8 @@ func testCacheCopyIsIndependent(creator: (() -> any KVCache)) async throws {
         }
 
         // mutate the copy — push more tokens through it
-        let moreKeys = MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16)
-        let moreValues = MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16)
+        let moreKeys = MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16, stream: .cpu)
+        let moreValues = MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16, stream: .cpu)
 
         switch copied {
         case let arrays as ArraysCache:
@@ -488,8 +480,8 @@ func testCacheListCopyIsIndependent() async throws {
         let sub2 = RotatingKVCache(maxSize: 32)
         let composite = CacheList(sub1, sub2)
 
-        let keys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
-        let values = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
+        let keys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16, stream: .cpu)
+        let values = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16, stream: .cpu)
         _ = sub1.update(keys: keys, values: values)
         _ = sub2.update(keys: keys, values: values)
 
@@ -513,8 +505,8 @@ func testCacheListCopyIsIndependent() async throws {
         // mutate inside the copy
         let copiedList = copied as! CacheList
         _ = copiedList[0].update(
-            keys: MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16),
-            values: MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16)
+            keys: MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16, stream: .cpu),
+            values: MLXArray.zeros([1, 8, 2, 64], dtype: .bfloat16, stream: .cpu)
         )
 
         // originals unchanged
