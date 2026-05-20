@@ -67,7 +67,10 @@ private enum Language {
         let mropeSection: [Int]
         let mropeSectionRaw: [Int]
         // Box hides invFreq from Module's weight-loader reflection.
-        private class InvFreqBox { let value: MLXArray; init(_ v: MLXArray) { value = v } }
+        private class InvFreqBox {
+            let value: MLXArray
+            init(_ v: MLXArray) { value = v }
+        }
         private let _invFreqBox: InvFreqBox
 
         @ModuleInfo(key: "q_proj") var wq: Linear

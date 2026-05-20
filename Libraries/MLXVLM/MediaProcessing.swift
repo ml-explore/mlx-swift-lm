@@ -114,30 +114,32 @@ public enum MediaProcessing {
         if let cg = image.cgImage, let provider = cg.dataProvider {
             iw = cg.width
             ih = cg.height
-            let retagged = CGImage(
-                width: iw, height: ih,
-                bitsPerComponent: cg.bitsPerComponent,
-                bitsPerPixel: cg.bitsPerPixel,
-                bytesPerRow: cg.bytesPerRow,
-                space: srgb, bitmapInfo: cg.bitmapInfo,
-                provider: provider, decode: nil,
-                shouldInterpolate: false, intent: .defaultIntent) ?? cg
+            let retagged =
+                CGImage(
+                    width: iw, height: ih,
+                    bitsPerComponent: cg.bitsPerComponent,
+                    bitsPerPixel: cg.bitsPerPixel,
+                    bytesPerRow: cg.bytesPerRow,
+                    space: srgb, bitmapInfo: cg.bitmapInfo,
+                    provider: provider, decode: nil,
+                    shouldInterpolate: false, intent: .defaultIntent) ?? cg
             src = [UInt8](repeating: 0, count: ih * iw * 4)
             let cgctx = CGContext(
                 data: &src, width: iw, height: ih,
                 bitsPerComponent: 8, bytesPerRow: iw * 4,
                 space: srgb,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-                          | CGBitmapInfo.byteOrder32Big.rawValue)!
+                    | CGBitmapInfo.byteOrder32Big.rawValue)!
             cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
         } else {
             iw = Int(image.extent.width)
             ih = Int(image.extent.height)
             src = [UInt8](repeating: 0, count: ih * iw * 4)
             let cictx = CIContext(options: [.workingColorSpace: srgb])
-            cictx.render(image, toBitmap: &src, rowBytes: iw * 4,
-                         bounds: image.extent, format: CIFormat.RGBA8,
-                         colorSpace: srgb)
+            cictx.render(
+                image, toBitmap: &src, rowBytes: iw * 4,
+                bounds: image.extent, format: CIFormat.RGBA8,
+                colorSpace: srgb)
         }
 
         // --- Pillow 10.4.0 Resample.c port ---
@@ -160,8 +162,12 @@ public enum MediaProcessing {
             let scale = Double(inSize) / Double(outSize)
             let fs = max(1.0, scale)
             let support = a * fs
-            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
-            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
+            var lo = [Int]()
+            var hi = [Int]()
+            var qq = [[Int32]]()
+            lo.reserveCapacity(outSize)
+            hi.reserveCapacity(outSize)
+            qq.reserveCapacity(outSize)
             for i in 0 ..< outSize {
                 let c = (Double(i) + 0.5) * scale
                 let l = max(Int(floor(c - support + 0.5)), 0)
@@ -170,7 +176,9 @@ public enum MediaProcessing {
                 var sum = 0.0
                 for k in 0 ..< (r - l) {
                     let x = (Double(l + k) + 0.5 - c) / fs
-                    let v = kernel(x); w[k] = v; sum += v
+                    let v = kernel(x)
+                    w[k] = v
+                    sum += v
                 }
                 if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
                 // Quantize to int32 with 22-bit precision. C's (int) truncates toward zero.
@@ -179,7 +187,9 @@ public enum MediaProcessing {
                     let b = s < 0 ? -0.5 + s : 0.5 + s
                     return Int32(b.rounded(.towardZero))
                 }
-                lo.append(l); hi.append(r); qq.append(q)
+                lo.append(l)
+                hi.append(r)
+                qq.append(q)
             }
             return (lo, hi, qq)
         }
@@ -198,9 +208,13 @@ public enum MediaProcessing {
         var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
         for y in 0 ..< ih {
             for x in 0 ..< tw {
-                let l = hlo[x], r = hhi[x], w = hw[x]
-                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
-                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                let l = hlo[x]
+                let r = hhi[x]
+                let w = hw[x]
+                var s0: Int32 = ROUND_BIAS
+                var s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS
+                var s3: Int32 = ROUND_BIAS
                 for k in 0 ..< (r - l) {
                     let p = y * iw * 4 + (l + k) * 4
                     let kw = w[k]
@@ -210,18 +224,24 @@ public enum MediaProcessing {
                     s3 &+= Int32(src[p + 3]) &* kw
                 }
                 let o = (y * tw + x) * 4
-                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
-                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
+                horiz[o + 0] = clip8(s0)
+                horiz[o + 1] = clip8(s1)
+                horiz[o + 2] = clip8(s2)
+                horiz[o + 3] = clip8(s3)
             }
         }
 
         // Vertical pass: uint8 → uint8 at (tw, th).
         var dst = [UInt8](repeating: 0, count: th * tw * 4)
         for y in 0 ..< th {
-            let l = vlo[y], r = vhi[y], w = vw[y]
+            let l = vlo[y]
+            let r = vhi[y]
+            let w = vw[y]
             for x in 0 ..< tw {
-                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
-                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                var s0: Int32 = ROUND_BIAS
+                var s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS
+                var s3: Int32 = ROUND_BIAS
                 for k in 0 ..< (r - l) {
                     let p = ((l + k) * tw + x) * 4
                     let kw = w[k]
@@ -231,14 +251,17 @@ public enum MediaProcessing {
                     s3 &+= Int32(horiz[p + 3]) &* kw
                 }
                 let o = (y * tw + x) * 4
-                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
-                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
+                dst[o + 0] = clip8(s0)
+                dst[o + 1] = clip8(s1)
+                dst[o + 2] = clip8(s2)
+                dst[o + 3] = clip8(s3)
             }
         }
 
-        return CIImage(bitmapData: Data(dst), bytesPerRow: tw * 4,
-                       size: CGSize(width: tw, height: th),
-                       format: .RGBA8, colorSpace: srgb)
+        return CIImage(
+            bitmapData: Data(dst), bytesPerRow: tw * 4,
+            size: CGSize(width: tw, height: th),
+            format: .RGBA8, colorSpace: srgb)
     }
 
     /// PIL-matching Lanczos that returns raw uint8 RGBA bytes (no CIImage
@@ -249,29 +272,32 @@ public enum MediaProcessing {
     internal static func _pilLanczosCore(
         _ image: CIImage, to size: CGSize
     ) -> (bytes: [UInt8], tw: Int, th: Int) {
-        let tw = Int(size.width), th = Int(size.height)
+        let tw = Int(size.width)
+        let th = Int(size.height)
         let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
 
-        let iw: Int, ih: Int
+        let iw: Int
+        let ih: Int
         var src: [UInt8]
         if let cg = image.cgImage, let provider = cg.dataProvider {
             iw = cg.width
             ih = cg.height
-            let retagged = CGImage(
-                width: iw, height: ih,
-                bitsPerComponent: cg.bitsPerComponent,
-                bitsPerPixel: cg.bitsPerPixel,
-                bytesPerRow: cg.bytesPerRow,
-                space: srgb, bitmapInfo: cg.bitmapInfo,
-                provider: provider, decode: nil,
-                shouldInterpolate: false, intent: .defaultIntent) ?? cg
+            let retagged =
+                CGImage(
+                    width: iw, height: ih,
+                    bitsPerComponent: cg.bitsPerComponent,
+                    bitsPerPixel: cg.bitsPerPixel,
+                    bytesPerRow: cg.bytesPerRow,
+                    space: srgb, bitmapInfo: cg.bitmapInfo,
+                    provider: provider, decode: nil,
+                    shouldInterpolate: false, intent: .defaultIntent) ?? cg
             src = [UInt8](repeating: 0, count: ih * iw * 4)
             let cgctx = CGContext(
                 data: &src, width: iw, height: ih,
                 bitsPerComponent: 8, bytesPerRow: iw * 4,
                 space: srgb,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-                          | CGBitmapInfo.byteOrder32Big.rawValue)!
+                    | CGBitmapInfo.byteOrder32Big.rawValue)!
             cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
         } else {
             iw = Int(image.extent.width)
@@ -300,8 +326,12 @@ public enum MediaProcessing {
             let scale = Double(inSize) / Double(outSize)
             let fs = max(1.0, scale)
             let support = a * fs
-            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
-            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
+            var lo = [Int]()
+            var hi = [Int]()
+            var qq = [[Int32]]()
+            lo.reserveCapacity(outSize)
+            hi.reserveCapacity(outSize)
+            qq.reserveCapacity(outSize)
             for i in 0 ..< outSize {
                 let c = (Double(i) + 0.5) * scale
                 let l = max(Int(floor(c - support + 0.5)), 0)
@@ -310,7 +340,9 @@ public enum MediaProcessing {
                 var sum = 0.0
                 for k in 0 ..< (r - l) {
                     let x = (Double(l + k) + 0.5 - c) / fs
-                    let v = kernel(x); w[k] = v; sum += v
+                    let v = kernel(x)
+                    w[k] = v
+                    sum += v
                 }
                 if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
                 let q = w.map { weight -> Int32 in
@@ -318,7 +350,9 @@ public enum MediaProcessing {
                     let b = s < 0 ? -0.5 + s : 0.5 + s
                     return Int32(b.rounded(.towardZero))
                 }
-                lo.append(l); hi.append(r); qq.append(q)
+                lo.append(l)
+                hi.append(r)
+                qq.append(q)
             }
             return (lo, hi, qq)
         }
@@ -334,9 +368,13 @@ public enum MediaProcessing {
         var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
         for y in 0 ..< ih {
             for x in 0 ..< tw {
-                let l = hlo[x], r = hhi[x], w = hw[x]
-                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
-                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                let l = hlo[x]
+                let r = hhi[x]
+                let w = hw[x]
+                var s0: Int32 = ROUND_BIAS
+                var s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS
+                var s3: Int32 = ROUND_BIAS
                 for k in 0 ..< (r - l) {
                     let p = y * iw * 4 + (l + k) * 4
                     let kw = w[k]
@@ -346,16 +384,22 @@ public enum MediaProcessing {
                     s3 &+= Int32(src[p + 3]) &* kw
                 }
                 let o = (y * tw + x) * 4
-                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
-                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
+                horiz[o + 0] = clip8(s0)
+                horiz[o + 1] = clip8(s1)
+                horiz[o + 2] = clip8(s2)
+                horiz[o + 3] = clip8(s3)
             }
         }
         var dst = [UInt8](repeating: 0, count: th * tw * 4)
         for y in 0 ..< th {
-            let l = vlo[y], r = vhi[y], w = vw[y]
+            let l = vlo[y]
+            let r = vhi[y]
+            let w = vw[y]
             for x in 0 ..< tw {
-                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
-                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
+                var s0: Int32 = ROUND_BIAS
+                var s1: Int32 = ROUND_BIAS
+                var s2: Int32 = ROUND_BIAS
+                var s3: Int32 = ROUND_BIAS
                 for k in 0 ..< (r - l) {
                     let p = ((l + k) * tw + x) * 4
                     let kw = w[k]
@@ -365,8 +409,10 @@ public enum MediaProcessing {
                     s3 &+= Int32(horiz[p + 3]) &* kw
                 }
                 let o = (y * tw + x) * 4
-                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
-                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
+                dst[o + 0] = clip8(s0)
+                dst[o + 1] = clip8(s1)
+                dst[o + 2] = clip8(s2)
+                dst[o + 3] = clip8(s3)
             }
         }
         return (dst, tw, th)
@@ -380,8 +426,12 @@ public enum MediaProcessing {
         std: (CGFloat, CGFloat, CGFloat)
     ) -> MLXArray {
         let (u8, tw, th) = _pilLanczosCore(image, to: size)
-        let rm = Float(mean.0), gm = Float(mean.1), bm = Float(mean.2)
-        let rs = Float(std.0),  gs = Float(std.1),  bs = Float(std.2)
+        let rm = Float(mean.0)
+        let gm = Float(mean.1)
+        let bm = Float(mean.2)
+        let rs = Float(std.0)
+        let gs = Float(std.1)
+        let bs = Float(std.2)
         let inv255: Float = 1.0 / 255.0
         let n = tw * th
         var planar = [Float](repeating: 0, count: 3 * n)
@@ -389,8 +439,8 @@ public enum MediaProcessing {
             for x in 0 ..< tw {
                 let p = (y * tw + x) * 4
                 let i = y * tw + x
-                planar[i]         = (Float(u8[p + 0]) * inv255 - rm) / rs
-                planar[i + n]     = (Float(u8[p + 1]) * inv255 - gm) / gs
+                planar[i] = (Float(u8[p + 0]) * inv255 - rm) / rs
+                planar[i + n] = (Float(u8[p + 1]) * inv255 - gm) / gs
                 planar[i + 2 * n] = (Float(u8[p + 2]) * inv255 - bm) / bs
             }
         }
