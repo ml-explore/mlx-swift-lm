@@ -82,6 +82,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `call:name{key:value,k:<escape>str<escape>}`
     case gemma
 
+    /// Gemma 4 function call format.
+    /// Example: `<|tool_call>call:name{key:value,k:<|"|>str<|"|>}<tool_call|>`
+    case gemma4
+
     /// Kimi K2 format with functions prefix.
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
     case kimiK2 = "kimi_k2"
@@ -115,6 +119,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return GLM4ToolCallParser()
         case .gemma:
             return GemmaFunctionParser()
+        case .gemma4:
+            return Gemma4FunctionParser()
         case .kimiK2:
             return KimiK2ToolCallParser()
         case .minimaxM2:
@@ -168,6 +174,12 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
         if type.hasPrefix("glm4") {
             return .glm4
+        }
+
+        // Gemma 4 (must precede the generic "gemma" check; uses different tool-call
+        // tokens and escape marker than Gemma 1–3).
+        if type.hasPrefix("gemma4") {
+            return .gemma4
         }
 
         // Gemma

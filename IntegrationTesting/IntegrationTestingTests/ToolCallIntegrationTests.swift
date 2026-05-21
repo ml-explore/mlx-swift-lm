@@ -99,4 +99,18 @@ struct ToolCallIntegrationTests {
             for: .init(id: IntegrationTestModelIDs.qwen35))
         try await ToolCallTests.qwen35MultiToolGeneration(container: container)
     }
+
+    // MARK: - Gemma 4
+
+    @Test func gemma4FormatAutoDetection() async throws {
+        let container = try await models.llmContainer(
+            for: .init(id: IntegrationTestModelIDs.gemma4))
+        try await ToolCallTests.gemma4FormatAutoDetection(container: container)
+    }
+
+    @Test func gemma4EndToEnd() async throws {
+        let container = try await models.llmContainer(
+            for: .init(id: IntegrationTestModelIDs.gemma4))
+        try await ToolCallTests.gemma4EndToEndGeneration(container: container)
+    }
 }

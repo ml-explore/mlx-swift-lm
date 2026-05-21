@@ -505,6 +505,69 @@ struct ToolTests {
         #expect(toolCall.function.arguments["expression"] == .string("2+2"))
     }
 
+    // MARK: - Gemma 4 Format Tests
+
+    @Test("Test Gemma 4 Function Parser")
+    func testGemma4Parser() throws {
+        let parser = Gemma4FunctionParser()
+        let content =
+            "<|tool_call>call:get_weather{location:Paris,unit:celsius}<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Gemma 4 Function Parser - Escaped Strings")
+    func testGemma4ParserEscapedStrings() throws {
+        let parser = Gemma4FunctionParser()
+        // Gemma 4's escape token is <|"|> (escape_token in tokenizer_config),
+        // surrounding string values that may contain commas, braces, or other delimiters.
+        let content =
+            "<|tool_call>call:search_journal{query:<|\"|>Asparaginase-Reaktion<|\"|>}<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search_journal")
+        #expect(toolCall.function.arguments["query"] == .string("Asparaginase-Reaktion"))
+    }
+
+    @Test("Test Gemma 4 Format via ToolCallProcessor")
+    func testGemma4FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .gemma4)
+        let content =
+            "<|tool_call>call:search_journal{query:<|\"|>Asparaginase-Reaktion<|\"|>}<tool_call|>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search_journal")
+        #expect(toolCall.function.arguments["query"] == .string("Asparaginase-Reaktion"))
+    }
+
+    @Test("Test Gemma 4 Format via ToolCallProcessor - leading thinking channel")
+    func testGemma4FormatProcessorWithThinkingChannel() throws {
+        // Mirrors real Gemma 4 output: the thinking channel comes first, then the tool call.
+        // The processor's tagged path looks for the start character `<`, so the channel
+        // tags get probed but should fail the partial-match check and be returned as text.
+        let processor = ToolCallProcessor(format: .gemma4)
+        let chunk1 = "<|channel>thought\nUser wants journal search.<channel|>"
+        let chunk2 = "<|tool_call>call:search{q:hello}<tool_call|>"
+
+        let out1 = processor.processChunk(chunk1)
+        let out2 = processor.processChunk(chunk2)
+
+        #expect(out1 == chunk1)
+        #expect(out2 == nil || out2?.isEmpty == true)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["q"] == .string("hello"))
+    }
+
     // MARK: - Kimi K2 Format Tests
 
     @Test("Test Kimi K2 Tool Call Parser")
@@ -638,6 +701,7 @@ struct ToolTests {
         #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
+        #expect(ToolCallFormat.gemma4.rawValue == "gemma4")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
@@ -670,6 +734,14 @@ struct ToolTests {
         // Gemma models
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
+
+        // Gemma 4 family (top-level config has model_type = "gemma4";
+        // sub-configs use gemma4_text / gemma4_audio / gemma4_vision)
+        #expect(ToolCallFormat.infer(from: "gemma4") == .gemma4)
+        #expect(ToolCallFormat.infer(from: "GEMMA4") == .gemma4)
+        #expect(ToolCallFormat.infer(from: "gemma4_text") == .gemma4)
+        // Confirm Gemma 1–3 still routes to .gemma, not .gemma4
+        #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
 
         // Nemotron models (prefix matching)
         #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)

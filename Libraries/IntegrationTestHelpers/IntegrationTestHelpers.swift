@@ -38,6 +38,7 @@ public enum IntegrationTestModelIDs {
     public static let mistral3 = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
     public static let nemotron = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
     public static let qwen35 = "mlx-community/Qwen3.5-2B-4bit"
+    public static let gemma4 = "mlx-community/gemma-4-e2b-it-4bit"
 }
 
 // MARK: - Model Loading
@@ -750,6 +751,39 @@ public enum ToolCallTests {
         try check(
             toolCalls.count > 1,
             "Expected multiple tool calls, got \(toolCalls.count)"
+        )
+    }
+
+    // MARK: Gemma 4
+
+    public static func gemma4FormatAutoDetection(container: LLModelContainer) async throws {
+        let config = await container.configuration
+        try check(
+            config.toolCallFormat == ToolCallFormat.gemma4,
+            "Expected .gemma4 tool call format, got: \(String(describing: config.toolCallFormat))"
+        )
+    }
+
+    public static func gemma4EndToEndGeneration(container: LLModelContainer) async throws {
+        let (result, toolCalls) = try await generateWithTools(
+            container: container,
+            userMessage: "What's the weather in Tokyo?")
+
+        print("Gemma4 Output:", result)
+        print("Gemma4 Tool Calls:", toolCalls)
+
+        try check(!toolCalls.isEmpty, "Expected at least one tool call, got none")
+        let toolCall = toolCalls[0]
+        try check(
+            toolCall.function.name == "get_weather",
+            "Expected tool name 'get_weather', got: \(toolCall.function.name)"
+        )
+        guard case .string(let location) = toolCall.function.arguments["location"] else {
+            throw IntegrationTestFailure("Expected string 'location' argument")
+        }
+        try check(
+            location.lowercased().contains("tokyo"),
+            "Expected location containing 'Tokyo', got: \(location)"
         )
     }
 
