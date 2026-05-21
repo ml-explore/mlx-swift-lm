@@ -86,7 +86,6 @@ jobs:
         shell: sh
         run: |
           xcodebuild -version
-          xcrun --show-sdk-build-version
           swift --version
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
           xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS'
