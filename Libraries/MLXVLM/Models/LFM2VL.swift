@@ -570,7 +570,7 @@ private enum Language {
                 var sanitizedParam = param
 
                 if name.contains("conv.weight") {
-                    if param.shape[param.shape.count - 1] > param.shape[1] {
+                    if param.shape[param.shape.count - 1] > param.dim(1) {
                         sanitizedParam = param.transposed(0, 2, 1)
                     }
                 }
@@ -1075,7 +1075,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             // Handle conv weight transposition
             var value = v
             if newKey.contains("conv.weight") {
-                if v.shape[v.shape.count - 1] > v.shape[1] {
+                if v.shape[v.shape.count - 1] > v.dim(1) {
                     value = v.transposed(0, 2, 1)
                 }
             }

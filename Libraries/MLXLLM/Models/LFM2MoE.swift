@@ -154,8 +154,9 @@ class LFM2MoEAttention: Module {
         keys = kLayerNorm(keys.reshaped(B, L, args.kvHeads, -1)).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
 
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let offset = cache?.ropeOffset
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
         let output = attentionWithCacheUpdate(
             queries: queries,
@@ -441,7 +442,7 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
         for (name, param) in weights {
             var tensor = param
             if name.contains("conv.weight") {
-                if tensor.shape.last! > tensor.shape[1] {
+                if tensor.dim(-1) > tensor.dim(1) {
                     tensor = tensor.transposed(0, 2, 1)
                 }
             }

@@ -27,11 +27,11 @@ public struct DownloaderMacro: ExpressionMacro {
             //
             // import HuggingFace
             //
-            { (hubApi: HubClient) -> MLXLMCommon.Downloader in
+            { (hubApi: HuggingFace.HubClient) -> MLXLMCommon.Downloader in
                 struct HubBridge: MLXLMCommon.Downloader {
-                    private let upstream: HubClient
+                    private let upstream: HuggingFace.HubClient
 
-                    init(_ upstream: HubClient) {
+                    init(_ upstream: HuggingFace.HubClient) {
                         self.upstream = upstream
                     }
 
@@ -40,7 +40,7 @@ public struct DownloaderMacro: ExpressionMacro {
                         revision: String?,
                         matching patterns: [String],
                         useLatest: Bool,
-                        progressHandler: @Sendable @escaping (Progress) -> Void
+                        progressHandler: @Sendable @escaping (Foundation.Progress) -> Void
                     ) async throws -> URL {                        
                         guard let repoID = HuggingFace.Repo.ID(rawValue: id) else {
                             throw HuggingFaceDownloaderError.invalidRepositoryID(id)
@@ -144,7 +144,7 @@ public struct TokenizerLoaderMacro: ExpressionMacro {
                         //
                         // import Tokenizers
                         //
-                        let upstream = try await AutoTokenizer.from(modelFolder: directory)
+                        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
                         return #adaptHuggingFaceTokenizer(upstream)
                     }
                 }

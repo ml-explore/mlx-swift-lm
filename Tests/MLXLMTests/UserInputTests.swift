@@ -95,6 +95,33 @@ public class UserInputTests: XCTestCase {
         assertEqual(expected, messages)
     }
 
+    public func testGemma4ConversionText() {
+        let chat: [Chat.Message] = [
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
+        ]
+
+        let messages = Gemma4MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "system",
+                "content": "You are a useful agent.",
+            ],
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Tell me a story.",
+                    ]
+                ],
+            ],
+        ]
+
+        assertEqual(expected, messages)
+    }
+
     // MARK: - Mistral3 Message Generator Tests
 
     public func testMistral3ConversionText() {
@@ -228,6 +255,91 @@ public class UserInputTests: XCTestCase {
 
         let userInput = UserInput(chat: chat)
         XCTAssertEqual(userInput.images.count, 1)
+    }
+
+    public func testGemma4ConversionImage() {
+        let chat: [Chat.Message] = [
+            .system("You are a useful agent."),
+            .user(
+                "What is this?",
+                images: [
+                    .url(
+                        URL(
+                            string: "https://opensource.apple.com/images/projects/mlx.f5c59d8b.png")!
+                    )
+                ]),
+        ]
+
+        let messages = Gemma4MessageGenerator().generate(messages: chat)
+
+        let expected: [[String: any Sendable]] = [
+            [
+                "role": "system",
+                "content": "You are a useful agent.",
+            ],
+            [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "image"
+                    ],
+                    [
+                        "type": "text",
+                        "text": "What is this?",
+                    ],
+                ],
+            ],
+        ]
+
+        assertEqual(expected, messages)
+    }
+
+    // MARK: - Init self.images / self.videos sync (#182)
+
+    public func testInitFromPromptStringPopulatesImages() throws {
+        // Reproducer for #182: a `.chat` prompt is built from the parameters
+        // but `prompt.didSet` does not fire during init, so `self.images`
+        // used to stay empty.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let placeholder = CIImage(
+            color: CIColor(red: 0.5, green: 0.5, blue: 0.5, colorSpace: cs)!
+        ).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+
+        let input = UserInput(
+            prompt: "What is in this image?",
+            images: [.ciImage(placeholder)])
+        XCTAssertEqual(
+            input.images.count, 1,
+            "UserInput(prompt:images:) must surface the images parameter on self.images")
+        XCTAssertEqual(input.videos.count, 0)
+    }
+
+    public func testInitFromPromptEnumPopulatesImagesForChat() throws {
+        // The `init(prompt: Prompt, images:, videos:, ...)` overload also had
+        // `case .chat: break` and dropped the images parameter on the floor.
+        // After the fix it derives images from the chat messages instead.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let placeholder = CIImage(
+            color: CIColor(red: 0.5, green: 0.5, blue: 0.5, colorSpace: cs)!
+        ).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+
+        let chat: [Chat.Message] = [
+            .user("describe", images: [.ciImage(placeholder)])
+        ]
+        let input = UserInput(prompt: .chat(chat))
+        XCTAssertEqual(
+            input.images.count, 1,
+            "UserInput(prompt:.chat) must derive self.images from the chat messages")
+    }
+
+    public func testInitFromPromptStringPopulatesVideos() throws {
+        // Same bug, video edition.
+        let videoURL = URL(fileURLWithPath: "/tmp/nonexistent.mp4")
+        let input = UserInput(
+            prompt: "describe this video",
+            videos: [.url(videoURL)])
+        XCTAssertEqual(input.videos.count, 1)
+        XCTAssertEqual(input.images.count, 0)
     }
 
 }

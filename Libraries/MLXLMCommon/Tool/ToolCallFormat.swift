@@ -185,6 +185,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .xmlFunction
         }
 
+        // Qwen3-Next family (qwen3_next, etc.)
+        if type.hasPrefix("qwen3_next") {
+            return .xmlFunction
+        }
+
         // Mistral3 family (mistral3, mistral3_text, etc.)
         if type.hasPrefix("mistral3") {
             return .mistral

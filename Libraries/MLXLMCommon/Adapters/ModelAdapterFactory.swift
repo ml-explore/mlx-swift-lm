@@ -77,7 +77,7 @@ public final class ModelAdapterFactory: Sendable {
         case .id(let id, let revision):
             adapterDirectory = try await downloader.download(
                 id: id, revision: revision,
-                matching: ["*.safetensors", "*.json"],
+                matching: ["*.safetensors", "*.json", "*.jinja"],
                 useLatest: useLatest,
                 progressHandler: progressHandler)
         case .directory(let directory):

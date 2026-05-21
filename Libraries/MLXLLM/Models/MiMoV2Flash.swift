@@ -169,8 +169,9 @@ class MiMoV2FlashAttention: Module {
         var k = keys.reshaped(B, L, numKeyValueHeads, -1).transposed(0, 2, 1, 3)
         let v = values.reshaped(B, L, numKeyValueHeads, -1).transposed(0, 2, 1, 3)
 
-        q = applyRotaryPosition(rope, to: q, cache: cache)
-        k = applyRotaryPosition(rope, to: k, cache: cache)
+        let offset = cache?.ropeOffset
+        q = applyRotaryPosition(rope, to: q, offset: offset)
+        k = applyRotaryPosition(rope, to: k, offset: offset)
 
         let output = attentionWithCacheUpdateAndSinks(
             queries: q,
@@ -408,7 +409,7 @@ public class MiMoV2FlashModel: Module, LLMModel, KVCacheDimensionProvider {
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
             let dtype = weight.dtype
             let bs = 128
-            let (m, n) = (weight.shape[0], weight.shape[1])
+            let (m, n) = (weight.dim(0), weight.dim(1))
             let padBottom = bs * scaleInv.dim(0) - m
             let padSide = bs * scaleInv.dim(1) - n
 

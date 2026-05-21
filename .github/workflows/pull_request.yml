@@ -69,18 +69,6 @@ jobs:
         run: |
           pre-commit run --all || (echo "Style checks failed, please install pre-commit and run pre-commit run --all and push the change"; echo ""; git --no-pager diff; exit 1)
 
-  docs:
-    needs: lint
-    if: github.repository == 'ml-explore/mlx-swift-lm'
-    runs-on: [self-hosted, macos]
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Verify documentation
-        run: scripts/verify-docs.sh
-
   mac_build_and_test:
     needs: lint
     if: github.repository == 'ml-explore/mlx-swift-lm'
@@ -98,10 +86,12 @@ jobs:
         shell: sh
         run: |
           xcodebuild -version
-          xcrun --show-sdk-build-version
           swift --version
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
           xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+
+      - name: Verify documentation
+        run: scripts/verify-docs.sh
 
       - name: Run Tests (Xcode, macOS)
         shell: sh

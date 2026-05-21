@@ -113,6 +113,45 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("swift programming"))
     }
 
+    @Test("Test JSON Tool Call Parser - Stringified Arguments")
+    func testJSONParserStringifiedArguments() throws {
+        let parser = JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            #"<tool_call>{"name":"get_weather","arguments":"{\"location\":\"Paris\",\"unit\":\"celsius\"}"}</tool_call>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test JSON Tool Call Parser - Stringified Empty Arguments")
+    func testJSONParserStringifiedEmptyArguments() throws {
+        let parser = JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            #"<tool_call>{"name":"current_time","arguments":"{}"}</tool_call>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "current_time")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test JSON Tool Call Parser - Stringified Array Arguments")
+    func testJSONParserStringifiedArrayArguments() throws {
+        let parser = JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            #"<tool_call>{"name":"search_many","arguments":"{\"queries\":[\"swift\",\"mlx\"],\"limit\":2}"}</tool_call>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search_many")
+        #expect(toolCall.function.arguments["limit"] == .int(2))
+        #expect(
+            toolCall.function.arguments["queries"] == .array([.string("swift"), .string("mlx")]))
+    }
+
     // MARK: - Pythonic Format Tests (LFM2/LFM2.5)
 
     @Test("Test Pythonic Tool Call Parser - Basic")
@@ -640,6 +679,11 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "qwen3_5") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "QWEN3_5") == .xmlFunction)
+
+        // Qwen3-Next models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
 
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)

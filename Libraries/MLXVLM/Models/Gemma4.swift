@@ -67,9 +67,9 @@ private func gemma4MaskedScatter(
         return inputTensor
     }
 
-    guard flattenedSource.shape[0] == targetIndices.count else {
+    guard flattenedSource.dim(0) == targetIndices.count else {
         fatalError(
-            "Masked scatter shape mismatch. source=\(flattenedSource.shape[0]) mask=\(targetIndices.count)"
+            "Masked scatter shape mismatch. source=\(flattenedSource.dim(0)) mask=\(targetIndices.count)"
         )
     }
 
@@ -193,7 +193,8 @@ private func gemma4AdjustAttentionMask(
 ) -> MLXFast.ScaledDotProductAttentionMaskMode {
     switch mask {
     case .array(let maskArray):
-        guard let maskLength = maskArray.shape.last, maskLength > keyLength else {
+        let maskLength = maskArray.dim(-1)
+        guard maskLength > keyLength else {
             return mask
         }
         let start = maskLength - keyLength
@@ -498,9 +499,9 @@ private final class Gemma4TextMLP: Module, UnaryLayer {
 
 private final class Gemma4TextRouter: Module {
     let topKExperts: Int
+    let config: Gemma4TextConfiguration
     private let rootSize: Float
 
-    @ModuleInfo(key: "norm") var norm: Gemma4RMSNormNoScale
     @ModuleInfo(key: "proj") var proj: Linear
     @ParameterInfo(key: "scale") var scale: MLXArray
     @ParameterInfo(key: "per_expert_scale") var perExpertScale: MLXArray
@@ -511,9 +512,9 @@ private final class Gemma4TextRouter: Module {
         }
 
         self.topKExperts = topKExperts
+        self.config = config
         self.rootSize = pow(Float(config.hiddenSize), -0.5)
 
-        self._norm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
         self._proj.wrappedValue = Linear(config.hiddenSize, numExperts, bias: false)
         self._scale.wrappedValue = MLXArray.ones([config.hiddenSize])
         self._perExpertScale.wrappedValue = MLXArray.ones([numExperts])
@@ -521,18 +522,16 @@ private final class Gemma4TextRouter: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        var x = norm(x)
-        x = x * MLXArray(rootSize, dtype: x.dtype)
-        x = x * scale.asType(x.dtype)
+        let normed = MLXFast.rmsNorm(
+            x, weight: (scale * rootSize).asType(x.dtype), eps: config.rmsNormEps)
 
-        let expertScores = proj(x)
-        let routerProbabilities = MLX.softmax(expertScores, axis: -1, precise: true)
+        let scores = proj(normed)
 
-        let topKIndices = MLX.argPartition(-expertScores, kth: topKExperts - 1, axis: -1)[
-            .ellipsis, ..<topKExperts,
+        let topKIndices = MLX.argPartition(scores, kth: -topKExperts, axis: -1)[
+            .ellipsis, (-topKExperts)...,
         ]
-        var topKWeights = MLX.takeAlong(routerProbabilities, topKIndices, axis: -1)
-        topKWeights = topKWeights / MLX.sum(topKWeights, axis: -1, keepDims: true)
+        var topKWeights = MLX.takeAlong(scores, topKIndices, axis: -1)
+        topKWeights = MLX.softmax(topKWeights, axis: -1)
         topKWeights = topKWeights * perExpertScale[topKIndices].asType(topKWeights.dtype)
         return (topKIndices, topKWeights)
     }
@@ -1768,6 +1767,32 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
 // MARK: - Processor
 
+public struct Gemma4MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        if message.role == .system {
+            [
+                "role": message.role.rawValue,
+                "content": message.content,
+            ]
+        } else {
+            [
+                "role": message.role.rawValue,
+                "content": message.images.map { _ in
+                    ["type": "image"]
+                }
+                    + message.videos.map { _ in
+                        ["type": "video"]
+                    }
+                    + [
+                        ["type": "text", "text": message.content]
+                    ],
+            ]
+        }
+    }
+}
+
 public struct Gemma4Processor: UserInputProcessor {
     private let config: Gemma4ProcessorConfiguration
     private let tokenizer: any Tokenizer
@@ -1804,7 +1829,7 @@ public struct Gemma4Processor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let messages = Gemma4MessageGenerator().generate(from: input)
 
         var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools,
@@ -1812,10 +1837,6 @@ public struct Gemma4Processor: UserInputProcessor {
 
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
-            let imagePlaceholderCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let boiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let eoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
-
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
             }
@@ -1840,10 +1861,6 @@ public struct Gemma4Processor: UserInputProcessor {
                 }
             }
             promptTokens = expandedTokens
-
-            let expandedImageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
-            let expandedBoiCount = promptTokens.filter { $0 == config.boiTokenId }.count
-            let expandedEoiCount = promptTokens.filter { $0 == config.eoiTokenId }.count
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)

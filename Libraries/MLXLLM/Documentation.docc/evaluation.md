@@ -10,8 +10,8 @@ let model = try await loadModel(
     id: "mlx-community/Qwen3-4B-4bit"
 )
 let session = ChatSession(model)
-print(try await session.respond(to: "What are two things to see in San Francisco?")
-print(try await session.respond(to: "How about a great place to eat?")
+print(try await session.respond(to: "What are two things to see in San Francisco?"))
+print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
 The second question actually refers to information (the location) from the first
@@ -54,7 +54,7 @@ let model = try await loadModel(
 let session = ChatSession(model)
 
 let answer1 = try await session.respond(
-    to: "what kind of creature is in the picture?"
+    to: "what kind of creature is in the picture?",
     image: .url(URL(fileURLWithPath: "support/test.jpg"))
 )
 print(answer1)

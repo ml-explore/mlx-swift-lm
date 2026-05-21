@@ -42,6 +42,14 @@ public struct IntOrIntArray: Codable, Sendable, Equatable {
             try container.encode(values)
         }
     }
+
+    /// Get the intermediate size for a specific layer
+    public subscript(layerIdx: Int) -> Int {
+        if values.count == 1 {
+            return values[0]
+        }
+        return values[layerIdx]
+    }
 }
 
 // MARK: - StringOrNumber

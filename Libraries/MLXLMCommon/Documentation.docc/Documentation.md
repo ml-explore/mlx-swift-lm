@@ -4,6 +4,7 @@ Common language model code.
 
 ## Articles
 
+- <doc:upgrade>
 - <doc:wired-memory>
 
 ## Other MLX Libraries Packages
