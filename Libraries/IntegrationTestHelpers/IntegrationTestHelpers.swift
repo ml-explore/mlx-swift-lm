@@ -987,7 +987,7 @@ private func datasetPathMatches(_ path: String, glob pattern: String) -> Bool {
         } else if i == parts.count - 1 {
             return path[cursor...].hasSuffix(part)
         } else {
-            guard let r = path.range(of: part, range: cursor..<path.endIndex) else {
+            guard let r = path.range(of: part, range: cursor ..< path.endIndex) else {
                 return false
             }
             cursor = r.upperBound

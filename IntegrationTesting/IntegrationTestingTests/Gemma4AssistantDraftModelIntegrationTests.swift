@@ -69,7 +69,9 @@ struct Gemma4AssistantIntegrationTests {
         #expect(cfg.textConfiguration.vocabularySize == 262_144)
         #expect(
             cfg.textConfiguration.layerTypes
-                == ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"]
+                == [
+                    "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+                ]
         )
     }
 

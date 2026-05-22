@@ -19,7 +19,8 @@ private func loadFixtureMaskOrSkip(_ name: String) async -> MLXArray? {
             matching: ["masks/*.safetensors"]
         )
     } catch {
-        Issue.record("masks/\(name) unavailable (dataset fetch failed): \(error.localizedDescription)")
+        Issue.record(
+            "masks/\(name) unavailable (dataset fetch failed): \(error.localizedDescription)")
         return nil
     }
     let url = dir.appendingPathComponent("masks").appendingPathComponent(name)
