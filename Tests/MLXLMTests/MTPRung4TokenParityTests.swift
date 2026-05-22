@@ -35,6 +35,85 @@ private func hfSnapshotDir(modelId: String) -> URL? {
     return entries.first
 }
 
+// MARK: - Shared bound drafter
+//
+// Rung 4 requires the drafter to be bound against a real target so the
+// `boundInputEmbed` / `boundEmbedScale` state set by `bind(target:)` is
+// available when `draftBlock` runs. Loading the 31B 8-bit target is
+// expensive (~30–60s); the `@Suite(.serialized)` wrapper below ensures
+// the three Rung 4 case methods run sequentially, and this module-level
+// cache reuses one bound drafter across all three.
+//
+// `Gemma4AssistantDraftModel` is deliberately non-Sendable (see the
+// design note at Gemma4Assistant.swift:153–155 — Embedding is a
+// reference type and cross-domain access must go through
+// `MTPDrafterContainer.perform`). `nonisolated(unsafe)` is appropriate
+// here because the suite is serialized — only one test runs at a time,
+// and the cache becomes read-only after first population.
+
+private struct Rung4BoundDrafter {
+    let drafter: Gemma4AssistantDraftModel
+    // Hold the target alive so the drafter's borrowed `embed_tokens`
+    // reference stays valid for the lifetime of every test in this suite.
+    let target: Gemma4
+}
+
+nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter?, Error>?
+
+private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
+    if let cached = _rung4Cache {
+        switch cached {
+        case .success(let value): return value
+        case .failure(let error): throw error
+        }
+    }
+    do {
+        let result = try loadRung4Drafter()
+        _rung4Cache = .success(result)
+        return result
+    } catch {
+        _rung4Cache = .failure(error)
+        throw error
+    }
+}
+
+private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
+    guard let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
+    else {
+        return nil
+    }
+    guard let targetDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit")
+    else {
+        return nil
+    }
+
+    // Drafter — bf16, no quantization.
+    let drafterCfg = try JSONDecoder().decode(
+        Gemma4AssistantConfiguration.self,
+        from: Data(contentsOf: drafterDir.appendingPathComponent("config.json")))
+    let drafter = Gemma4AssistantDraftModel(drafterCfg)
+    try loadWeights(modelDirectory: drafterDir, model: drafter)
+
+    // Target — 8-bit quantized. `loadWeights` auto-applies group quantization
+    // when weights carry `.scales` keys, per Libraries/MLXLMCommon/Load.swift:40-52.
+    let targetConfigData = try Data(
+        contentsOf: targetDir.appendingPathComponent("config.json"))
+    let targetBase = try JSONDecoder().decode(
+        BaseConfiguration.self, from: targetConfigData)
+    let targetCfg = try JSONDecoder().decode(
+        Gemma4Configuration.self, from: targetConfigData)
+    let target = Gemma4(targetCfg)
+    try loadWeights(
+        modelDirectory: targetDir,
+        model: target,
+        perLayerQuantization: targetBase.perLayerQuantization)
+
+    // Production bind path: mirrors `MTPSpeculativeTokenIterator.bind`.
+    drafter.bind(target: target)
+
+    return Rung4BoundDrafter(drafter: drafter, target: target)
+}
+
 // MARK: - Rung 4 — drafter `draftBlock` greedy parity with Python fixtures
 //
 // Rung 4 is bit-exact (no tolerance): greedy sampling at temperature=0 is
@@ -46,19 +125,22 @@ private func hfSnapshotDir(modelId: String) -> URL? {
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
 
-@Test
-func testRung4DraftBlockGreedyMatchesFixture31BCase01Block2() throws {
-    try assertDraftBlockMatchesFixture(name: "case_01_block2")
-}
+@Suite(.serialized)
+struct Rung4TokenParityTests {
+    @Test
+    func testRung4DraftBlockGreedyMatchesFixture31BCase01Block2() throws {
+        try assertDraftBlockMatchesFixture(name: "case_01_block2")
+    }
 
-@Test
-func testRung4DraftBlockGreedyMatchesFixture31BCase02Block4() throws {
-    try assertDraftBlockMatchesFixture(name: "case_02_block4")
-}
+    @Test
+    func testRung4DraftBlockGreedyMatchesFixture31BCase02Block4() throws {
+        try assertDraftBlockMatchesFixture(name: "case_02_block4")
+    }
 
-@Test
-func testRung4DraftBlockGreedyMatchesFixture31BCase03Block6() throws {
-    try assertDraftBlockMatchesFixture(name: "case_03_block6")
+    @Test
+    func testRung4DraftBlockGreedyMatchesFixture31BCase03Block6() throws {
+        try assertDraftBlockMatchesFixture(name: "case_03_block6")
+    }
 }
 
 // MARK: - Implementation
@@ -68,17 +150,13 @@ private func assertDraftBlockMatchesFixture(name: String) throws {
         Issue.record("tools/fixtures dir not found; skipping Rung 4 \(name)")
         return
     }
-    guard let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-    else {
-        Issue.record("31B-assistant-bf16 checkpoint not in HF cache; skipping Rung 4 \(name)")
+    guard let bound = try sharedBoundDrafter() else {
+        Issue.record(
+            "required checkpoint not in HF cache (drafter or 31B 8-bit target); skipping Rung 4 \(name)"
+        )
         return
     }
-
-    let configURL = drafterDir.appendingPathComponent("config.json")
-    let cfg = try JSONDecoder().decode(
-        Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
-    let model = Gemma4AssistantDraftModel(cfg)
-    try loadWeights(modelDirectory: drafterDir, model: model)
+    let model = bound.drafter
 
     let fixtureURL = fixturesDir.appendingPathComponent("drafter_block/\(name).safetensors")
     let arrays = try MLX.loadArrays(url: fixtureURL)
