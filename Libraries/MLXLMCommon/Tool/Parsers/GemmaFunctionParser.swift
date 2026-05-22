@@ -3,24 +3,44 @@
 import Foundation
 
 /// Parser for Gemma format: call:name{key:value,k:<escape>str<escape>}
+/// Supports both Gemma 3 (<start_function_call>/<end_function_call>) and
+/// Gemma 4 (<|tool_call>/<tool_call|>) formats.
 /// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/function_gemma.py
 public struct GemmaFunctionParser: ToolCallParser, Sendable {
-    public let startTag: String? = "<start_function_call>"
-    public let endTag: String? = "<end_function_call>"
+    // Gemma 4 format tags (primary, as Gemma 4 is the current model)
+    public let startTag: String? = "<|tool_call>"
+    public let endTag: String? = "<tool_call|>"
 
+    // Gemma 3 format tags (fallback detection)
+    private static let gemma3StartTag = "<start_function_call>"
+    private static let gemma3EndTag = "<end_function_call>"
+
+    // Gemma 3 escape marker
     private let escapeMarker = "<escape>"
+    // Gemma 4 escape marker
+    private static let gemma4EscapeMarker = "<|\"|>"
 
     public init() {}
 
+    /// Detects which Gemma format is being used based on content
+    private func detectFormat(in text: String) -> (isGemma4: Bool, stripped: String) {
+        // Try Gemma 4 tags first (startTag/endTag)
+        if let st = startTag, let et = endTag, text.contains(st) || text.contains(et) {
+            var stripped = text
+            stripped = stripped.replacingOccurrences(of: st, with: "")
+            stripped = stripped.replacingOccurrences(of: et, with: "")
+            return (true, stripped)
+        }
+        // Fallback to Gemma 3 tags
+        var stripped = text
+        stripped = stripped.replacingOccurrences(of: Self.gemma3StartTag, with: "")
+        stripped = stripped.replacingOccurrences(of: Self.gemma3EndTag, with: "")
+        return (false, stripped)
+    }
+
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Strip tags if present
-        var text = content
-        if let start = startTag {
-            text = text.replacingOccurrences(of: start, with: "")
-        }
-        if let end = endTag {
-            text = text.replacingOccurrences(of: end, with: "")
-        }
+        // Detect format and strip tags
+        let (isGemma4, text) = detectFormat(in: content)
 
         // Pattern: call:(\w+)\{(.*?)\}
         // Find "call:" followed by function name and arguments in braces
@@ -40,6 +60,9 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
 
         var arguments: [String: any Sendable] = [:]
 
+        // Use correct escape marker based on detected format
+        let escMarker = isGemma4 ? Self.gemma4EscapeMarker : escapeMarker
+
         // Parse key:value pairs
         while !argsStr.isEmpty {
             // Find the key (everything before :)
@@ -48,12 +71,16 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
             argsStr = String(argsStr[argsStr.index(after: colonIdx)...])
 
             // Handle escaped strings
-            if argsStr.hasPrefix(escapeMarker) {
-                argsStr = String(argsStr.dropFirst(escapeMarker.count))
-                guard let endEscape = argsStr.range(of: escapeMarker) else { break }
-                let value = String(argsStr[..<endEscape.lowerBound])
-                arguments[key] = value
+            var parsedValue: String?
+            if argsStr.hasPrefix(escMarker) {
+                argsStr = String(argsStr.dropFirst(escMarker.count))
+                guard let endEscape = argsStr.range(of: escMarker) else { break }
+                parsedValue = String(argsStr[..<endEscape.lowerBound])
                 argsStr = String(argsStr[endEscape.upperBound...])
+            }
+
+            if let pv = parsedValue {
+                arguments[key] = pv
                 // Skip comma if present
                 if argsStr.hasPrefix(",") {
                     argsStr = String(argsStr.dropFirst())
@@ -63,18 +90,18 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
 
             // Handle regular values (until comma or end)
             let commaIdx = argsStr.firstIndex(of: ",") ?? argsStr.endIndex
-            let value = String(argsStr[..<commaIdx])
+            let rawValue = String(argsStr[..<commaIdx])
             argsStr =
                 commaIdx < argsStr.endIndex
                 ? String(argsStr[argsStr.index(after: commaIdx)...]) : ""
 
             // Try JSON decode, fallback to string
-            if let data = value.data(using: .utf8),
+            if let data = rawValue.data(using: .utf8),
                 let json = deserializeJSON(data)
             {
                 arguments[key] = json
             } else {
-                arguments[key] = value
+                arguments[key] = rawValue
             }
         }
 
