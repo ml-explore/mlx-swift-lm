@@ -43,8 +43,8 @@ private enum Language {
         let kvHeads: Int
         let headDim: Int
         let scale: Float
-        let mropeSection: [Int]      // cumulative section indices (for half-dim split)
-        let mropeSectionRaw: [Int]   // raw section sizes [16, 24, 24] (for full-dim split)
+        let mropeSection: [Int]  // cumulative section indices (for half-dim split)
+        let mropeSectionRaw: [Int]  // raw section sizes [16, 24, 24] (for full-dim split)
         // Leading underscore makes Module's weight loader skip this property —
         // invFreq is computed from ropeTheta+headDim, not a trained weight.
         // (See `parameterIsValid(_:)` in mlx-swift's Module.)
@@ -319,8 +319,9 @@ private enum Language {
                 effectivePositionIds = broadcast(effectivePositionIds!, to: [3, batch, seqLength])
             }
 
-            var out = model(inputs, cache: cache, inputEmbedding: inputEmbedding,
-                           positionIds: effectivePositionIds)
+            var out = model(
+                inputs, cache: cache, inputEmbedding: inputEmbedding,
+                positionIds: effectivePositionIds)
             if let lmHead {
                 out = lmHead(out)
             } else {
@@ -417,9 +418,10 @@ private enum Vision {
             // Apply attention mask (window or full attention)
             // attentionMask is [1, seqLen, seqLen] boolean — convert to float16 mask for SDPA
             let boolMask = attentionMask[.newAxis, 0..., 0..., 0...]  // [1, 1, seqLen, seqLen]
-            let floatMask = MLX.where(boolMask,
-                                       MLXArray(Float16(0)),
-                                       MLXArray(Float16(-10000)))
+            let floatMask = MLX.where(
+                boolMask,
+                MLXArray(Float16(0)),
+                MLXArray(Float16(-10000)))
 
             let output = MLXFast.scaledDotProductAttention(
                 queries: q,
@@ -814,10 +816,14 @@ public struct Qwen25VLProcessor: UserInputProcessor {
             targetSize = CGSize(width: w, height: h)
         }
 
-        let processedImages = images
+        let processedImages =
+            images
             .map { MediaProcessing.inSRGBToneCurveSpace($0) }
             .map { MediaProcessing.resampleBicubic($0, to: targetSize) }
-            .map { MediaProcessing.normalize($0, mean: config.imageMeanTuple, std: config.imageStdTuple) }
+            .map {
+                MediaProcessing.normalize(
+                    $0, mean: config.imageMeanTuple, std: config.imageStdTuple)
+            }
             .map { MediaProcessing.asMLXArray($0) }
 
         return try QwenVL.patchify(
