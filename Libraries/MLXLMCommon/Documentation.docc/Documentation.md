@@ -4,6 +4,7 @@ Common language model code.
 
 ## Articles
 
+- <doc:continuous-batching>
 - <doc:upgrade>
 - <doc:wired-memory>
 
