@@ -16,6 +16,11 @@ private enum Qwen35VLError: Error {
     case featureTokenMismatch(expected: Int, actual: Int)
 }
 
+private let precomputedPositionIdsKey = LMOutput.Key<MLXArray>(
+    "qwen35.precomputedPositionIds")
+private let ropeDeltasKey = LMOutput.Key<MLXArray>(
+    "qwen35.ropeDeltas")
+
 // MARK: - Gated Delta Helpers
 
 private func computeGatedDeltaG(_ aLog: MLXArray, _ a: MLXArray, _ dtBias: MLXArray)
@@ -884,9 +889,6 @@ enum Qwen35Language {
         let modelType: String
         let kvHeads: [Int]
 
-        fileprivate var precomputedPositionIds: MLXArray? = nil
-        fileprivate var ropeDeltas: MLXArray? = nil
-
         init(_ config: Qwen35Configuration) {
             self.config = config
             self.textConfig = config.textConfiguration
@@ -906,29 +908,29 @@ enum Qwen35Language {
             super.init()
         }
 
-        func resetPositionState() {
-            precomputedPositionIds = nil
-            ropeDeltas = nil
-        }
-
         func callAsFunction(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
             cache: [KVCache?]? = nil,
+            state: LMOutput.State?,
             mask: MLXArray? = nil,
             positionIds providedPositionIds: MLXArray? = nil,
             pixelValues: MLXArray? = nil,
             imageGridTHW: [THW]? = nil,
             videoGridTHW: [THW]? = nil
         ) -> LMOutput {
+            var state = state ?? .init()
+
             // Ensure inputs is 2D [batch, seq]. Text-only callers (e.g.
             // WiredMemoryUtils, TokenIterator) may pass 1D token arrays.
             let inputs = inputs.ndim == 1 ? inputs.expandedDimensions(axis: 0) : inputs
 
             if pixelValues != nil {
-                precomputedPositionIds = nil
-                ropeDeltas = nil
+                state[precomputedPositionIdsKey] = nil
+                state[ropeDeltasKey] = nil
             }
+            let precomputedPositionIds = state[precomputedPositionIdsKey]
+            let ropeDeltas = state[ropeDeltasKey]
 
             var cacheOffset = 0
             if let cache, let faCache = cache[model.faIdx] {
@@ -962,8 +964,8 @@ enum Qwen35Language {
                             visionStartTokenId: config.visionStartTokenId,
                             attentionMask: ropeMask)
                         positionIds = computed
-                        precomputedPositionIds = computed
-                        ropeDeltas = deltas
+                        state[precomputedPositionIdsKey] = computed
+                        state[ropeDeltasKey] = deltas
                     }
                 } else {
                     let batchSize = inputs.dim(0)
@@ -1004,7 +1006,7 @@ enum Qwen35Language {
                 out = model.embedTokens.asLinear(out)
             }
 
-            return LMOutput(logits: out)
+            return LMOutput(logits: out, state: state)
         }
 
         func makeCache(maxKVSize: Int?) -> [KVCache] {
@@ -1149,8 +1151,6 @@ public class Qwen35: Module, VLMModel {
                 videoTokenIndex: config.videoTokenIndex
             )
             inputEmbeddings = mergedEmbeds
-        } else {
-            languageModel.resetPositionState()
         }
 
         let typedCache = castCache(cache)
@@ -1158,6 +1158,7 @@ public class Qwen35: Module, VLMModel {
             inputIds,
             inputsEmbeds: inputEmbeddings,
             cache: typedCache,
+            state: nil,
             mask: input.text.mask,
             positionIds: nil,
             pixelValues: pixelValues,
@@ -1168,19 +1169,22 @@ public class Qwen35: Module, VLMModel {
         return .logits(output)
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
         let typedCache = castCacheOptional(cache)
         let result = languageModel(
-            inputs,
+            input.tokens,
             inputsEmbeds: nil,
             cache: typedCache,
+            state: state,
             mask: nil,
             positionIds: nil,
             pixelValues: nil,
             imageGridTHW: nil,
             videoGridTHW: nil
         )
-        return result.logits
+        return result
     }
 
     public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:

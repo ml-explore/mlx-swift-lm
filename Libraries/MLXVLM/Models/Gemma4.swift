@@ -82,6 +82,24 @@ private func gemma4OneHot(_ indices: MLXArray, numClasses: Int) -> MLXArray {
     expandedDimensions(indices, axis: -1) .== MLXArray(0 ..< numClasses)
 }
 
+/// Average-pool kernel for Gemma 4's vision pooler.
+///
+/// The padded patch tensor has length
+/// `paddedPatchCount = outputLength × pool²` where `pool` is the
+/// model's `pooling_kernel_size`. Recovering `pool` from these
+/// two values yields `floor(sqrt(paddedPatchCount / outputLength))`.
+///
+/// Matches HuggingFace's reference image processor (see
+/// `image_processing_gemma4.py`: `max_patches = max_soft_tokens *
+/// pooling_kernel_size**2`).
+internal func gemma4VisionPoolingKernel(
+    paddedPatchCount: Int, outputLength: Int
+) -> Int {
+    let safeLength = max(outputLength, 1)
+    let ratio = max(1, paddedPatchCount / safeLength)
+    return Int(sqrt(Double(ratio)))
+}
+
 private func gemma4RotateHalf(_ x: MLXArray) -> MLXArray {
     let half = x.shape[x.shape.count - 1] / 2
     let x1 = x[.ellipsis, ..<half]
@@ -968,6 +986,18 @@ private final class Gemma4TextBackbone: Module {
         cache: [KVCache?]? = nil,
         perLayerInputs: MLXArray? = nil
     ) -> MLXArray {
+        // Tolerate callers that hand us a 1D `(L,)` token array instead
+        // of the canonical 2D `(B, L)` produced by `Gemma4Processor.prepare`.
+        // The downstream `perLayerInputs` indexing path (`finalPerLayerInputs[
+        // 0..., 0..., idx, 0...]`) requires 4D shapes; with 1D inputs the
+        // model otherwise crashes inside `MLXArray.subscript.getter`
+        // → `mlx_array_dim` → `_mlx_error`. This expansion is zero-copy
+        // and behaves identically when the caller already passed 2D.
+        let inputs = inputs.map { $0.ndim == 1 ? $0.expandedDimensions(axis: 0) : $0 }
+        let inputsEmbeds = inputsEmbeds.map {
+            $0.ndim == 2 ? $0.expandedDimensions(axis: 0) : $0
+        }
+
         let h0: MLXArray
         if let inputsEmbeds {
             h0 = inputsEmbeds
@@ -1485,7 +1515,8 @@ private final class Gemma4VisionPooler: Module {
 
         let actualPositions = patchPositions[0, ..<validCount]
         let maxX = Int(actualPositions[0..., 0].max().item(Int32.self)) + 1
-        let kernel = Int(sqrt(Double(max(1, validCount / max(length, 1)))))
+        let kernel = gemma4VisionPoolingKernel(
+            paddedPatchCount: pooledHiddenStates.dim(1), outputLength: length)
         let divisor = max(kernel * kernel, 1)
         let pooledLength = max(length, 1)
 

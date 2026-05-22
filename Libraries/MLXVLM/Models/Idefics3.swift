@@ -730,10 +730,33 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
     {
         let inputIds = input.text.tokens
         let pixelValues = input.image?.pixels
-        let embeddings = getInputEmbeddings(
+        var embeddings = getInputEmbeddings(
             inputIds: inputIds,
             pixelValues: pixelValues
         )
+
+        // Prefill the merged image+text embeddings in windowSize-sized chunks,
+        // matching mlx-vlm (and `LLMModel.prepare`'s token chunking): evaluate
+        // the KV cache between chunks, leaving the last embedding for the logits.
+        let prefillStepSize = windowSize ?? 512
+        let totalTokens = embeddings.dim(1)
+
+        var processed = 0
+        while embeddings.dim(1) > 1 {
+            let nToProcess = min(prefillStepSize, embeddings.dim(1) - 1)
+            let chunk = embeddings[0..., ..<nToProcess]
+            _ = languageModel(nil, cache: cache, inputs_embeds: chunk)
+            eval(cache)
+            embeddings = embeddings[0..., nToProcess...]
+            processed += nToProcess
+        }
+
+        // The prefix is now in the KV cache; the final embedding yields the
+        // first-token logits.
+        precondition(
+            processed == totalTokens - 1,
+            "Idefics3 chunked prefill: expected one residual embedding, processed "
+                + "\(processed) of \(totalTokens)")
         let result = languageModel(nil, cache: cache, inputs_embeds: embeddings)
         return .logits(result)
     }

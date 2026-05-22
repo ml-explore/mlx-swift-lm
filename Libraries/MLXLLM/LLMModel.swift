@@ -27,9 +27,11 @@ extension LLMModel {
         // Prepare the prompt in chunks if larger than the prefill size.
         // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
         // chunk N.
+        var state: LMOutput.State?
         while y.tokens.size > prefillStepSize {
             let input = y[.newAxis, ..<prefillStepSize]
-            _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
+            let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
+            state = output.state
             asyncEval(cache)
             y = y[prefillStepSize...]
         }
