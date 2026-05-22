@@ -34,38 +34,30 @@ private func hfSnapshotDir(modelId: String) -> URL? {
 /// R8 is the related "no quantized MTP for this PR" limitation; this test
 /// documents the fallback behavior end-to-end.
 
-@Test
+@Test(
+    .disabled(
+        """
+        Full target+drafter end-to-end exercise (kvBits=4, quantizedKVStart=32, \
+        passthrough fallback once cache quantizes mid-generation) is deferred \
+        to a follow-up PR. The passthrough fallback logic is unit-tested in \
+        `MTPSpeculativeTokenIteratorTests.testMTPIteratorMissingStateFallsBackToPassthrough` \
+        (in MLXLMTests) with synthetic state; this test will be wired up once \
+        full-target quantization-onset measurement is exercisable here.
+        """
+    )
+)
 func testMTPMidGenerationKVQuantizationCompletesWithoutCrash() async throws {
-    // Documents the R13 verification plan. Full target+drafter end-to-end
-    // exercise is deferred to a follow-up PR; this placeholder gates on
-    // checkpoint presence so the test reports a useful skip reason when the
-    // moved IntegrationTesting target runs without the prerequisite caches.
+    // Body retained for future implementation. The `.disabled` trait above
+    // causes Swift Testing to skip without recording an issue.
     //
     // The semantic to verify: with `kvBits=4, quantizedKVStart=32`, the
     // main cache transitions from `KVCacheSimple` to `QuantizedKVCache`
     // mid-generation. Once the cache quantizes, the target's emit-hook
     // returns `sharedKV: nil` and the iterator's passthrough fallback
     // engages. Generation completes without crashing.
-    guard hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16") != nil
+    guard hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16") != nil,
+        hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit") != nil
     else {
-        Issue.record("31B-assistant-bf16 not in HF cache; skipping R13 quantization-onset test")
         return
     }
-    guard hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit") != nil
-    else {
-        Issue.record("31b-it-8bit target not in HF cache; skipping R13 quantization-onset test")
-        return
-    }
-
-    Issue.record(
-        """
-        R13 quantization-onset test is placeholdered: full target+drafter
-        end-to-end exercise (kvBits=4, quantizedKVStart=32, passthrough
-        fallback once cache quantizes mid-generation) is deferred to a
-        follow-up PR. The passthrough fallback logic is unit-tested in
-        `MTPSpeculativeTokenIteratorTests.testMTPIteratorMissingStateFallsBackToPassthrough`
-        (in MLXLMTests) with synthetic state; this test will be wired up
-        once full-target quantization-onset measurement is exercisable here.
-        """
-    )
 }

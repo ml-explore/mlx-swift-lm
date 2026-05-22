@@ -8,7 +8,7 @@ import Testing
 
 /// Pinned revision of the `angelsbrood/gemma4-mtp-fixtures` HF dataset for
 /// byte-exact fixture parity. Bump when the dataset is regenerated.
-private let fixturesRevision = "ae79d3536d023d1fd0db4fa829c1d29adadf7bd1"
+private let fixturesRevision = "152a8ea4cd9e58da11b0c4b39542d3ad347fce06"
 
 private func loadFixtureMaskOrSkip(_ name: String) async -> MLXArray? {
     let dir: URL
