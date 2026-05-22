@@ -10,7 +10,7 @@ import MLXLMCommon
 /// launch). Re-registration is idempotent — it overwrites the prior creator
 /// with the same one.
 ///
-/// Async because ``ModelTypeRegistry`` is an `actor` — registration calls
+/// Async because `ModelTypeRegistry` is an `actor` — registration calls
 /// require `await`. A bootstrap pattern like the synchronous
 /// `LLMTypeRegistry.shared = .init(creators: [...])` is not possible here:
 /// the drafter implementation (`Gemma4AssistantDraftModel`) lives in

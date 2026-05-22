@@ -138,7 +138,7 @@ public final class Gemma4AssistantDraftInner: Module {
 ///
 /// Mirrors mlx-vlm's `Gemma4AssistantDraftModel` at
 /// `mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py`
-/// (SHA d49d428). Conforms to ``MTPDrafterModel``; consumed by
+/// (SHA d49d428). Conforms to `MTPDrafterModel`; consumed by
 /// `MTPSpeculativeTokenIterator` (Phase B).
 public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
     public let config: Gemma4AssistantConfiguration

@@ -1842,11 +1842,11 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         return logits.logits
     }
 
-    /// MTP-aware ``LanguageModel`` entry point. Reads ``mtpEmitFlagKey`` from
-    /// the incoming `state` and threads it through to ``Gemma4TextLanguageModel``;
-    /// the returned ``LMOutput`` carries ``mtpLastHiddenStatesKey`` and
-    /// ``mtpSharedKVStatesKey`` populated when the flag is set, empty otherwise.
-    /// Overrides the protocol-extension default at ``LanguageModel`` which
+    /// MTP-aware `LanguageModel` entry point. Reads `mtpEmitFlagKey` from
+    /// the incoming `state` and threads it through to `Gemma4TextLanguageModel`;
+    /// the returned `LMOutput` carries `mtpLastHiddenStatesKey` and
+    /// `mtpSharedKVStatesKey` populated when the flag is set, empty otherwise.
+    /// Overrides the protocol-extension default at `LanguageModel` which
     /// would discard `state`.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?

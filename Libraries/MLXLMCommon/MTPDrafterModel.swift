@@ -76,7 +76,7 @@ public struct MTPDrafterContext {
 /// Sendable container for an ``MTPDrafterContext``.
 ///
 /// Mirrors the ``ModelContainer`` pattern: a `final class : Sendable` that
-/// wraps the non-Sendable context in a ``SerialAccessContainer`` and exposes
+/// wraps the non-Sendable context in a `SerialAccessContainer` and exposes
 /// async `perform(_:)` closures for serialized access.
 public final class MTPDrafterContainer: Sendable {
     private let context: SerialAccessContainer<MTPDrafterContext>

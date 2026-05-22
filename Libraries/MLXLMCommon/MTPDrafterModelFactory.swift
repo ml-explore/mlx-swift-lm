@@ -38,7 +38,7 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     }
 }
 
-/// Loader for ``MTPDrafterModel`` checkpoints. Mirrors ``LLMModelFactory``
+/// Loader for ``MTPDrafterModel`` checkpoints. Mirrors `LLMModelFactory`
 /// in shape, but produces an ``MTPDrafterContext`` (no tokenizer, no user
 /// input processor, no message generator — drafters borrow their target's
 /// tokenizer).
