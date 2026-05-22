@@ -173,8 +173,10 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // Expected pendingTokens after one round: [7, 7, 7, 9].
 
     let mainLogitTokens: [Int32] = [
-        // Prefill follow-up call (length 3): final position picks 7
-        99, 99, 7,
+        // Prefill follow-up call (length 3): only the final position is
+        // sampled (iterator takes `logits[-1]`); positions 0/1 can hold any
+        // value < vocab=20. Using 0 as an inert placeholder.
+        0, 0, 7,
         // Verify pass (length 4): [7, 7, 7, 9]
         7, 7, 7, 9,
     ]
@@ -241,8 +243,9 @@ func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
     // so the iterator switches to passthrough on the first `speculateRound`
     // call. Drafter must not be invoked.
     let mainLogitTokens: [Int32] = [
-        // Prefill follow-up: length 3, final position picks 5
-        99, 99, 5,
+        // Prefill follow-up: length 3, final position picks 5 (positions 0/1
+        // are not sampled and must be < vocab=20; using 0 as a placeholder).
+        0, 0, 5,
         // Passthrough single-token rounds: each is a length-1 call picking
         // 11, then 12, then 13.
         11, 12, 13,
@@ -276,7 +279,7 @@ func testMTPIteratorPendingBufferDrainOrder() throws {
     // position 2 = 7. The pendingTokens order should be [5, 5, 7] — main-model
     // sequence order — not the drafter's [5, 5, 5].
     let mainLogitTokens: [Int32] = [
-        99, 99, 5,  // prefill follow-up picks bonus 5
+        0, 0, 5,  // prefill follow-up picks bonus 5 (positions 0/1 unused, < vocab=20)
         5, 5, 7, 9,  // verify positions
     ]
     let main = MockMainModel(nextLogitTokens: mainLogitTokens)
