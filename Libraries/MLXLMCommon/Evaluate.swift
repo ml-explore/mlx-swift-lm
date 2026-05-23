@@ -1832,12 +1832,16 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
 
+            let mtpStats = iterator as? MTPStatsCollecting
             let info = GenerateCompletionInfo(
                 promptTokenCount: promptTokenCount,
                 generationTokenCount: tokenCount,
                 promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime,
-                stopReason: stopReason ?? .cancelled
+                stopReason: stopReason ?? .cancelled,
+                proposedDraftTokens: mtpStats?.proposedDraftTokens,
+                acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
+                passthroughReason: mtpStats?.passthroughReason
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -1907,6 +1911,23 @@ public struct GenerateCompletionInfo: Sendable {
     /// Reason generation stopped.
     public let stopReason: GenerateStopReason
 
+    /// Total tokens proposed by the MTP drafter across all speculation rounds
+    /// in this stream, or nil for non-MTP iterators. Sourced from the
+    /// iterator's ``MTPStatsCollecting`` conformance when present.
+    public let proposedDraftTokens: Int?
+
+    /// Total tokens accepted by the target across all speculation rounds in
+    /// this stream, or nil for non-MTP iterators. The acceptance rate is
+    /// `Double(acceptedDraftTokens) / Double(proposedDraftTokens)` when both
+    /// are non-nil and proposed > 0.
+    public let acceptedDraftTokens: Int?
+
+    /// Non-nil when the MTP iterator transitioned into sticky-passthrough
+    /// mode for the remainder of the stream; carries the reason string
+    /// captured at the moment of engagement. Nil if the iterator stayed
+    /// speculative for the full stream or for non-MTP streams.
+    public let passthroughReason: String?
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -1922,13 +1943,19 @@ public struct GenerateCompletionInfo: Sendable {
         generationTokenCount: Int,
         promptTime: TimeInterval,
         generationTime: TimeInterval,
-        stopReason: GenerateStopReason = .stop
+        stopReason: GenerateStopReason = .stop,
+        proposedDraftTokens: Int? = nil,
+        acceptedDraftTokens: Int? = nil,
+        passthroughReason: String? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
         self.promptTime = promptTime
         self.generateTime = generationTime
         self.stopReason = stopReason
+        self.proposedDraftTokens = proposedDraftTokens
+        self.acceptedDraftTokens = acceptedDraftTokens
+        self.passthroughReason = passthroughReason
     }
 
     public func summary() -> String {

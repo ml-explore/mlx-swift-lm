@@ -129,3 +129,31 @@ public let mtpSharedKVStatesKey =
 /// ``mtpLastHiddenStatesKey`` and ``mtpSharedKVStatesKey``. An absent key
 /// reads as `false` (no emit), so non-MTP callers are unaffected.
 public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
+
+// MARK: - Iterator stats surface
+
+/// Introspection surface for token iterators that perform MTP speculative
+/// decoding.
+///
+/// The iterator value lives inside `generateLoopTask` and never escapes the
+/// stream, so its per-stream draft proposal and acceptance counters are not
+/// reachable through the high-level `generate(...)` API. Conforming the
+/// iterator to this protocol lets `generateLoopTask` downcast and thread the
+/// counters through the emitted `.info` event's
+/// ``GenerateCompletionInfo/proposedDraftTokens``,
+/// ``GenerateCompletionInfo/acceptedDraftTokens``, and
+/// ``GenerateCompletionInfo/passthroughReason`` fields. Non-MTP iterators do
+/// not conform; the downcast returns nil and the fields default to nil for
+/// non-MTP streams.
+public protocol MTPStatsCollecting {
+    /// Total tokens proposed across all speculation rounds in the stream.
+    var proposedDraftTokens: Int { get }
+
+    /// Total tokens accepted by the target across all speculation rounds.
+    var acceptedDraftTokens: Int { get }
+
+    /// nil if the iterator stayed in speculative mode for the full stream;
+    /// non-nil if sticky-passthrough engaged, with the reason string captured
+    /// at the moment of engagement.
+    var passthroughReason: String? { get }
+}

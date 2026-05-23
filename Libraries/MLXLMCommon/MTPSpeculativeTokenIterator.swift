@@ -69,6 +69,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     public private(set) var acceptedCount: Int = 0
     public private(set) var proposedCount: Int = 0
 
+    // Reason recorded the first time sticky-passthrough engaged, or nil if
+    // the iterator stayed speculative for the full stream. Surfaced through
+    // ``MTPStatsCollecting`` so `generateLoopTask` can include it on the
+    // emitted `.info` event.
+    public private(set) var passthroughReason: String?
+
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -280,6 +286,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             print("[MTPSpeculativeTokenIterator] passthrough mode: \(reason)")
             passthroughLoggedOnce = true
         }
+        passthroughReason = reason
         passthrough = true
     }
 
@@ -342,4 +349,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         tokenCount += 1
         return token
     }
+}
+
+extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
+    public var proposedDraftTokens: Int { proposedCount }
+    public var acceptedDraftTokens: Int { acceptedCount }
 }
