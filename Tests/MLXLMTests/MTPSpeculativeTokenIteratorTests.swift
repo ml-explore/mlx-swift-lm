@@ -168,9 +168,10 @@ private final class CountingKVCache: KVCache {
 func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // Plan: prompt of 3 tokens [1, 2, 3], main model is rigged so that it
     // samples bonus token 7 at prefill, then on the verify pass samples
-    // [7, 7, 7, 9] (3 matching drafts, 1 correction). Drafter returns [7, 7, 7]
-    // so all three drafts match and we get a single correction bonus of 9.
-    // Expected pendingTokens after one round: [7, 7, 7, 9].
+    // [7, 7, 7, 9] (3 matching drafts, 1 correction). Drafter returns
+    // [7, 7, 7] so all three drafts match. Total tokens yielded across
+    // the bonus drain + one speculation round: [bonus=7, draft=7,
+    // draft=7, draft=7, correction=9].
 
     let mainLogitTokens: [Int32] = [
         // Prefill follow-up call (length 3): only the final position is
@@ -197,20 +198,23 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // `bind` called exactly once in init.
     #expect(drafter.bindCallCount == 1)
 
-    // Draw the first token from `next()`; this triggers `speculateRound`.
+    // First token drained from `next()` is the prepare-time bonus; the
+    // speculation round runs on the second call.
     let t0 = iter.next()
     #expect(t0 == 7)
 
-    // Drain the rest of the round's pending buffer.
+    // Drain the speculation round's pending buffer.
     let t1 = iter.next()
     let t2 = iter.next()
     let t3 = iter.next()
+    let t4 = iter.next()
     #expect(t1 == 7)
     #expect(t2 == 7)
-    #expect(t3 == 9)
+    #expect(t3 == 7)
+    #expect(t4 == 9)
 
-    // One round produced 4 tokens (3 accepted + 1 bonus correction).
-    #expect(iter.tokenCount == 4)
+    // 1 prepare bonus + one round of 4 tokens (3 accepted + 1 correction).
+    #expect(iter.tokenCount == 5)
     #expect(drafter.draftBlockCallCount == 1)
     // proposedCount = numDraft = 3; accepted = 3.
     #expect(iter.proposedCount == 3)
@@ -242,13 +246,19 @@ func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
     // Main model with `omitDrafterState=true` never populates the MTP keys,
     // so the iterator switches to passthrough on the first `speculateRound`
     // call. Drafter must not be invoked.
+    //
+    // With maxTokens=3, the iterator yields 1 prepare-time bonus + 2
+    // passthrough tokens before hitting the budget. The third passthrough
+    // position is never reached.
     let mainLogitTokens: [Int32] = [
-        // Prefill follow-up: length 3, final position picks 5 (positions 0/1
-        // are not sampled and must be < vocab=20; using 0 as a placeholder).
+        // Prefill follow-up: length 3, final position picks bonus 5
+        // (positions 0/1 are not sampled and must be < vocab=20; using 0 as
+        // a placeholder).
         0, 0, 5,
-        // Passthrough single-token rounds: each is a length-1 call picking
-        // 11, then 12, then 13.
-        11, 12, 13,
+        // Passthrough single-token rounds (length-1 calls): the iterator
+        // takes 2 of these inside the 3-token budget after yielding the
+        // bonus first.
+        11, 12,
     ]
     let main = MockMainModel(nextLogitTokens: mainLogitTokens)
     main.omitDrafterState = true
@@ -261,10 +271,10 @@ func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
     )
 
     let tokens = [iter.next(), iter.next(), iter.next(), iter.next()]
-    // 3 tokens generated, then nil.
-    #expect(tokens[0] == 11)
-    #expect(tokens[1] == 12)
-    #expect(tokens[2] == 13)
+    // [bonus from prepare, 2 passthrough tokens, nil].
+    #expect(tokens[0] == 5)
+    #expect(tokens[1] == 11)
+    #expect(tokens[2] == 12)
     #expect(tokens[3] == nil)
     // Drafter was never invoked for an actual round.
     #expect(drafter.draftBlockCallCount == 0)
@@ -275,9 +285,11 @@ func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
 @Test
 func testMTPIteratorPendingBufferDrainOrder() throws {
     // Drafter returns [5, 5, 5]; main verifies [5, 5, 7, 9].
-    // Expected accept-prefix is positions 0..1 -> [5, 5], then correction at
-    // position 2 = 7. The pendingTokens order should be [5, 5, 7] — main-model
-    // sequence order — not the drafter's [5, 5, 5].
+    // After the prepare-time bonus (5) is yielded first, speculateRound's
+    // accept-prefix is positions 0..1 → [5, 5], then correction at position
+    // 2 = 7. The pendingTokens order inside the round should be [5, 5, 7] —
+    // main-model sequence order — not the drafter's [5, 5, 5]. Total
+    // stream: [bonus=5, draft=5, draft=5, correction=7].
     let mainLogitTokens: [Int32] = [
         0, 0, 5,  // prefill follow-up picks bonus 5 (positions 0/1 unused, < vocab=20)
         5, 5, 7, 9,  // verify positions
@@ -294,9 +306,11 @@ func testMTPIteratorPendingBufferDrainOrder() throws {
     let t0 = iter.next()
     let t1 = iter.next()
     let t2 = iter.next()
-    #expect(t0 == 5)
-    #expect(t1 == 5)
-    #expect(t2 == 7)
+    let t3 = iter.next()
+    #expect(t0 == 5)  // bonus from prepare
+    #expect(t1 == 5)  // first accepted draft
+    #expect(t2 == 5)  // second accepted draft
+    #expect(t3 == 7)  // correction at the rejected position
     // proposedCount = 3 (numDraft); accepted = 2.
     #expect(iter.proposedCount == 3)
     #expect(iter.acceptedCount == 2)
