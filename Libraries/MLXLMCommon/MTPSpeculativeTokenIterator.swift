@@ -143,6 +143,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             mainState = result.state
+            // Yield the bonus to the iterator's consumer. Without this,
+            // the iterator silently starts 1 position ahead of an
+            // equivalent autoregressive run, violating speculative
+            // decoding's bit-exact-equivalence-to-greedy guarantee.
+            pendingTokens.append(token.item(Int.self))
         case .logits(let prefillResult):
             // Some `prepare` implementations evaluate the final position
             // themselves and return logits directly; their `state` here may
@@ -171,6 +176,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 let newToken = sampler.sample(logits: newLogits)
                 processor?.didSample(token: newToken)
                 y = .init(tokens: newToken)
+                // Yield BOTH bonuses to the consumer, in sample order.
+                // `token` is the prefill-position-N sample (consumed by the
+                // re-prime forward, now committed in cache); `newToken` is
+                // the prefill-position-N+1 sample that becomes the input
+                // to the first speculateRound.
+                pendingTokens.append(token.item(Int.self))
+                pendingTokens.append(newToken.item(Int.self))
+            } else {
+                // Prefill state already carried drafter keys; the single
+                // bonus is the input to the first speculateRound.
+                pendingTokens.append(token.item(Int.self))
             }
         }
     }
