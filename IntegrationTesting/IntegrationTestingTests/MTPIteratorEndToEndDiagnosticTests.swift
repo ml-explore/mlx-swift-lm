@@ -162,6 +162,93 @@ struct MTPIteratorEndToEndDiagnosticTests {
             "drafts proposed but none accepted — target rejected every draft")
     }
 
+    /// Speculative decoding's load-bearing correctness property: at greedy
+    /// decoding (temperature=0), MTP MUST produce token-identical output to
+    /// autoregressive generation against the same target. Internal acceptance
+    /// counters being healthy and forward-component fixtures passing are
+    /// NECESSARY but not SUFFICIENT — only direct byte-comparison against
+    /// baseline catches divergence from prepare-time bonus mishandling,
+    /// position-id drift, sampling-determinism breaks, etc.
+    ///
+    /// Regression test for the prepare-time bonus yield bug fixed in
+    /// commit ee86bff (Phase 4b): the iterator's prepare(input:) sampled one
+    /// or two bonus tokens but never appended them to pendingTokens, so the
+    /// output stream silently started 1 or 2 positions ahead of baseline.
+    @Test
+    func testMTP31BMatchesBaselineByteIdentical() async throws {
+        guard
+            let loaded = try await loadTargetAndDrafter(
+                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
+                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
+            )
+        else {
+            Issue.record(
+                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
+            )
+            return
+        }
+
+        let prompt = "Why is the sky blue? Explain in one paragraph."
+        let userInput = UserInput(chat: [.user(prompt)])
+        let lmInput = try await loaded.context.processor.prepare(input: userInput)
+
+        // MTP run.
+        let mtpStream = try generate(
+            input: lmInput,
+            parameters: GenerateParameters(maxTokens: 32, temperature: 0),
+            context: loaded.context,
+            mtpDrafter: loaded.drafter,
+            blockSize: 4
+        )
+        var mtpInfo: GenerateCompletionInfo?
+        var mtpText = ""
+        for await event in mtpStream {
+            switch event {
+            case .chunk(let chunk): mtpText += chunk
+            case .toolCall: break
+            case .info(let i): mtpInfo = i
+            }
+        }
+
+        // Baseline (non-speculative) run against the same target.
+        let baselineStream = try generate(
+            input: lmInput,
+            parameters: GenerateParameters(maxTokens: 32, temperature: 0),
+            context: loaded.context
+        )
+        var baselineText = ""
+        for await event in baselineStream {
+            if case .chunk(let chunk) = event { baselineText += chunk }
+        }
+
+        guard let mtpInfo else {
+            Issue.record("MTP stream completed without emitting an .info event")
+            return
+        }
+
+        print(
+            "[MTPIteratorEndToEndDiagnostic byte-identity] mtpText: \(mtpText)"
+        )
+        print(
+            "[MTPIteratorEndToEndDiagnostic byte-identity] baselineText: \(baselineText)"
+        )
+
+        // Defense in depth — if speculation regresses to passthrough or
+        // produces no proposals, the byte-identity assertion below might still
+        // pass (passthrough output matches baseline by definition).
+        #expect(
+            mtpInfo.proposedDraftTokens != nil && (mtpInfo.proposedDraftTokens ?? 0) > 0,
+            "MTP run produced no proposals — speculation regressed")
+        #expect(
+            mtpInfo.passthroughReason == nil,
+            "MTP iterator engaged sticky-passthrough: \(mtpInfo.passthroughReason ?? "")")
+
+        #expect(
+            mtpText == baselineText,
+            "MTP and baseline outputs diverged at temp=0 — speculative decoding violated bit-exact equivalence to autoregressive"
+        )
+    }
+
     /// Same shape as the 31B test but against E4B. Gated behind
     /// `TEST_E4B_PAIR` env var because the E4B drafter requires the centroid
     /// embedder which isn't on this branch. Documents the slot for future
