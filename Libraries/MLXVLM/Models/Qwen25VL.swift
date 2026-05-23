@@ -316,20 +316,17 @@ private enum Vision {
             k = k.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
             v = v.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
 
-            // attentionMask is [1, seqLen, seqLen] boolean -- convert to an additive
-            // Float16 mask for SDPA's .array fast path on the vision fp16 code path.
-            let boolMask = attentionMask[.newAxis, 0..., 0..., 0...]
-            let floatMask = MLX.where(
-                boolMask,
-                MLXArray(Float16(0)),
-                MLXArray(Float16(-10000)))
-
+            // attentionMask is the SDPA-ready additive float mask (shape
+            // [1, seqLen, seqLen]) — built once at VisionModel level and
+            // shared across all 32 blocks. Previously each block did the
+            // bool→additive conversion redundantly with hard-coded fp16
+            // scalars (per davidkoski #238 review: dtype + hoist).
             let output = MLXFast.scaledDotProductAttention(
                 queries: q,
                 keys: k,
                 values: v,
                 scale: scale,
-                mask: .array(floatMask)
+                mask: .array(attentionMask)
             )
             .transposed(0, 2, 1, 3)
             .reshaped(sequenceLength, -1)
@@ -591,9 +588,29 @@ private enum Vision {
             }
             let cuSeqlensArray = MLXArray(cuSeqlens)
 
-            let fullAttentionMask = attentionMask(sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
-            let windowAttentionMask = attentionMask(
+            // Build boolean masks once, then convert to additive float masks
+            // matching the q-tensor dtype (carried by hiddenStates as it
+            // flows through the encoder). Done ONCE here instead of inside
+            // each of the 32 encoder blocks — per davidkoski #238 review:
+            //   • dtype: parity with the precedent in commit 3a7503d
+            //     (Bert/NomicBert attention mask dtype fix)
+            //   • hoist: avoid 32× redundant graph construction per layer
+            // The mask is constant across all blocks for a given input,
+            // so building it inside the per-block attention was pure
+            // duplication.
+            let fullAttentionMaskBool = attentionMask(
+                sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
+            let windowAttentionMaskBool = attentionMask(
                 sequenceLength: seqLen, cuSeqlens: cuWindowSeqlens)
+            let maskDtype = hiddenStates.dtype
+            let fullAttentionMask = MLX.where(
+                fullAttentionMaskBool[.newAxis, 0..., 0..., 0...],
+                MLXArray(0, dtype: maskDtype),
+                MLXArray(-10000, dtype: maskDtype))
+            let windowAttentionMask = MLX.where(
+                windowAttentionMaskBool[.newAxis, 0..., 0..., 0...],
+                MLXArray(0, dtype: maskDtype),
+                MLXArray(-10000, dtype: maskDtype))
 
             // Reshape and reindex hidden states
             hiddenStates = hiddenStates.reshaped(seqLen / spatialMergeUnit, spatialMergeUnit, -1)
