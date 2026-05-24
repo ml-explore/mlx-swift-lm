@@ -793,9 +793,16 @@ public struct Qwen25VLProcessor: UserInputProcessor {
     }
 
     func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
+        // Bicubic matches the image-path resampler (the dedicated PIL-
+        // Lanczos port for images was reverted in PR #243 once parity
+        // was measured to not be load-bearing). This helper is only
+        // called from the video-frame map loop in
+        // VideoFrameProcessor; switching it to Lanczos in an earlier
+        // exploratory pass was accidental scope-creep (no video parity
+        // benchmark justifies it). Per davidkoski #239 review.
         image
             .toSRGB()
-            .resampled(to: resizedSize, method: .lanczos)
+            .resampled(to: resizedSize, method: .bicubic)
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
     }
 
