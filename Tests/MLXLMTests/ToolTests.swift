@@ -431,7 +431,7 @@ struct ToolTests {
     func testGemmaParser() throws {
         let parser = GemmaFunctionParser()
         let content =
-            "<start_function_call>call:get_weather{location:Paris,unit:celsius}<end_function_call>"
+            "<|tool_call>call:get_weather{location:Paris,unit:celsius}<tool_call|>"
 
         let toolCall = try #require(parser.parse(content: content, tools: nil))
 
@@ -443,9 +443,8 @@ struct ToolTests {
     @Test("Test Gemma Function Parser - Escaped Strings")
     func testGemmaParserEscapedStrings() throws {
         let parser = GemmaFunctionParser()
-        // Note: Gemma uses <escape> for both start and end markers (not </escape>)
         let content =
-            "<start_function_call>call:search{query:<escape>hello, world!<escape>}<end_function_call>"
+            "<|tool_call>call:search{query:<|\"|>hello, world!<|\"|>}<tool_call|>"
 
         let toolCall = try #require(parser.parse(content: content, tools: nil))
 
@@ -456,7 +455,7 @@ struct ToolTests {
     @Test("Test Gemma Format via ToolCallProcessor")
     func testGemmaFormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma)
-        let content = "<start_function_call>call:calculator{expression:2+2}<end_function_call>"
+        let content = "<|tool_call>call:calculator{expression:2+2}<tool_call|>"
 
         _ = processor.processChunk(content)
 
@@ -464,6 +463,32 @@ struct ToolTests {
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "calculator")
         #expect(toolCall.function.arguments["expression"] == .string("2+2"))
+    }
+
+    @Test("Test Gemma Function Parser - Legacy Tags")
+    func testGemmaParserLegacyTags() throws {
+        let parser = GemmaFunctionParser()
+        let content =
+            "<start_function_call>call:get_weather{location:<escape>San Francisco<escape>}<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("San Francisco"))
+    }
+
+    @Test("Test Gemma Legacy Tags via ToolCallProcessor")
+    func testGemmaLegacyFormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .gemma)
+        let content =
+            "<start_function_call>call:get_weather{location:<escape>San Francisco<escape>}<end_function_call>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("San Francisco"))
     }
 
     // MARK: - Kimi K2 Format Tests
@@ -631,6 +656,8 @@ struct ToolTests {
         // Gemma models
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma4") == .gemma)
+        #expect(ToolCallFormat.infer(from: "gemma4_text") == .gemma)
 
         // Nemotron models (prefix matching)
         #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)

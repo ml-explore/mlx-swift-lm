@@ -19,6 +19,12 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
+    /// Additional model-specific start tags accepted by this parser.
+    var alternateStartTags: [String] { get }
+
+    /// Additional model-specific end tags accepted by this parser.
+    var alternateEndTags: [String] { get }
+
     /// Parse the content into a `ToolCall`.
     /// - Parameters:
     ///   - content: The text content to parse (may include tags)
@@ -35,10 +41,26 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    public var alternateStartTags: [String] { [] }
+    public var alternateEndTags: [String] { [] }
+
+    package var acceptedStartTags: [String] {
+        ([startTag].compactMap { $0 } + alternateStartTags)
+    }
+
+    package var acceptedEndTags: [String] {
+        ([endTag].compactMap { $0 } + alternateEndTags)
+    }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
-        if let startTag {
+        let startTags = acceptedStartTags
+        if let startTag = startTags.first {
+            var normalized = toolCallBuffer
+            for alternateStartTag in startTags.dropFirst() {
+                normalized = normalized.replacingOccurrences(of: alternateStartTag, with: startTag)
+            }
             return
-                toolCallBuffer
+                normalized
                 .components(separatedBy: startTag)
                 .filter { !$0.isEmpty }
                 .compactMap { parse(content: $0, tools: tools) }
@@ -79,7 +101,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     case glm4
 
     /// Gemma function call format.
-    /// Example: `call:name{key:value,k:<escape>str<escape>}`
+    /// Example: `<|tool_call>call:name{key:value,k:<|"|>str<|"|>}<tool_call|>`
     case gemma
 
     /// Kimi K2 format with functions prefix.
@@ -171,7 +193,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         }
 
         // Gemma
-        if type == "gemma" {
+        if type.hasPrefix("gemma") {
             return .gemma
         }
 

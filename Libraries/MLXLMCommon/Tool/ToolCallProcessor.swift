@@ -57,12 +57,12 @@ public class ToolCallProcessor {
 
     /// Whether this processor uses inline format (no start tag).
     private var isInlineFormat: Bool {
-        parser.startTag == nil
+        parser.acceptedStartTags.isEmpty
     }
 
-    /// The first character of the start tag for quick detection.
-    private var startTagFirstChar: Character? {
-        parser.startTag?.first
+    /// The first characters of accepted start tags for quick detection.
+    private var startTagFirstChars: [Character] {
+        Array(Set(parser.acceptedStartTags.compactMap(\.first)))
     }
 
     // MARK: - Public Methods
@@ -171,13 +171,17 @@ public class ToolCallProcessor {
 
     /// Process chunk for tagged formats.
     private func processTaggedChunk(_ chunk: String) -> String? {
-        guard let startTag = parser.startTag,
-            let startChar = startTagFirstChar
-        else {
+        let startTags = parser.acceptedStartTags
+        let endTags = parser.acceptedEndTags
+
+        guard !startTags.isEmpty else {
             return chunk
         }
 
-        guard (state == .normal && chunk.contains(startChar)) || state != .normal else {
+        guard
+            (state == .normal && startTagFirstChars.contains(where: { chunk.contains($0) }))
+                || state != .normal
+        else {
             return chunk
         }
 
@@ -190,11 +194,11 @@ public class ToolCallProcessor {
             state = .potentialToolCall
 
             leadingToken = separateToken(
-                from: &toolCallBuffer, separator: String(startChar), returnLeading: true)
+                from: &toolCallBuffer, separators: startTags, returnLeading: true)
 
             fallthrough
         case .potentialToolCall:
-            if partialMatch(buffer: toolCallBuffer, tag: startTag) {
+            if let startTag = partialMatch(buffer: toolCallBuffer, tags: startTags) {
                 if toolCallBuffer.starts(with: startTag) {
                     state = .collectingToolCall
                     fallthrough
@@ -209,14 +213,14 @@ public class ToolCallProcessor {
                 return (leadingToken ?? "") + buffer
             }
         case .collectingToolCall:
-            guard let endTag = parser.endTag else {
+            guard !endTags.isEmpty else {
                 return nil
             }
 
-            if toolCallBuffer.contains(endTag) {
+            if endTags.contains(where: { toolCallBuffer.contains($0) }) {
                 // Separate the trailing token
                 let trailingToken = separateToken(
-                    from: &toolCallBuffer, separator: endTag, returnLeading: false)
+                    from: &toolCallBuffer, separators: endTags, returnLeading: false)
 
                 // Parse the tool call using the parser
                 if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
@@ -227,8 +231,8 @@ public class ToolCallProcessor {
                 toolCallBuffer = ""
 
                 // If the token contains the start character, there may be more tool calls to come
-                if let trailingToken, let startChar = startTagFirstChar,
-                    trailingToken.contains(startChar)
+                if let trailingToken,
+                    startTagFirstChars.contains(where: { trailingToken.contains($0) })
                 {
                     return processChunk(trailingToken)
                 } else {
@@ -239,6 +243,15 @@ public class ToolCallProcessor {
                 return nil
             }
         }
+    }
+
+    private func separateToken(
+        from buffer: inout String, separators: [String], returnLeading: Bool
+    ) -> String? {
+        guard let separator = firstSeparator(in: buffer, separators: separators) else {
+            return nil
+        }
+        return separateToken(from: &buffer, separator: separator, returnLeading: returnLeading)
     }
 
     /// Separates a token from a string buffer based on a separator
@@ -272,5 +285,20 @@ public class ToolCallProcessor {
         }
 
         return true
+    }
+
+    private func partialMatch(buffer: String, tags: [String]) -> String? {
+        tags.first { partialMatch(buffer: buffer, tag: $0) }
+    }
+
+    private func firstSeparator(in buffer: String, separators: [String]) -> String? {
+        var match: (range: Range<String.Index>, separator: String)?
+        for separator in separators {
+            guard let range = buffer.range(of: separator) else { continue }
+            if match == nil || range.lowerBound < match!.range.lowerBound {
+                match = (range, separator)
+            }
+        }
+        return match?.separator
     }
 }

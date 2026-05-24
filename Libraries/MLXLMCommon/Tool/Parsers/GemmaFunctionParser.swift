@@ -5,21 +5,25 @@ import Foundation
 /// Parser for Gemma format: call:name{key:value,k:<escape>str<escape>}
 /// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/function_gemma.py
 public struct GemmaFunctionParser: ToolCallParser, Sendable {
-    public let startTag: String? = "<start_function_call>"
-    public let endTag: String? = "<end_function_call>"
+    public let startTag: String? = "<|tool_call>"
+    public let endTag: String? = "<tool_call|>"
+    public let alternateStartTags: [String] = ["<start_function_call>"]
+    public let alternateEndTags: [String] = ["<end_function_call>"]
 
-    private let escapeMarker = "<escape>"
+    private let escapeMarkers = ["<|\"|>", "<escape>"]
+    private let wrapperTags = [
+        "<|tool_call>",
+        "<tool_call|>",
+        "<start_function_call>",
+        "<end_function_call>",
+    ]
 
     public init() {}
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Strip tags if present
         var text = content
-        if let start = startTag {
-            text = text.replacingOccurrences(of: start, with: "")
-        }
-        if let end = endTag {
-            text = text.replacingOccurrences(of: end, with: "")
+        for tag in wrapperTags {
+            text = text.replacingOccurrences(of: tag, with: "")
         }
 
         // Pattern: call:(\w+)\{(.*?)\}
@@ -47,8 +51,7 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
             let key = String(argsStr[..<colonIdx])
             argsStr = String(argsStr[argsStr.index(after: colonIdx)...])
 
-            // Handle escaped strings
-            if argsStr.hasPrefix(escapeMarker) {
+            if let escapeMarker = escapeMarkers.first(where: { argsStr.hasPrefix($0) }) {
                 argsStr = String(argsStr.dropFirst(escapeMarker.count))
                 guard let endEscape = argsStr.range(of: escapeMarker) else { break }
                 let value = String(argsStr[..<endEscape.lowerBound])

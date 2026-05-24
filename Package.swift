@@ -29,6 +29,12 @@ let package = Package(
             name: "MLXHuggingFace",
             targets: ["MLXHuggingFace"]),
         .library(
+            name: "MLXLMServer",
+            targets: ["MLXLMServer"]),
+        .executable(
+            name: "mlx-server",
+            targets: ["mlx-server"]),
+        .library(
             name: "BenchmarkHelpers",
             targets: ["BenchmarkHelpers"]),
         .library(
@@ -37,6 +43,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.23.0"),
+        .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -91,6 +100,26 @@ let package = Package(
             ]
         ),
         .target(
+            name: "MLXLMServer",
+            dependencies: [
+                "MLXLLM",
+                "MLXVLM",
+                "MLXLMCommon",
+                "MLXEmbedders",
+                "MLXHuggingFace",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            path: "Libraries/MLXLMServer"
+        ),
+        .executableTarget(
+            name: "mlx-server",
+            dependencies: ["MLXLMServer"],
+            path: "Executables/mlx-server"
+        ),
+        .target(
             name: "BenchmarkHelpers",
             dependencies: [
                 "MLXLMCommon",
@@ -129,6 +158,15 @@ let package = Package(
                 "README.md"
             ],
             resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
+        ),
+        .testTarget(
+            name: "MLXLMServerTests",
+            dependencies: [
+                "MLXLMServer",
+                "MLXLMCommon",
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
+            ],
+            path: "Tests/MLXLMServerTests"
         ),
         .macro(
             name: "MLXHuggingFaceMacros",
