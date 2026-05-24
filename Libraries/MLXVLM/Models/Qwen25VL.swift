@@ -105,29 +105,16 @@ private enum Language {
             var freqs = matmul(invFreqExpanded, posExpanded)  // [3, batch, dim/2, seq]
             freqs = freqs.transposed(0, 1, 3, 2)  // [3, batch, seq, dim/2]
 
-            // Python apply_mrope: start with temporal (freqs[0]), overwrite H/W slices
-            // mropeSectionRaw = [16, 24, 24]
-            // dims 0..15 → temporal, dims 16..39 → height, dims 40..63 → width
-            var result = freqs[0]  // [batch, seq, dim/2] — start with temporal
-            var offset = mropeSectionRaw[0]  // 16
+            var freqsT = freqs[0]
+            var offset = mropeSectionRaw[0]
             for dim in 1 ..< mropeSectionRaw.count {
                 let length = mropeSectionRaw[dim]
-                // Replace slice [offset..<offset+length] with freqs from this dimension
-                let dimFreqs = freqs[dim]  // [batch, seq, dim/2]
-                // Use scatter or manual slice replacement
-                let before = result[0..., 0..., 0 ..< offset]
-                let middle = dimFreqs[0..., 0..., offset ..< (offset + length)]
-                let after: MLXArray
-                if offset + length < result.dim(-1) {
-                    after = result[0..., 0..., (offset + length)...]
-                    result = concatenated([before, middle, after], axis: -1)
-                } else {
-                    result = concatenated([before, middle], axis: -1)
-                }
+                freqsT[0..., 0..., offset ..< (offset + length)] =
+                    freqs[dim][0..., 0..., offset ..< (offset + length)]
                 offset += length
             }
 
-            let emb = concatenated([result, result], axis: -1)  // [batch, seq, dim]
+            let emb = concatenated([freqsT, freqsT], axis: -1)
             return (MLX.cos(emb), MLX.sin(emb))
         }
 
