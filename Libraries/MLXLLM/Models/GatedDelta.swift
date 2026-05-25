@@ -296,7 +296,11 @@ func gatedDeltaUpdate(
         state = state.asType(.float32)
     }
 
-    if GatedDeltaKernelManager.shared.kernel != nil {
+    let selectedKernel =
+        mask == nil
+        ? GatedDeltaKernelManager.shared.kernel
+        : GatedDeltaKernelManager.shared.kernelMasked
+    if selectedKernel != nil {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 

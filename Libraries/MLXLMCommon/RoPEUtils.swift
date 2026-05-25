@@ -9,6 +9,93 @@ import Foundation
 import MLX
 import MLXNN
 
+private let yarnTypes: Set<String> = ["yarn", "deepseek_yarn", "telechat3-yarn"]
+private let supportedRoPETypes = Set<String>([
+    "default", "linear", "dynamic", "proportional", "llama3", "longrope", "mrope",
+]).union(yarnTypes)
+
+private func ropeType(in scalingConfig: [String: StringOrNumber]?) -> String? {
+    guard let value = scalingConfig?["type"] ?? scalingConfig?["rope_type"] else { return nil }
+    if case .string(let ropeType) = value { return ropeType }
+    return nil
+}
+
+private func invalidRoPEConfiguration(_ context: String, _ message: String) -> ModelFactoryError {
+    .invalidConfiguration("\(context): \(message)")
+}
+
+public func linearRoPEScalingFactor(_ scalingConfig: [String: StringOrNumber]?) -> Float? {
+    guard ropeType(in: scalingConfig) == "linear" else { return nil }
+    return scalingConfig?["factor"]?.asFloat()
+}
+
+public func validateRoPEConfiguration(
+    _ scalingConfig: [String: StringOrNumber]?,
+    context: String = "rope_scaling"
+) throws {
+    guard let scalingConfig else { return }
+
+    if let typeValue = scalingConfig["type"] ?? scalingConfig["rope_type"] {
+        guard case .string(let ropeType) = typeValue else {
+            throw invalidRoPEConfiguration(context, "type must be a string")
+        }
+        guard supportedRoPETypes.contains(ropeType) else {
+            throw invalidRoPEConfiguration(context, "unsupported type '\(ropeType)'")
+        }
+    }
+
+    if let factor = scalingConfig["factor"], factor.asFloat() == nil {
+        throw invalidRoPEConfiguration(context, "factor must be numeric")
+    }
+
+    switch ropeType(in: scalingConfig) {
+    case "llama3":
+        for key in ["low_freq_factor", "high_freq_factor", "original_max_position_embeddings"] {
+            if let value = scalingConfig[key], value.asFloat() == nil {
+                throw invalidRoPEConfiguration(context, "\(key) must be numeric")
+            }
+        }
+    case "longrope":
+        guard scalingConfig["original_max_position_embeddings"]?.asInt() != nil else {
+            throw invalidRoPEConfiguration(context, "longrope requires original_max_position_embeddings")
+        }
+        guard scalingConfig["short_factor"]?.asFloats() != nil else {
+            throw invalidRoPEConfiguration(context, "longrope requires numeric short_factor")
+        }
+        guard scalingConfig["long_factor"]?.asFloats() != nil else {
+            throw invalidRoPEConfiguration(context, "longrope requires numeric long_factor")
+        }
+    case "mrope":
+        try validateMROPESection(scalingConfig, context: context)
+    default:
+        break
+    }
+}
+
+public func validateMROPESection(
+    _ scalingConfig: [String: StringOrNumber]?,
+    context: String = "rope_scaling"
+) throws {
+    guard let section = scalingConfig?["mrope_section"]?.asInts() else {
+        throw invalidRoPEConfiguration(context, "mrope_section must be an array of integers")
+    }
+    guard section.count == 3, section.allSatisfy({ $0 > 0 }) else {
+        throw invalidRoPEConfiguration(context, "mrope_section must contain three positive integers")
+    }
+}
+
+public func cumulativeMROPESection(_ section: [Int]) -> [Int] {
+    Array(sequence(state: (0, section.makeIterator())) { state in
+        guard let value = state.1.next() else { return nil }
+        state.0 += value * 2
+        return state.0
+    }.dropLast())
+}
+
+public func fallbackMROPESection(headDim: Int) -> [Int] {
+    [headDim / 3, (2 * headDim) / 3]
+}
+
 public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dims: Int
     let maxPositionEmbeddings: Int
@@ -26,9 +113,7 @@ public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
         self.maxPositionEmbeddings = maxPositionEmbeddings
         self.traditional = traditional
 
-        guard let scalingConfig = scalingConfig else {
-            fatalError("Llama3RoPE requires scaling_config")
-        }
+        let scalingConfig = scalingConfig ?? [:]
 
         let factor = scalingConfig["factor"]?.asFloat() ?? 1.0
         let lowFreqFactor = scalingConfig["low_freq_factor"]?.asFloat() ?? 1.0
@@ -331,8 +416,6 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
 
 }
 
-private let yarnTypes: Set = ["yarn", "deepseek_yarn", "telechat3-yarn"]
-
 public typealias RoPELayer = OffsetLayer & ArrayOffsetLayer
 
 public func initializeRope(
@@ -396,17 +479,12 @@ public func initializeRope(
             mscaleAllDim: mscaleAllDim
         )
     } else if ropeType == "longrope" {
-        guard let config = scalingConfig else {
-            fatalError("longrope requires scaling_config")
-        }
-        guard let origMax = config["original_max_position_embeddings"]?.asInt() else {
-            fatalError("longrope requires original_max_position_embeddings")
-        }
-        guard let shortFactor = config["short_factor"]?.asFloats() else {
-            fatalError("longrope requires short_factor")
-        }
-        guard let longFactor = config["long_factor"]?.asFloats() else {
-            fatalError("longrope requires long_factor")
+        guard let config = scalingConfig,
+            let origMax = config["original_max_position_embeddings"]?.asInt(),
+            let shortFactor = config["short_factor"]?.asFloats(),
+            let longFactor = config["long_factor"]?.asFloats()
+        else {
+            return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
         }
 
         return SuScaledRoPE(
@@ -424,13 +502,10 @@ public func initializeRope(
         if let config = scalingConfig,
             let mropeSection = config["mrope_section"]?.asInts()
         {
-            precondition(
-                mropeSection.count == 3,
-                "MRoPE currently only supports 3 sections, got \(mropeSection.count)"
-            )
+            _ = mropeSection.count == 3
         }
         return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
     } else {
-        fatalError("Unsupported RoPE type: \(ropeType)")
+        return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
     }
 }

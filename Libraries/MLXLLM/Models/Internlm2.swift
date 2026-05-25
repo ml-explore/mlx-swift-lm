@@ -80,18 +80,7 @@ class Internlm2Attention: Module {
             dim, (self.heads + 2 * self.kvHeads) * self.headDim, bias: args.bias)
         self._wo.wrappedValue = Linear(self.heads * self.headDim, dim, bias: args.bias)
 
-        let ropeScale: Float
-        if let ropeScaling = args.ropeScaling, ropeScaling["type"] == .string("linear"),
-            let factor = ropeScaling["factor"]
-        {
-            if let v = factor.asFloat() {
-                ropeScale = 1 / v
-            } else {
-                fatalError("ropeScaling.factor must be a float")
-            }
-        } else {
-            ropeScale = 1
-        }
+        let ropeScale = linearRoPEScalingFactor(args.ropeScaling).map { 1 / $0 } ?? 1
 
         self.rope = Internlm2DynamicNTKScalingRoPE(
             dims: self.headDim,
@@ -135,6 +124,12 @@ class Internlm2Attention: Module {
         .reshaped(B, L, -1)
 
         return wo(output)
+    }
+}
+
+extension InternLM2Configuration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "InternLM2Configuration.rope_scaling")
     }
 }
 
