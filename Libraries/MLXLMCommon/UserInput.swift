@@ -227,7 +227,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:tools:additionalContext:)``
+    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
     public init(
         prompt: String,
         images: [Image] = [Image](),
@@ -268,8 +268,9 @@ public struct UserInput {
     /// ]
     /// ```
     ///
-    /// Typically the ``init(chat:processing:tools:additionalContext:)`` should be used instead
-    /// along with a model specific ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
+    /// Typically the ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// should be used instead along with a model specific
+    /// ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
     ///
     /// - Parameters:
     ///   - messages: array of dictionaries representing the prompt in a model specific format
@@ -280,7 +281,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:tools:additionalContext:)``
+    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
     public init(
         messages: [Message],
         images: [Image] = [Image](),
@@ -320,7 +321,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:tools:additionalContext:)``
+    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
     public init(
         chat: [Chat.Message],
         processing: Processing = .init(),
@@ -349,7 +350,8 @@ public struct UserInput {
 
     /// Initialize the `UserInput` with a preconfigured ``Prompt-swift.enum``.
     ///
-    /// ``init(chat:processing:tools:additionalContext:)`` is the preferred mechanism.
+    /// ``init(chat:processing:audioProcessing:tools:additionalContext:)`` is
+    /// the preferred mechanism.
     ///
     /// - Parameters:
     ///   - prompt: the prompt
@@ -362,7 +364,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:tools:additionalContext:)``
+    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
     public init(
         prompt: Prompt,
         images: [Image] = [Image](),

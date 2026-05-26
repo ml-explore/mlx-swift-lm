@@ -125,6 +125,7 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
+    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
