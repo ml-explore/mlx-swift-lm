@@ -6,6 +6,13 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+// Per-call decoder state is plumbed through `LMOutput.State` rather than
+// stored as instance vars on the model — see #283 for the pattern. The
+// model itself stays a pure function, so one instance can serve many
+// concurrent chat sessions without their state colliding.
+private let positionIdsKey = LMOutput.Key<MLXArray>("qwen25vl.positionIds")
+private let ropeDeltasKey = LMOutput.Key<MLXArray>("qwen25vl.ropeDeltas")
+
 // MARK: - Language
 
 private enum Language {
@@ -259,10 +266,6 @@ private enum Language {
 
         var kvHeads: [Int]
 
-        // MROPE state: stored position IDs from prefill, reused during autoregressive generation
-        var _positionIds: MLXArray?
-        var _ropeDeltas: MLXArray?
-
         public init(_ args: Qwen25VLConfiguration.TextConfiguration) {
             self.model = Qwen25Model(args)
 
@@ -274,18 +277,20 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ inputs: MLXArray?, cache: [KVCache]? = nil, inputEmbedding: MLXArray? = nil,
+            _ inputs: MLXArray?, cache: [KVCache]? = nil,
+            state: LMOutput.State?,
+            inputEmbedding: MLXArray? = nil,
             positionIds: MLXArray? = nil
         ) -> LMOutput {
-            var effectivePositionIds = positionIds ?? _positionIds
+            var state = state ?? .init()
+            var effectivePositionIds = positionIds ?? state[positionIdsKey]
+            if state[positionIdsKey] != nil {
+                state[positionIdsKey] = nil
+            }
 
-            // Clear stored position IDs after first use (prefill done)
-            if _positionIds != nil { _positionIds = nil }
-
-            // During autoregressive generation after multimodal prefill:
-            // compute position IDs using rope_deltas so MROPE offsets are correct
-            if effectivePositionIds == nil, let ropeDeltas = _ropeDeltas, let cache {
-                let input = inputs ?? inputEmbedding!
+            if effectivePositionIds == nil, let ropeDeltas = state[ropeDeltasKey],
+                let cache, let input = inputs ?? inputEmbedding
+            {
                 let batch = input.dim(0)
                 let seqLength = input.dim(1)
                 let lastCacheOffset = cache.last?.offset ?? 0
@@ -314,7 +319,7 @@ private enum Language {
             } else {
                 out = model.embedTokens.asLinear(out)
             }
-            return LMOutput(logits: out)
+            return LMOutput(logits: out, state: state)
         }
     }
 }
@@ -931,19 +936,20 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         self._languageModel.wrappedValue = Language.LanguageModel(config.textConfiguration)
     }
 
+    /// Builds the multimodal input embedding for one prefill step.
+    ///
+    /// Returns the embeddings paired with the prefill-only MROPE state
+    /// (positionIds + ropeDeltas) — both nil on the no-image path. The
+    /// caller seeds `LMOutput.State` with these so subsequent decode
+    /// steps can reconstruct positions from `ropeDeltas + cacheOffset`
+    /// without mutating the model.
     private func inputEmbeddings(inputIds: MLXArray, pixelValues: MLXArray?, frames: [THW]?)
-        -> MLXArray
+        -> (embeds: MLXArray, positionIds: MLXArray?, ropeDeltas: MLXArray?)
     {
         guard let pixelValues, let frames else {
-            // Text-only: reset MROPE state
-            languageModel._positionIds = nil
-            languageModel._ropeDeltas = nil
-            return languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis])
+            return (languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]),
+                    nil, nil)
         }
-
-        // Reset MROPE state when processing new image (matches Python)
-        languageModel._positionIds = nil
-        languageModel._ropeDeltas = nil
 
         // Get the input embeddings from the language model
         let inputEmbeds = languageModel.model.embedTokens(inputIds)
@@ -972,10 +978,8 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,
             visionStartTokenId: config.baseConfiguration.visionStartTokenId)
-        languageModel._positionIds = positionIds
-        languageModel._ropeDeltas = ropeDeltas
 
-        return mergedEmbeds
+        return (mergedEmbeds, positionIds, ropeDeltas)
     }
 
     public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
@@ -1001,17 +1005,28 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             allFrames.append(contentsOf: videoFrames)
         }
 
-        let inputEmbeddings = self.inputEmbeddings(
+        let (embeds, positionIds, ropeDeltas) = self.inputEmbeddings(
             inputIds: input.text.tokens, pixelValues: allPixels,
             frames: allFrames.isEmpty ? nil : allFrames)
 
-        let result = languageModel(nil, cache: cache, inputEmbedding: inputEmbeddings)
+        // Seed per-call decoder state with the prefill-only MROPE
+        // positions + ropeDeltas (both nil on the no-image path). The
+        // LMOutput's `state` returned by this call is what subsequent
+        // decode steps consume via `callAsFunction(_:cache:state:)`.
+        var state = LMOutput.State()
+        if let positionIds {
+            state[positionIdsKey] = positionIds
+        }
+        if let ropeDeltas {
+            state[ropeDeltasKey] = ropeDeltas
+        }
+
+        let result = languageModel(
+            nil, cache: cache, state: state, inputEmbedding: embeds)
 
         return .logits(result)
     }
 
-    /// Compute MROPE 3D position IDs for image/video spatial encoding
-    /// Ported from Qwen3VL.swift getRopeIndex() and Python get_rope_index()
     static func getRopeIndex(
         inputIds: MLXArray,
         imageGridTHW: [THW]?,
@@ -1169,8 +1184,10 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         return (positionIds, deltas)
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
-        languageModel(inputs, cache: cache).logits
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        languageModel(input.tokens, cache: cache, state: state)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
