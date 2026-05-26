@@ -10,8 +10,9 @@ import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
-@testable import MLXVLM
 import XCTest
+
+@testable import MLXVLM
 
 final class SmolVLM2TilingTests: XCTestCase {
 
