@@ -591,13 +591,7 @@ private enum Vision {
             // Build boolean masks once, then convert to additive float masks
             // matching the q-tensor dtype (carried by hiddenStates as it
             // flows through the encoder). Done ONCE here instead of inside
-            // each of the 32 encoder blocks — per davidkoski #238 review:
-            //   • dtype: parity with the precedent in commit 3a7503d
-            //     (Bert/NomicBert attention mask dtype fix)
-            //   • hoist: avoid 32× redundant graph construction per layer
-            // The mask is constant across all blocks for a given input,
-            // so building it inside the per-block attention was pure
-            // duplication.
+            // each of the 32 encoder blocks.
             let fullAttentionMaskBool = attentionMask(
                 sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
             let windowAttentionMaskBool = attentionMask(
