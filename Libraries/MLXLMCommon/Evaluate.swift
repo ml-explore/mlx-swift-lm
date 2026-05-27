@@ -495,6 +495,13 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var maxTokens: Int? { get }
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
+    var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
+    mutating func discardGeneratedToken()
+}
+
+extension TokenIteratorProtocol {
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
+    public mutating func discardGeneratedToken() {}
 }
 
 /// Generator of tokens.
@@ -756,6 +763,14 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
+    private var telemetry = SpeculativeDecodingTelemetry()
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
+        telemetry.roundCount > 0 ? telemetry : nil
+    }
+
+    public mutating func discardGeneratedToken() {
+        telemetry.discardGeneratedToken()
+    }
 
     /// Initialize a `SpeculativeTokenIterator` with the given input.
     ///
@@ -909,6 +924,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.didSample(token: finalToken)
         pendingTokens.append(mainTokensList[accepted])
 
+        telemetry.recordRound(
+            drafted: numDraft,
+            accepted: accepted,
+            targetVerified: numDraft + 1
+        )
+
         // Rewind caches for rejected tokens
         trimPromptCache(mainCache, numTokens: numDraft - accepted)
         trimPromptCache(draftCache, numTokens: Swift.max(numDraft - accepted - 1, 0))
@@ -943,6 +964,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             let token = pendingTokens[pendingIndex]
             pendingIndex += 1
             tokenCount += 1
+            telemetry.recordGeneratedToken()
             return token
         }
 
@@ -958,6 +980,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
         tokenCount += 1
+        telemetry.recordGeneratedToken()
         return token
     }
 }
@@ -1684,7 +1707,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
         let performIteration = {
-            let iterator = iterator.consume()
+            var iterator = iterator.consume()
             var handler = handler.consume()
 
             var start = Date.timeIntervalSinceReferenceDate
@@ -1697,7 +1720,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            for token in iterator {
+            while let token = iterator.next() {
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
                     stopReason = .cancelled
@@ -1718,6 +1741,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                             stopReason = .cancelled
                             break
                         }
+                    } else {
+                        iterator.discardGeneratedToken()
                     }
                     stopReason = .stop
                     break
@@ -1750,7 +1775,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 generationTokenCount: tokenCount,
                 promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime,
-                stopReason: stopReason ?? .cancelled
+                stopReason: stopReason ?? .cancelled,
+                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -1820,6 +1846,9 @@ public struct GenerateCompletionInfo: Sendable {
     /// Reason generation stopped.
     public let stopReason: GenerateStopReason
 
+    /// Speculative decoding telemetry, when generation used speculative decoding.
+    public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -1835,13 +1864,15 @@ public struct GenerateCompletionInfo: Sendable {
         generationTokenCount: Int,
         promptTime: TimeInterval,
         generationTime: TimeInterval,
-        stopReason: GenerateStopReason = .stop
+        stopReason: GenerateStopReason = .stop,
+        speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
         self.promptTime = promptTime
         self.generateTime = generationTime
         self.stopReason = stopReason
+        self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
     }
 
     public func summary() -> String {
