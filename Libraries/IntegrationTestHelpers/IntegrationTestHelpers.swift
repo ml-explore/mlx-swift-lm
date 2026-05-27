@@ -230,9 +230,9 @@ public enum ChatSessionTests {
         // If we got tool calls, feed back a tool result and verify the model responds
         if !toolCalls.isEmpty {
             let followUp = try await streamAndCollect(
-                session.streamResponse(
-                    to: "Foggy with a high in the low 60s, clearing later in the day",
-                    role: .tool, images: [], videos: []),
+                session.streamResponse(to: [
+                    .tool("Foggy with a high in the low 60s, clearing later in the day")
+                ]),
                 label: "Tool result")
             try check(
                 !followUp.isEmpty,

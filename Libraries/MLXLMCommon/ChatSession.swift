@@ -352,6 +352,28 @@ public final class ChatSession {
         )
     }
 
+    /// Produces a response after appending a batch of structured chat messages.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Important: Initializing a new session from history must prefill that
+    ///   history once. Reuse the same session with this method for subsequent
+    ///   tool or agent turns to avoid repeatedly pre-filling the accumulated
+    ///   transcript.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: the model's response
+    public func respond(
+        to messages: consuming [Chat.Message]
+    ) async throws -> String {
+        var output = ""
+        for try await chunk in streamResponse(to: messages) {
+            output += chunk
+        }
+        return output
+    }
+
     /// Produces a streaming response to a prompt as Strings.
     ///
     /// - Parameters:
@@ -367,6 +389,21 @@ public final class ChatSession {
         videos: consuming [UserInput.Video]
     ) -> AsyncThrowingStream<String, Error> {
         streamMap(to: prompt, role: role, images: images, videos: videos) {
+            $0.chunk
+        }
+    }
+
+    /// Produces a streaming response after appending a batch of structured chat messages.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: a stream of string chunks from the model
+    public func streamResponse(
+        to messages: consuming [Chat.Message]
+    ) -> AsyncThrowingStream<String, Error> {
+        streamMap(messages: messages) {
             $0.chunk
         }
     }
@@ -390,6 +427,21 @@ public final class ChatSession {
         }
     }
 
+    /// Produces a streaming response after appending a batch of structured chat messages as `Generation`.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: a stream of `Generation` from the model
+    public func streamDetails(
+        to messages: consuming [Chat.Message]
+    ) -> AsyncThrowingStream<Generation, Error> {
+        streamMap(messages: messages) {
+            $0
+        }
+    }
+
     /// Produces a streaming response to a prompt by transforming the
     /// raw `Generation` values.
     ///
@@ -405,13 +457,21 @@ public final class ChatSession {
         videos: consuming [UserInput.Video],
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
+        streamMap(
+            messages: [.init(role: role, content: prompt, images: images, videos: videos)],
+            transform: transform
+        )
+    }
+
+    private func streamMap<R: Sendable>(
+        messages: consuming [Chat.Message],
+        transform: @Sendable @escaping (Generation) -> R?
+    ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
-        let message = SendableBox<Chat.Message>(
-            .init(role: role, content: prompt, images: images, videos: videos)
-        )
+        let inputMessages = SendableBox<[Chat.Message]>(messages)
 
         let task = Task {
             [
@@ -468,7 +528,7 @@ public final class ChatSession {
                     }
 
                     // prepare the input
-                    messages.append(message.consume())
+                    messages.append(contentsOf: inputMessages.consume())
 
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
