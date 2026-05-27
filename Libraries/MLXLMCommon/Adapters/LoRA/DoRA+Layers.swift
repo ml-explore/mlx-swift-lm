@@ -109,11 +109,10 @@ public class DoRALinear: Linear, LoRALayer {
     }
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let y = matmul(x, weight.T)
         if !loraEnabled {
-            if let bias { return y + bias }
-            return y
+            return super.callAsFunction(x)
         }
+        let y = matmul(x, weight.T)
         return forward(
             x: x, y: y,
             weight: weight, bias: bias,
@@ -175,13 +174,12 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
     }
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        if !loraEnabled {
+            return super.callAsFunction(x)
+        }
         let y = quantizedMM(
             x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
             mode: mode)
-        if !loraEnabled {
-            if let bias { return y + bias }
-            return y
-        }
         return forward(
             x: x, y: y,
             weight: dequantizedWeight, bias: bias,
