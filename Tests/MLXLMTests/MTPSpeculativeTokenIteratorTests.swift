@@ -232,6 +232,14 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // proposedCount = numDraft = 3; accepted = 3.
     #expect(iter.proposedCount == 3)
     #expect(iter.acceptedCount == 3)
+    let telemetry = try #require(iter.speculativeDecodingTelemetry)
+    #expect(telemetry.roundCount == 1)
+    #expect(telemetry.draftTokenCount == 3)
+    #expect(telemetry.acceptedDraftTokenCount == 3)
+    #expect(telemetry.targetModelCallCount == 1)
+    #expect(telemetry.draftModelCallCount == 1)
+    #expect(telemetry.targetVerifiedTokenCount == 4)
+    #expect(telemetry.emittedTokenCount == iter.tokenCount)
     // Verify the main model received emit=true on every call after prefill.
     #expect(main.lastIncomingEmitFlag == true)
 }
