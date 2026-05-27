@@ -30,7 +30,7 @@ import MLXNN
 private func nlsLlama4AttentionScale(
     start: Int, stop: Int, beta: Float, maxPositionEmbeddings: Int
 ) -> MLXArray {
-    let positions = MLXArray(Int32(start) ..< Int32(stop))
+    let positions = arange(start, stop)
     let scaling =
         1 + beta
         * MLX.log(
@@ -486,6 +486,17 @@ extension NemotronLabsDiffusionModel {
     /// Mirrors `ar_generate` in `modeling_nemotron_labs_diffusion.py`. Returns
     /// the prompt concatenated with newly generated tokens, and the number of
     /// forward passes performed.
+    ///
+    /// > Note: This method is provided for **symmetry** with
+    /// > ``diffusionGenerate(promptIds:maxNewTokens:blockLength:threshold:eosTokenId:onStep:)``
+    /// > and ``linearSpecGenerate(promptIds:maxNewTokens:blockLength:threshold:eosTokenId:onAccept:)``
+    /// > so callers can pick a mode by method name. For real applications
+    /// > prefer driving AR generation through the standard pipeline
+    /// > (`ChatSession` / `ModelContainer.generate(...)`), which calls
+    /// > ``callAsFunction(_:cache:)`` token-by-token via `TokenIterator` and
+    /// > adds streaming, temperature / top-p / repetition-penalty sampling,
+    /// > chunked prompt prefill, sliding-window and quantized KV caches, and
+    /// > wired-memory ticket coordination — none of which this method does.
     public func arGenerate(
         promptIds: [Int],
         maxNewTokens: Int = 128,
@@ -531,6 +542,31 @@ extension NemotronLabsDiffusionModel {
     /// trimmed by `blockLength` so the next step writes over the same slots.
     /// Once a block stabilizes, we run one causal forward over its finalized
     /// tokens to commit their K/V into the cache for subsequent blocks.
+    ///
+    /// > Design note — model-local rather than protocol-driven:
+    /// >
+    /// > The block-wise denoising loop here (causal prefill → bidirectional
+    /// > block forward → cache-trim → confidence-driven commit → causal
+    /// > commit) is the standard mask-diffusion LM recipe and would
+    /// > generalize to other mask-diffusion models.
+    /// > A `DiffusionLanguageModel` protocol could in
+    /// > principle hoist this into a default extension, parameterized by a
+    /// > model-supplied `bidirectionalLogits(_:cache:)` and a `maskTokenId`.
+    /// >
+    /// > That generalization is intentionally not done now. Nemotron is
+    /// > the only mask-diffusion port in this repo, and several knobs
+    /// > here are model-specific: the bidirectional-vs-causal mode switch on
+    /// > the encoder is a Nemotron design, the threshold/top-N commit policy
+    /// > and the "fall back to single most-confident token" behavior are
+    /// > implementation choices, and `causal_context=False` is one of two
+    /// > paradigms the upstream Python exposes. Premature abstraction over
+    /// > a single example tends to encode whichever model arrived first.
+    /// >
+    /// > Re-visit when a second mask-diffusion model is added. With two
+    /// > implementations to compare, the right protocol shape (which knobs
+    /// > are common, which need policy-strategy hooks, what the bidirectional
+    /// > forward should look like generically) becomes obvious from the
+    /// > differences, and the abstraction pays for itself.
     public func diffusionGenerate(
         promptIds: [Int],
         maxNewTokens: Int,
