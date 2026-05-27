@@ -316,11 +316,6 @@ private enum Vision {
             k = k.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
             v = v.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
 
-            // attentionMask is the SDPA-ready additive float mask (shape
-            // [1, seqLen, seqLen]) — built once at VisionModel level and
-            // shared across all 32 blocks. Previously each block did the
-            // bool→additive conversion redundantly with hard-coded fp16
-            // scalars (per davidkoski #238 review: dtype + hoist).
             let output = MLXFast.scaledDotProductAttention(
                 queries: q,
                 keys: k,
@@ -588,10 +583,6 @@ private enum Vision {
             }
             let cuSeqlensArray = MLXArray(cuSeqlens)
 
-            // Build boolean masks once, then convert to additive float masks
-            // matching the q-tensor dtype (carried by hiddenStates as it
-            // flows through the encoder). Done ONCE here instead of inside
-            // each of the 32 encoder blocks.
             let fullAttentionMaskBool = attentionMask(
                 sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
             let windowAttentionMaskBool = attentionMask(
