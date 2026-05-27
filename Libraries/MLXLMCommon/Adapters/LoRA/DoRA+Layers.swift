@@ -64,6 +64,7 @@ private func filterFreezeKeys(from module: Module, keys: [String]?) -> [String] 
 public class DoRALinear: Linear, LoRALayer {
 
     let scale: Float
+    public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
@@ -109,6 +110,10 @@ public class DoRALinear: Linear, LoRALayer {
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
         let y = matmul(x, weight.T)
+        if !loraEnabled {
+            if let bias { return y + bias }
+            return y
+        }
         return forward(
             x: x, y: y,
             weight: weight, bias: bias,
@@ -127,6 +132,7 @@ public class DoRALinear: Linear, LoRALayer {
 public class QDoRALinear: QuantizedLinear, LoRALayer {
 
     let scale: Float
+    public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
@@ -172,6 +178,10 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
         let y = quantizedMM(
             x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
             mode: mode)
+        if !loraEnabled {
+            if let bias { return y + bias }
+            return y
+        }
         return forward(
             x: x, y: y,
             weight: dequantizedWeight, bias: bias,

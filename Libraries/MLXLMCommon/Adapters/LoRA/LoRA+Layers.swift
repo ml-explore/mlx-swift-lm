@@ -25,6 +25,7 @@ import MLXOptimizers
 public class LoRALinear: Linear, LoRALayer {
 
     let scale: Float
+    public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
@@ -89,6 +90,7 @@ public class LoRALinear: Linear, LoRALayer {
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
         let y = super.callAsFunction(x.asType(weight.dtype))
+        if !loraEnabled { return y }
         let z = matmul(matmul(x, self.loraA), self.loraB)
         return y + scale * z
     }
@@ -100,6 +102,7 @@ public class LoRALinear: Linear, LoRALayer {
 public class QLoRALinear: QuantizedLinear, LoRALayer {
 
     let scale: Float
+    public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
@@ -173,6 +176,7 @@ public class QLoRALinear: QuantizedLinear, LoRALayer {
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
         let y = super.callAsFunction(x.asType(scales.dtype))
+        if !loraEnabled { return y }
         let z = matmul(matmul(x, self.loraA), self.loraB)
         return y + scale * z
     }
