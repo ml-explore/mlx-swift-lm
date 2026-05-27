@@ -149,6 +149,8 @@ public struct UserInput {
     public struct Processing: Sendable {
         public var resize: CGSize?
 
+        public var audio = AudioProcessing()
+
         public init(resize: CGSize? = nil) {
             self.resize = resize
         }
@@ -214,7 +216,6 @@ public struct UserInput {
     /// Additional values provided for the chat template rendering context
     public var additionalContext: [String: any Sendable]?
     public var processing: Processing = .init()
-    public var audioProcessing: AudioProcessing = .init()
 
     /// Initialize the `UserInput` with a single text prompt.
     ///
@@ -227,7 +228,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         prompt: String,
         images: [Image] = [Image](),
@@ -281,7 +282,7 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         messages: [Message],
         images: [Image] = [Image](),
@@ -317,15 +318,13 @@ public struct UserInput {
     ///   - chat: structured content
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
-    ///   - audioProcessing: optional processing to be applied to audio
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         chat: [Chat.Message],
         processing: Processing = .init(),
-        audioProcessing: AudioProcessing = .init(),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
@@ -343,7 +342,6 @@ public struct UserInput {
         }
 
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -364,14 +362,13 @@ public struct UserInput {
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
-    /// - ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         prompt: Prompt,
         images: [Image] = [Image](),
         videos: [Video] = [Video](),
         audios: [Audio] = [Audio](),
         processing: Processing = .init(),
-        audioProcessing: AudioProcessing = .init(),
         tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = prompt
@@ -393,7 +390,6 @@ public struct UserInput {
             }
         }
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.tools = tools
         self.additionalContext = additionalContext
     }

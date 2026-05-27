@@ -73,7 +73,6 @@ public final class ChatSession {
     public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
     public var processing: UserInput.Processing
-    public var audioProcessing: UserInput.AudioProcessing
     public var generateParameters: GenerateParameters
     public var additionalContext: [String: any Sendable]?
     public var tools: [ToolSpec]?
@@ -90,7 +89,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -100,7 +98,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -109,7 +106,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.empty)
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -125,7 +121,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -135,7 +130,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -144,7 +138,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.empty)
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -163,7 +156,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -174,7 +166,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -183,7 +174,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -202,7 +192,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -213,7 +202,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -222,7 +210,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -250,7 +237,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -261,7 +247,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -270,7 +255,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil))
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -298,7 +282,6 @@ public final class ChatSession {
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
-    ///   - audioProcessing: audio processing configuration for audio files
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
@@ -309,7 +292,6 @@ public final class ChatSession {
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
-        audioProcessing: UserInput.AudioProcessing = .init(),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -318,7 +300,6 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil))
         self.processing = processing
-        self.audioProcessing = audioProcessing
         self.generateParameters = generateParameters
         self.tools = tools
         self.toolDispatch = toolDispatch
@@ -446,7 +427,7 @@ public final class ChatSession {
         let task = Task {
             [
                 model,
-                instructions, processing, audioProcessing, tools, toolDispatch,
+                instructions, processing, tools, toolDispatch,
                 additionalContext, cache, generateParameters, speculativeDecoding
             ] in
             do {
@@ -505,7 +486,6 @@ public final class ChatSession {
                         let userInput = UserInput(
                             chat: messages,
                             processing: processing,
-                            audioProcessing: audioProcessing,
                             tools: tools, additionalContext: additionalContext)
                         let input = try await processor.prepare(input: userInput)
                         messages.removeAll()
