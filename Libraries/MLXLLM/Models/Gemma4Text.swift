@@ -589,7 +589,14 @@ private class Gemma4TextModelInner: Module {
                 tokenPLE.dim(0), tokenPLE.dim(1),
                 config.numHiddenLayers, config.hiddenSizePerLayerInput)
 
-            // Model projection PLE
+            // Model projection PLE. The hidden_size**-0.5 scale (the reference
+            // impl's `per_layer_projection_scale`) is applied here, AFTER the
+            // projection, so the projection itself stays a plain Linear and
+            // quantizes like every other Linear in the model. The 8-bit E-series
+            // checkpoints ship per_layer_model_projection as a packed
+            // QuantizedLinear; a custom non-Linear module is invisible to
+            // quantize() and would mismatch those packed weights at load.
+            let perLayerProjectionScale = pow(Float(config.hiddenSize), -0.5)
             let modelPLE = (modelProj(h) * perLayerProjectionScale).reshaped(
                 h.dim(0), h.dim(1),
                 config.numHiddenLayers, config.hiddenSizePerLayerInput)
