@@ -698,12 +698,22 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         // First apply the user requested resizing, etc. if any
         let images = images.map { MediaProcessing.apply($0, processing: processing) }
 
-        // image_processing_qwen2_vl._preprocess
+        // Cap longest side at 1280 and snap to multiples of (patchSize *
+        // mergeSize), matching the per-image token budget that Qwen2.5-VL's
+        // model card documents as the recommended config in its "Image
+        // Resolution for performance boost" section:
+        //   min_pixels = 256 * 28 * 28
+        //   max_pixels = 1280 * 28 * 28
+        // Upstream's `QwenVL.targetSize` uses `config.size.maxPixels`, which on
+        // Qwen2.5-VL defaults to 12,845,056 (a 3584x3584 cap) — much larger
+        // than the documented recommended setting, producing wider patch grids
+        // than the bbox-prediction head was trained for.
         let size = images[0].extent.size
-        let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
-            height: Int(size.height), width: Int(size.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
+        let factor = CGFloat(config.patchSize * config.mergeSize)
+        let maxLong: CGFloat = 1280.0
+        let ratio = min(maxLong / max(size.width, size.height), 1.0)
+        let resizedWidth = max(Int(size.width * ratio / factor) * Int(factor), Int(factor))
+        let resizedHeight = max(Int(size.height * ratio / factor) * Int(factor), Int(factor))
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         // Process images
