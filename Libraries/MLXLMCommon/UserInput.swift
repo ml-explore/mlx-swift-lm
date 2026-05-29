@@ -269,7 +269,7 @@ public struct UserInput {
     /// ]
     /// ```
     ///
-    /// Typically the ``init(chat:processing:audioProcessing:tools:additionalContext:)``
+    /// Typically the ``init(chat:processing:tools:additionalContext:)``
     /// should be used instead along with a model specific
     /// ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
     ///
@@ -348,7 +348,7 @@ public struct UserInput {
 
     /// Initialize the `UserInput` with a preconfigured ``Prompt-swift.enum``.
     ///
-    /// ``init(chat:processing:audioProcessing:tools:additionalContext:)`` is
+    /// ``init(chat:processing:tools:additionalContext:)`` is
     /// the preferred mechanism.
     ///
     /// - Parameters:
@@ -358,7 +358,6 @@ public struct UserInput {
     ///   - audios: optional audios
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
-    ///   - audioProcessing: optional processing to be applied to audio
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
