@@ -2,6 +2,7 @@
 
 // port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/paligemma
 
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
 import Foundation
 import MLX
@@ -734,3 +735,4 @@ public struct PaliGemmaProcessorConfiguration: Codable, Sendable {
         case imageSequenceLength = "image_seq_length"
     }
 }
+#endif

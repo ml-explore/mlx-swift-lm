@@ -2,6 +2,7 @@
 
 // port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_vl
 
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
 import Foundation
 import MLX
@@ -923,3 +924,4 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
         ]
     }
 }
+#endif

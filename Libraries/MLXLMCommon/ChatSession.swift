@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
 import Foundation
 import MLX
 
@@ -97,7 +96,7 @@ public final class ChatSession {
         instructions: String? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -129,7 +128,7 @@ public final class ChatSession {
         instructions: String? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -165,7 +164,7 @@ public final class ChatSession {
         history: consuming [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -201,7 +200,7 @@ public final class ChatSession {
         history: [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -246,7 +245,7 @@ public final class ChatSession {
         cache: consuming [KVCache],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
@@ -291,7 +290,7 @@ public final class ChatSession {
         cache: consuming [KVCache],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
-        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        processing: UserInput.Processing = .init(resizeWidth: 512, resizeHeight: 512),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil

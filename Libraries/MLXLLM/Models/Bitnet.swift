@@ -5,8 +5,11 @@
 //  Created by John Mai on 2025/6/12.
 //
 
+// Bitnet requires Metal custom kernels and is only available on Apple platforms
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import Foundation
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
 
@@ -482,3 +485,4 @@ extension BitnetModel: LoRAModel {
         model.layers
     }
 }
+#endif

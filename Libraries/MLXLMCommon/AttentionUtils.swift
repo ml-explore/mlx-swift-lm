@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXNN
 
 /// Attention utilities that match Python mlx-lm's interface
 ///

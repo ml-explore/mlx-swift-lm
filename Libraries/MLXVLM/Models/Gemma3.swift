@@ -1,5 +1,7 @@
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import CoreImage
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
 
@@ -1177,3 +1179,4 @@ extension Gemma3: LoRAModel {
         languageModel.model.layers
     }
 }
+#endif
