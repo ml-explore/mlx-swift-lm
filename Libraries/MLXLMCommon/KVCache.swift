@@ -332,6 +332,19 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
 public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     internal var keys: MLXArray?
     internal var values: MLXArray?
+
+    // MARK: - TurboQuant State
+    public var turboQuantEnabled: Bool = false
+    nonisolated(unsafe) private static var turboWarnedHeadDims: Set<Int> = []
+    public var turboSplitHeads: Bool = false
+    public var polarKeys: MLXArray?
+    public var polarValues: MLXArray?
+    public var residualKeys: MLXArray?
+    public var residualValues: MLXArray?
+    public var compressedOffset: Int = 0
+    public var turboMinActivationTokens: Int = 2048
+    public var turboHotWindowSize: Int = 256
+
     public var step = 256
 
     public override init() {
@@ -380,6 +393,64 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
         self.keys?[.ellipsis, previous ..< self.offset, 0...] = keys
         self.values?[.ellipsis, previous ..< self.offset, 0...] = values
+
+        // MARK: TurboKV hot-window eviction
+        if turboQuantEnabled {
+            let headDim = keys.dim(-1)
+            let supportedDim = (headDim == 128 || headDim == 256)
+            let splittableDim = (headDim == 512)
+            if !supportedDim && !splittableDim {
+                if !Self.turboWarnedHeadDims.contains(headDim) {
+                    Self.turboWarnedHeadDims.insert(headDim)
+                    print("[TurboKV] head_dim \(headDim) unsupported (requires 128 or 256). Falling back to fp16.")
+                }
+                turboQuantEnabled = false
+            } else if self.offset > turboMinActivationTokens {
+                let coldEnd = self.offset - turboHotWindowSize
+                let newColdCount = coldEnd - self.compressedOffset
+
+                if newColdCount >= step {
+                    if let fullK = self.keys, let fullV = self.values {
+                        var coldK = fullK[.ellipsis, self.compressedOffset..<coldEnd, 0...]
+                        var coldV = fullV[.ellipsis, self.compressedOffset..<coldEnd, 0...]
+
+                        if headDim == 512 {
+                            turboSplitHeads = true
+                            let B = coldK.dim(0), H = coldK.dim(1), T = coldK.dim(2)
+                            coldK = coldK.reshaped(B, H * 2, T, 256)
+                            coldV = coldV.reshaped(B, H * 2, T, 256)
+                        }
+
+                        let (qK, qV) = MLXFast.turboQuantEncode(keys: coldK, values: coldV, bits: 3)
+
+                        if let existingPK = self.polarKeys, let existingPV = self.polarValues {
+                            self.polarKeys = concatenated([existingPK, qK.0], axis: 2)
+                            self.polarValues = concatenated([existingPV, qV.0], axis: 2)
+                        } else {
+                            self.polarKeys = qK.0
+                            self.polarValues = qV.0
+                        }
+                        self.residualKeys = qK.1
+                        self.residualValues = qV.1
+                        self.compressedOffset += newColdCount
+
+                        let hotK = fullK[.ellipsis, coldEnd..<self.offset, 0...]
+                        let hotV = fullV[.ellipsis, coldEnd..<self.offset, 0...]
+                        let sparK = MLXArray.zeros(
+                            [keys.dim(0), keys.dim(1), step, keys.dim(3)], dtype: keys.dtype)
+                        let sparV = MLXArray.zeros(
+                            [values.dim(0), values.dim(1), step, values.dim(3)], dtype: values.dtype)
+                        self.keys = concatenated([hotK, sparK], axis: 2)
+                        self.values = concatenated([hotV, sparV], axis: 2)
+                        self.offset = turboHotWindowSize
+
+                        TurboKVCacheTelemetry.logOnce(
+                            compressedOffset: newColdCount, keys: qK.0, values: qV.0,
+                            headDim: turboSplitHeads ? 256 : keys.dim(-1))
+                    }
+                }
+            }
+        }
 
         let returnedKeys = self.keys![.ellipsis, ..<self.offset, 0...]
         let returnedValues = self.values![.ellipsis, ..<self.offset, 0...]
