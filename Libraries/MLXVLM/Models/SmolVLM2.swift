@@ -320,7 +320,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 }
             ) { frame in
 
-                let processedFrame = try frame.frame
+                let processedFrame = try frame.image
                     .asCIImage()
                     .toSRGB()
                     .resampled(
@@ -328,7 +328,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                         method: CIImage.ResamplingMethod.lanczos
                     )
                     .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-                return VideoFrame(frame: .ciImage(processedFrame), timeStamp: frame.timeStamp)
+                return VideoFrame(image: .ciImage(processedFrame), timeStamp: frame.timeStamp)
             }
 
             let thwFrames = (0 ..< processedFrames.frames.count).map {

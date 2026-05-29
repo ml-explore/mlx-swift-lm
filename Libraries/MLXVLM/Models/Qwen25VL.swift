@@ -760,7 +760,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 ) { frame in
                     // first apply the user requested resizing, etc. if any
                     let resizedImage = MediaProcessing.apply(
-                        try frame.frame.asCIImage(), processing: input.processing)
+                        try frame.image.asCIImage(), processing: input.processing)
                     if resizedSize == .zero {
                         let size = resizedImage.extent.size
                         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
@@ -770,7 +770,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                         resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
                     }
                     let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
-                    return VideoFrame(frame: .ciImage(processedImage), timeStamp: frame.timeStamp)
+                    return VideoFrame(image: .ciImage(processedImage), timeStamp: frame.timeStamp)
                 }
 
                 videosAsImageSequences.append(imageSequence.frames)

@@ -45,13 +45,34 @@ public struct UserInput {
     }
 
     public struct VideoFrame {
-        public let frame: Image
+        public let image: Image
         public let timeStamp: CMTime
 
-        public init(frame: Image, timeStamp: CMTime) {
-            self.frame = frame
+        public init(image: Image, timeStamp: CMTime) {
+            self.image = image
             self.timeStamp = timeStamp
         }
+
+        #if canImport(CoreImage)
+
+            @available(
+                *, deprecated,
+                message: "Use init(image:, timeStamp:) instead"
+            )
+            public init(frame: CIImage, timeStamp: CMTime) {
+                self.image = .ciImage(frame)
+                self.timeStamp = timeStamp
+            }
+
+            @available(
+                *, deprecated,
+                message: "Use image.asCIImage()"
+            )
+            public var frame: CIImage {
+                return try! image.asCIImage()
+            }
+
+        #endif
     }
 
     /// Representation of a video resource.

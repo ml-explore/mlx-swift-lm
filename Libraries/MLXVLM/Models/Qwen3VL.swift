@@ -113,7 +113,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     video, targetFPS: { _ in Double(2) }
                 ) { frame in
                     let processed = MediaProcessing.apply(
-                        try frame.frame.asCIImage(), processing: input.processing)
+                        try frame.image.asCIImage(), processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
                         let (height, width) = try QwenVL.targetSize(
@@ -125,7 +125,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                         resizedSize = CGSize(width: width, height: height)
                     }
                     let finalImage = preprocess(image: processed, resizedSize: resizedSize)
-                    return VideoFrame(frame: .ciImage(finalImage), timeStamp: frame.timeStamp)
+                    return VideoFrame(image: .ciImage(finalImage), timeStamp: frame.timeStamp)
                 }
                 accumulatedFrames.append(sequence.frames)
             }
