@@ -443,8 +443,8 @@ public enum MediaProcessing {
             case .success(requestedTime: _, let image, actualTime: let actual):
                 let ciImage = CIImage(
                     cgImage: image, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
-                let frame = try frameProcessing(.init(frame: ciImage, timeStamp: actual))
-                ciImages.append(frame.frame)
+                let frame = try frameProcessing(.init(frame: .ciImage(ciImage), timeStamp: actual))
+                ciImages.append(try frame.frame.asCIImage())
                 timestamps.append(frame.timeStamp)
             case .failure(requestedTime: _, _):
                 break
@@ -512,7 +512,7 @@ public enum MediaProcessing {
                 let videoFrame = videoFrames[targetIndex]
                 let frame = try frameProcessing(
                     .init(frame: videoFrame.frame, timeStamp: videoFrame.timeStamp))
-                ciImages.append(frame.frame)
+                ciImages.append(try frame.frame.asCIImage())
                 timestamps.append(frame.timeStamp)
             }
         }
