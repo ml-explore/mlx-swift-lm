@@ -95,3 +95,10 @@ iOSInjectionProject/
 .idea
 .vscode
 
+# Local Python tooling for fixture regeneration (uv-managed)
+.python-version
+.venv/
+pyproject.toml
+uv.lock
+main.py
+
