@@ -240,6 +240,26 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
 
+        if parameters?.kvCacheStrategy == .turboQuant {
+            let preset = parameters?.turboQuantPreset ?? .turbo3_5
+            let backend = parameters?.turboQuantBackend ?? .mlxPacked
+            let groupSize = parameters?.kvGroupSize ?? 64
+            if let maxKVSize = parameters?.maxKVSize {
+                return (0 ..< numLayers).map { _ in
+                    RotatingTurboQuantKVCache(
+                        maxSize: maxKVSize,
+                        keep: 4,
+                        preset: preset,
+                        groupSize: groupSize,
+                        backend: backend
+                    )
+                }
+            }
+            return (0 ..< numLayers).map { _ in
+                TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
+            }
+        }
+
         // Follow Python logic: use RotatingKVCache if maxKVSize is provided
         if let maxKVSize = parameters?.maxKVSize {
             return (0 ..< numLayers).map { _ in

@@ -332,9 +332,11 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
 public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     internal var keys: MLXArray?
     internal var values: MLXArray?
+    private let stream: StreamOrDevice
     public var step = 256
 
-    public override init() {
+    public init(stream: StreamOrDevice = .default) {
+        self.stream = stream
         super.init()
     }
 
@@ -360,16 +362,16 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             let nSteps = (step + keys.dim(2) - 1) / step
             let kShape = [B, kvHeads, nSteps * step, kHeadDim]
             let vShape = [B, kvHeads, nSteps * step, vHeadDim]
-            let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
-            let newV = MLXArray.zeros(vShape, dtype: values.dtype)
+            let newK = MLXArray.zeros(kShape, dtype: keys.dtype, stream: stream)
+            let newV = MLXArray.zeros(vShape, dtype: values.dtype, stream: stream)
 
             if var currentKeys = self.keys, var currentValues = self.values {
                 if previous % step != 0 {
                     currentKeys = currentKeys[.ellipsis, ..<previous, 0...]
                     currentValues = currentValues[.ellipsis, ..<previous, 0...]
                 }
-                self.keys = concatenated([currentKeys, newK], axis: 2)
-                self.values = concatenated([currentValues, newV], axis: 2)
+                self.keys = concatenated([currentKeys, newK], axis: 2, stream: stream)
+                self.values = concatenated([currentValues, newV], axis: 2, stream: stream)
             } else {
                 self.keys = newK
                 self.values = newV
@@ -422,7 +424,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     ///
     /// Use `updateQuantized()` and `quantizedScaledDotProductAttention()` for zero-overhead operation.
     public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
-        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits)
+        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits, stream: stream)
         quantizedCache.offset = self.offset
 
         if let keys = self.keys, let values = self.values {
@@ -430,8 +432,10 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             let currentKeys = keys[.ellipsis, ..<offset, 0...]
             let currentValues = values[.ellipsis, ..<offset, 0...]
 
-            let quantizedKeys = quantized(currentKeys, groupSize: groupSize, bits: bits)
-            let quantizedValues = quantized(currentValues, groupSize: groupSize, bits: bits)
+            let quantizedKeys = quantized(
+                currentKeys, groupSize: groupSize, bits: bits, stream: stream)
+            let quantizedValues = quantized(
+                currentValues, groupSize: groupSize, bits: bits, stream: stream)
 
             // Set the quantized state
             quantizedCache.state = [
@@ -444,7 +448,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     }
 
     public override func copy() -> any KVCache {
-        let new = KVCacheSimple()
+        let new = KVCacheSimple(stream: stream)
         new.step = self.step
         let s = self.state
         if !s.isEmpty {
@@ -466,13 +470,20 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     private var maxCacheSize: Int
     private var step: Int
     private var idx: Int = 0
+    private let stream: StreamOrDevice
 
     public override var maxSize: Int? { maxCacheSize }
 
-    public init(maxSize: Int, keep: Int = 0, step: Int = 256) {
+    public init(
+        maxSize: Int,
+        keep: Int = 0,
+        step: Int = 256,
+        stream: StreamOrDevice = .default
+    ) {
         self.maxCacheSize = maxSize
         self.keep = keep
         self.step = step
+        self.stream = stream
         super.init()
     }
 
@@ -493,7 +504,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         if let append {
             toCat.append(append)
         }
-        return concatenated(toCat, axis: 2)
+        return concatenated(toCat, axis: 2, stream: stream)
     }
 
     private func temporalOrder(_ array: MLXArray) -> MLXArray {
@@ -506,7 +517,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
                     array[.ellipsis, ..<keep, 0...],
                     array[.ellipsis, idx..., 0...],
                     array[.ellipsis, keep ..< idx, 0...],
-                ], axis: 2)
+                ], axis: 2, stream: stream)
         } else {
             return array[.ellipsis, ..<idx, 0...]
         }
@@ -552,12 +563,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
             let kShape = [B, nKVHeads, newSize, kHeadDim]
             let vShape = [B, nKVHeads, newSize, vHeadDim]
-            let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
-            let newV = MLXArray.zeros(vShape, dtype: values.dtype)
+            let newK = MLXArray.zeros(kShape, dtype: keys.dtype, stream: stream)
+            let newV = MLXArray.zeros(vShape, dtype: values.dtype, stream: stream)
 
             if let currentKeys = self.keys, let currentValues = self.values {
-                self.keys = concatenated([currentKeys, newK], axis: 2)
-                self.values = concatenated([currentValues, newV], axis: 2)
+                self.keys = concatenated([currentKeys, newK], axis: 2, stream: stream)
+                self.values = concatenated([currentValues, newV], axis: 2, stream: stream)
             } else {
                 self.keys = newK
                 self.values = newV
@@ -715,7 +726,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 
     public override func copy() -> any KVCache {
-        let new = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step)
+        let new = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step, stream: stream)
         let s = self.state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
@@ -746,15 +757,22 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     private var keys: (MLXArray, MLXArray, MLXArray?)?
     private var values: (MLXArray, MLXArray, MLXArray?)?
     private let step: Int
+    private let stream: StreamOrDevice
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
 
-    public init(groupSize: Int = 64, bits: Int = 8, mode: QuantizationMode = .affine) {
+    public init(
+        groupSize: Int = 64,
+        bits: Int = 8,
+        mode: QuantizationMode = .affine,
+        stream: StreamOrDevice = .default
+    ) {
         self.groupSize = groupSize
         self.bits = bits
         self.step = 256
         self.mode = mode
+        self.stream = stream
         super.init()
     }
 
@@ -793,8 +811,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     private func initQuant(dim: Int, shape: [Int], dtype: DType) -> (MLXArray, MLXArray, MLXArray?)
     {
         // Create temporary zero arrays and quantize them using native MLX Swift
-        let tempArray = MLXArray.zeros(shape + [dim], dtype: dtype)
-        let quantized = quantized(tempArray, groupSize: groupSize, bits: bits)
+        let tempArray = MLXArray.zeros(shape + [dim], dtype: dtype, stream: stream)
+        let quantized = quantized(tempArray, groupSize: groupSize, bits: bits, stream: stream)
 
         return (quantized.wq, quantized.scales, quantized.biases)
     }
@@ -805,7 +823,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     ) {
         return treeMap(
             { array in
-                let newArray = MLXArray.zeros(newShape + [array.dim(-1)], dtype: array.dtype)
+                let newArray = MLXArray.zeros(
+                    newShape + [array.dim(-1)], dtype: array.dtype, stream: self.stream)
                 return concatenated([array, newArray], axis: -2)
             }, quantTuple)
     }
@@ -870,8 +889,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
 
         offset += numSteps
 
-        let quantizedKeys = quantized(keys, groupSize: groupSize, bits: bits)
-        let quantizedValues = quantized(values, groupSize: groupSize, bits: bits)
+        let quantizedKeys = quantized(keys, groupSize: groupSize, bits: bits, stream: stream)
+        let quantizedValues = quantized(values, groupSize: groupSize, bits: bits, stream: stream)
 
         // Convert named tuples to positional tuples
         let qKeys = (quantizedKeys.wq, quantizedKeys.scales, quantizedKeys.biases)
@@ -970,7 +989,7 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     }
 
     public override func copy() -> any KVCache {
-        let new = QuantizedKVCache(groupSize: groupSize, bits: bits, mode: mode)
+        let new = QuantizedKVCache(groupSize: groupSize, bits: bits, mode: mode, stream: stream)
         let s = self.state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
@@ -991,10 +1010,10 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
 
             let dequantizedKeys = dequantized(
                 currentKeys.0, scales: currentKeys.1, biases: currentKeys.2,
-                groupSize: groupSize, bits: bits, mode: mode)
+                groupSize: groupSize, bits: bits, mode: mode, stream: stream)
             let dequantizedValues = dequantized(
                 currentValues.0, scales: currentValues.1, biases: currentValues.2,
-                groupSize: groupSize, bits: bits, mode: mode)
+                groupSize: groupSize, bits: bits, mode: mode, stream: stream)
 
             // Set the unquantized state
             simpleCache.state = [dequantizedKeys, dequantizedValues]
@@ -1383,7 +1402,9 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
+    case is RotatingTurboQuantKVCache: return "RotatingTurboQuantKVCache"
     case is RotatingKVCache: return "RotatingKVCache"
+    case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
@@ -1522,6 +1543,43 @@ private func restoreCacheFromMetaState(
         cache.metaState = metaState
         return cache
 
+    case "TurboQuantKVCache":
+        let preset =
+            metaState.count > 4 ? TurboQuantPreset(rawValue: metaState[4]) ?? .turbo3_5 : .turbo3_5
+        let groupSize =
+            metaState.count > 2 ? Int(metaState[2]) ?? 64 : 64
+        let backend =
+            metaState.count > 5
+            ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
+        let cache = TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
+        cache.state = state
+        cache.metaState = metaState
+        return cache
+
+    case "RotatingTurboQuantKVCache":
+        guard metaState.count >= 7 else {
+            throw KVCacheError(
+                message: "Invalid RotatingTurboQuantKVCache metaState - expected 7 values")
+        }
+        guard let maxSize = Int(metaState[1]) else {
+            throw KVCacheError(
+                message: "Failed to parse RotatingTurboQuantKVCache maxSize from: \(metaState[1])")
+        }
+        let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
+        let groupSize = Int(metaState[6]) ?? 64
+        let backend =
+            metaState.count > 7
+            ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
+        let cache = RotatingTurboQuantKVCache(
+            maxSize: maxSize,
+            preset: preset,
+            groupSize: groupSize,
+            backend: backend
+        )
+        cache.state = state
+        cache.metaState = metaState
+        return cache
+
     case "ChunkedKVCache":
         let cache = ChunkedKVCache()
         cache.state = state
@@ -1655,8 +1713,28 @@ public func makePromptCache(
 /// Use this when `makePromptCache` cannot determine the layer count automatically.
 public func makePromptCacheWithLayerCount(
     numLayers: Int,
-    maxKVSize: Int? = nil
+    maxKVSize: Int? = nil,
+    parameters: GenerateParameters? = nil
 ) -> [KVCache] {
+    if parameters?.kvCacheStrategy == .turboQuant {
+        let preset = parameters?.turboQuantPreset ?? .turbo3_5
+        let backend = parameters?.turboQuantBackend ?? .mlxPacked
+        let groupSize = parameters?.kvGroupSize ?? 64
+        if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+            return (0 ..< numLayers).map { _ in
+                RotatingTurboQuantKVCache(
+                    maxSize: maxKVSize,
+                    preset: preset,
+                    groupSize: groupSize,
+                    backend: backend
+                )
+            }
+        }
+        return (0 ..< numLayers).map { _ in
+            TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
+        }
+    }
+
     if let maxKVSize = maxKVSize {
         return (0 ..< numLayers).map { _ in
             RotatingKVCache(maxSize: maxKVSize, keep: 4)
@@ -1797,9 +1875,15 @@ public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    kvCacheStrategy: KVCacheStrategy = .mlxAffine,
+    turboQuantPreset: TurboQuantPreset = .turbo3_5,
+    turboQuantBackend: TurboQuantBackend = .mlxPacked
 ) {
-    guard let kvBits = kvBits, !cache.isEmpty else { return }
+    guard !cache.isEmpty else { return }
+    if kvCacheStrategy == .none { return }
+    let resolvedBits = kvCacheStrategy == .turboQuant ? turboQuantPreset.effectiveBits : kvBits
+    guard let kvBits = resolvedBits else { return }
 
     // Find the first quantizable (non-Mamba, non-already-quantized) cache entry
     guard let firstQuantizable = cache.first(where: { $0 is KVCacheSimple }),
@@ -1812,7 +1896,15 @@ public func maybeQuantizeKVCache(
     for i in 0 ..< cache.count {
         // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            if kvCacheStrategy == .turboQuant {
+                cache[i] = simpleCache.toTurboQuant(
+                    preset: turboQuantPreset,
+                    groupSize: kvGroupSize,
+                    backend: turboQuantBackend
+                )
+            } else {
+                cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            }
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
         // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
