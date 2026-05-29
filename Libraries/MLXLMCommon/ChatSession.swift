@@ -1,8 +1,11 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
 import Foundation
 import MLX
+
+#if canImport(CoreGraphics)
+    import CoreGraphics
+#endif
 
 /// Configuration for speculative decoding in a `ChatSession`.
 ///
