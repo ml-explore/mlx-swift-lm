@@ -72,7 +72,8 @@ public class MediaProcesingTests: XCTestCase {
         // We know video is exactly 5 seconds long, expect 10 samples
         let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
             frame in
-            let image = preprocess(image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
             return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
@@ -117,7 +118,8 @@ public class MediaProcesingTests: XCTestCase {
         // We know video is exactly 5 seconds long, expect 10 samples
         let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
             frame in
-            let image = preprocess(image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
             return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
