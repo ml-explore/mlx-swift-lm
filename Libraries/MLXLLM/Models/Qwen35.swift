@@ -251,7 +251,7 @@ final class Qwen35GatedDeltaNet: Module {
 
         let convInput = concatenated([convState, qkv], axis: 1)
         if let cache {
-            cache[0] = convInput[0..., (-(convKernelSize - 1))...]
+            cache[0] = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
         }
 
         let convOut = silu(conv1d(convInput))
@@ -287,6 +287,7 @@ final class Qwen35GatedDeltaNet: Module {
 
         if let cache {
             cache[1] = state
+            cache.advance(S)
         }
 
         out = norm(out, gate: z)
