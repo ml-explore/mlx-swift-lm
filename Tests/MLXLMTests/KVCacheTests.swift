@@ -107,6 +107,27 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     assertArraysClose(restored.state, cache.state)
 }
 
+@Test func testArraysCacheMaskUsesLeftPaddingAfterStateUpdate() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [1, 3])
+    cache[0] = MLXArray.ones([2, 4], dtype: .float32)
+
+    let mask = try #require(cache.makeMask(N: 4))
+    #expect(
+        mask.asArray(Bool.self) == [
+            false, true, true, true,
+            false, false, false, true,
+        ])
+}
+
+@Test func testArraysCacheAdvanceUpdatesOffsetAndLeftPadding() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [3, 5])
+
+    cache.advance(2)
+
+    #expect(cache.offset == 2)
+    #expect(cache.leftPaddingValues == [1, 3])
+}
+
 // MARK: - MambaCache type preservation
 
 @Test func testMambaCacheRoundTrip() throws {

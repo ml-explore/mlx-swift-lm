@@ -16,6 +16,10 @@ func sigmoidMultiply(_ x: MLXArray, _ gate: MLXArray) -> MLXArray {
     x * sigmoid(gate)
 }
 
+private func preciseSwiGLU(_ hiddenStates: MLXArray, gate: MLXArray, x: MLXArray) -> MLXArray {
+    (silu(gate.asType(.float32)) * x.asType(.float32)).asType(hiddenStates.dtype)
+}
+
 // MARK: - Model Components
 
 final class Qwen3NextRMSNormGated: Module {
@@ -31,7 +35,7 @@ final class Qwen3NextRMSNormGated: Module {
     func callAsFunction(_ hiddenStates: MLXArray, gate: MLXArray? = nil) -> MLXArray {
         var x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
         if let gate {
-            x = x * silu(gate)
+            x = preciseSwiGLU(hiddenStates, gate: gate, x: x)
         }
         return x
     }
@@ -258,7 +262,7 @@ public final class Qwen3NextGatedDeltaNet: Module {
 
         let convInput = concatenated([convState, mixedQKV], axis: 1)
         if let cache {
-            cache[0] = convInput[0..., (1 - convKernelSize)..., 0...]
+            cache[0] = contiguous(convInput[0..., (1 - convKernelSize)..., 0...])
         }
 
         let convOut = silu(conv1d(convInput))
@@ -290,6 +294,7 @@ public final class Qwen3NextGatedDeltaNet: Module {
 
         if let cache {
             cache[1] = newState
+            cache.advance(S)
         }
 
         let normalized = norm(out, gate: z)

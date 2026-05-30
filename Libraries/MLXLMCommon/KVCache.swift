@@ -1157,9 +1157,17 @@ public class ArraysCache: BaseKVCache {
         leftPadding = nil
     }
 
+    /// Advance sequence-relative metadata after consuming `N` tokens.
+    public func advance(_ N: Int) {
+        offset += N
+        if let leftPadding {
+            self.leftPadding = leftPadding - N
+        }
+    }
+
     /// Create attention mask based on left padding
     public func makeMask(N: Int) -> MLXArray? {
-        if cache[0] == nil, let leftPadding = leftPadding {
+        if let leftPadding {
             return MLXArray(0 ..< N) .>= leftPadding[0..., .newAxis]
         } else {
             return nil
