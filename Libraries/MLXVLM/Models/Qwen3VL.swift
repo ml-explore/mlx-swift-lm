@@ -349,7 +349,7 @@ public struct Qwen3VLConfiguration: Codable, Sendable {
         private let _inChannels: Int?
         public var inChannels: Int { _inChannels ?? 3 }
         private let _hiddenAct: String?
-        public var hiddenAct: String { _hiddenAct ?? "gelu" }
+        public var hiddenAct: String { _hiddenAct ?? "gelu_pytorch_tanh" }
         private let _deepstackVisualIndexes: [Int]?
         public var deepstackVisualIndexes: [Int] { _deepstackVisualIndexes ?? [] }
 
@@ -455,6 +455,17 @@ public struct Qwen3VLConfiguration: Codable, Sendable {
 // MARK: - Vision
 
 enum Qwen3VLVision {
+
+    private static func geluApproximation(for hiddenAct: String) -> GELU.Approximation {
+        switch hiddenAct {
+        case "gelu_pytorch_tanh", "gelu_new":
+            .tanh
+        case "gelu_fast":
+            .fast
+        default:
+            .none
+        }
+    }
 
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let half = x.dim(-1) / 2
@@ -677,10 +688,11 @@ enum Qwen3VLVision {
         @ModuleInfo(key: "linear_fc2") var linear2: Linear
         @ModuleInfo(key: "act") var activation: GELU
 
-        init(dim: Int, hiddenDim: Int) {
+        init(dim: Int, hiddenDim: Int, hiddenAct: String) {
             _linear1.wrappedValue = Linear(dim, hiddenDim, bias: true)
             _linear2.wrappedValue = Linear(hiddenDim, dim, bias: true)
-            _activation.wrappedValue = GELU(approximation: .fast)
+            _activation.wrappedValue = GELU(
+                approximation: Qwen3VLVision.geluApproximation(for: hiddenAct))
         }
 
         func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -698,7 +710,10 @@ enum Qwen3VLVision {
             _norm1.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: 1e-6)
             _norm2.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: 1e-6)
             _attention.wrappedValue = Attention(dim: config.hiddenSize, numHeads: config.numHeads)
-            _mlp.wrappedValue = MLP(dim: config.hiddenSize, hiddenDim: config.intermediateSize)
+            _mlp.wrappedValue = MLP(
+                dim: config.hiddenSize,
+                hiddenDim: config.intermediateSize,
+                hiddenAct: config.hiddenAct)
         }
 
         func callAsFunction(
