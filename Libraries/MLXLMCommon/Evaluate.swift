@@ -1986,8 +1986,8 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
                 }
             }
 
-            // Check if we have a complete tool call.
-            if let toolCall = toolCallProcessor.toolCalls.popLast() {
+            // Emit all complete tool calls in parse order.
+            for toolCall in toolCallProcessor.drainToolCalls() {
                 if case .terminated = emit(.toolCall(toolCall)) {
                     return false
                 }
@@ -2007,9 +2007,15 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
     mutating func onGenerationEnd(
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) {
-        toolCallProcessor.processEOS()
+        if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
+            !bufferedText.isEmpty
+        {
+            if case .terminated = emit(.chunk(bufferedText)) {
+                return
+            }
+        }
 
-        for toolCall in toolCallProcessor.toolCalls {
+        for toolCall in toolCallProcessor.drainToolCalls() {
             if case .terminated = emit(.toolCall(toolCall)) {
                 break
             }
