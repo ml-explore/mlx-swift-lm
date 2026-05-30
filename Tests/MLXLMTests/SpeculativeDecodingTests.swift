@@ -70,15 +70,82 @@ struct SpeculativeDecodingTests {
         }
 
         var speculativeTokens: [Int] = []
+        var telemetry: SpeculativeDecodingTelemetry?
         for await generation in try generateTokens(
             input: modelInput, parameters: parameters, context: mainContext,
             draftModel: draftContext.model, numDraftTokens: numDraftTokens
         ) {
             if let token = generation.token { speculativeTokens.append(token) }
+            if let info = generation.info {
+                telemetry = info.speculativeDecodingTelemetry
+            }
         }
 
         #expect(!normalTokens.isEmpty)
         #expect(!speculativeTokens.isEmpty)
         #expect(normalTokens == speculativeTokens)
+
+        let speculativeTelemetry = try #require(telemetry)
+        #expect(speculativeTelemetry.roundCount > 0)
+        #expect(speculativeTelemetry.draftTokenCount > 0)
+        #expect(speculativeTelemetry.targetModelCallCount == speculativeTelemetry.roundCount)
+        #expect(speculativeTelemetry.draftModelCallCount == speculativeTelemetry.draftTokenCount)
+        #expect(speculativeTelemetry.acceptanceRate >= 0)
+        #expect(speculativeTelemetry.acceptanceRate <= 1)
+    }
+
+    @Test func `Speculative telemetry emitted count matches generated tokens`() async throws {
+        let input = UserInput(prompt: "Input text")
+        let modelInput = try await processor.prepare(input: input)
+        let parameters = GenerateParameters(
+            maxTokens: 1,
+            temperature: 0.0
+        )
+
+        var tokenCount = 0
+        var info: GenerateCompletionInfo?
+        for await generation in try generateTokens(
+            input: modelInput, parameters: parameters, context: mainContext,
+            draftModel: draftContext.model, numDraftTokens: 8
+        ) {
+            if generation.token != nil {
+                tokenCount += 1
+            }
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try #require(info)
+        let telemetry = try #require(completionInfo.speculativeDecodingTelemetry)
+        #expect(completionInfo.generationTokenCount == tokenCount)
+        #expect(telemetry.emittedTokenCount == tokenCount)
+        #expect(telemetry.emittedTokenCount == completionInfo.generationTokenCount)
+    }
+
+    @Test func `Speculative telemetry emitted count works with direct iterator`() async throws {
+        let input = UserInput(prompt: "Input text")
+        let modelInput = try await processor.prepare(input: input)
+        let parameters = GenerateParameters(
+            maxTokens: 3,
+            temperature: 0.0
+        )
+
+        var iterator = try SpeculativeTokenIterator(
+            input: modelInput,
+            mainModel: mainContext.model,
+            draftModel: draftContext.model,
+            parameters: parameters,
+            numDraftTokens: 8
+        )
+
+        var tokenCount = 0
+        while iterator.next() != nil {
+            tokenCount += 1
+        }
+
+        let telemetry = try #require(iterator.speculativeDecodingTelemetry)
+        #expect(tokenCount == 3)
+        #expect(telemetry.emittedTokenCount == tokenCount)
     }
 }

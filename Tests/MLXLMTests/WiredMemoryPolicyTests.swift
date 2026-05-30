@@ -44,4 +44,30 @@ final class WiredMemoryPolicyTests: XCTestCase {
         XCTAssertTrue(first.canAdmit(baseline: 50, activeSizes: [75], newSize: 75))
         XCTAssertFalse(first.canAdmit(baseline: 50, activeSizes: [75], newSize: 76))
     }
+
+    func testSpeculativeDecodingMemoryPolicyEvaluatesCombinedModelBudget() {
+        let policy = SpeculativeDecodingMemoryPolicy(
+            limitBytes: 1_000,
+            additionalBytes: 100,
+            action: .fallbackToDefault
+        )
+
+        let admitted = policy.evaluate(mainModelBytes: 600, draftModelBytes: 250)
+        XCTAssertEqual(admitted.estimatedBytes, 950)
+        XCTAssertTrue(admitted.isWithinBudget)
+        XCTAssertTrue(admitted.shouldUseSpeculativeDecoding)
+
+        let denied = policy.evaluate(mainModelBytes: 600, draftModelBytes: 350)
+        XCTAssertEqual(denied.estimatedBytes, 1_050)
+        XCTAssertFalse(denied.isWithinBudget)
+        XCTAssertFalse(denied.shouldUseSpeculativeDecoding)
+    }
+
+    func testSpeculativeDecodingMemoryPolicyAllowOverridesBudget() {
+        let policy = SpeculativeDecodingMemoryPolicy(limitBytes: 100, action: .allow)
+        let evaluation = policy.evaluate(mainModelBytes: 100, draftModelBytes: 1)
+
+        XCTAssertFalse(evaluation.isWithinBudget)
+        XCTAssertTrue(evaluation.shouldUseSpeculativeDecoding)
+    }
 }

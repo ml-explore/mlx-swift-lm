@@ -27,7 +27,21 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
-    private func model(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
+    private struct UnexpectedDraftModelLoadError: Error {}
+
+    private actor DraftModelLoadCounter {
+        private var count = 0
+
+        func increment() {
+            count += 1
+        }
+
+        var value: Int {
+            count
+        }
+    }
+
+    private static func makeModel(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
         let config = Gemma3TextConfiguration(
             modelType: "text",
             hiddenSize: 64, hiddenLayers: 8, intermediateSize: 64, attentionHeads: 4,
@@ -50,6 +64,10 @@ public class ChatSessionTests: XCTestCase {
             model: model,
             processor: processor,
             tokenizer: processor.tokenizer)
+    }
+
+    private func model(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
+        Self.makeModel(processor: processor)
     }
 
     private let generationParameters = GenerateParameters(maxTokens: 50)
@@ -239,6 +257,155 @@ public class ChatSessionTests: XCTestCase {
             result += part
         }
         XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testSpeculativeDecodingMemoryPolicyFallbackUsesDefaultGeneration() async throws {
+        let draft = ModelContainer(context: model())
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: draft,
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fallbackToDefault
+                )
+            ),
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    func testSpeculativeDecodingMemoryPolicyFailThrows() async throws {
+        let draft = ModelContainer(context: model())
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: draft,
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fail
+                )
+            ),
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        do {
+            for try await _ in session.streamDetails(
+                to: "hello",
+                role: .user,
+                images: [] as [UserInput.Image],
+                videos: [] as [UserInput.Video]
+            ) {}
+            XCTFail("expected SpeculativeDecodingMemoryError")
+        } catch let error as SpeculativeDecodingMemoryError {
+            XCTAssertFalse(error.evaluation.isWithinBudget)
+            XCTAssertFalse(error.evaluation.shouldUseSpeculativeDecoding)
+        } catch {
+            XCTFail("expected SpeculativeDecodingMemoryError, got \(error)")
+        }
+    }
+
+    func testDeferredSpeculativeDecodingMemoryPolicyFallbackDoesNotLoadDraftModel() async throws {
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 1,
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fallbackToDefault
+                )
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    func testDeferredSpeculativeDecodingMemoryPolicyFailDoesNotLoadDraftModel() async throws {
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 1,
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fail
+                )
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        do {
+            for try await _ in session.streamDetails(
+                to: "hello",
+                role: .user,
+                images: [] as [UserInput.Image],
+                videos: [] as [UserInput.Video]
+            ) {}
+            XCTFail("expected SpeculativeDecodingMemoryError")
+        } catch is UnexpectedDraftModelLoadError {
+            XCTFail("draft model loader should not be called")
+        } catch let error as SpeculativeDecodingMemoryError {
+            XCTAssertFalse(error.evaluation.isWithinBudget)
+            XCTAssertFalse(error.evaluation.shouldUseSpeculativeDecoding)
+        } catch {
+            XCTFail("expected SpeculativeDecodingMemoryError, got \(error)")
+        }
+    }
+
+    func testDeferredSpeculativeDecodingLoadsDraftModelOnceAcrossTurns() async throws {
+        let loadCounter = DraftModelLoadCounter()
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                await loadCounter.increment()
+                return ModelContainer(context: Self.makeModel())
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        _ = try await session.respond(to: "hello")
+        _ = try await session.respond(to: "again")
+
+        let loadCount = await loadCounter.value
+        XCTAssertEqual(loadCount, 1)
     }
 
     // MARK: - KV Cache
