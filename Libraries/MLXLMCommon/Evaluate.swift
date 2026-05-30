@@ -671,8 +671,9 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     /// Evaluate the next token and return the new token (y), updating cache state
     mutating func step(previous: LMInput.Text) -> MLXArray {
-        let result = model(
-            previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        let result = withPreparedCache(cache, lengths: previous.sequenceLengths) {
+            model(previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        }
         self.state = result.state
 
         // Apply dynamic cache quantization after each step

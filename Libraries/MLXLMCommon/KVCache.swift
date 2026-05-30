@@ -93,6 +93,43 @@ extension KVCache {
     }
 }
 
+public func withPreparedCache<Result>(
+    _ cache: [any KVCache],
+    lengths: [Int]?,
+    _ body: () throws -> Result
+) rethrows -> Result {
+    guard let lengths else {
+        return try body()
+    }
+    for cache in cache {
+        cache.prepareArrayMetadata(lengths: lengths)
+    }
+    defer {
+        for cache in cache {
+            cache.finalizeArrayMetadata()
+        }
+    }
+    return try body()
+}
+
+extension KVCache {
+    fileprivate func prepareArrayMetadata(lengths: [Int]?) {
+        if let arrays = self as? ArraysCache {
+            arrays.prepare(lengths: lengths)
+        } else if let list = self as? CacheList {
+            list.prepare(lengths: lengths)
+        }
+    }
+
+    fileprivate func finalizeArrayMetadata() {
+        if let arrays = self as? ArraysCache {
+            arrays.finalize()
+        } else if let list = self as? CacheList {
+            list.finalize()
+        }
+    }
+}
+
 /// Protocol for caches that support efficient quantized operations
 ///
 /// **Usage Example:**
@@ -1163,7 +1200,7 @@ public class ChunkedKVCache: KVCacheSimple {
 
 /// Base cache for array-based state storage
 public class ArraysCache: BaseKVCache {
-    private var cache: [MLXArray?]
+    fileprivate var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
 
@@ -1198,10 +1235,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     internal func copyContents(to new: ArraysCache) {
-        let s = self.state
-        if !s.isEmpty {
-            new.state = s.map { $0[.ellipsis] }
-        }
+        new.cache = cache.map { $0?[.ellipsis] }
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
@@ -1273,6 +1307,11 @@ public class ArraysCache: BaseKVCache {
     internal var leftPaddingValues: [Int]? {
         guard let leftPadding else { return nil }
         return leftPadding.asArray(Int.self)
+    }
+
+    internal var lengthsValues: [Int]? {
+        guard let lengths else { return nil }
+        return lengths.asArray(Int.self)
     }
 
     internal var presentSlotIndices: [Int] {

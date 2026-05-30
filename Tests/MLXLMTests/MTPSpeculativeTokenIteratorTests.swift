@@ -2,9 +2,10 @@
 
 import Foundation
 import MLX
-@_spi(Testing) @testable import MLXLMCommon
 import MLXNN
 import Testing
+
+@_spi(Testing) @testable import MLXLMCommon
 
 // MARK: - Synthetic mocks for iterator plumbing
 
@@ -311,6 +312,38 @@ func testMTPIteratorPendingBufferDrainOrder() throws {
     // proposedCount = 3 (numDraft); accepted = 2.
     #expect(iter.proposedCount == 3)
     #expect(iter.acceptedCount == 2)
+}
+
+@Test
+func testMTPIteratorUsesSingleStepWhenOnlyOneTokenRemains() throws {
+    // With maxTokens=2, the prepare-time bonus consumes the first output slot.
+    // Only one slot remains, so a speculative round would be unable to emit
+    // both an accepted draft and the verifier's correction/bonus token. The
+    // iterator must take one normal main-model step instead.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5
+        11,  // single-token tail step
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 11)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+    let cache = CountingKVCache()
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 2), blockSize: 4
+    )
+
+    let tokens = [iter.next(), iter.next(), iter.next()]
+
+    #expect(tokens[0] == 5)
+    #expect(tokens[1] == 11)
+    #expect(tokens[2] == nil)
+    #expect(iter.tokenCount == 2)
+    #expect(drafter.draftBlockCallCount == 0)
+    #expect(iter.proposedCount == 0)
+    #expect(iter.acceptedCount == 0)
+    #expect(cache.offset == 4)
 }
 
 // MARK: - LogitProcessor emit-only invariant

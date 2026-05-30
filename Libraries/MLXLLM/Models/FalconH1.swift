@@ -434,9 +434,9 @@ class FalconH1Mixer: Module {
                 let t = paddedInput.dim(1)
                 let ends = clip(lengths, min: 0, max: t - nKeep)
                 let positions = (ends[0..., .newAxis] + MLXArray(0 ..< nKeep))[.ellipsis, .newAxis]
-                cache[0] = MLX.takeAlong(paddedInput, positions, axis: 1)
+                cache[0] = contiguous(MLX.takeAlong(paddedInput, positions, axis: 1))
             } else {
-                cache[0] = paddedInput[0..., (-nKeep)...]
+                cache[0] = contiguous(paddedInput[0..., (-nKeep)..., 0...])
             }
         }
 
