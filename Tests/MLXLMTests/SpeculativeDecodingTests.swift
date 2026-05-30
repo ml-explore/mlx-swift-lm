@@ -6,6 +6,7 @@ import MLXLLM
 import MLXLMCommon
 import Testing
 
+@Suite(.serialized)
 struct SpeculativeDecodingTests {
 
     let processor: any UserInputProcessor

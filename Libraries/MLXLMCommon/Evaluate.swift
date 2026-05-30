@@ -377,14 +377,14 @@ public struct RepetitionContext: LogitProcessor {
 
     public func process(logits: MLXArray) -> MLXArray {
         guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
-        var selectedLogits = logits[0..., indices]
+        let broadcastIndices = indices[.newAxis, 0...]
+        var selectedLogits = takeAlong(logits, broadcastIndices, axis: -1)
 
         selectedLogits = MLX.where(
             selectedLogits .< 0, selectedLogits * repetitionPenalty,
             selectedLogits / repetitionPenalty)
 
-        logits[0..., indices] = selectedLogits
-        return logits
+        return putAlong(logits, broadcastIndices, values: selectedLogits, axis: -1)
     }
 
     mutating public func didSample(token: MLXArray) {
@@ -411,8 +411,9 @@ public struct PresencePenaltyContext: LogitProcessor {
 
     public func process(logits: MLXArray) -> MLXArray {
         guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
-        logits[0..., indices] = logits[0..., indices] - presencePenalty
-        return logits
+        let broadcastIndices = indices[.newAxis, 0...]
+        let selectedLogits = takeAlong(logits, broadcastIndices, axis: -1) - presencePenalty
+        return putAlong(logits, broadcastIndices, values: selectedLogits, axis: -1)
     }
 
     mutating public func didSample(token: MLXArray) {
@@ -671,8 +672,9 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     /// Evaluate the next token and return the new token (y), updating cache state
     mutating func step(previous: LMInput.Text) -> MLXArray {
-        let result = model(
-            previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        let result = withPreparedCache(cache, lengths: previous.sequenceLengths) {
+            model(previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        }
         self.state = result.state
 
         // Apply dynamic cache quantization after each step

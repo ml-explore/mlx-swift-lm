@@ -168,6 +168,29 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 0.0, accuracy: 1e-6)
     }
 
+    func testPresencePenaltyDoesNotMutateLogitsViewSource() {
+        var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
+        processor.prompt(MLXArray([1, 3]))
+
+        let source = MLXArray([
+            0.0 as Float, 1.0 as Float, 2.0 as Float, 3.0 as Float,
+            10.0 as Float, 11.0 as Float, 12.0 as Float, 13.0 as Float,
+        ]).reshaped(1, 2, 4)
+        let logitsView = source[0..., 1, 0...]
+
+        let processed = processor.process(logits: logitsView)
+
+        zip(processed[0].asArray(Float.self), [10.0, 10.5, 12.0, 12.5]).forEach {
+            XCTAssertEqual($0, $1, accuracy: 1e-6)
+        }
+        zip(
+            source.asArray(Float.self),
+            [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0]
+        ).forEach {
+            XCTAssertEqual($0, $1, accuracy: 1e-6)
+        }
+    }
+
     func testFrequencyPenaltyContextPenalizesByTokenCount() {
         var processor = FrequencyPenaltyContext(frequencyPenalty: 0.5, frequencyContextSize: 5)
         processor.prompt(MLXArray([0, 0, 0, 1, 1]))

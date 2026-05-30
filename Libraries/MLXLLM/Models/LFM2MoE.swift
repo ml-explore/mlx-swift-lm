@@ -231,7 +231,8 @@ class LFM2MoEShortConv: Module {
         Bx = concatenated([state!, Bx], axis: -2)
         if let cache {
             let start = Bx.dim(1) - (lCache - 1)
-            cache[0] = Bx[0..., start..., 0...]
+            cache[0] = contiguous(Bx[0..., start..., 0...])
+            cache.advance(x.dim(1))
         }
 
         let convOut = conv(Bx)

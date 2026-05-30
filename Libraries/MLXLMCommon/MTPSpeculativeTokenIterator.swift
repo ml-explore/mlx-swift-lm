@@ -205,10 +205,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     mutating func speculateRound() {
         guard !passthrough else { return }
 
-        // Cap drafting by maxTokens.
-        let remaining = maxTokens.map { $0 - tokenCount } ?? (blockSize - 1)
-        let numDraft = Swift.min(remaining, blockSize - 1)
-        guard numDraft > 0 else { return }
+        // A speculative round can emit up to `numDraft + 1` tokens: the
+        // accepted draft prefix plus the verifier's correction/bonus token.
+        // Keep the whole pending buffer within the remaining output budget.
+        let numDraft: Int
+        if let maxTokens {
+            let remaining = maxTokens - tokenCount
+            guard remaining > 0 else { return }
+
+            let draftBudget = Swift.min(remaining - 1, blockSize - 1)
+            guard draftBudget > 0 else {
+                if let token = passthroughStep() {
+                    pendingTokens.append(token)
+                }
+                return
+            }
+            numDraft = draftBudget
+        } else {
+            numDraft = blockSize - 1
+        }
 
         guard
             let state = mainState,
