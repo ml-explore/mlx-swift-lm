@@ -2083,36 +2083,60 @@ private protocol TokenLoopHandler {
 private struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
-    var detokenizer: NaiveStreamingDetokenizer
-    let toolCallProcessor: ToolCallProcessor
+    private enum Mode {
+        case standard(detokenizer: NaiveStreamingDetokenizer, toolCallProcessor: ToolCallProcessor)
+        case gptOSS(GPTOSSTokenStreamParser)
+    }
+
+    private var mode: Mode
 
     init(tokenizer: Tokenizer, format: ToolCallFormat, tools: [[String: any Sendable]]? = nil) {
-        detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-        toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
+        if format == .gptOSS, let parser = GPTOSSTokenStreamParser(tokenizer: tokenizer) {
+            mode = .gptOSS(parser)
+        } else {
+            mode = .standard(
+                detokenizer: NaiveStreamingDetokenizer(tokenizer: tokenizer),
+                toolCallProcessor: ToolCallProcessor(format: format, tools: tools)
+            )
+        }
     }
 
     mutating func onToken(
         _ token: Int,
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) -> Bool {
-        detokenizer.append(token: token)
-        if let chunk = detokenizer.next() {
-            // Process chunk through the tool call processor.
-            if let textToYield = toolCallProcessor.processChunk(chunk) {
-                if case .terminated = emit(.chunk(textToYield)) {
-                    return false
+        switch mode {
+        case .gptOSS(var parser):
+            let shouldContinue = parser.onToken(token, emit: emit)
+            mode = .gptOSS(parser)
+            return shouldContinue
+
+        case .standard(var detokenizer, let toolCallProcessor):
+            detokenizer.append(token: token)
+
+            if let chunk = detokenizer.next() {
+                // Process chunk through the tool call processor.
+                if let textToYield = toolCallProcessor.processChunk(chunk) {
+                    if case .terminated = emit(.chunk(textToYield)) {
+                        mode = .standard(
+                            detokenizer: detokenizer, toolCallProcessor: toolCallProcessor)
+                        return false
+                    }
+                }
+
+                // Emit all complete tool calls in parse order.
+                for toolCall in toolCallProcessor.drainToolCalls() {
+                    if case .terminated = emit(.toolCall(toolCall)) {
+                        mode = .standard(
+                            detokenizer: detokenizer, toolCallProcessor: toolCallProcessor)
+                        return false
+                    }
                 }
             }
 
-            // Emit all complete tool calls in parse order.
-            for toolCall in toolCallProcessor.drainToolCalls() {
-                if case .terminated = emit(.toolCall(toolCall)) {
-                    return false
-                }
-            }
+            mode = .standard(detokenizer: detokenizer, toolCallProcessor: toolCallProcessor)
+            return true
         }
-
-        return true
     }
 
     mutating func onStopToken(
@@ -2125,17 +2149,24 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
     mutating func onGenerationEnd(
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) {
-        if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
-            !bufferedText.isEmpty
-        {
-            if case .terminated = emit(.chunk(bufferedText)) {
-                return
-            }
-        }
+        switch mode {
+        case .gptOSS(var parser):
+            parser.onGenerationEnd(emit: emit)
+            mode = .gptOSS(parser)
 
-        for toolCall in toolCallProcessor.drainToolCalls() {
-            if case .terminated = emit(.toolCall(toolCall)) {
-                break
+        case .standard(_, let toolCallProcessor):
+            if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
+                !bufferedText.isEmpty
+            {
+                if case .terminated = emit(.chunk(bufferedText)) {
+                    return
+                }
+            }
+
+            for toolCall in toolCallProcessor.drainToolCalls() {
+                if case .terminated = emit(.toolCall(toolCall)) {
+                    break
+                }
             }
         }
     }

@@ -68,12 +68,12 @@ public class ToolCallProcessor {
 
     /// Whether this processor uses inline format (no start tag).
     private var isInlineFormat: Bool {
-        parser.startTag == nil
+        parser.startTags.isEmpty
     }
 
     /// The first character of the start tag for quick detection.
     private var startTagFirstChar: Character? {
-        parser.startTag?.first
+        parser.startTags.first?.first
     }
 
     // MARK: - Public Methods
@@ -215,11 +215,12 @@ public class ToolCallProcessor {
 
     /// Process chunk for tagged formats.
     private func processTaggedChunk(_ chunk: String) -> String? {
-        guard let startTag = parser.startTag,
-            let startChar = startTagFirstChar
+        let startTags = parser.startTags
+        guard !startTags.isEmpty, let startChar = startTagFirstChar
         else {
             return chunk
         }
+        let startTag = parser.startTag ?? startTags[0]
 
         let startMode =
             state == .normal
@@ -258,14 +259,23 @@ public class ToolCallProcessor {
             // Change state to potential tagged tool call.
             state = .potentialToolCall
 
-            leadingToken = separateToken(
-                from: &toolCallBuffer, separator: String(startChar), returnLeading: true)
+            if let startRange = firstStartTagRange(in: toolCallBuffer, tags: startTags) {
+                leadingToken = String(toolCallBuffer[..<startRange.lowerBound])
+                toolCallBuffer = String(toolCallBuffer[startRange.lowerBound...])
+            } else {
+                leadingToken = separateToken(
+                    from: &toolCallBuffer,
+                    separator: String(startChar),
+                    returnLeading: true,
+                    preferLastSeparator: true
+                )
+            }
 
             fallthrough
 
         case .potentialToolCall:
-            if partialMatch(buffer: toolCallBuffer, tag: startTag) {
-                if toolCallBuffer.starts(with: startTag) {
+            if partialMatch(buffer: toolCallBuffer, tags: startTags) {
+                if startsWithAnyStartTag(buffer: toolCallBuffer, tags: startTags) {
                     state = .collectingToolCall
                     fallthrough
                 } else {
@@ -442,11 +452,22 @@ public class ToolCallProcessor {
     ///   - buffer: The string buffer to modify
     ///   - separator: The separator string to search for
     ///   - returnLeading: If true, returns text before separator; if false, returns text after
+    ///   - preferLastSeparator: If true, split on the last separator occurrence (useful for
+    ///     preserving trailing partial start tags across chunks)
     /// - Returns: The separated token, or nil if separator not found
-    private func separateToken(from buffer: inout String, separator: String, returnLeading: Bool)
-        -> String?
-    {
-        guard let range = buffer.range(of: separator) else { return nil }
+    private func separateToken(
+        from buffer: inout String,
+        separator: String,
+        returnLeading: Bool,
+        preferLastSeparator: Bool = false
+    ) -> String? {
+        let range: Range<String.Index>?
+        if preferLastSeparator {
+            range = buffer.range(of: separator, options: .backwards)
+        } else {
+            range = buffer.range(of: separator)
+        }
+        guard let range else { return nil }
 
         let token: String
         if returnLeading {
@@ -468,6 +489,25 @@ public class ToolCallProcessor {
         }
 
         return true
+    }
+
+    private func partialMatch(buffer: String, tags: [String]) -> Bool {
+        tags.contains { partialMatch(buffer: buffer, tag: $0) }
+    }
+
+    private func startsWithAnyStartTag(buffer: String, tags: [String]) -> Bool {
+        tags.contains { buffer.starts(with: $0) }
+    }
+
+    private func firstStartTagRange(in buffer: String, tags: [String]) -> Range<String.Index>? {
+        var earliest: Range<String.Index>? = nil
+        for tag in tags {
+            guard let range = buffer.range(of: tag) else { continue }
+            if earliest == nil || range.lowerBound < earliest!.lowerBound {
+                earliest = range
+            }
+        }
+        return earliest
     }
 }
 
