@@ -15,6 +15,10 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var startTag: String? { get }
 
+    /// Optional additional start tags for formats with multiple valid headers.
+    /// Defaults to `[startTag]` when a start tag exists.
+    var startTags: [String] { get }
+
     /// The end tag that indicates a tool call has ended.
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
@@ -35,6 +39,11 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    public var startTags: [String] {
+        guard let startTag else { return [] }
+        return [startTag]
+    }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -102,6 +111,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
 
+    /// GPT-OSS Harmony tool call format.
+    /// Example: `<|channel|>commentary to=get_weather<|message|>{"location": "Tokyo"}<|call|>`
+    case gptOSS = "gpt_oss"
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -132,6 +145,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .gptOSS:
+            return GPTOSSToolCallParser()
         }
     }
 
@@ -207,6 +222,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         // Mistral3 family (mistral3, mistral3_text, etc.)
         if type.hasPrefix("mistral3") {
             return .mistral
+        }
+
+        // GPT-OSS family
+        if type.hasPrefix("gpt_oss") || type == "gptoss" {
+            return .gptOSS
         }
 
         return nil
