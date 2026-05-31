@@ -304,8 +304,7 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
         scores = scores.asType(x.dtype)
 
         let expertOutputs = switchMLP(x, indices)
-        let weighted = expertOutputs * scores[.ellipsis, .newAxis]
-        return weighted.sum(axis: -2)
+        return weightedExpertSum(expertOutputs, scores)
     }
 }
 

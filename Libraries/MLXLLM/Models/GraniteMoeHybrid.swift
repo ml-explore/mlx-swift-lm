@@ -315,7 +315,7 @@ class GraniteMoeHybridMoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, gates) = router(x)
         let expertOutputs = switchMLP(x, indices)
-        return (expertOutputs * gates[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(expertOutputs, gates)
     }
 }
 
