@@ -100,6 +100,55 @@ internal func gemma4VisionPoolingKernel(
     return Int(sqrt(Double(ratio)))
 }
 
+/// Largest aspect-ratio-preserving size for a Gemma 4 vision input that stays
+/// within the soft-token (patch) budget and aligns to
+/// `patchSize * poolingKernelSize`. Mirrors mlx-vlm's
+/// `Gemma4ImageProcessor.aspect_ratio_preserving_resize`.
+///
+/// Gemma 4's vision tower is NaViT-style: it patchifies at the input's real
+/// aspect ratio and pools to a fixed soft-token budget regardless of shape, so
+/// preserving aspect ratio (rather than forcing a square `fixedSize`) avoids
+/// feeding the model distorted, off-distribution images at no token cost.
+///
+/// Returns `fallback` for degenerate (non-positive) extents.
+internal func gemma4VisionAspectPreservingTarget(
+    width: Double, height: Double, imageSeqLength: Int, fallback: CGSize
+) -> CGSize {
+    // Fixed by Gemma 4's SigLIP-style vision encoder.
+    let patchSize = 16
+    let poolingKernelSize = 3
+    let sideMultiple = patchSize * poolingKernelSize
+    let maxPatches = imageSeqLength * poolingKernelSize * poolingKernelSize
+
+    guard width > 0, height > 0 else { return fallback }
+
+    func alignedDown(_ value: Double) -> Int {
+        max((Int(value) / sideMultiple) * sideMultiple, sideMultiple)
+    }
+
+    let maxPixels = Double(maxPatches * patchSize * patchSize)
+    let scale = sqrt(maxPixels / (width * height))
+
+    var targetW = alignedDown(width * scale)
+    var targetH = alignedDown(height * scale)
+
+    // Flooring to `sideMultiple` already keeps the patch count within budget for
+    // normal aspect ratios; this loop only fires for extreme ratios where the
+    // short side is clamped up to a single block, trimming the long side until
+    // the budget holds.
+    while (targetW / patchSize) * (targetH / patchSize) > maxPatches {
+        if targetW >= targetH && targetW > sideMultiple {
+            targetW -= sideMultiple
+        } else if targetH > sideMultiple {
+            targetH -= sideMultiple
+        } else {
+            break
+        }
+    }
+
+    return CGSize(width: targetW, height: targetH)
+}
+
 private func gemma4RotateHalf(_ x: MLXArray) -> MLXArray {
     let half = x.shape[x.shape.count - 1] / 2
     let x1 = x[.ellipsis, ..<half]
@@ -1836,11 +1885,17 @@ public struct Gemma4Processor: UserInputProcessor {
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        var userProcessing = processing ?? UserInput.Processing()
-        let targetSize = config.fixedSize
-        userProcessing.resize = targetSize
+        let targetSize =
+            images.first.map {
+                gemma4VisionAspectPreservingTarget(
+                    width: Double($0.extent.width), height: Double($0.extent.height),
+                    imageSeqLength: config.imageSeqLength, fallback: config.fixedSize)
+            } ?? config.fixedSize
 
         let processedImages = images.map { image in
+            var userProcessing = processing ?? UserInput.Processing()
+            userProcessing.resize = targetSize
+
             let processedImage = MediaProcessing.apply(image, processing: userProcessing)
             let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
             let resizedImage = MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
