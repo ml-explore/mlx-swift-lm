@@ -338,7 +338,7 @@ class AfMoEMoE: Module, UnaryLayer {
 
         // Apply experts
         var y = experts(x, inds)
-        y = (y * selectedScores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, selectedScores).asType(y.dtype)
 
         // Add shared expert output
         if let sharedExperts = sharedExperts {

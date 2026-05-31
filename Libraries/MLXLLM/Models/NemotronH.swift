@@ -527,7 +527,7 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let sharedExperts {
             y = y + sharedExperts(x)

@@ -587,8 +587,8 @@ private final class Gemma4TextExperts: Module {
             x.reshaped(batch * length, hidden),
             topKIndices.reshaped(batch * length, topK)
         )
-        let weights = topKWeights.reshaped(batch * length, topK, 1).asType(expertOutput.dtype)
-        return (expertOutput * weights).sum(axis: -2).reshaped(batch, length, hidden)
+        let weights = topKWeights.reshaped(batch * length, topK).asType(expertOutput.dtype)
+        return weightedExpertSum(expertOutput, weights).reshaped(batch, length, hidden)
     }
 }
 

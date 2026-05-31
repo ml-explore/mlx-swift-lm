@@ -143,7 +143,7 @@ class PhiMoESparseMoeBlock: Module {
         let scores = MLX.softmax(MLX.takeAlong(gates, inds, axis: -1), axis: -1, precise: true)
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 
