@@ -128,4 +128,25 @@ public enum JSONValue: Hashable, Codable, Sendable {
             return ["type": "object", "properties": props]
         }
     }
+
+    /// Convert to a `Sendable`-typed value suitable for use in
+    /// `[String: any Sendable]` dictionaries (e.g. ``Message``).
+    public var sendableValue: any Sendable {
+        switch self {
+        case .null:
+            return NSNull()
+        case .bool(let value):
+            return value
+        case .int(let value):
+            return value
+        case .double(let value):
+            return value
+        case .string(let value):
+            return value
+        case .array(let value):
+            return value.map { $0.sendableValue }
+        case .object(let value):
+            return value.mapValues { $0.sendableValue }
+        }
+    }
 }
