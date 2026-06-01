@@ -939,8 +939,10 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         -> (embeds: MLXArray, positionIds: MLXArray?, ropeDeltas: MLXArray?)
     {
         guard let pixelValues, let frames else {
-            return (languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]),
-                    nil, nil)
+            return (
+                languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]),
+                nil, nil
+            )
         }
 
         // Get the input embeddings from the language model
