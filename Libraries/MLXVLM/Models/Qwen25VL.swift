@@ -407,14 +407,6 @@ private enum Vision {
             k = k.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
             v = v.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
 
-            // Apply attention mask (window or full attention)
-            // attentionMask is [1, seqLen, seqLen] boolean — convert to float16 mask for SDPA
-            let boolMask = attentionMask[.newAxis, 0..., 0..., 0...]  // [1, 1, seqLen, seqLen]
-            let floatMask = MLX.where(
-                boolMask,
-                MLXArray(Float16(0)),
-                MLXArray(Float16(-10000)))
-
             let output = MLXFast.scaledDotProductAttention(
                 queries: q,
                 keys: k,
@@ -947,8 +939,10 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         -> (embeds: MLXArray, positionIds: MLXArray?, ropeDeltas: MLXArray?)
     {
         guard let pixelValues, let frames else {
-            return (languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]),
-                    nil, nil)
+            return (
+                languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]),
+                nil, nil
+            )
         }
 
         // Get the input embeddings from the language model
