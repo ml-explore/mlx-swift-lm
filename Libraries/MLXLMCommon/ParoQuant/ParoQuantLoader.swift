@@ -1,7 +1,6 @@
 import Foundation
 import MLX
 import MLXNN
-import os
 
 private let logger = Logger(subsystem: "mlx-swift-lm", category: "paroquant")
 
