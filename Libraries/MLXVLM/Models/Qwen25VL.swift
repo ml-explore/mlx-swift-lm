@@ -776,7 +776,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
+    func preprocessVideoFrame(image: CIImage, resizedSize: CGSize) -> CIImage {
         // Bicubic matches the image-path resampler (the dedicated PIL-
         // Lanczos port for images was reverted in PR #243 once parity
         // was measured to not be load-bearing). This helper is only
@@ -870,7 +870,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                             minPixels: config.minPixels, maxPixels: config.maxPixels)
                         resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
                     }
-                    let processedImage = preprocess(image: resizedImage, resizedSize: resizedSize)
+                    let processedImage = preprocessVideoFrame(
+                        image: resizedImage, resizedSize: resizedSize)
                     return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
                 }
 
