@@ -32,6 +32,7 @@ public enum LLMTypeRegistry {
         "gemma3_text": create(Gemma3TextConfiguration.self, Gemma3TextModel.init),
         "gemma3n": create(Gemma3nTextConfiguration.self, Gemma3nTextModel.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
+        "gemma4_unified": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
         "qwen2": create(Qwen2Configuration.self, Qwen2Model.init),
         "qwen3": create(Qwen3Configuration.self, Qwen3Model.init),
