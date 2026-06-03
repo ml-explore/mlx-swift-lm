@@ -192,21 +192,6 @@ private class RMSNormNoScale: Module {
     }
 }
 
-private class ScaledLinear: Module {
-    let weight: MLXArray
-    let scalar: Float
-
-    init(inFeatures: Int, outFeatures: Int, scalar: Float) {
-        self.weight = MLXArray.zeros([outFeatures, inFeatures])
-        self.scalar = scalar
-        super.init()
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        matmul(x, weight.T) * scalar
-    }
-}
-
 // MARK: - Attention
 
 private class Gemma4Attention: Module {
@@ -523,7 +508,7 @@ private class Gemma4TextModelInner: Module {
 
     // Per-layer embeddings (PLE)
     @ModuleInfo(key: "embed_tokens_per_layer") var embedTokensPerLayer: Embedding?
-    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: ScaledLinear?
+    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: Linear?
     @ModuleInfo(key: "per_layer_projection_norm") var perLayerProjectionNorm: RMSNorm?
 
     // KV sharing mapping: for each layer, which earlier layer provides KVs
@@ -547,10 +532,10 @@ private class Gemma4TextModelInner: Module {
             self._embedTokensPerLayer.wrappedValue = Embedding(
                 embeddingCount: config.vocabSizePerLayerInput,
                 dimensions: config.numHiddenLayers * config.hiddenSizePerLayerInput)
-            self._perLayerModelProjection.wrappedValue = ScaledLinear(
-                inFeatures: config.hiddenSize,
-                outFeatures: config.numHiddenLayers * config.hiddenSizePerLayerInput,
-                scalar: pow(Float(config.hiddenSize), -0.5))
+            self._perLayerModelProjection.wrappedValue = Linear(
+                config.hiddenSize,
+                config.numHiddenLayers * config.hiddenSizePerLayerInput,
+                bias: false)
             self._perLayerProjectionNorm.wrappedValue = RMSNorm(
                 dimensions: config.hiddenSizePerLayerInput, eps: config.rmsNormEps)
         }
@@ -600,8 +585,15 @@ private class Gemma4TextModelInner: Module {
                 tokenPLE.dim(0), tokenPLE.dim(1),
                 config.numHiddenLayers, config.hiddenSizePerLayerInput)
 
-            // Model projection PLE
-            let modelPLE = modelProj(h).reshaped(
+            // Model projection PLE. The hidden_size**-0.5 scale (the reference
+            // impl's `per_layer_projection_scale`) is applied here, AFTER the
+            // projection, so the projection itself stays a plain Linear and
+            // quantizes like every other Linear in the model. The 8-bit E-series
+            // checkpoints ship per_layer_model_projection as a packed
+            // QuantizedLinear; a custom non-Linear module is invisible to
+            // quantize() and would mismatch those packed weights at load.
+            let perLayerProjectionScale = pow(Float(config.hiddenSize), -0.5)
+            let modelPLE = (modelProj(h) * perLayerProjectionScale).reshaped(
                 h.dim(0), h.dim(1),
                 config.numHiddenLayers, config.hiddenSizePerLayerInput)
             let normedModelPLE = projNorm(modelPLE)
