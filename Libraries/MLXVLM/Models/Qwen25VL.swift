@@ -793,24 +793,21 @@ public struct Qwen25VLProcessor: UserInputProcessor {
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        // Compute target size from the original image before any processing, matching Python's
-        // single-step resize: ratio = max_size / max(w,h); new_w = int(w*ratio)//28*28
-        let origSize = images[0].extent.size
-        let factor = config.patchSize * config.mergeSize
-        let targetSize: CGSize
-        if let resize = processing?.resize {
-            targetSize = resize
-        } else {
-            let (h, w) = try QwenVL.targetSize(
-                height: Int(origSize.height), width: Int(origSize.width),
-                factor: factor, minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
-            targetSize = CGSize(width: w, height: h)
-        }
+        // First apply the user requested resizing, etc. if any
+        let images = images.map { MediaProcessing.apply($0, processing: processing) }
+
+        // image_processing_qwen2_vl._preprocess
+        let size = images[0].extent.size
+        let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
+            height: Int(size.height), width: Int(size.width),
+            factor: config.patchSize * config.mergeSize,
+            minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
+        let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         let processedImages =
             images
             .map { MediaProcessing.inSRGBToneCurveSpace($0) }
-            .map { MediaProcessing.resampleBicubic($0, to: targetSize) }
+            .map { MediaProcessing.resampleBicubic($0, to: resizedSize) }
             .map {
                 MediaProcessing.normalize(
                     $0, mean: config.imageMeanTuple, std: config.imageStdTuple)
