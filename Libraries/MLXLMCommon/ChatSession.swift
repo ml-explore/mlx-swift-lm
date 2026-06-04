@@ -344,8 +344,8 @@ public final class ChatSession {
     public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        image: UserInput.Image? = nil,
-        video: UserInput.Video? = nil,
+        image: consuming UserInput.Image? = nil,
+        video: consuming UserInput.Video? = nil,
         audio: consuming UserInput.Audio? = nil
     ) async throws -> String {
         try await respond(
@@ -658,9 +658,9 @@ public final class ChatSession {
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
-        image: UserInput.Image? = nil,
-        video: UserInput.Video? = nil,
-        audio: UserInput.Audio? = nil
+        image: consuming UserInput.Image? = nil,
+        video: consuming UserInput.Video? = nil,
+        audio: consuming UserInput.Audio? = nil
     ) -> AsyncThrowingStream<String, Error> {
         streamResponse(
             to: prompt,
