@@ -206,12 +206,15 @@ private class Gemma4Attention: Module {
     let scale: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    // Optional: KV-shared layers reuse an earlier layer's K/V and own no k_proj/v_proj.
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+    // Optional: KV-shared layers don't compute K, so they carry no k_norm weight.
+    // (v_norm is RMSNormNoScale — parameter-free — so it never appears in checkpoints.)
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
     @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale
 
     @ModuleInfo var rope: RoPELayer
@@ -240,14 +243,26 @@ private class Gemma4Attention: Module {
         self.scale = 1.0
 
         self._qProj.wrappedValue = Linear(dim, nHeads * effectiveHeadDim, bias: false)
-        self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        if !useKeqV {
-            self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+        // KV-shared layers (the last `num_kv_shared_layers`) reuse the K/V of an earlier
+        // layer of the same attention type, so they own no k_proj/v_proj. Quantized
+        // (QAT) checkpoints prune those tensors; create them only for the KV-owning
+        // layers so the module tree matches the checkpoint. (Older/PTQ checkpoints that
+        // still ship the redundant tensors are dropped in `sanitize`.) Same predicate as
+        // the double-wide MLP gate.
+        let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
+        let isKvSharedLayer = layerIdx >= firstKvSharedLayerIdx && firstKvSharedLayerIdx > 0
+        if !isKvSharedLayer {
+            self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            if !useKeqV {
+                self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            }
         }
         self._oProj.wrappedValue = Linear(nHeads * effectiveHeadDim, dim, bias: false)
 
         self._qNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
+        if !isKvSharedLayer {
+            self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
+        }
         self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
 
         // RoPE: sliding uses default, full uses proportional with partial rotation
@@ -289,6 +304,13 @@ private class Gemma4Attention: Module {
             keys = sharedK
             values = sharedV
         } else {
+            // Only KV-owning layers fall here (KV-shared layers always receive `sharedKV`),
+            // so k_proj and k_norm are guaranteed to exist.
+            guard let kProj, let kNorm else {
+                fatalError(
+                    "Gemma4Attention layer \(layerIdx) computed its own K/V but has no k_proj/k_norm; "
+                        + "KV-shared layers must be passed `sharedKV`.")
+            }
             var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             k = kNorm(k)
             k = k.transposed(0, 2, 1, 3)
@@ -671,6 +693,7 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
         var sanitized = [String: MLXArray]()
         for (k, v) in weights {
             // Skip vision/audio/rotary weights
@@ -682,9 +705,30 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
             {
                 continue
             }
+            // Drop redundant k_proj/v_proj/k_norm for KV-shared layers: they reuse an
+            // earlier layer's K/V and own no K projection or K norm, so the module tree
+            // has none. QAT checkpoints already omit these; some (PTQ) checkpoints still
+            // ship them, and keeping them would be an unexpected weight. Dropping here
+            // makes both load against the same tree. (v_norm is parameter-free.)
+            if firstKvSharedLayerIdx > 0,
+                k.contains("self_attn.k_proj")
+                    || k.contains("self_attn.v_proj")
+                    || k.contains("self_attn.k_norm"),
+                let layerIdx = Self.decoderLayerIndex(in: k),
+                layerIdx >= firstKvSharedLayerIdx
+            {
+                continue
+            }
             sanitized[k] = v
         }
         return sanitized
+    }
+
+    /// Extract `N` from a weight key shaped like `…layers.N.…`, else nil.
+    private static func decoderLayerIndex(in key: String) -> Int? {
+        guard let range = key.range(of: "layers.") else { return nil }
+        let digits = key[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
     }
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
