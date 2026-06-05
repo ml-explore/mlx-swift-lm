@@ -126,15 +126,18 @@ public struct LMInput {
         }
     }
 
-    /// Representation of prepared input audio(s).
+    /// Representation of prepared audio features.
     public struct ProcessedAudio {
+        public let features: MLXArray
+        public let mask: MLXArray?
 
-        public let samples: MLXArray
+        public init(features: MLXArray, mask: MLXArray? = nil) {
+            self.features = features
+            self.mask = mask
+        }
 
-        public init(
-            samples: MLXArray
-        ) {
-            self.samples = samples
+        public init(samples: MLXArray) {
+            self.init(features: samples)
         }
     }
 
