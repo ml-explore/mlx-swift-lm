@@ -168,6 +168,147 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     assertArraysClose(restored.state, cache.state)
 }
 
+@Test func testArraysCacheLengthsRoundTrip() throws {
+    let cache = ArraysCache(size: 2)
+    cache.prepare(lengths: [4, 2])
+    cache[0] = MLXArray.ones([2, 4], dtype: .float32)
+
+    let url = tempURL()
+    try savePromptCache(url: url, cache: [cache], metadata: [:])
+    let (loaded, _) = try loadPromptCache(url: url)
+
+    let restored = try #require(loaded[0] as? ArraysCache)
+    #expect(restored.currentLengths?.asArray(Int.self) == [4, 2])
+    assertArraysClose(restored.state, cache.state)
+}
+
+@Test func testArraysCacheAdvanceUpdatesLengthsAndLeftPaddingMasks() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [1, 3])
+    cache.prepare(lengths: [4, 2])
+    cache.advance(2)
+
+    #expect(cache.leftPaddingValues == [-1, 1])
+    #expect(cache.currentLengths?.asArray(Int.self) == [2, 0])
+
+    let mask = try #require(cache.makeMask(N: 3))
+    #expect(mask.asArray(Bool.self) == [true, true, true, false, true, true])
+
+    let lengthOnly = ArraysCache(size: 1)
+    lengthOnly.prepare(lengths: [2, 0])
+    let lengthMask = try #require(lengthOnly.makeMask(N: 3))
+    #expect(lengthMask.asArray(Bool.self) == [true, true, false, false, false, false])
+
+    cache.finalize()
+    #expect(cache.leftPaddingValues == nil)
+    #expect(cache.currentLengths == nil)
+}
+
+@Test func testArraysCacheFilterAndExtendPreserveBatchMetadata() throws {
+    let first = ArraysCache(size: 1, leftPadding: [0, 2])
+    first.prepare(lengths: [5, 3])
+    first[0] = MLXArray.ones([2, 2], dtype: .float32)
+
+    first.filter(batchIndices: MLXArray([1]))
+    #expect(first.leftPaddingValues == [2])
+    #expect(first.currentLengths?.asArray(Int.self) == [3])
+    #expect(first[0]?.shape == [1, 2])
+
+    let second = ArraysCache(size: 1, leftPadding: [1, 4])
+    second.prepare(lengths: [6, 2])
+    second[0] = MLXArray.ones([2, 2], dtype: .float32) * 2
+
+    first.extend(other: second)
+    #expect(first.leftPaddingValues == [2, 1, 4])
+    #expect(first.currentLengths?.asArray(Int.self) == [3, 6, 2])
+    #expect(first[0]?.shape == [3, 2])
+}
+
+@Test func testAttentionMaskUsesSharedCausalCachePath() throws {
+    let cache = KVCacheSimple()
+    let prefillInput = MLXArray.ones([1, 3, 8], dtype: .float32)
+
+    let prefillMask = createAttentionMask(h: prefillInput, cache: cache)
+    if case .causal = prefillMask {
+        // Expected for multi-token prefill: Falcon H1 uses the shared symbolic causal mask path.
+    } else {
+        Issue.record("Expected symbolic causal attention mask for prefill")
+    }
+
+    let tokenInput = MLXArray.ones([1, 1, 8], dtype: .float32)
+    let tokenMask = createAttentionMask(h: tokenInput, cache: cache)
+    if case .none = tokenMask {
+        // Expected for one-token decode: no materialized mask is needed.
+    } else {
+        Issue.record("Expected no attention mask for one-token decode")
+    }
+
+    cache.offset = 2
+    let forcedMask = createAttentionMask(h: prefillInput, cache: cache, returnArray: true)
+    guard case .array(let mask) = forcedMask else {
+        Issue.record("Expected forced attention mask array")
+        return
+    }
+    #expect(mask.shape == [3, 5])
+    #expect(
+        mask.asArray(Bool.self) == [
+            true, true, true, false, false,
+            true, true, true, true, false,
+            true, true, true, true, true,
+        ])
+}
+
+@Test func testSSMMaskUsesSharedMambaMetadataPath() throws {
+    let leftPadded = MambaCache(leftPadding: [1, 3])
+    let input = MLXArray.ones([2, 4, 8], dtype: .float32)
+
+    let leftPaddingMask = try #require(createSSMMask(h: input, cache: leftPadded))
+    #expect(
+        leftPaddingMask.asArray(Bool.self) == [
+            false, true, true, true,
+            false, false, false, true,
+        ])
+
+    let lengthMasked = MambaCache()
+    lengthMasked.prepare(lengths: [3, 1])
+    let lengthsMask = try #require(createSSMMask(h: input, cache: lengthMasked))
+    #expect(
+        lengthsMask.asArray(Bool.self) == [
+            true, true, true, false,
+            true, false, false, false,
+        ])
+}
+
+@Test func testCacheListPrepareFinalizePropagatesThroughNestedHybridCaches() throws {
+    let mamba = MambaCache(leftPadding: [0, 2])
+    let arrays = ArraysCache(size: 1)
+    let nested = CacheList(CacheList(mamba), arrays)
+
+    nested.prepare(lengths: [4, 1])
+
+    #expect(mamba.currentLengths?.asArray(Int.self) == [4, 1])
+    #expect(arrays.currentLengths?.asArray(Int.self) == [4, 1])
+
+    nested.finalize()
+
+    #expect(mamba.currentLengths == nil)
+    #expect(mamba.leftPaddingValues == nil)
+    #expect(arrays.currentLengths == nil)
+}
+
+@Test func testMambaCacheCopyPreservesBatchMaskMetadata() throws {
+    let cache = MambaCache(leftPadding: [2, 0])
+    cache.prepare(lengths: [5, 3])
+    cache[0] = MLXArray.ones([2, 3, 4], dtype: .float32)
+    cache[1] = MLXArray.ones([2, 1, 4, 4], dtype: .float32)
+
+    let copied = try #require(cache.copy() as? MambaCache)
+
+    #expect(copied.leftPaddingValues == [2, 0])
+    #expect(copied.currentLengths?.asArray(Int.self) == [5, 3])
+    #expect(copied[0]?.shape == [2, 3, 4])
+    #expect(copied[1]?.shape == [2, 1, 4, 4])
+}
+
 // MARK: - MambaCache type preservation
 
 @Test func testMambaCacheRoundTrip() throws {

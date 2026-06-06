@@ -14,7 +14,7 @@ import MLXNN
 public func computeDt(_ dt: MLXArray, _ dtBias: MLXArray, _ timeStepLimit: (Float, Float))
     -> MLXArray
 {
-    let dt = softplus(dt + dtBias)
+    let dt = softplus(dt.asType(.float32) + dtBias)
     return MLX.clip(dt, min: timeStepLimit.0, max: timeStepLimit.1)
 }
 
@@ -50,7 +50,7 @@ private func makeSSMKernel() -> MLXFast.MLXFastKernel? {
                 auto idx = d_idx * Ds + s_idx;
                 auto dB_by_x = x_ * dt_ * static_cast<float>(B_[s_idx]);
                 auto state = dA * i_state[idx] + dB_by_x;
-                o_state[idx] = static_cast<T>(state);
+                o_state[idx] = static_cast<U>(state);
                 acc += state * C_[s_idx];
             }
             acc = simd_sum(acc);
@@ -90,6 +90,7 @@ func ssmUpdateKernel(
 ) -> (MLXArray, MLXArray) {
     let (n, _, h, d) = hiddenStates.shape4
     let inputType = hiddenStates.dtype
+    let stateType = state.dtype
     let (hb, ds) = (B.dim(-2), B.dim(-1))
 
     let dt = computeDt(dt, dtBias, timeStepLimit)
@@ -102,6 +103,7 @@ func ssmUpdateKernel(
         [hiddenStates, ALog, B, C, D, dt, state],
         template: [
             ("T", inputType),
+            ("U", stateType),
             ("Dh", d),
             ("Ds", ds),
             ("H", h),
@@ -110,7 +112,7 @@ func ssmUpdateKernel(
         grid: (32, d, h * n),
         threadGroup: (32, 8, 1),
         outputShapes: [[n, 1, h, d], state.shape],
-        outputDTypes: [inputType, inputType]
+        outputDTypes: [inputType, stateType]
     )
 
     return (outputs[0], outputs[1])
@@ -150,47 +152,104 @@ public func ssmAttn(
     dtBias: MLXArray,
     state: MLXArray? = nil,
     timeStepLimit: (Float, Float) = (0.001, 100.0),
-    mask: MLXArray? = nil
+    mask: MLXArray? = nil,
+    lengths: MLXArray? = nil,
+    step: Int = 256
 ) -> (MLXArray, MLXArray) {
     let (b, l, h, dh) = x.shape4
     let (_, _, g, d) = B.shape4
 
     let dt = computeDt(dt, dtBias, timeStepLimit)
     let repeats = h / g
-    let A = -MLX.exp(ALog)
-    var B = MLX.transposed(B, axes: [0, 2, 3, 1])
-
-    // A * s + B * C
-    var CB = MLX.swappedAxes(C, 1, 2).matmul(B)
-    CB = MLX.repeated(CB, count: repeats, axis: 1)
-
+    let A = -MLX.exp(ALog).asType(dt.dtype)
     let dtA = dt * A.reshaped(1, 1, -1)
-    var decay = MLX.exp(segsum(dtA.swappedAxes(1, 2), mask: mask))
-
-    let surrogateAttentionMatrix = MLX.tril(CB * decay, k: 0)
-
     let dtx = dt.reshaped(b, l, h, 1) * x
-    var y = surrogateAttentionMatrix.matmul(dtx.swappedAxes(1, 2))
-    y = MLX.swappedAxes(y, 1, 2)
+    let stateType = state?.dtype ?? x.dtype
 
-    decay = decay[0..., 0..., (-1)..., 0...].transposed(0, 3, 1, 2)
-    B = MLX.repeated(B, count: h / g, axis: 1).swappedAxes(2, 3)
-    var dtxdecay = dtx * decay
-    dtxdecay = dtxdecay.swappedAxes(1, 2).swappedAxes(2, 3)
+    func stepForward(
+        dtx: MLXArray,
+        dtA: MLXArray,
+        B: MLXArray,
+        C: MLXArray,
+        state: MLXArray?,
+        mask: MLXArray?,
+        lengths: MLXArray?
+    ) -> (MLXArray, MLXArray) {
+        let s = dtx.dim(1)
+        var B = MLX.transposed(B, axes: [0, 2, 3, 1])
 
-    var nextState = dtxdecay.matmul(B)
+        var CB = MLX.swappedAxes(C, 1, 2).matmul(B)
+        CB = MLX.repeated(CB, count: repeats, axis: 1)
 
-    if var state = state {
-        let expDtACumsum = MLX.exp(MLX.cumsum(dtA, axis: -2))
-        nextState = nextState + expDtACumsum[0..., -1, 0..., .newAxis, .newAxis] * state
-        state = state.reshaped(b, 1, g, repeats, dh, d)
-        let C = C.reshaped(b, l, g, 1, d, 1)
-        let yPrev = (state.matmul(C)).squeezed(axis: -1).flattened(start: 2, end: 3)
-        y = y + expDtACumsum[.ellipsis, .newAxis] * yPrev
+        var decay = MLX.exp(segsum(dtA.swappedAxes(1, 2), mask: mask))
+
+        let surrogateAttentionMatrix = MLX.tril(CB * decay, k: 0)
+
+        var y = surrogateAttentionMatrix.matmul(dtx.swappedAxes(1, 2))
+        y = MLX.swappedAxes(y, 1, 2)
+
+        if let lengths {
+            var pos = MLX.minimum(lengths, MLXArray(step)) - 1
+            pos = MLX.maximum(pos, MLXArray(0))
+            pos = expandedDimensions(pos, axes: [1, 2, 3])
+            decay = MLX.takeAlong(decay, pos, axis: 2)
+        } else {
+            decay = decay[0..., 0..., (-1)..., 0...]
+        }
+        decay = decay.transposed(0, 3, 1, 2)
+        B = MLX.repeated(B, count: h / g, axis: 1).swappedAxes(2, 3)
+        var dtxdecay = dtx * decay
+        dtxdecay = dtxdecay.swappedAxes(1, 2).swappedAxes(2, 3)
+
+        var nextState = dtxdecay.matmul(B)
+
+        if var state {
+            let expDtACumsum = MLX.exp(MLX.cumsum(dtA, axis: -2))
+            nextState = nextState + expDtACumsum[0..., -1, 0..., .newAxis, .newAxis] * state
+            state = state.reshaped(b, 1, g, repeats, dh, d)
+            let C = C.reshaped(b, s, g, 1, d, 1)
+            let yPrev = (state.matmul(C)).squeezed(axis: -1).flattened(start: 2, end: 3)
+            y = y + expDtACumsum[.ellipsis, .newAxis] * yPrev
+        }
+        if let state, let lengths {
+            nextState = MLX.where(
+                expandedDimensions(lengths .< 0, axes: [1, 2, 3]), state, nextState)
+        }
+
+        return (y.asType(x.dtype), nextState.asType(stateType))
     }
 
-    y = y + x * D.reshaped(1, 1, h, 1)
-    return (y, nextState)
+    var ys = [MLXArray]()
+    ys.reserveCapacity((l + step - 1) / step)
+
+    var state = state
+    var lengths = lengths
+    for i in stride(from: 0, to: l, by: step) {
+        let end = min(i + step, l)
+        let maskChunk = mask == nil ? nil : mask![0..., i ..< end]
+        let (y, nextState) = stepForward(
+            dtx: dtx[0..., i ..< end],
+            dtA: dtA[0..., i ..< end],
+            B: B[0..., i ..< end],
+            C: C[0..., i ..< end],
+            state: state,
+            mask: maskChunk,
+            lengths: lengths
+        )
+        ys.append(y)
+        state = nextState
+        asyncEval(y, nextState)
+        if let currentLengths = lengths {
+            lengths = currentLengths - step
+        }
+    }
+
+    let y = MLX.concatenated(ys, axis: 1) + x * D.reshaped(1, 1, h, 1)
+    guard let state else {
+        fatalError("SSM update did not produce a state")
+    }
+    eval(y, state)
+    return (y, state)
 }
 
 public func ssmUpdate(
@@ -203,7 +262,8 @@ public func ssmUpdate(
     dtBias: MLXArray,
     state: MLXArray? = nil,
     timeStepLimit: (Float, Float) = (0.001, 100.0),
-    mask: MLXArray? = nil
+    mask: MLXArray? = nil,
+    lengths: MLXArray? = nil
 ) -> (MLXArray, MLXArray) {
     let seqLen = hiddenStates.dim(1)
 
@@ -233,7 +293,8 @@ public func ssmUpdate(
             dtBias: dtBias,
             state: state,
             timeStepLimit: timeStepLimit,
-            mask: mask
+            mask: mask,
+            lengths: lengths
         )
     }
 }

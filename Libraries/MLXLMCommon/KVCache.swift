@@ -1165,6 +1165,7 @@ public class ChunkedKVCache: KVCacheSimple {
 public class ArraysCache: BaseKVCache {
     private var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
+    internal var lengths: MLXArray?
 
     public init(size: Int, leftPadding: [Int]? = nil) {
         self.cache = Array(repeating: nil, count: size)
@@ -1192,13 +1193,22 @@ public class ArraysCache: BaseKVCache {
 
     public override func copy() -> any KVCache {
         let new = ArraysCache(size: cache.count)
+        copyContents(to: new)
+        return new
+    }
+
+    internal func copyContents(to new: ArraysCache) {
         let s = self.state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
         }
         new.offset = self.offset
         new.leftPadding = self.leftPadding
-        return new
+        new.lengths = self.lengths
+    }
+
+    internal var batchSize: Int {
+        cache.lazy.compactMap { $0?.dim(0) }.first ?? leftPadding?.size ?? lengths?.size ?? 1
     }
 
     /// In-place filter to keep just the given indices in the cache
@@ -1206,24 +1216,78 @@ public class ArraysCache: BaseKVCache {
         cache = cache.map { c in
             c?[batchIndices]
         }
-        leftPadding = nil
+        leftPadding = leftPadding?[batchIndices]
+        lengths = lengths?[batchIndices]
     }
 
     /// In-place extend this cache with the other cache
     public func extend(other: ArraysCache) {
-        cache = zip(cache, other.cache).map { (c, o) in
-            if let c = c, let o = o {
-                return MLX.concatenated([c, o])
+        let aBatch = batchSize
+        let bBatch = other.batchSize
+
+        func concatenate(_ a: MLXArray?, _ b: MLXArray?) -> MLXArray? {
+            guard let example = a ?? b else {
+                return nil
             }
-            return c ?? o
+
+            let suffixShape = Array(example.shape.dropFirst())
+            let dtype = example.dtype
+            let lhs = a ?? MLXArray.zeros([aBatch] + suffixShape, dtype: dtype)
+            let rhs = b ?? MLXArray.zeros([bBatch] + suffixShape, dtype: dtype)
+            return MLX.concatenated([lhs, rhs])
         }
+
+        cache = zip(cache, other.cache).map { c, o in
+            concatenate(c, o)
+        }
+        leftPadding = concatenate(leftPadding, other.leftPadding)
+        lengths = concatenate(lengths, other.lengths)
+    }
+
+    public func prepare(lengths: [Int]?) {
+        self.lengths = lengths.map { MLXArray($0) }
+    }
+
+    public func prepare(lengths: MLXArray?) {
+        self.lengths = lengths
+    }
+
+    public func finalize() {
+        lengths = nil
         leftPadding = nil
     }
 
-    /// Create attention mask based on left padding
+    public func advance(_ N: Int) {
+        if let currentLengths = lengths {
+            lengths = currentLengths - N
+        }
+        if let currentLeftPadding = leftPadding {
+            leftPadding = currentLeftPadding - N
+        }
+    }
+
+    public var currentLengths: MLXArray? {
+        lengths
+    }
+
+    internal var leftPaddingValues: [Int]? {
+        guard let leftPadding else { return nil }
+        return leftPadding.asArray(Int.self)
+    }
+
+    internal var presentSlotIndices: [Int] {
+        cache.enumerated().compactMap { (i, v) in v != nil ? i : nil }
+    }
+
+    internal var slotCount: Int { cache.count }
+
+    /// Create attention mask based on left padding or prepared sequence lengths
     public func makeMask(N: Int) -> MLXArray? {
-        if cache[0] == nil, let leftPadding = leftPadding {
-            return MLXArray(0 ..< N) .>= leftPadding[0..., .newAxis]
+        let positions = MLXArray(0 ..< N)
+        if let leftPadding {
+            return positions .>= leftPadding[0..., .newAxis]
+        } else if let lengths {
+            return positions .< lengths[0..., .newAxis]
         } else {
             return nil
         }
@@ -1231,16 +1295,23 @@ public class ArraysCache: BaseKVCache {
 
     // MARK: - Serialization
 
-    /// metaState format: [slotCount, presentSlots (comma-separated), leftPadding (comma-separated, optional)]
+    /// metaState format: [slotCount, presentSlots, leftPadding?, lengths?]
     /// Legacy format (BaseKVCache default): [""]
     public override var metaState: [String] {
         get {
+            let leftPaddingState = Self.serializeMetadata(leftPadding)
+            let lengthsState = Self.serializeMetadata(lengths)
             var result = [
                 "\(cache.count)",
                 presentSlotIndices.map(String.init).joined(separator: ","),
             ]
-            if let lp = leftPaddingValues {
-                result.append(lp.map(String.init).joined(separator: ","))
+            if let leftPaddingState {
+                result.append(leftPaddingState)
+            } else if lengthsState != nil {
+                result.append("")
+            }
+            if let lengthsState {
+                result.append(lengthsState)
             }
             return result
         }
@@ -1258,34 +1329,27 @@ public class ArraysCache: BaseKVCache {
             let presentSlots =
                 savedMetaState[1].isEmpty
                 ? [] : savedMetaState[1].split(separator: ",").compactMap { Int($0) }
-            let lp: [Int]? =
-                savedMetaState.count >= 3
-                ? savedMetaState[2].split(separator: ",").compactMap({ Int($0) }) : nil
 
             self.cache = Array(repeating: nil, count: slotCount)
             for (arrayIdx, slotIdx) in presentSlots.enumerated()
             where slotIdx < slotCount && arrayIdx < state.count {
                 self.cache[slotIdx] = state[arrayIdx]
             }
-            self.leftPadding = lp.map { MLXArray($0) }
+            self.leftPadding = Self.metadataArray(savedMetaState, at: 2)
+            self.lengths = Self.metadataArray(savedMetaState, at: 3)
         } else {
             // Legacy: best-effort, state is compacted
             self.cache = state.map { $0 as MLXArray? }
         }
     }
 
-    /// Total number of slots (including nil)
-    internal var slotCount: Int { cache.count }
-
-    /// Indices of non-nil slots
-    internal var presentSlotIndices: [Int] {
-        cache.enumerated().compactMap { (i, v) in v != nil ? i : nil }
+    private static func serializeMetadata(_ array: MLXArray?) -> String? {
+        array?.asArray(Int.self).map(String.init).joined(separator: ",")
     }
 
-    /// Left padding values as Int array, or nil
-    internal var leftPaddingValues: [Int]? {
-        guard let lp = leftPadding else { return nil }
-        return lp.asArray(Int.self)
+    private static func metadataArray(_ state: [String], at index: Int) -> MLXArray? {
+        guard state.indices.contains(index), !state[index].isEmpty else { return nil }
+        return MLXArray(state[index].split(separator: ",").compactMap { Int($0) })
     }
 }
 
@@ -1297,12 +1361,7 @@ public class MambaCache: ArraysCache {
 
     public override func copy() -> any KVCache {
         let new = MambaCache()
-        let s = self.state
-        if !s.isEmpty {
-            new.state = s.map { $0[.ellipsis] }
-        }
-        new.offset = self.offset
-        new.leftPadding = self.leftPadding
+        copyContents(to: new)
         return new
     }
 }
@@ -1351,6 +1410,28 @@ public class CacheList: BaseKVCache {
         let copiedCaches = caches.map { $0.copy() }
         let new = CacheList(caches: copiedCaches)
         return new
+    }
+
+    public func prepare(lengths: [Int]?) {
+        forEachArraysCache { $0.prepare(lengths: lengths) }
+    }
+
+    public func prepare(lengths: MLXArray?) {
+        forEachArraysCache { $0.prepare(lengths: lengths) }
+    }
+
+    public func finalize() {
+        forEachArraysCache { $0.finalize() }
+    }
+
+    private func forEachArraysCache(_ body: (ArraysCache) -> Void) {
+        for cache in caches {
+            if let arrays = cache as? ArraysCache {
+                body(arrays)
+            } else if let list = cache as? CacheList {
+                list.forEachArraysCache(body)
+            }
+        }
     }
 
     public override var isTrimmable: Bool {
