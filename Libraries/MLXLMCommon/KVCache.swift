@@ -12,6 +12,16 @@ public enum RoPEOffset {
     case batch(MLXArray)
 }
 
+/// Strategy used when converting a standard KV cache to a compressed cache.
+public enum KVCacheQuantizationStrategy: String, Sendable {
+    /// Existing affine MLX quantization over K and V with one shared bit-width.
+    case affine
+
+    /// Experimental KVarN-inspired path: Hadamard rotation, tile variance normalization,
+    /// and axis-aware quantization of completed tiles.
+    case varianceNormalized
+}
+
 /// Implementation of KV cache functionality for MLX Swift
 ///
 ///
@@ -167,6 +177,19 @@ public protocol QuantizedKVCacheProtocol: KVCache {
     /// Useful for accessing cached data without adding new tokens.
     /// - Returns: Current quantized state, or nil if cache is empty
     func getQuantizedState() -> ((MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?))?
+}
+
+/// Protocol for caches that can update and compute attention from their own storage layout.
+public protocol KVCacheAttentionProtocol: KVCache {
+    /// Update the cache with new K/V tensors and compute attention without first returning a
+    /// fully materialized cache tensor pair.
+    func updateAndAttend(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray
 }
 
 /// Base cache implementation providing default behaviors
@@ -797,7 +820,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
-private func resolvedKVQuantizationGroupSize(
+func resolvedKVQuantizationGroupSize(
     requested: Int,
     keyHeadDim: Int,
     valueHeadDim: Int
@@ -933,7 +956,6 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
                 "KV cache quantization requires head dimensions divisible by one of the supported group sizes (32, 64, 128). Requested group size: \(groupSize). Key head dim: \(kHeadDim). Value head dim: \(vHeadDim)."
             )
         }
-
         // Check if we need to expand the cache
         if self.keys == nil || (prev + numSteps) > self.keys!.0.dim(-2) {
             let newSteps = ((step + numSteps - 1) / step) * step
@@ -1560,6 +1582,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
+    case is VarianceNormalizedKVCache: return "VarianceNormalizedKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
@@ -1696,6 +1719,25 @@ private func restoreCacheFromMetaState(
         let cache = QuantizedKVCache()
         cache.state = state
         cache.metaState = metaState
+        return cache
+
+    case "VarianceNormalizedKVCache":
+        guard metaState.count == 7,
+            let tileSize = Int(metaState[0]),
+            let keyBits = Int(metaState[2]),
+            let valueBits = Int(metaState[3]),
+            let sinkhornIterations = Int(metaState[4])
+        else {
+            throw KVCacheError(
+                message: "Invalid VarianceNormalizedKVCache metaState - expected 7 values")
+        }
+        let cache = VarianceNormalizedKVCache(
+            tileSize: tileSize,
+            keyBits: keyBits,
+            valueBits: valueBits,
+            sinkhornIterations: sinkhornIterations)
+        cache.metaState = metaState
+        cache.state = state
         return cache
 
     case "ChunkedKVCache":
@@ -1901,44 +1943,13 @@ public func quantizedScaledDotProductAttention(
     }
 
     // Compute attention scores using quantized matmul
-    var scores = quantizedMM(
+    let scores = quantizedMM(
         scaledQueries, qKeys.0, scales: qKeys.1, biases: qKeys.2,
         transpose: true, groupSize: groupSize, bits: bits,
         mode: mode
     )
 
-    // Apply mask
-    switch mask {
-    case .causal:
-        let (qL, kL) = (scores.dim(-2), scores.dim(-1))
-        let qIndices = MLXArray(0 ..< qL) + MLXArray(kL - qL)
-        let kIndices = MLXArray(0 ..< kL)
-        let causalMask = greaterEqual(
-            expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray(Float.leastNormalMagnitude))
-
-    case .array(let maskArray):
-        if maskArray.dtype == .bool {
-            scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
-        } else {
-            scores = scores + maskArray
-        }
-
-    case .arrays(let maskArrays):
-        // Handle multiple mask arrays - just use the first one for simplicity
-        if let maskArray = maskArrays.first {
-            if maskArray.dtype == .bool {
-                scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
-            } else {
-                scores = scores + maskArray
-            }
-        }
-
-    case .none:
-        break
-    }
-
-    let attentionWeights = softmax(scores, axis: -1)
+    let attentionWeights = softmax(applyAttentionMask(scores: scores, mask: mask), axis: -1)
 
     // Compute output using quantized matmul
     var output = quantizedMM(
@@ -1953,6 +1964,90 @@ public func quantizedScaledDotProductAttention(
     }
 
     return output
+}
+
+func applyAttentionMask(
+    scores: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode
+) -> MLXArray {
+    let maskedValue = MLXArray(-Float.greatestFiniteMagnitude)
+
+    switch mask {
+    case .causal:
+        let (qL, kL) = (scores.dim(-2), scores.dim(-1))
+        let qIndices = MLXArray(0 ..< qL) + MLXArray(kL - qL)
+        let kIndices = MLXArray(0 ..< kL)
+        let causalMask = greaterEqual(
+            expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
+        return MLX.where(causalMask, scores, maskedValue)
+
+    case .array(let maskArray):
+        if maskArray.dtype == .bool {
+            return MLX.where(maskArray, scores, maskedValue)
+        } else {
+            return scores + maskArray
+        }
+
+    case .arrays(let maskArrays):
+        if let maskArray = maskArrays.first {
+            if maskArray.dtype == .bool {
+                return MLX.where(maskArray, scores, maskedValue)
+            } else {
+                return scores + maskArray
+            }
+        }
+        return scores
+
+    case .none:
+        return scores
+    }
+}
+
+func attentionScores(
+    queries: MLXArray,
+    keys: MLXArray,
+    scale: Float
+) -> MLXArray {
+    let (batchSize, queryHeadCount, queryLength, headDim) = (
+        queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3)
+    )
+    let kvHeadCount = keys.dim(1)
+    let repeats = queryHeadCount / kvHeadCount
+    let scaledQueries = queries * scale
+
+    if repeats > 1 {
+        let groupedQueries = scaledQueries.reshaped([
+            batchSize, kvHeadCount, repeats, queryLength, headDim,
+        ])
+        let groupedKeys = expandedDimensions(keys, axis: -3)
+        return matmul(groupedQueries, groupedKeys.transposed(0, 1, 2, 4, 3))
+            .reshaped(batchSize, queryHeadCount, queryLength, keys.dim(2))
+    } else {
+        return matmul(scaledQueries, keys.transposed(0, 1, 3, 2))
+    }
+}
+
+func attentionValues(
+    weights: MLXArray,
+    values: MLXArray,
+    queryHeadCount: Int
+) -> MLXArray {
+    let (batchSize, _, queryLength, keyLength) = (
+        weights.dim(0), weights.dim(1), weights.dim(2), weights.dim(3)
+    )
+    let kvHeadCount = values.dim(1)
+    let repeats = queryHeadCount / kvHeadCount
+
+    if repeats > 1 {
+        let groupedWeights = weights.reshaped([
+            batchSize, kvHeadCount, repeats, queryLength, keyLength,
+        ])
+        let groupedValues = expandedDimensions(values, axis: -3)
+        return matmul(groupedWeights, groupedValues)
+            .reshaped(batchSize, queryHeadCount, queryLength, values.dim(3))
+    } else {
+        return matmul(weights, values)
+    }
 }
 
 // MARK: - Dynamic Cache Quantization
@@ -1973,7 +2068,10 @@ public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    strategy: KVCacheQuantizationStrategy = .affine,
+    kvValueBits: Int? = nil,
+    kvTileSize: Int = 128
 ) {
     guard let kvBits = kvBits, !cache.isEmpty else { return }
 
@@ -1988,6 +2086,23 @@ public func maybeQuantizeKVCache(
     for i in 0 ..< cache.count {
         // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
+            if strategy == .varianceNormalized {
+                let state = simpleCache.state
+                guard state.count == 2,
+                    supportsVarianceNormalizedKVCache(
+                        keyHeadDim: state[0].dim(3),
+                        valueHeadDim: state[1].dim(3),
+                        tileSize: kvTileSize)
+                else {
+                    continue
+                }
+                cache[i] = simpleCache.toVarianceNormalized(
+                    tileSize: kvTileSize,
+                    keyBits: kvBits,
+                    valueBits: kvValueBits ?? kvBits)
+                continue
+            }
+
             let state = simpleCache.state
             if state.count == 2 {
                 let keyHeadDim = state[0].dim(3)
