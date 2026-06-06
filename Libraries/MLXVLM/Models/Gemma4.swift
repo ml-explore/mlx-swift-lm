@@ -620,11 +620,12 @@ private final class Gemma4TextAttention: Module {
     let useKEqV: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    // Optional: KV-shared layers reuse an earlier layer's K/V and own no k_proj/v_proj/k_norm.
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
     @ModuleInfo(key: "q_norm") var qNorm: Gemma4RMSNormZeroShift
-    @ModuleInfo(key: "k_norm") var kNorm: Gemma4RMSNormZeroShift
+    @ModuleInfo(key: "k_norm") var kNorm: Gemma4RMSNormZeroShift?
     @ModuleInfo(key: "v_norm") var vNorm: Gemma4RMSNormNoScale
     @ModuleInfo var rope: OffsetLayer
 
@@ -646,15 +647,21 @@ private final class Gemma4TextAttention: Module {
         self.isKVSharedLayer = layerIdx >= firstKVSharedLayer && firstKVSharedLayer > 0
 
         self._qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        self._kProj.wrappedValue = Linear(config.hiddenSize, numKVHeads * headDim, bias: false)
-        if !useKEqV {
-            self._vProj.wrappedValue = Linear(
-                config.hiddenSize, numKVHeads * headDim, bias: false)
+        // KV-shared layers (the last `num_kv_shared_layers`) reuse an earlier layer's K/V,
+        // so they own no k_proj/v_proj/k_norm. QAT checkpoints prune those; create them only
+        // for the KV-owning layers so the module tree matches the checkpoint. (Redundant
+        // ones in PTQ checkpoints are dropped in `sanitize`.)
+        if !isKVSharedLayer {
+            self._kProj.wrappedValue = Linear(config.hiddenSize, numKVHeads * headDim, bias: false)
+            if !useKEqV {
+                self._vProj.wrappedValue = Linear(
+                    config.hiddenSize, numKVHeads * headDim, bias: false)
+            }
+            self._kNorm.wrappedValue = Gemma4RMSNormZeroShift(
+                dimensions: headDim, eps: config.rmsNormEps)
         }
         self._oProj.wrappedValue = Linear(numHeads * headDim, config.hiddenSize, bias: false)
         self._qNorm.wrappedValue = Gemma4RMSNormZeroShift(
-            dimensions: headDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: headDim, eps: config.rmsNormEps)
         self._vNorm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
 
@@ -690,6 +697,13 @@ private final class Gemma4TextAttention: Module {
             currentOffset = offset ?? 0
             kvState = sharedKV
         } else {
+            // Only KV-owning layers reach here (KV-shared layers always get `sharedKV`),
+            // so k_proj and k_norm are guaranteed to exist.
+            guard let kProj, let kNorm else {
+                fatalError(
+                    "Gemma4 layer \(layerIdx) computed its own K/V but has no k_proj/k_norm; "
+                        + "KV-shared layers must be passed sharedKV.")
+            }
             currentOffset = cache?.offset ?? 0
             var keys = kProj(x).reshaped(batch, length, numKVHeads, headDim)
             var values =
@@ -889,7 +903,9 @@ private final class Gemma4TextBackbone: Module {
     @ModuleInfo(key: "layers") var layers: [Gemma4TextDecoderLayer]
     @ModuleInfo(key: "norm") var norm: Gemma4RMSNormZeroShift
     @ModuleInfo(key: "embed_tokens_per_layer") var embedTokensPerLayer: Embedding?
-    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: Gemma4ScaledLinear?
+    // A plain Linear (not a custom ScaledLinear) so `quantize()` can convert it for QAT
+    // checkpoints; the hidden_size**-0.5 scale is applied in the forward. (Mirrors #320.)
+    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: Linear?
     @ModuleInfo(key: "per_layer_projection_norm") var perLayerProjectionNorm:
         Gemma4RMSNormZeroShift?
 
@@ -929,10 +945,10 @@ private final class Gemma4TextBackbone: Module {
                 embeddingCount: config.vocabularySizePerLayerInput,
                 dimensions: config.hiddenLayers * config.hiddenSizePerLayerInput
             )
-            self._perLayerModelProjection.wrappedValue = Gemma4ScaledLinear(
-                inFeatures: config.hiddenSize,
-                outFeatures: config.hiddenLayers * config.hiddenSizePerLayerInput,
-                scalar: pow(Float(config.hiddenSize), -0.5)
+            self._perLayerModelProjection.wrappedValue = Linear(
+                config.hiddenSize,
+                config.hiddenLayers * config.hiddenSizePerLayerInput,
+                bias: false
             )
             self._perLayerProjectionNorm.wrappedValue = Gemma4RMSNormZeroShift(
                 dimensions: config.hiddenSizePerLayerInput, eps: config.rmsNormEps)
@@ -963,7 +979,10 @@ private final class Gemma4TextBackbone: Module {
             return nil
         }
 
+        // hidden_size**-0.5 scale that the old Gemma4ScaledLinear baked in (now applied here
+        // so the projection can be a plain, quantizable Linear — mirrors #320).
         var perLayerProjection = perLayerModelProjection(inputsEmbeds)
+            * pow(Float(config.hiddenSize), -0.5)
         perLayerProjection = perLayerProjection.reshaped(
             Array(inputsEmbeds.shape.dropLast()) + [
                 config.hiddenLayers, config.hiddenSizePerLayerInput,
@@ -1151,8 +1170,28 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         var sanitized: [String: MLXArray] = [:]
         sanitized.reserveCapacity(weights.count + 1)
 
+        let firstKVSharedLayer = config.hiddenLayers - config.numKVSharedLayers
         for (key, value) in weights {
             if key.contains("rotary_emb") {
+                continue
+            }
+            // Drop redundant k_proj/v_proj/k_norm for KV-shared layers (they reuse an earlier
+            // layer's K/V and own none). QAT checkpoints already omit these; some (PTQ) ship
+            // them — dropping makes both load against the now-smaller module tree.
+            // SCOPE: text backbone only. The vision tower (`vision_tower.encoder.layers.N`)
+            // shares the `layers.N.self_attn.{k,v}_proj` naming, so without this guard the
+            // drop would amputate vision layers ≥ firstKVSharedLayer (15) and trigger a
+            // `keyNotFound` for their clip bounds / projections.
+            if firstKVSharedLayer > 0,
+                !key.contains("vision_tower"),
+                !key.contains("audio_tower"),
+                key.contains("self_attn.k_proj")
+                    || key.contains("self_attn.v_proj")
+                    || key.contains("self_attn.k_norm"),
+                let r = key.range(of: "layers."),
+                let li = Int(key[r.upperBound...].prefix { $0.isNumber }),
+                li >= firstKVSharedLayer
+            {
                 continue
             }
 
