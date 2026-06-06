@@ -72,6 +72,15 @@ public struct GenerateParameters: Sendable {
     /// Step to begin using a quantized KV cache when kvBits is non-nil (default: 0)
     public var quantizedKVStart: Int
 
+    /// Quantization transform to use for KV cache compression.
+    public var kvQuantizationStrategy: KVCacheQuantizationStrategy
+
+    /// Number of bits to use for cached values. If nil, ``kvBits`` is used.
+    public var kvValueBits: Int?
+
+    /// Tile size for variance-normalized KV cache quantization.
+    public var kvTileSize: Int
+
     /// Sampling temperature
     public var temperature: Float
 
@@ -108,6 +117,9 @@ public struct GenerateParameters: Sendable {
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
+        kvQuantizationStrategy: KVCacheQuantizationStrategy = .affine,
+        kvValueBits: Int? = nil,
+        kvTileSize: Int = 128,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -125,6 +137,9 @@ public struct GenerateParameters: Sendable {
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
+        self.kvQuantizationStrategy = kvQuantizationStrategy
+        self.kvValueBits = kvValueBits
+        self.kvTileSize = kvTileSize
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -536,6 +551,9 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvBits: Int?
     let kvGroupSize: Int
     let quantizedKVStart: Int
+    let kvQuantizationStrategy: KVCacheQuantizationStrategy
+    let kvValueBits: Int?
+    let kvTileSize: Int
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -564,6 +582,9 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
+        self.kvQuantizationStrategy = parameters.kvQuantizationStrategy
+        self.kvValueBits = parameters.kvValueBits
+        self.kvTileSize = parameters.kvTileSize
 
         self.promptPrefillTime = try measure {
             try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
@@ -597,6 +618,9 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
         self.quantizedKVStart = parameters.quantizedKVStart
+        self.kvQuantizationStrategy = parameters.kvQuantizationStrategy
+        self.kvValueBits = parameters.kvValueBits
+        self.kvTileSize = parameters.kvTileSize
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -630,6 +654,9 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = nil
         self.kvGroupSize = 64
         self.quantizedKVStart = 0
+        self.kvQuantizationStrategy = .affine
+        self.kvValueBits = nil
+        self.kvTileSize = 128
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -680,7 +707,10 @@ public struct TokenIterator: TokenIteratorProtocol {
             cache: &cache,
             kvBits: kvBits,
             kvGroupSize: kvGroupSize,
-            quantizedKVStart: quantizedKVStart
+            quantizedKVStart: quantizedKVStart,
+            strategy: kvQuantizationStrategy,
+            kvValueBits: kvValueBits,
+            kvTileSize: kvTileSize
         )
 
         return convertToToken(logits: result.logits)
@@ -798,7 +828,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                strategy: parameters.kvQuantizationStrategy,
+                kvValueBits: parameters.kvValueBits,
+                kvTileSize: parameters.kvTileSize
             )
         }
 
