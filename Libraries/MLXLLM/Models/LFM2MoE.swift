@@ -12,6 +12,12 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private let compiledLFM2MoESiluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+    shapeless: true
+) { gate, up in
+    MLXNN.silu(gate) * up
+}
+
 public struct LFM2MoEConfiguration: Codable, Sendable {
     public let modelType: String
     public let vocabularySize: Int
@@ -255,7 +261,7 @@ class LFM2MoEMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        downProj(compiledLFM2MoESiluProduct(gateProj(x), upProj(x)))
     }
 }
 
