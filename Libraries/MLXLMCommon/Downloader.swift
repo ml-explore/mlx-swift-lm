@@ -74,6 +74,7 @@ public struct ResolvedModelConfiguration: Sendable {
     public var extraEOSTokens: Set<String>
     public var eosTokenIds: Set<Int>
     public var toolCallFormat: ToolCallFormat?
+    public var reasoningConfig: ReasoningConfig?
 
     public init(
         modelDirectory: URL,
@@ -82,7 +83,8 @@ public struct ResolvedModelConfiguration: Sendable {
         defaultPrompt: String,
         extraEOSTokens: Set<String>,
         eosTokenIds: Set<Int>,
-        toolCallFormat: ToolCallFormat?
+        toolCallFormat: ToolCallFormat?,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
@@ -91,6 +93,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 }
 
@@ -105,6 +108,7 @@ extension ResolvedModelConfiguration {
             defaultPrompt: "",
             extraEOSTokens: [],
             eosTokenIds: [],
-            toolCallFormat: nil)
+            toolCallFormat: nil,
+            reasoningConfig: nil)
     }
 }

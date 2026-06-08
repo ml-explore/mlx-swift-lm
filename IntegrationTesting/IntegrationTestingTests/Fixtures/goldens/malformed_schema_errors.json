@@ -1,0 +1,53 @@
+{
+  "errors" : [
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 0,
+      "label" : "not_json",
+      "messagePrefix" : "expected ident at line 1 column 2",
+      "outcome" : "threw",
+      "schema" : "not a schema at all"
+    },
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 1,
+      "label" : "empty_string",
+      "messagePrefix" : "EOF while parsing a value at line 1 column 0",
+      "outcome" : "threw",
+      "schema" : ""
+    },
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 2,
+      "label" : "unknown_type",
+      "messagePrefix" : "Invalid type: flibbertigibbet",
+      "outcome" : "threw",
+      "schema" : "{\"type\":\"flibbertigibbet\"}"
+    },
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 3,
+      "label" : "enum_not_array",
+      "messagePrefix" : "enum must be an array",
+      "outcome" : "threw",
+      "schema" : "{\"type\":\"string\",\"enum\":\"not-an-array\"}"
+    },
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 4,
+      "label" : "dangling_ref",
+      "messagePrefix" : "Reference segment '$defs' not found in '#\/$defs\/does-not-exist'.",
+      "outcome" : "threw",
+      "schema" : "{\"$ref\":\"#\/$defs\/does-not-exist\"}"
+    },
+    {
+      "errorCase" : "constraintCompilationFailed",
+      "index" : 5,
+      "label" : "top_level_array",
+      "messagePrefix" : "schema must be an object or boolean",
+      "outcome" : "threw",
+      "schema" : "[]"
+    }
+  ],
+  "modelId" : "mlx-community\/Qwen2.5-3B-Instruct-4bit"
+}
