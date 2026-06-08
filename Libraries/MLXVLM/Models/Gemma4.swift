@@ -1039,9 +1039,9 @@ private final class Gemma4TextBackbone: Module {
                 mask: layerMask,
                 cache: layerCache,
                 perLayerInput: layerInput,
-                sharedKV: hasExplicitCache && idx >= firstKVSharedLayerIdx
+                sharedKV: idx >= firstKVSharedLayerIdx
                     ? intermediates[sourceIdx].kv : nil,
-                offset: hasExplicitCache && idx >= firstKVSharedLayerIdx
+                offset: idx >= firstKVSharedLayerIdx
                     ? intermediates[sourceIdx].offset : nil
             )
             h = output
