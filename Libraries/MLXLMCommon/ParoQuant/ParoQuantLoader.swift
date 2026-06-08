@@ -66,7 +66,7 @@ private enum AWQ {
 /// The shift table and reorder indices are rebuilt per call rather than cached
 /// as module-level statics — they're tiny (8 × 8 bytes) and only touched at
 /// model load time, so caching bought nothing and only created thread-safety
-/// concerns around unevaluated `MLXArray`s (PR #164 review comment C2).
+/// concerns around unevaluated `MLXArray`s.
 private func unpackAndReorder(_ packed: MLXArray) -> MLXArray {
     let rows = packed.dim(0)
     let cols = packed.dim(1)

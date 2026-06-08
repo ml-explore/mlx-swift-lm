@@ -17,6 +17,7 @@
 		57DEAEDB2F83CB0A0050B4ED /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = 57DEAEDA2F83CB0A0050B4ED /* MLXEmbedders */; };
 		57DEAEDD2F83CB0A0050B4ED /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 57DEAEDC2F83CB0A0050B4ED /* MLXHuggingFace */; };
 		57DEAEDF2F83CB0A0050B4ED /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 57DEAEDE2F83CB0A0050B4ED /* MLXLLM */; };
+		FADE00000000000000000002 /* MLXFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = FADE00000000000000000001 /* MLXFoundationModels */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,6 +61,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				57DEAEDF2F83CB0A0050B4ED /* MLXLLM in Frameworks */,
+				FADE00000000000000000002 /* MLXFoundationModels in Frameworks */,
 				57408EBC2F82A947001E2121 /* Tokenizers in Frameworks */,
 				57DEAEDD2F83CB0A0050B4ED /* MLXHuggingFace in Frameworks */,
 				57DEAED72F83CB0A0050B4ED /* BenchmarkHelpers in Frameworks */,
@@ -164,6 +166,7 @@
 				57DEAEDA2F83CB0A0050B4ED /* MLXEmbedders */,
 				57DEAEDC2F83CB0A0050B4ED /* MLXHuggingFace */,
 				57DEAEDE2F83CB0A0050B4ED /* MLXLLM */,
+				FADE00000000000000000001 /* MLXFoundationModels */,
 			);
 			productName = IntegrationTestingTests;
 			productReference = 578E559C2F82A3B9001FEF6B /* IntegrationTestingTests.xctest */;
@@ -459,6 +462,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = mlx.IntegrationTestingTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) FoundationModelsIntegration GuidedGenerationSupport";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -476,6 +480,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = mlx.IntegrationTestingTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) FoundationModelsIntegration GuidedGenerationSupport";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -579,6 +584,10 @@
 		57DEAEDE2F83CB0A0050B4ED /* MLXLLM */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MLXLLM;
+		};
+		FADE00000000000000000001 /* MLXFoundationModels */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MLXFoundationModels;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -1,0 +1,8 @@
+{
+  "bosTokenString" : null,
+  "constructionStatus" : "ok",
+  "eosTokenId" : 151645,
+  "eosTokenString" : "<|im_end|>",
+  "modelId" : "mlx-community\/Qwen2.5-3B-Instruct-4bit",
+  "vocabSize" : 151665
+}
