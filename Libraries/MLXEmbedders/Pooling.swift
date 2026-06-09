@@ -63,7 +63,7 @@ func loadPooling(modelDirectory: URL, model: EmbeddingModel) -> Pooling {
 ///
 /// `Pooling` takes the sequence of hidden states from a transformer model and collapses them
 /// into a single vector using strategies like mean, max, or token selection.
-open class Pooling: Module {
+public struct Pooling: Sendable {
 
     /// Supported pooling strategies.
     public enum Strategy: Sendable {
@@ -82,10 +82,10 @@ open class Pooling: Module {
     }
 
     /// The active strategy used for pooling hidden states.
-    public private(set) var strategy: Strategy
+    public let strategy: Strategy
 
     /// Optional dimension to truncate the resulting embedding to.
-    public private(set) var dimension: Int?
+    public let dimension: Int?
 
     /// Initializes a `Pooling` module with a specific strategy.
     /// - Parameters:
