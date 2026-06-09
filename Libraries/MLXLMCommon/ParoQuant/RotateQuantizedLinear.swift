@@ -84,8 +84,7 @@ private func metalSource(
 // MARK: - Kernel Cache
 
 /// Cached compiled Metal kernels keyed by tile size, guarded by `kernelCacheLock`.
-/// Callers are multi-threaded (each `ModelContainer.perform` closure can run on its
-/// own task), so the dictionary read-modify-write is serialised. Contention is
+/// Callers are multi-threaded, so the dictionary read-modify-write is serialised. Contention is
 /// practically nil — only two tile sizes (1 and 4) are ever requested, so the lock
 /// is contended exactly twice per process before steady-state hits.
 nonisolated(unsafe) private var kernelCache: [Int: MLXFast.MLXFastKernel] = [:]

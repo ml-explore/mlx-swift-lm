@@ -13,7 +13,7 @@ Core implementation:
 - `Libraries/MLXLMCommon/WiredMemoryPolicies.swift`
 - `Libraries/MLXLMCommon/WiredMemoryUtils.swift`
 - `Libraries/MLXLMCommon/Evaluate.swift`
-- `Libraries/MLXLMCommon/ModelContainer.swift`
+- `Libraries/MLXLMCommon/ModelContainer.swift` (deprecated; `ModelContext`, which is `Sendable`, is the current entry point)
 
 ## Ticket Flow
 

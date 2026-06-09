@@ -149,7 +149,7 @@ Models not in registries can be loaded by ID:
 ```swift
 // Any mlx-community model
 let config = ModelConfiguration(id: "mlx-community/SomeModel-4bit")
-let container = try await LLMModelFactory.shared.loadContainer(
+let context = try await LLMModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: config

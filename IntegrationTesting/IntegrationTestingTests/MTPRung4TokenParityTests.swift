@@ -36,13 +36,6 @@ private func mtpFixturesDirOrSkip(name: String) async -> URL? {
 // expensive (~30–60s); the `@Suite(.serialized)` wrapper below ensures
 // the three Rung 4 case methods run sequentially, and this module-level
 // cache reuses one (drafter, target) pair across all three.
-//
-// `Gemma4AssistantDraftModel` is deliberately non-Sendable (see the
-// design note at Gemma4Assistant.swift:153–155 — Embedding is a
-// reference type and cross-domain access must go through
-// `MTPDrafterContainer.perform`). `nonisolated(unsafe)` is appropriate
-// here because the suite is serialized — only one test runs at a time,
-// and the cache becomes read-only after first population.
 
 private struct Rung4BoundDrafter {
     let drafter: Gemma4AssistantDraftModel

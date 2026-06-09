@@ -33,17 +33,21 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 
 ### Architecture Overview
 ```
-MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, wired memory helpers)
+MLXLMCommon     - Core infra (ModelContext, ChatSession, Evaluate, KVCache, wired memory helpers)
 MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc.)
 MLXVLM          - Vision-Language Models (Qwen-VL, PaliGemma, Gemma3, etc.)
 MLXEmbedders    - Embedding models and pooling utilities
 ```
 
+`ModelContext` (the model + tokenizer + processor bundle) is `Sendable` — its
+model is wrapped in a `MaterializedModule` — so you pass it directly across
+tasks and actors. `ModelContainer` is deprecated.
+
 ## 2. Key File Reference
 
 | Purpose | File Path |
 |---------|-----------|
-| Thread-safe model wrapper | `Libraries/MLXLMCommon/ModelContainer.swift` |
+| Sendable model bundle (`ModelContext`) | `Libraries/MLXLMCommon/ModelFactory.swift` |
 | Simplified chat API | `Libraries/MLXLMCommon/ChatSession.swift` |
 | Generation & streaming APIs | `Libraries/MLXLMCommon/Evaluate.swift` |
 | KV cache types | `Libraries/MLXLMCommon/KVCache.swift` |
@@ -68,13 +72,13 @@ import MLXLMCommon
 import MLXLMHuggingFace  // from swift-huggingface-mlx
 import MLXLMTokenizers   // from swift-tokenizers-mlx
 
-let modelContainer = try await LLMModelFactory.shared.loadContainer(
+let context = try await LLMModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
-let session = ChatSession(modelContainer)
+let session = ChatSession(context)
 
 let response = try await session.respond(to: "What is Swift?")
 print(response)
@@ -92,13 +96,13 @@ import MLXLMCommon
 import MLXLMHuggingFace  // from swift-huggingface-mlx
 import MLXLMTokenizers   // from swift-tokenizers-mlx
 
-let modelContainer = try await VLMModelFactory.shared.loadContainer(
+let context = try await VLMModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),
     configuration: .init(id: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 )
 
-let session = ChatSession(modelContainer)
+let session = ChatSession(context)
 let image = UserInput.Image.url(imageURL)
 
 let response = try await session.respond(
@@ -115,20 +119,18 @@ import MLXEmbedders
 import MLXEmbeddersHuggingFace  // from swift-huggingface-mlx
 import MLXLMTokenizers          // from swift-tokenizers-mlx
 
-let container = try await loadModelContainer(
+let context = try await EmbedderModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),
     configuration: ModelConfiguration(id: "mlx-community/bge-small-en-v1.5-mlx")
 )
 
-let embeddings = await container.perform { model, tokenizer, pooler in
-    let tokens = tokenizer.encode(text: "Hello world")
-    let input = MLXArray(tokens).expandedDimensions(axis: 0)
-    let output = model(input)
-    let pooled = pooler(output, normalize: true)
-    eval(pooled)
-    return pooled
-}
+// EmbedderModelContext is Sendable — use its members directly
+let tokens = context.tokenizer.encode(text: "Hello world")
+let input = MLXArray(tokens).expandedDimensions(axis: 0)
+let output = context.model(input)
+let pooled = context.pooling(output, normalize: true)
+eval(pooled)
 ```
 
 ## 4. Primary Workflow: LLM Inference
@@ -139,7 +141,7 @@ let embeddings = await container.perform { model, tokenizer, pooler in
 
 ```swift
 let session = ChatSession(
-    modelContainer,
+    context,
     instructions: "You are a helpful assistant",
     generateParameters: GenerateParameters(maxTokens: 500, temperature: 0.7)
 )
@@ -150,17 +152,19 @@ let r2 = try await session.respond(to: "And if you multiply that by 3?")
 await session.clear()
 ```
 
-### Streaming with `ModelContainer.generate(...)`
+### Streaming with `generate(...)`
 
-For lower-level control, prepare `UserInput` and generate directly:
+For lower-level control, prepare `UserInput` and generate directly on the
+`ModelContext` (which is `Sendable`, so no container/actor is needed):
 
 ```swift
 let userInput = UserInput(prompt: "Hello")
-let lmInput = try await modelContainer.prepare(input: userInput)
+let lmInput = try context.processor.prepare(input: userInput)
 
-let stream = try await modelContainer.generate(
+let stream = try generate(
     input: lmInput,
-    parameters: GenerateParameters()
+    parameters: GenerateParameters(),
+    context: context
 )
 
 for await generation in stream {
@@ -207,8 +211,8 @@ let userInput = UserInput(
     tools: [weatherTool.schema]
 )
 
-let lmInput = try await modelContainer.prepare(input: userInput)
-let stream = try await modelContainer.generate(input: lmInput, parameters: GenerateParameters())
+let lmInput = try context.processor.prepare(input: userInput)
+let stream = try generate(input: lmInput, parameters: GenerateParameters(), context: context)
 
 for await generation in stream {
     switch generation {
@@ -251,11 +255,12 @@ let policy = WiredSumPolicy()
 let ticket = policy.ticket(size: estimatedBytes, kind: .active)
 
 let userInput = UserInput(prompt: "Summarize this text")
-let lmInput = try await modelContainer.prepare(input: userInput)
+let lmInput = try context.processor.prepare(input: userInput)
 
-let stream = try await modelContainer.generate(
+let stream = try generate(
     input: lmInput,
     parameters: GenerateParameters(),
+    context: context,
     wiredMemoryTicket: ticket
 )
 
@@ -277,7 +282,7 @@ let history: [Chat.Message] = [
     .assistant("Hi there!")
 ]
 
-let session = ChatSession(modelContainer, history: history)
+let session = ChatSession(context, history: history)
 ```
 
 ## 5. Secondary Workflow: VLM Inference
@@ -311,7 +316,7 @@ let response = try await session.respond(to: "Compare these two images", images:
 
 ```swift
 let session = ChatSession(
-    modelContainer,
+    context,
     processing: UserInput.Processing(resize: CGSize(width: 512, height: 512))
 )
 ```
@@ -322,11 +327,11 @@ let session = ChatSession(
 
 ```swift
 // DO: Prefer ChatSession for multi-turn chat UX
-let session = ChatSession(modelContainer)
+let session = ChatSession(context)
 
-// DO: Prepare UserInput before container-level generation
+// DO: Prepare UserInput before low-level generation
 let userInput = UserInput(prompt: "Hello")
-let lmInput = try await modelContainer.prepare(input: userInput)
+let lmInput = try context.processor.prepare(input: userInput)
 
 // DO: Use task-handle variants for early-stop scenarios
 let (stream, task) = generateTask(
@@ -342,14 +347,14 @@ await task.value
 
 // DO: Use wired tickets when coordinating concurrent workloads
 let ticket = WiredSumPolicy().ticket(size: estimatedBytes)
-let _ = try await modelContainer.generate(input: lmInput, parameters: params, wiredMemoryTicket: ticket)
+let _ = try generate(input: lmInput, parameters: params, context: context, wiredMemoryTicket: ticket)
 ```
 
 ### DON'T
 
 ```swift
-// DON'T: Skip prepare(input:) before container-level generation.
-// ModelContainer.generate expects LMInput, not UserInput.
+// DON'T: Skip prepare(input:) before low-level generation.
+// generate(...) expects LMInput, not UserInput.
 
 // DON'T: Share MLXArray across tasks (not Sendable)
 let array = MLXArray(...)
@@ -364,9 +369,9 @@ for await item in stream {
 
 ### Thread Safety
 
-- `ModelContainer` is `Sendable` and thread-safe.
+- `ModelContext` is now `Sendable` (its model is a `MaterializedModule`); use it directly across tasks and actors.
 - `ChatSession` is not thread-safe; use one session per task/flow.
-- `MLXArray` is not `Sendable`; keep it inside one isolation domain or use `SendableBox` transfer patterns.
+- `MLXArray` is not `Sendable`; keep it inside one isolation domain, or snapshot it with `array.materialized()` (a Sendable `MaterializedArray`) or use `SendableBox` transfer patterns.
 
 ### Memory Management
 
@@ -380,7 +385,7 @@ await session.clear()
 
 | Reference | When to Use |
 |-----------|-------------|
-| [references/model-container.md](references/model-container.md) | Loading models, ModelContainer API, ModelConfiguration |
+| [references/model-container.md](references/model-container.md) | Loading models, the Sendable `ModelContext`, `ModelConfiguration` (deprecated `ModelContainer`) |
 | [references/generation.md](references/generation.md) | `generate`, `generateTask`, raw token streaming APIs |
 | [references/wired-memory.md](references/wired-memory.md) | Wired tickets, policies, budgeting, reservations |
 | [references/kv-cache.md](references/kv-cache.md) | Cache types, memory optimization, cache serialization |

@@ -143,7 +143,7 @@ public enum WiredMemoryUtils {
         seedText: String = " hello",
         resetPeakMemory: Bool = true
     ) async throws -> WiredMemoryMeasurement {
-        let weights = context.model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
+        let weights = context.model.parameterNBytes
 
         let input = makeTokenInput(
             count: tokenCount,
@@ -193,7 +193,7 @@ public enum WiredMemoryUtils {
         parameters: GenerateParameters,
         resetPeakMemory: Bool = true
     ) async throws -> WiredMemoryMeasurement {
-        let weights = context.model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
+        let weights = context.model.parameterNBytes
 
         let startActive = Memory.activeMemory
         if resetPeakMemory {

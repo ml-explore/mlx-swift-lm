@@ -2,7 +2,7 @@
 
 ## Overview
 
-mlx-swift-lm uses Swift concurrency with specialized utilities to handle the unique constraints of ML workloads: non-Sendable `MLXArray` types, long-running computations, and thread-safe model access.
+mlx-swift-lm uses Swift concurrency with specialized utilities to handle the unique constraints of ML workloads: non-Sendable `MLXArray` types, long-running computations, and thread-safe model access.  There is a `MaterializedArray` that is a subclass of MLXArray and it is sendable.  `MaterializedModule` can wrap a `Module` and provide Sendable access as well.
 
 **File:** `Libraries/MLXLMCommon/Utilities/SerialAccessContainer.swift`
 
@@ -13,7 +13,9 @@ mlx-swift-lm uses Swift concurrency with specialized utilities to handle the uni
 | `SerialAccessContainer<T>` | Exclusive async access to wrapped state |
 | `AsyncMutex` | Lock that works with async blocks |
 | `SendableBox<T>` | Transfer non-Sendable values across isolation |
-| `ModelContainer` | Thread-safe model wrapper (uses SerialAccessContainer) |
+| `MaterializedArray` | `Sendable` snapshot of an `MLXArray` (immutable, evaluated) |
+| `MaterializedModule` | `Sendable` wrapper of a `Module` (materialized, sealed) |
+| `ModelContext` / `EmbedderModelContext` | `Sendable` model bundles (model is a `MaterializedModule`) |
 | `ChatSession` | NOT thread-safe (single task only) |
 
 ## SerialAccessContainer
@@ -75,29 +77,16 @@ Transfer non-Sendable values across isolation boundaries:
 
 ```swift
 // Problem: LMInput is not Sendable
-let input: LMInput = ...
+let iterator: IteratorProtocol = ...
 Task {
-    use(input)  // Compiler error!
+    use(iterator)  // Compiler error!
 }
 
 // Solution: Use SendableBox
-let box = SendableBox(input)
+let box = SendableBox(iterator)
 Task {
-    let input = box.consume()  // Transfer ownership
-    use(input)
-}
-```
-
-### Pattern: Consuming Parameters
-
-```swift
-func processAsync(input: consuming LMInput) async throws -> Result {
-    let boxed = SendableBox(input)
-
-    return try await container.read { context in
-        let input = boxed.consume()  // Consume inside closure
-        return try process(input, context: context)
-    }
+    let iterator = box.consume()  // Transfer ownership
+    use(iterator)
 }
 ```
 
@@ -109,62 +98,24 @@ let v1 = box.consume()  // OK
 let v2 = box.consume()  // fatalError: "value already consumed"
 ```
 
-## ModelContainer Thread Safety
-
-`ModelContainer` uses `SerialAccessContainer` internally:
-
-```swift
-public final class ModelContainer: Sendable {
-    private let context: SerialAccessContainer<ModelContext>
-
-    // Thread-safe access
-    public func perform<R: Sendable>(
-        _ action: @Sendable (ModelContext) async throws -> R
-    ) async rethrows -> R
-}
-```
-
-### Safe Usage
-
-```swift
-// Multiple tasks can call perform() safely
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
-    id: "mlx-community/Qwen3-4B-4bit"
-)
-
-Task {
-    await container.perform { context in
-        // Exclusive access to model
-    }
-}
-
-Task {
-    await container.perform { context in
-        // Waits for first task to complete
-    }
-}
-```
-
 ## ChatSession Thread Safety
 
-`ChatSession` is NOT thread-safe. Use from a single task:
+`ChatSession` is NOT thread-safe (it is a class and has mutable properties). Use from a single task:
 
 ```swift
 // WRONG: Multiple tasks using same session
-let session = ChatSession(container)
+let session = ChatSession(context)
 Task { await session.respond(to: "A") }  // Race condition!
 Task { await session.respond(to: "B") }
 
 // CORRECT: Single task per session
-let session = ChatSession(container)
+let session = ChatSession(context)
 let r1 = await session.respond(to: "A")
 let r2 = await session.respond(to: "B")
 
-// Or: Separate sessions per task
+// Or: Separate sessions per task (ModelContext is Sendable, so share it freely)
 Task {
-    let session = ChatSession(container)  // Own session
+    let session = ChatSession(context)  // Own session
     await session.respond(to: "...")
 }
 ```
@@ -271,38 +222,94 @@ task.cancel()  // Stream terminates
 
 `MLXArray` is NOT `Sendable`. Strategies:
 
-### 1. Eval Before Returning
+### 1. Use item() to extract a value:
 
 ```swift
-await container.perform { context in
-    let result = context.model(input)
-    eval(result)  // Evaluate before crossing boundary
-    return result.item(Float.self)  // Return primitive
-}
+let result = context.model(input)
+eval(result)                 // Evaluate before crossing boundary
+let value = result.item(Float.self)  // Return a primitive (Sendable)
 ```
 
-### 2. Use SendableBox for Transfer
+### 2. Use MaterializedArray for Transfer
 
 ```swift
-let box = SendableBox(array)
+let snapshot = array.materialized()  // MaterializedArray: a Sendable snapshot
 Task {
-    let array = box.consume()
-    // Use array in this task only
+    // Use snapshot safely across the isolation boundary.
+    // Operations on it still produce ordinary lazy MLXArray results.
+    let doubled = snapshot * 2
+    eval(doubled)
 }
 ```
 
 ### 3. Keep Arrays Within Isolation
 
 ```swift
-// All array operations in same perform block
-await container.perform { context in
-    let a = model(input1)
-    let b = model(input2)
-    let combined = a + b
-    eval(combined)
-    return combined.item()
-}
+// Keep all array operations in the same isolation domain
+let a = context.model(input1)
+let b = context.model(input2)
+let combined = a + b
+eval(combined)
+let value = combined.item(Float.self)
 ```
+
+## MaterializedArray and MaterializedModule
+
+These two `@unchecked Sendable` types are what let a `ModelContext` cross
+isolation boundaries safely, so you can pass it directly instead of hiding a
+model behind a `ModelContainer` actor.
+
+### MaterializedArray
+
+A subclass of `MLXArray` that holds a fully-evaluated, immutable snapshot.
+
+```swift
+// Create from an existing array
+let snapshot = array.materialized()   // or: materialize(array)
+
+// Usable anywhere an MLXArray is expected
+let y = snapshot + 1                   // produces an ordinary lazy MLXArray
+```
+
+- It is `Sendable`, so it can be captured by another task/actor.
+- It is immutable: attempting to mutate it in place traps.
+- Operations on it produce ordinary lazy `MLXArray` results (only the snapshot
+  itself is materialized).
+
+### MaterializedModule
+
+A `Sendable` wrapper around a `Module` (`MaterializedModule<LayerType: Module>`).
+
+```swift
+let sealed = MaterializedModule(module)
+```
+
+On init it evaluates and materializes all of the module's parameters and then
+SEALS the module against mutation: `update`, `apply`, `freeze`, and `train`
+all trap. Protocol conformances are added via extensions constrained on
+`LayerType` (e.g. `extension MaterializedModule: LanguageModel where LayerType: LanguageModel`),
+so a sealed language model is still usable for inference.
+
+### Why this matters for ModelContext
+
+`ModelContext` and `EmbedderModelContext` are now `Sendable` because their model
+is a `MaterializedModule`. You use them directly across tasks and actors — no
+`ModelContainer` actor and no `perform { }` block:
+
+```swift
+let context = try await LLMModelFactory.shared.load(
+    from: HubClient.default,
+    using: TokenizersLoader(),
+    configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
+)
+
+let input = try context.processor.prepare(input: UserInput(prompt: "Hello"))
+let stream = try generate(input: input, parameters: .init(), context: context)
+```
+
+Because the model is sealed, you cannot mutate/train it or call
+`context.model.update(parameters:)` (it traps). To modify weights or apply LoRA
+adapters, load a mutable `TrainableModelContext` via `loadTrainable(...)` instead.
 
 ## Async Evaluation
 

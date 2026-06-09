@@ -17,8 +17,8 @@ import CoreGraphics
 ///
 /// Example usage:
 /// ```swift
-/// let main  = try await LLMModelFactory.shared.loadContainer(configuration: mainConfig)
-/// let draft = try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+/// let main  = try await LLMModelFactory.shared.load(configuration: mainConfig)
+/// let draft = try await LLMModelFactory.shared.load(configuration: draftConfig)
 ///
 /// let session = ChatSession(
 ///     main,
@@ -36,15 +36,15 @@ import CoreGraphics
 ///         draftModelBytes: estimatedDraftBytes,
 ///         memoryPolicy: .recommendedWorkingSet
 ///     ) {
-///         try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+///         try await LLMModelFactory.shared.load(configuration: draftConfig)
 ///     }
 /// )
 /// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
     package enum DraftModelSource: Sendable {
-        case loaded(ModelContainer)
-        case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
+        case loaded(ModelContext)
+        case deferred(bytes: Int, @Sendable () async throws -> ModelContext)
     }
 
     package let draftModelSource: DraftModelSource
@@ -54,7 +54,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// Configurations initialized with a loader closure return `nil` because the
     /// draft model is loaded asynchronously by ``ChatSession`` only when speculation
     /// is admitted by the memory policy.
-    public var draftModel: ModelContainer? {
+    public var draftModel: ModelContext? {
         if case .loaded(let draftModel) = draftModelSource {
             return draftModel
         }
@@ -72,7 +72,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
 
     public init(
-        draftModel: ModelContainer,
+        draftModel: ModelContext,
         numDraftTokens: Int = 5,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) {
@@ -97,7 +97,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         draftModelBytes: Int,
         numDraftTokens: Int = 5,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
-        loadDraftModel: @escaping @Sendable () async throws -> ModelContainer
+        loadDraftModel: @escaping @Sendable () async throws -> ModelContext
     ) {
         self.draftModelSource = .deferred(bytes: max(0, draftModelBytes), loadDraftModel)
         self.numDraftTokens = numDraftTokens
@@ -111,7 +111,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         return bytes
     }
 
-    package func loadDraftModel() async throws -> ModelContainer {
+    package func loadDraftModel() async throws -> ModelContext {
         switch draftModelSource {
         case .loaded(let draftModel):
             draftModel
@@ -126,8 +126,8 @@ public struct SpeculativeDecodingConfig: Sendable {
 /// For example:
 ///
 /// ```swift
-/// let modelContainer = try await loadModelContainer(id: "mlx-community/Qwen3-4B-4bit")
-/// let session = ChatSession(modelContainer)
+/// let model = try await loadModel(id: "mlx-community/Qwen3-4B-4bit")
+/// let session = ChatSession(model)
 /// print(try await session.respond(to: "What are two things to see in San Francisco?"))
 /// print(try await session.respond(to: "How about a great place to eat?"))
 /// ```
@@ -135,16 +135,16 @@ public struct SpeculativeDecodingConfig: Sendable {
 /// To enable speculative decoding for faster generation, pass a `SpeculativeDecodingConfig`:
 ///
 /// ```swift
-/// let draft = try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+/// let draft = try await LLMModelFactory.shared.load(configuration: draftConfig)
 /// let session = ChatSession(
-///     modelContainer,
+///     model,
 ///     speculativeDecoding: SpeculativeDecodingConfig(draftModel: draft)
 /// )
 /// ```
 ///
 /// - Note: `ChatSession` is not thread-safe. Each session should be used from a single
-///   task/thread at a time. The underlying `ModelContainer` handles thread safety for
-///   model operations.
+///   task/thread at a time. The `ModelContext` it holds is `Sendable` (its model is a
+///   `MaterializedModule`), so it can be shared across sessions and tasks.
 public final class ChatSession {
 
     enum Cache {
@@ -157,10 +157,12 @@ public final class ChatSession {
         case history([Chat.Message])
     }
 
-    private let model: ModelContainer
+    private let modelContext: ModelContext
     public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
-    private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
+
+    // note: this is in a SerialAccessContainer because it can be loaded on the fly
+    private let loadedDraftModel: SerialAccessContainer<ModelContext?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
     public var additionalContext: [String: any Sendable]?
@@ -181,6 +183,7 @@ public final class ChatSession {
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
+    @available(*, deprecated, message: "use ModelContext variant instead")
     public init(
         _ model: ModelContainer,
         instructions: String? = nil,
@@ -191,7 +194,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = model
+        self.modelContext = model.modelContext
         self.instructions = instructions
         self.cache = .init(.empty)
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -224,7 +227,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = ModelContainer(context: model)
+        self.modelContext = model
         self.instructions = instructions
         self.cache = .init(.empty)
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -250,10 +253,11 @@ public final class ChatSession {
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
+    @available(*, deprecated, message: "use ModelContext variant instead")
     public init(
         _ model: ModelContainer,
         instructions: String? = nil,
-        history: consuming [Chat.Message],
+        history: [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
@@ -261,7 +265,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = model
+        self.modelContext = model.modelContext
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -298,7 +302,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = ModelContainer(context: model)
+        self.modelContext = model
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -333,6 +337,7 @@ public final class ChatSession {
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
+    @available(*, deprecated, message: "use ModelContext variant instead")
     public init(
         _ model: ModelContainer,
         instructions: String? = nil,
@@ -344,7 +349,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = model
+        self.modelContext = model.modelContext
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -390,7 +395,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = ModelContainer(context: model)
+        self.modelContext = model
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -414,9 +419,9 @@ public final class ChatSession {
     public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video],
-        audios: consuming [UserInput.Audio]
+        images: [UserInput.Image],
+        videos: [UserInput.Video],
+        audios: [UserInput.Audio]
     ) async throws -> String {
         var output = ""
         for try await chunk in streamResponse(
@@ -439,9 +444,9 @@ public final class ChatSession {
     public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        image: consuming UserInput.Image? = nil,
-        video: consuming UserInput.Video? = nil,
-        audio: consuming UserInput.Audio? = nil
+        image: UserInput.Image? = nil,
+        video: UserInput.Video? = nil,
+        audio: UserInput.Audio? = nil
     ) async throws -> String {
         try await respond(
             to: prompt,
@@ -465,7 +470,7 @@ public final class ChatSession {
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: the model's response
     public func respond(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) async throws -> String {
         var output = ""
         for try await chunk in streamResponse(to: messages) {
@@ -486,9 +491,9 @@ public final class ChatSession {
     public func streamResponse(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = []
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = []
     ) -> AsyncThrowingStream<String, Error> {
         streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
             $0.chunk
@@ -503,7 +508,7 @@ public final class ChatSession {
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) -> AsyncThrowingStream<String, Error> {
         streamMap(messages: messages) {
             $0.chunk
@@ -522,9 +527,9 @@ public final class ChatSession {
     public func streamDetails(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = [],
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = [],
     ) -> AsyncThrowingStream<Generation, Error> {
         streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
             $0
@@ -539,7 +544,7 @@ public final class ChatSession {
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: a stream of `Generation` from the model
     public func streamDetails(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) -> AsyncThrowingStream<Generation, Error> {
         streamMap(messages: messages) {
             $0
@@ -558,9 +563,9 @@ public final class ChatSession {
     private func streamMap<R: Sendable>(
         to prompt: String,
         role: Chat.Message.Role,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = [],
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = [],
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         streamMap(
@@ -572,50 +577,29 @@ public final class ChatSession {
     }
 
     private func streamMap<R: Sendable>(
-        messages: consuming [Chat.Message],
+        messages inputMessages: [Chat.Message],
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
-        // images and videos are not Sendable (MLXArray) but they are consumed
-        // and are only being sent to the inner async
-        let inputMessages = SendableBox<[Chat.Message]>(messages)
-
         let task = Task {
             [
-                model,
+                modelContext,
                 instructions, processing, tools, toolDispatch,
                 additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
             ] in
             do {
                 try await cache.update { cache in
 
-                    // these are all Sendable
-                    let processor = await model.processor
-                    let tokenizer = await model.tokenizer
-                    let modelConfiguration = await model.configuration
+                    let model = modelContext.model
+                    let processor = modelContext.processor
+                    let tokenizer = modelContext.tokenizer
+                    let modelConfiguration = modelContext.configuration
 
                     var messages: [Chat.Message] = []
                     if let instructions {
                         messages.append(.system(instructions))
                     }
-
-                    // prepare the cache, if needed.  note:
-                    // this is using the LanguageModel (not Sendable) outside
-                    // the protective lock.  Assuming the weights are not
-                    // being mutated behind the scenes, this will obey the MLXArray
-                    // contract that they be evaluated if used across threads.
-                    // This is internal to the implementation and this technique
-                    // should not be used in calling code.
-                    //
-                    // The benefit is that callers can be running multiple
-                    // ChatSessions in parallel, as long as the instances
-                    // are distinct.  In particular the KVCache cannot
-                    // be shared and that is the lock that is held here.
-
-                    let model = await model.perform { context in
-                        SendableBox(context.model)
-                    }.consume()
 
                     var kvCache: [KVCache]
                     var draftKVCache: [KVCache]?
@@ -641,7 +625,7 @@ public final class ChatSession {
                     }
 
                     // prepare the input
-                    messages.append(contentsOf: inputMessages.consume())
+                    messages.append(contentsOf: inputMessages)
 
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
@@ -684,9 +668,7 @@ public final class ChatSession {
                                     speculativeDecoding.estimatedDraftModelBytes
                             {
                                 let memoryEvaluation = memoryPolicy.evaluate(
-                                    mainModelBytes:
-                                        SpeculativeDecodingMemoryPolicy
-                                        .modelWeightBytes(model),
+                                    mainModelBytes: model.parameterNBytes,
                                     draftModelBytes: draftModelBytes
                                 )
                                 if !memoryEvaluation.shouldUseSpeculativeDecoding {
@@ -702,18 +684,14 @@ public final class ChatSession {
                             if shouldFallBackBeforeLoadingDraft {
                                 (genStream, genTask) = try defaultGeneration()
                             } else {
-                                let cachedDraftContainer = await loadedDraftModel.read { $0 }
-                                let draftContainer: ModelContainer
-                                if let cachedDraftContainer {
-                                    draftContainer = cachedDraftContainer
+                                let cachedDraftContext = await loadedDraftModel.read { $0 }
+                                let draftContext: ModelContext
+                                if let cachedDraftContext {
+                                    draftContext = cachedDraftContext
                                 } else {
-                                    draftContainer = try await speculativeDecoding.loadDraftModel()
+                                    draftContext = try await speculativeDecoding.loadDraftModel()
                                 }
-
-                                // Extract the draft model from its container (same pattern as the main model).
-                                let draftModel = await draftContainer.perform { context in
-                                    SendableBox(context.model)
-                                }.consume()
+                                let draftModel = draftContext.model
 
                                 let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
                                     mainModel: model,
@@ -729,10 +707,12 @@ public final class ChatSession {
 
                                     (genStream, genTask) = try defaultGeneration()
                                 } else {
-                                    if cachedDraftContainer == nil {
+                                    if cachedDraftContext == nil {
+                                        // The draft model can be loaded on the fly so it is
+                                        // protected by a SerialAccessContainer
                                         await loadedDraftModel.update { storedDraftModel in
                                             if storedDraftModel == nil {
-                                                storedDraftModel = draftContainer
+                                                storedDraftModel = draftContext
                                             }
                                         }
                                     }
@@ -845,9 +825,9 @@ public final class ChatSession {
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
-        image: consuming UserInput.Image? = nil,
-        video: consuming UserInput.Video? = nil,
-        audio: consuming UserInput.Audio? = nil
+        image: UserInput.Image? = nil,
+        video: UserInput.Video? = nil,
+        audio: UserInput.Audio? = nil
     ) -> AsyncThrowingStream<String, Error> {
         streamResponse(
             to: prompt,

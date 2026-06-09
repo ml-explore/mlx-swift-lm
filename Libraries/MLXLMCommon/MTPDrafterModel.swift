@@ -2,7 +2,7 @@
 
 import Foundation
 import MLX
-import MLXNN
+@_spi(MaterializedModule) import MLXNN
 
 /// Protocol for Multi-Token Prediction (MTP) speculative drafter models.
 ///
@@ -59,26 +59,44 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ) -> MLXArray
 }
 
+public typealias TrainableMTPDrafterModel = MTPDrafterModel & Module
+
+extension MaterializedModule: MTPDrafterModel where LayerType: MTPDrafterModel {
+
+    public func draftBlock(
+        target: any LanguageModel, lastToken: MLXArray, lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)], queryOffset: Int, blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        _base.draftBlock(
+            target: target,
+            lastToken: lastToken, lastHidden: lastHidden,
+            sharedKV: sharedKV, queryOffset: queryOffset,
+            blockSize: blockSize, sampler: sampler)
+    }
+}
+
 /// Lightweight context for an MTP drafter — simpler than `ModelContext`
 /// because drafters have no tokenizer, no user input processor, no chat
 /// template.
-///
-/// Not `Sendable`; cross-domain access goes through ``MTPDrafterContainer``.
-public struct MTPDrafterContext {
+public struct MTPDrafterContext: Sendable {
     public var configuration: ModelConfiguration
-    public var model: any MTPDrafterModel
+    public var model: any MTPDrafterModel & Sendable
 
-    public init(configuration: ModelConfiguration, model: any MTPDrafterModel) {
+    public init(configuration: ModelConfiguration, model: some TrainableMTPDrafterModel) {
         self.configuration = configuration
-        self.model = model
+        self.model = MaterializedModule(model)
     }
 }
 
 /// Sendable container for an ``MTPDrafterContext``.
 ///
+/// * Important: `MTPDrafterContext` is now `Sendable` and can be used directly.
+///
 /// Mirrors the ``ModelContainer`` pattern: a `final class : Sendable` that
 /// wraps the non-Sendable context in a `SerialAccessContainer` and exposes
 /// async `perform(_:)` closures for serialized access.
+@available(*, deprecated, message: "use MTPDrafterContext instead")
 public final class MTPDrafterContainer: Sendable {
     private let context: SerialAccessContainer<MTPDrafterContext>
 
@@ -102,6 +120,8 @@ public final class MTPDrafterContainer: Sendable {
         }
     }
 }
+
+public typealias MTPDrafterContainerConstraint = MTPDrafterContainer
 
 // MARK: - Cross-model state keys
 //

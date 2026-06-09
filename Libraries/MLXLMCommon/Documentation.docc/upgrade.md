@@ -48,7 +48,7 @@ import HuggingFace
 import Tokenizers
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
-let model = try await #huggingFaceLoadModelContainer(
+let model = try await #huggingFaceLoadModel(
     configuration: modelConfiguration
 )
 
@@ -67,7 +67,7 @@ import HuggingFace
 import Tokenizers
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
-let model = try await loadModelContainer(
+let model = try await loadModel(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
     configuration: modelConfiguration
@@ -99,7 +99,7 @@ import MLXLMCommon
 import IntegrationPackage
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
-let model = try await loadModelContainer(
+let model = try await loadModel(
     from: HubClient(),
     configuration: modelConfiguration
 )
@@ -145,8 +145,8 @@ let defaultModelConfiguration = EmbedderRegistry.nomic_text_v1_5
 let hub = #hubDownloader()
 let loader = #huggingFaceTokenizerLoader()
 
-// MLXEmbedders.loadModelContainer (free function) -> EmbedderModelFactory.shared.loadContainer
-let container = try await EmbedderModelFactory.shared.loadContainer(
+// MLXEmbedders.loadModelContainer (free function) -> EmbedderModelFactory.shared.load
+let context = try await EmbedderModelFactory.shared.load(
     from: hub,
     using: loader,
     configuration: configuration
@@ -161,7 +161,7 @@ These types are removed or replaced:
 - `ModelConfiguration.nomic_text_v1_5` -> `EmbedderRegistry.nomic_text_v1_5`
 - `BaseConfiguration` -> use MLXLMCommon
 - `ModelType` - removed
-- `ModelContainer` -> EmbedderModelContainer and EmbedderModelContext (matches LLM/VLM concepts)
+- `ModelContainer` -> EmbedderModelContext (matches LLM/VLM concepts; `EmbedderModelContainer` is deprecated)
 - `load()` free functions -> EmbedderModelFactory
 
 ## Release Notes
@@ -188,7 +188,7 @@ let container = try await loadModelContainer(
 // After (3.x) – Using HuggingFace integration macros
 import MLXHuggingFace
 
-let model = try await #huggingFaceLoadModelContainer(
+let model = try await #huggingFaceLoadModel(
     configuration: LLMRegistry.gemma3_1B_qat_4bit
 )
 ```
@@ -202,13 +202,13 @@ Loading from a local directory:
 let container = try await loadModelContainer(directory: modelDirectory)
 
 // After (3.x)
-let container = try await loadModelContainer(from: modelDirectory)
+let context = try await loadModel(from: modelDirectory)
 ```
 
 Loading with a model factory:
 
 ```swift
-let container = try await LLMModelFactory.shared.loadContainer(
+let context = try await LLMModelFactory.shared.load(
     from: HubClient.default,
     configuration: modelConfiguration
 )
@@ -271,4 +271,61 @@ The `defaultHubApi` global has been removed. Hugging Face Hub access is now prov
 - `loadTokenizerConfig(configuration:hub:)` → `AutoTokenizer.from(directory:)`
 - `ModelFactory._load(hub:configuration:progressHandler:)` → `_load(configuration: ResolvedModelConfiguration)`
 - `ModelFactory._loadContainer`: removed (base `loadContainer` now builds the container from `_load`)
+
+## `ModelContext` is now Sendable
+
+`ModelContext` (and `EmbedderModelContext`) are now `Sendable`: the model they
+hold is wrapped in a `MaterializedModule`, which evaluates and materializes all
+of its parameters and seals the module against mutation. This means you can hold
+a `ModelContext` and pass it directly across tasks and actors -- there is no
+longer any need for a container wrapper to coordinate access.
+
+Because of this the `ModelContainer` / `EmbedderModelContainer` wrappers are
+deprecated, along with their `perform`, async property accessors, and `update`
+methods. Instead of:
+
+```swift
+let result = try await modelContainer.perform { [input] context in
+    let input = try context.processor.prepare(input: input)
+    return generate(input: input, parameters: parameters, context: context) { ... }
+}
+```
+
+use the `ModelContext` directly:
+
+```swift
+let input = try context.processor.prepare(input: input)
+let result = generate(input: input, parameters: parameters, context: context) { ... }
+```
+
+The loading APIs are renamed to return a `ModelContext` rather than a container:
+
+- `loadModelContainer(...)` → `loadModel(...)`
+- `factory.loadContainer(...)` → `factory.load(...)`
+- `#huggingFaceLoadModelContainer(...)` → `#huggingFaceLoadModel(...)`
+
+The old names remain as deprecated aliases.
+
+### Training and Adapters
+
+Because a `ModelContext`'s model is materialized and sealed, it cannot be
+mutated -- so it cannot be used for training or applying adapters (e.g. LoRA).
+For those use cases load a trainable model instead, which returns a mutable
+`TrainableModelContext`:
+
+- free function `loadTrainable(...)`
+- `factory.loadTrainable(...)`
+- macro `#huggingFaceLoadTrainableModel(configuration:progressHandler:)`
+
+Once training is complete you can convert a `TrainableModelContext` into an
+inference `ModelContext` with `ModelContext(trainableContext)`.
+
+### Crossing Isolation Boundaries with MLXArray
+
+A plain `MLXArray` is still not `Sendable` and remains lazy. To move array data
+across an isolation boundary, read a scalar with `.item()` or convert it to a
+Sendable snapshot with `array.materialized()`, which yields a
+`MaterializedArray` -- a fully-evaluated, immutable `MLXArray` you can use
+anywhere an `MLXArray` is expected.
+
 

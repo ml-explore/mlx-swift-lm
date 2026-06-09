@@ -2,10 +2,14 @@
 
 import Foundation
 import MLX
-import MLXNN
+@_spi(MaterializedModule) import MLXNN
 
 /// Abstract form of a model that processes language.
-public protocol BaseLanguageModel: Module {
+public protocol BaseLanguageModel {
+
+    /// Sum of all the `nbytes` of the parameters in the encapsulated model.
+    var parameterNBytes: Int { get }
+
     /// Optionally preprocess the weights and modify / remove values as needed.
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
 
@@ -36,6 +40,14 @@ extension BaseLanguageModel {
         sanitize(weights: weights)
     }
 }
+
+extension BaseLanguageModel where Self: Module {
+    public var parameterNBytes: Int {
+        parameters().reduce(0) { $0 + $1.nbytes }
+    }
+}
+
+public typealias TrainableBaseLanguageModel = BaseLanguageModel & Module
 
 /// Time/Height/Width struct to represent information about input images.
 public struct THW: Sendable {
@@ -298,5 +310,48 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         } else {
             return (0 ..< numLayers).map { _ in KVCacheSimple() }
         }
+    }
+}
+
+/// A mutable and trainable LanguageModel.
+///
+/// This is a `Module` so it can be fine tuned, e.g. with LoRA.  It is _not_ Sendable.
+///
+/// See also ``TrainableModelContext`` and ``ModelContext``.
+public typealias TrainableLanguageModel = LanguageModel & Module
+
+extension MaterializedModule: BaseLanguageModel where LayerType: BaseLanguageModel {
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        _base.sanitize(weights: weights)
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+        MLXArray]
+    {
+        _base.sanitize(weights: weights, metadata: metadata)
+    }
+}
+
+extension MaterializedModule: LanguageModel where LayerType: LanguageModel {
+
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int?
+    ) throws -> PrepareResult {
+        try _base.prepare(input, cache: cache, state: state, windowSize: windowSize)
+    }
+
+    public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+        -> LMOutput
+    {
+        _base.callAsFunction(input, cache: cache, state: state)
+    }
+
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        _base.callAsFunction(inputs, cache: cache)
+    }
+
+    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        _base.newCache(parameters: parameters)
     }
 }

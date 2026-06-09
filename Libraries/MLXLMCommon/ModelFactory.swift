@@ -1,6 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
+import MLXNN
 
 /// File patterns required to resolve a tokenizer without downloading model weights.
 package let tokenizerDownloadPatterns = ["*.json", "*.jinja"]
@@ -62,24 +63,60 @@ public protocol ModelConfigurationValidating {
 
 /// Context of types that work together to provide a ``LanguageModel``.
 ///
-/// A ``ModelContext`` is created by ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// A ``ModelContext`` is `Sendable` and is created by ``loadModel(from:using:configuration:useLatest:progressHandler:)``
+/// or ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This contains the following:
 ///
 /// - ``ModelConfiguration``: identifier for the model
-/// - ``LanguageModel``: the model itself, see ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``
+/// - ``LanguageModel``: the model itself (wrapped in a `MaterializedModule`), see ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``
 /// - ``UserInputProcessor``: can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///
-/// See also ``GenericModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
+/// See also the deprecated ``GenericModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
 /// ``ModelContainer``.
-public struct ModelContext {
+public struct ModelContext: Sendable {
     public var configuration: ModelConfiguration
-    public var model: any LanguageModel
+    public var model: any LanguageModel & Sendable
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
 
     public init(
-        configuration: ModelConfiguration, model: any LanguageModel,
+        configuration: ModelConfiguration, model: some TrainableLanguageModel,
+        processor: any UserInputProcessor, tokenizer: any Tokenizer
+    ) {
+        self.configuration = configuration
+        self.model = MaterializedModule(model)
+        self.processor = processor
+        self.tokenizer = tokenizer
+    }
+
+    public init(_ context: consuming TrainableModelContext) {
+        self.configuration = context.configuration
+        func makeModel<T: TrainableLanguageModel>(_ m: consuming T) -> any LanguageModel & Sendable
+        {
+            MaterializedModule(m)
+        }
+        self.model = makeModel(context.model)
+        self.processor = context.processor
+        self.tokenizer = context.tokenizer
+    }
+}
+
+/// A version of ``ModelContext`` that holds a ``TrainableLanguageModel``.
+///
+/// This context contains the same properties as a `ModelContext` but the `model` is
+/// mutable and thus the context is _not_ `Sendable`.
+///
+/// Produced by ``loadTrainable(from:using:configuration:useLatest:progressHandler:)`` or the
+/// equivalent methods on `LLMModelFactory` and `VLMModelFactory`.
+public struct TrainableModelContext {
+    public var configuration: ModelConfiguration
+    public var model: any TrainableLanguageModel
+    public var processor: any UserInputProcessor
+    public var tokenizer: Tokenizer
+
+    public init(
+        configuration: ModelConfiguration, model: some TrainableLanguageModel,
         processor: any UserInputProcessor, tokenizer: any Tokenizer
     ) {
         self.configuration = configuration
@@ -105,14 +142,15 @@ public struct ModelContext {
 /// or variants.
 public protocol GenericModelFactory<ContextType, ContainerType>: Sendable {
 
-    associatedtype ContextType
+    associatedtype ContextType: Sendable
     associatedtype ContainerType: Sendable
 
     var modelRegistry: AbstractModelRegistry { get }
 
     /// load level load of a ``ResolvedModelConfiguration`` (urls) into a
-    /// ``ContextType``.  This is typically `struct` that holds the values
-    /// needed to run inference in the model and is _not_ `Sendable`.
+    /// ``ContextType``.  This is typically a `Sendable` `struct` that holds the
+    /// values needed to run inference in the model (for ``ModelContext`` the
+    /// model is wrapped in a `MaterializedModule`).
     func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
@@ -171,6 +209,9 @@ extension GenericModelFactory {
 
     /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
     /// producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
     public func loadContainer(
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
@@ -198,6 +239,9 @@ extension GenericModelFactory {
     }
 
     /// Load a model from a local directory, producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
     public func loadContainer(
         from directory: URL,
         using tokenizerLoader: any TokenizerLoader
@@ -209,16 +253,45 @@ extension GenericModelFactory {
 
 }
 
-extension GenericModelFactory where ContextType == ModelContext, ContainerType == ModelContainer {
+extension GenericModelFactory
+where ContextType == ModelContext, ContainerType == ModelContainerConstraint {
 
-    public func _wrap(_ context: ModelContext) -> ModelContainer {
+    public func _wrap(_ context: ModelContext) -> ModelContainerConstraint {
         .init(context: context)
     }
 
 }
 
+public protocol TrainableModelContextLoader {
+
+    func loadTrainable(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> sending TrainableModelContext
+}
+
+extension TrainableModelContextLoader {
+
+    public func loadTrainable(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> sending TrainableModelContext {
+        try await loadTrainable(
+            from: downloader, using: tokenizerLoader, configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
+    }
+
+}
+
 /// For backward compatibility: `ModelFactory` refers to an LLM/VLM model factory.
-public typealias ModelFactory = GenericModelFactory<ModelContext, ModelContainer>
+public typealias ModelFactory = GenericModelFactory<ModelContext, ModelContainerConstraint>
+    & TrainableModelContextLoader
 
 /// Resolve a ``ModelConfiguration`` into a ``ResolvedModelConfiguration`` by
 /// downloading remote sources via a ``Downloader``.
@@ -302,6 +375,7 @@ public func loadModel(
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
+@available(*, deprecated, message: "use loadModel instead")
 public func loadModelContainer(
     from downloader: any Downloader,
     using tokenizerLoader: any TokenizerLoader,
@@ -358,6 +432,7 @@ public func loadModel(
 ///   - useLatest: when true, always checks the provider for the latest version
 ///   - progressHandler: optional callback for progress
 /// - Returns: a ``ModelContainer``
+@available(*, deprecated, message: "use loadModel instead")
 public func loadModelContainer(
     from downloader: any Downloader,
     using tokenizerLoader: any TokenizerLoader,
@@ -376,8 +451,8 @@ public func loadModelContainer(
 
 /// Load a model from a local directory of configuration and weights.
 ///
-/// Returns a ``ModelContext`` holding the model and tokenizer without
-/// an `actor` providing an isolation context.
+/// Returns a ``ModelContext`` holding the model and tokenizer
+/// in a Sendable context.
 ///
 /// - Parameters:
 ///   - directory: directory of configuration and weights
@@ -394,6 +469,55 @@ public func loadModel(
 
 /// Load a model from a local directory of configuration and weights.
 ///
+/// Returns a ``TrainableModelContext`` holding the model and tokenizer
+/// in a non-Sendable context (suitable for training).
+///
+/// - Parameters:
+///   - directory: directory of configuration and weights
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
+/// - Returns: a ``TrainableModelContext``
+public func loadTrainable(
+    from directory: URL,
+    using tokenizerLoader: any TokenizerLoader
+) async throws -> sending TrainableModelContext {
+    try await load {
+        try await $0.loadTrainable(
+            from: LocalDownloader(url: directory),
+            using: tokenizerLoader,
+            configuration: .init(directory: directory))
+    }
+}
+
+/// Load a model given a model identifier, downloading via a ``Downloader``.
+///
+/// Returns a ``TrainableModelContext`` holding the model and tokenizer
+/// in a non-Sendable context (suitable for training).
+///
+/// - Parameters:
+///   - downloader: the ``Downloader`` to use for fetching remote resources
+///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
+///   - id: model identifier, e.g "mlx-community/Qwen3-4B-4bit"
+///   - revision: revision to download (defaults to "main")
+///   - useLatest: when true, always checks the provider for the latest version
+///   - progressHandler: optional callback for progress
+/// - Returns: a ``TrainableModelContext``
+public func loadTrainable(
+    from downloader: any Downloader,
+    using tokenizerLoader: any TokenizerLoader,
+    configuration: ModelConfiguration,
+    useLatest: Bool = false,
+    progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+) async throws -> sending TrainableModelContext {
+    try await load {
+        try await $0.loadTrainable(
+            from: downloader, using: tokenizerLoader,
+            configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
+    }
+}
+
+/// Load a model from a local directory of configuration and weights.
+///
 /// Returns a ``ModelContainer`` holding a ``ModelContext``
 /// inside an actor providing isolation control for the values.
 ///
@@ -401,6 +525,7 @@ public func loadModel(
 ///   - directory: directory of configuration and weights
 ///   - tokenizerLoader: the ``TokenizerLoader`` to use for loading the tokenizer
 /// - Returns: a ``ModelContainer``
+@available(*, deprecated, message: "use loadModel instead")
 public func loadModelContainer(
     from directory: URL,
     using tokenizerLoader: any TokenizerLoader
@@ -457,7 +582,7 @@ private func load<R>(loader: (any ModelFactory) async throws -> sending R) async
 /// ## See Also
 /// - ``ModelFactoryRegistry``
 public protocol ModelFactoryTrampoline {
-    static func modelFactory() -> (any GenericModelFactory<ModelContext, ModelContainer>)?
+    static func modelFactory() -> (any ModelFactory)?
 }
 
 /// Registry of ``ModelFactory`` trampolines.

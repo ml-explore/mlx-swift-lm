@@ -86,7 +86,7 @@ private func create<C: Decodable, P>(
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
-    public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+    public static let shared: ModelTypeRegistry<TrainableLanguageModel> = .init(creators: [
         "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
         "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
         "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
@@ -301,16 +301,17 @@ public typealias ModelRegistry = VLMRegistry
 /// is required.
 ///
 /// ```swift
-/// let modelContainer = try await VLMModelFactory.shared.loadContainer(
+/// let modelContainer = try await VLMModelFactory.shared.load(
 ///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
-public final class VLMModelFactory: GenericModelFactory {
+public final class VLMModelFactory: GenericModelFactory, TrainableModelContextLoader {
 
     public typealias ContextType = ModelContext
-    public typealias ContainerType = ModelContainer
+    public typealias ContainerType = ModelContainerConstraint
 
     public init(
-        typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
+        typeRegistry: ModelTypeRegistry<TrainableLanguageModel>,
+        processorRegistry: ProcessorTypeRegistry,
         modelRegistry: AbstractModelRegistry
     ) {
         self.typeRegistry = typeRegistry
@@ -324,7 +325,7 @@ public final class VLMModelFactory: GenericModelFactory {
         modelRegistry: VLMRegistry.shared)
 
     /// registry of model type, e.g. configuration value `paligemma` -> configuration and init methods
-    public let typeRegistry: ModelTypeRegistry<LanguageModel>
+    public let typeRegistry: ModelTypeRegistry<TrainableLanguageModel>
 
     /// registry of input processor type, e.g. configuration value `PaliGemmaProcessor` -> configuration and init methods
     public let processorRegistry: ProcessorTypeRegistry
@@ -332,10 +333,40 @@ public final class VLMModelFactory: GenericModelFactory {
     /// registry of model id to configuration, e.g. `mlx-community/paligemma-3b-mix-448-8bit`
     public let modelRegistry: AbstractModelRegistry
 
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``TrainableModelContext``.
+    ///
+    /// Use this when the model needs to be mutated -- e.g. for training or
+    /// applying adapters (LoRA). The model inside a ``ModelContext`` is
+    /// materialized and sealed and cannot be modified; convert a trainable
+    /// context to an inference ``ModelContext`` via `ModelContext(_:)` when done.
+    public func loadTrainable(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> sending TrainableModelContext {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return try await _loadTrainable(configuration: resolved, tokenizerLoader: tokenizerLoader)
+    }
+
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
-    ) async throws -> sending ModelContext {
+    ) async throws -> ModelContext {
+        let trainable = try await _loadTrainable(
+            configuration: configuration, tokenizerLoader: tokenizerLoader)
+        return ModelContext(trainable)
+    }
+
+    /// internal load of a TrainableModelContext that can be converted into a ModelContext
+    private func _loadTrainable(
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> TrainableModelContext {
         let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
@@ -355,7 +386,7 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let model: LanguageModel
+        let model: any TrainableLanguageModel
         do {
             model = try await typeRegistry.createModel(
                 configuration: configData, modelType: baseConfig.modelType)

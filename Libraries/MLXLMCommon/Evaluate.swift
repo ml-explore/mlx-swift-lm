@@ -1263,7 +1263,7 @@ private func runSynchronousGenerationLoop(
 ///   - extraEOSTokens: any additional stop tokens
 ///   - didGenerate: visitor for the tokens as they are generated
 @available(
-    *, deprecated,
+    *, unavailable,
     message:
         "Use the AsyncStream-based generate(input:cache:parameters:context:) instead for better Swift concurrency support"
 )
@@ -1273,21 +1273,7 @@ public func generate(
     extraEOSTokens: Set<String>? = nil,
     didGenerate: ([Int]) -> GenerateDisposition
 ) throws -> GenerateResult {
-    let tokens = MLXArray(promptTokens)
-    let iterator = try TokenIterator(
-        prompt: tokens, model: model, parameters: parameters)
-
-    // this is a compatibility cover -- create the required values
-    // for the iteration
-    let input = LMInput(tokens: tokens)
-    let configuration = ModelConfiguration(id: "stand-in", extraEOSTokens: extraEOSTokens ?? [])
-    let context = ModelContext(
-        configuration: configuration, model: model, processor: StandInUserInputProcessor(),
-        tokenizer: tokenizer)
-
-    return generate(
-        input: input, context: context, iterator: iterator,
-        didGenerate: didGenerate)
+    fatalError("not implemented")
 }
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.

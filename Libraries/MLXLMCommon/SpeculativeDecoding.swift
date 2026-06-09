@@ -188,13 +188,9 @@ public struct SpeculativeDecodingMemoryPolicy: Sendable, Hashable {
         draftModel: any LanguageModel
     ) -> SpeculativeDecodingMemoryEvaluation {
         evaluate(
-            mainModelBytes: Self.modelWeightBytes(mainModel),
-            draftModelBytes: Self.modelWeightBytes(draftModel)
+            mainModelBytes: mainModel.parameterNBytes,
+            draftModelBytes: draftModel.parameterNBytes
         )
-    }
-
-    package static func modelWeightBytes(_ model: any LanguageModel) -> Int {
-        model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
     }
 }
 

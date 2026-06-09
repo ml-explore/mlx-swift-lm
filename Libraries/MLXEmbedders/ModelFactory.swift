@@ -16,7 +16,7 @@ private func create<C: Decodable, M>(
 /// Registry of model type, e.g 'bert', to functions that can instantiate the model from configuration.
 public enum EmbedderTypeRegistry {
 
-    public static let shared: ModelTypeRegistry<EmbeddingModel> = .init(creators: [
+    public static let shared: ModelTypeRegistry<TrainableEmbeddingModel> = .init(creators: [
         "bert": create(BertConfiguration.self) { BertModel($0) },
         "roberta": create(BertConfiguration.self) { BertModel($0) },
         "xlm-roberta": create(BertConfiguration.self) { BertModel($0) },
@@ -124,16 +124,25 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
 
 /// Context of values that work together to provide an ``EmbeddingModel``.
 ///
-/// This is created using a ``EmbedderModelFactory`` and often used
-/// inside a ``EmbedderModelContainer``.
-public struct EmbedderModelContext {
+/// This is created using a ``EmbedderModelFactory``.
+public struct EmbedderModelContext: Sendable {
     public var configuration: ModelConfiguration
-    public var model: any EmbeddingModel
+    public var model: any EmbeddingModel & Sendable
     public var tokenizer: any Tokenizer
     public let pooling: Pooling
 
     public init(
-        configuration: ModelConfiguration, model: any EmbeddingModel,
+        configuration: ModelConfiguration, model: some TrainableEmbeddingModel,
+        tokenizer: any Tokenizer, pooling: Pooling
+    ) {
+        self.configuration = configuration
+        self.model = MaterializedModule(model)
+        self.tokenizer = tokenizer
+        self.pooling = pooling
+    }
+
+    public init(
+        configuration: ModelConfiguration, model: some EmbeddingModel & Sendable,
         tokenizer: any Tokenizer, pooling: Pooling
     ) {
         self.configuration = configuration
@@ -152,7 +161,7 @@ public struct EmbedderModelContext {
 /// let downloader: any Downloader
 /// let tokenizerLoader: any TokenizerLoader
 /// let modelId = "mlx-community/gemma-3-1b-it-qat-4bit"
-/// let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
+/// let modelContainer = try await EmbedderModelFactory.shared.load(
 ///     from: downloader, using: tokenizerLoader, configuration: .init(id: modelId),
 ///     progressHandler: logProgress(modelId)
 /// )
@@ -160,10 +169,10 @@ public struct EmbedderModelContext {
 public final class EmbedderModelFactory: GenericModelFactory {
 
     public typealias ContextType = EmbedderModelContext
-    public typealias ContainerType = EmbedderModelContainer
+    public typealias ContainerType = EmbedderModelContainerConstraint
 
     public init(
-        typeRegistry: ModelTypeRegistry<EmbeddingModel>,
+        typeRegistry: ModelTypeRegistry<TrainableEmbeddingModel>,
         modelRegistry: AbstractModelRegistry
     ) {
         self.typeRegistry = typeRegistry
@@ -175,7 +184,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
         typeRegistry: EmbedderTypeRegistry.shared, modelRegistry: EmbedderRegistry.shared)
 
     /// registry of model type, e.g. configuration value `gemma3` -> configuration and init methods
-    public let typeRegistry: ModelTypeRegistry<EmbeddingModel>
+    public let typeRegistry: ModelTypeRegistry<TrainableEmbeddingModel>
 
     /// registry of model id to configuration, e.g. `sentence-transformers/all-MiniLM-L6-v2`
     public let modelRegistry: AbstractModelRegistry
@@ -204,7 +213,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let model: EmbeddingModel
+        let model: any TrainableEmbeddingModel
         do {
             model = try await typeRegistry.createModel(
                 configuration: configData, modelType: baseConfig.modelType)
@@ -245,7 +254,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
         )
     }
 
-    public func _wrap(_ context: EmbedderModelContext) -> EmbedderModelContainer {
+    public func _wrap(_ context: EmbedderModelContext) -> EmbedderModelContainerConstraint {
         .init(context: context)
     }
 }
