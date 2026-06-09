@@ -871,7 +871,8 @@ struct MTPIteratorEndToEndDiagnosticTests {
             )
         } else {
             Issue.record(
-                "log[0]=\(log.recordedTokens[0]) not found in emitted[0..<3]=\(Array(emitted.prefix(3))) — content overlap broken")
+                "log[0]=\(log.recordedTokens[0]) not found in emitted[0..<3]=\(Array(emitted.prefix(3))) — content overlap broken"
+            )
         }
     }
 
