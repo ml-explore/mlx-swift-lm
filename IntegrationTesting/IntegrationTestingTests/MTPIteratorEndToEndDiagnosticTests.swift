@@ -5,7 +5,7 @@ import HuggingFace
 import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
-import MLXLMCommon
+@_spi(Testing) import MLXLMCommon
 import MLXVLM
 import Testing
 import Tokenizers
@@ -43,6 +43,20 @@ private func hfSnapshotDir(modelId: String) -> URL? {
 private struct LoadedPair {
     let context: ModelContext
     let drafter: any MTPDrafterModel
+}
+
+/// Recording `LogitProcessor` for the emit-only invariant test
+/// `testMTPLogitProcessorReceivesOnlyEmittedTokens`. Struct so that
+/// `var verifyProcessorCopy = processor` in `speculateRound` forks the
+/// `recordedTokens` array via Swift copy-on-write — mutations to the
+/// verify-loop copy do not propagate to the canonical processor.
+private struct EmissionLog: LogitProcessor {
+    var recordedTokens: [Int] = []
+    mutating func prompt(_ prompt: MLXArray) {}
+    func process(logits: MLXArray) -> MLXArray { logits }
+    mutating func didSample(token: MLXArray) {
+        recordedTokens.append(token.item(Int.self))
+    }
 }
 
 private func loadTargetAndDrafter(
@@ -737,6 +751,128 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
         // C6: passthrough produces real continuations.
         #expect(!text.isEmpty, "generated text is empty after passthrough engaged")
+    }
+
+    /// End-to-end regression for the LogitProcessor emit-only invariant.
+    /// Locks in the behavior that `MTPSpeculativeTokenIterator.processor`
+    /// (the canonical processor) receives `didSample(token:)` calls ONLY
+    /// for emitted tokens (accepted drafts + correction per round, plus
+    /// passthrough tokens if engaged). The verify loop's sampling, which
+    /// runs on a struct value-copy (`verifyProcessorCopy` inside
+    /// `speculateRound`), must NOT pollute the canonical processor.
+    ///
+    /// Uses the test-only `_setProcessorForTesting` / `_processorForTesting`
+    /// accessors (guarded by `@_spi(Testing)`) to install a recording
+    /// `EmissionLog` AFTER `init`. `init` calls `prepare()` internally,
+    /// which also calls `didSample` — but it hits the parameters-derived
+    /// processor (nil here, since no penalties are configured) rather than
+    /// the EmissionLog. The probe records speculation-round emissions only.
+    ///
+    /// Assertion: `EmissionLog.recordedTokens` is a contiguous suffix of
+    /// the emitted token stream. Equivalently, the recorded count is no
+    /// more than the emitted count, and the contents match position-by-
+    /// position from the recorded-sequence start.
+    @Test
+    func testMTPLogitProcessorReceivesOnlyEmittedTokens() async throws {
+        guard
+            let loaded = try await loadTargetAndDrafter(
+                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
+                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
+            )
+        else {
+            Issue.record(
+                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
+            )
+            return
+        }
+
+        let userInput = UserInput(chat: [
+            .user("Why is the sky blue? Explain in one paragraph.")
+        ])
+        let lmInput = try await loaded.context.processor.prepare(input: userInput)
+
+        // Construct the iterator directly so we can install the EmissionLog
+        // probe via the @_spi(Testing) setter AFTER init's prepare() has
+        // run. The invariant we're testing is internal to the iterator's
+        // verify/accept flow, not generate(...)'s task wrapping.
+        var iter = try MTPSpeculativeTokenIterator(
+            input: lmInput,
+            mainModel: loaded.context.model,
+            drafter: loaded.drafter,
+            mainCache: nil,
+            parameters: GenerateParameters(maxTokens: 32, temperature: 0),
+            blockSize: 4
+        )
+
+        iter._setProcessorForTesting(EmissionLog())
+
+        var emitted: [Int] = []
+        while let token = iter.next() {
+            emitted.append(token)
+        }
+
+        guard let log = iter._processorForTesting as? EmissionLog else {
+            Issue.record("EmissionLog probe lost between install and drain")
+            return
+        }
+
+        print(
+            "[LogitProcessor emit-only] emitted=\(emitted.count) tokens, recorded=\(log.recordedTokens.count), passthroughReason=\(iter.passthroughReason ?? "nil")"
+        )
+
+        // Under the emit-only invariant, log.recordedTokens.count is close
+        // to emitted.count — equal modulo: (a) 1–2 prepare-time bonuses
+        // the probe missed (probe was installed AFTER init's prepare()
+        // ran, so prepare's didSample hit the parameters-derived nil
+        // processor instead), and (b) up to `blockSize - 1` trailing
+        // entries from a final speculation round that began before but
+        // overshot `maxTokens` (didSample fires inside speculateRound's
+        // accept loop BEFORE pendingTokens.append; the maxTokens cap is
+        // checked at next() boundaries, so the last round's tail can
+        // exceed the emit budget).
+        //
+        // Under a regression where verify-loop didSample leaks from the
+        // local copy into the canonical processor, log size inflates
+        // by ~(numDraft + 1) / (accepted + 1) — roughly 2× at the
+        // ~50% acceptance rate of this configuration. The tight upper
+        // bound below catches that case.
+        let blockSize = 4
+        let upperBound = emitted.count + blockSize
+        let lowerBound = emitted.count - 2
+        #expect(
+            log.recordedTokens.count <= upperBound,
+            "log size \(log.recordedTokens.count) > emitted+overhang \(upperBound) — verify-loop didSample is leaking from `verifyProcessorCopy` into `self.processor`. The struct value-semantics scoping has regressed."
+        )
+        #expect(
+            log.recordedTokens.count >= lowerBound,
+            "log size \(log.recordedTokens.count) < emitted-bonuses \(lowerBound) — fewer recordings than expected. self.processor.didSample is not firing for some emitted tokens."
+        )
+        #expect(
+            iter.passthroughReason == nil,
+            "passthrough engaged unexpectedly: \(iter.passthroughReason ?? "")")
+        #expect(
+            log.recordedTokens.count >= 1,
+            "no speculation-round didSamples — speculation did not run on the canonical processor")
+
+        // Content sanity: log should overlap with emitted's speculation
+        // suffix. Detect the prepare-bonus offset by matching log[0]
+        // against the first 3 emitted positions (Gemma 4 yields 1 or 2
+        // prepare bonuses), then verify the overlapping prefix matches.
+        if let offset = (0 ..< Swift.min(3, emitted.count))
+            .first(where: { emitted[$0] == log.recordedTokens[0] })
+        {
+            let commonCount = Swift.min(
+                log.recordedTokens.count, emitted.count - offset)
+            let logPrefix = Array(log.recordedTokens.prefix(commonCount))
+            let emittedSlice = Array(emitted[offset ..< offset + commonCount])
+            #expect(
+                logPrefix == emittedSlice,
+                "recorded didSample sequence diverged from emitted-stream at offset \(offset). Recorded prefix: \(logPrefix). Emitted slice: \(emittedSlice). Verify-loop didSample is leaking from the local copy into the canonical processor."
+            )
+        } else {
+            Issue.record(
+                "log[0]=\(log.recordedTokens[0]) not found in emitted[0..<3]=\(Array(emitted.prefix(3))) — content overlap broken")
+        }
     }
 
     /// E4B failure-mode characterization. Both E-series drafters have

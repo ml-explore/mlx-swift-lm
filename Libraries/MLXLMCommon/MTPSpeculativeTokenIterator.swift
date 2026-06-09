@@ -260,13 +260,19 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Sample one main-model token per verify position.
         let mainTokens: MLXArray
-        if var verifyProcessor = processor {
+        // Local copy: process() may mutate processor state via Swift struct
+        // value semantics, but those mutations stay scoped to this verify
+        // loop. Canonical processor state at `self.processor` is only
+        // updated by the accept loop below, which evolves it across the
+        // actually-emitted tokens. This keeps rejected-draft sampling from
+        // polluting cross-round state.
+        if var verifyProcessorCopy = processor {
             var sampled = [MLXArray]()
             for i in 0 ..< (numDraft + 1) {
                 var logits = mainLogits[0..., verifyStart + i, 0...]
-                logits = verifyProcessor.process(logits: logits)
+                logits = verifyProcessorCopy.process(logits: logits)
                 let token = sampler.sample(logits: logits)
-                verifyProcessor.didSample(token: token)
+                verifyProcessorCopy.didSample(token: token)
                 sampled.append(token)
             }
             mainTokens = concatenated(sampled)
@@ -389,4 +395,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
     public var proposedDraftTokens: Int { proposedCount }
     public var acceptedDraftTokens: Int { acceptedCount }
+}
+
+extension MTPSpeculativeTokenIterator {
+    /// Test-only setter for the canonical `LogitProcessor`. Lets regression
+    /// tests install a recording probe AFTER `init` (which calls `prepare`
+    /// and would otherwise consume the prepare-time bonus before the probe
+    /// is observable). Used by the emit-only invariant regression tests in
+    /// `MTPSpeculativeTokenIteratorTests` (CI-scoped) and
+    /// `MTPIteratorEndToEndDiagnosticTests` (31B end-to-end).
+    @_spi(Testing) public mutating func _setProcessorForTesting(
+        _ processor: LogitProcessor?
+    ) {
+        self.processor = processor
+    }
+
+    /// Test-only getter for the canonical `LogitProcessor` so regression
+    /// tests can inspect its post-drain state (e.g., a recording probe's
+    /// accumulated didSample log).
+    @_spi(Testing) public var _processorForTesting: LogitProcessor? {
+        processor
+    }
 }

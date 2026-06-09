@@ -5,7 +5,7 @@ import MLX
 import MLXNN
 import Testing
 
-@testable import MLXLMCommon
+@_spi(Testing) @testable import MLXLMCommon
 
 // MARK: - Synthetic mocks for iterator plumbing
 
@@ -291,4 +291,90 @@ func testMTPIteratorPendingBufferDrainOrder() throws {
     // proposedCount = 3 (numDraft); accepted = 2.
     #expect(iter.proposedCount == 3)
     #expect(iter.acceptedCount == 2)
+}
+
+// MARK: - LogitProcessor emit-only invariant
+
+/// Records `didSample(token:)` calls so a test can verify which tokens the
+/// processor actually observed. Pure value semantics — Swift struct value
+/// copies (e.g., `var verifyProcessorCopy = processor` in `speculateRound`)
+/// produce a separate `recordedTokens` backing via array copy-on-write.
+private struct EmissionLog: LogitProcessor {
+    var recordedTokens: [Int] = []
+
+    mutating func prompt(_ prompt: MLXArray) {}
+
+    func process(logits: MLXArray) -> MLXArray { logits }
+
+    mutating func didSample(token: MLXArray) {
+        recordedTokens.append(token.item(Int.self))
+    }
+}
+
+/// Locks in the value-semantics invariant of `speculateRound`'s verify
+/// loop: `var verifyProcessorCopy = processor` makes a Swift struct copy,
+/// so `verifyProcessorCopy.didSample(...)` calls mutate the local copy
+/// and do NOT propagate back to `self.processor`. The canonical processor
+/// state at `self.processor` is updated only by the accept loop, which
+/// runs over the actually-emitted tokens (accepted drafts + correction).
+///
+/// Test scenario: bs=4 (numDraft=3), drafter proposes [5, 5, 5], main
+/// verifies and samples [5, 9, 1, 2] — only position 0 matches the draft.
+/// accepted=1, correction=9, emitted=[bonus=5, draft=5, correction=9].
+/// Verify loop's `didSample` fires four times (on the copy) for [5, 9, 1, 2].
+/// Self.processor's `didSample` should fire exactly twice (for emitted [5, 9])
+/// — NOT four times. The probe processor is installed AFTER init so the
+/// prepare-time bonus is not recorded; the test asserts on speculation-
+/// round emissions only.
+@Test
+func testMTPVerifyLoopDidSampleStaysScopedToLocalCopy() throws {
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5 (positions 0/1 unused, < vocab=20)
+        5, 9, 1, 2,  // verify positions: only position 0 matches draft
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    // maxTokens larger than the test's emit budget so `speculateRound`'s
+    // `numDraft = min(remaining, blockSize - 1)` doesn't get capped — we
+    // need the full numDraft=3 verify pass to exercise the invariant
+    // (4 verify-position samples vs only 2 emitted tokens). Control the
+    // round count by manual `next()` calls instead of draining.
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 8), blockSize: 4
+    )
+
+    // Install probe AFTER init so the prepare-time bonus didSample (which
+    // happens inside init's call to prepare()) hits the parameters-derived
+    // processor (nil here, since no penalties were configured) rather than
+    // the EmissionLog. The probe records speculation-round emissions only.
+    iter._setProcessorForTesting(EmissionLog())
+
+    // Manual drain — exactly 3 calls to cover prepare bonus + 1 accepted
+    // draft + correction. Stopping here avoids triggering a second round
+    // (which would need more `mainLogitTokens` data and would just retest
+    // the same invariant redundantly).
+    let t0 = iter.next()
+    let t1 = iter.next()
+    let t2 = iter.next()
+    #expect(t0 == 5, "prepare bonus")
+    #expect(t1 == 5, "first accepted draft")
+    #expect(t2 == 9, "correction at the first rejected position")
+    #expect(iter.proposedCount == 3, "numDraft=3 verify samples expected")
+    #expect(iter.acceptedCount == 1, "only draft[0] matched")
+
+    let log = iter._processorForTesting as? EmissionLog
+    #expect(log != nil, "probe processor lost between install and drain")
+
+    // self.processor's didSample fired exactly twice — for the accepted
+    // draft and the correction — NOT for the three other verify-position
+    // samples (9, 1, 2) which happened on the local copy. If a regression
+    // ever removes the local-copy idiom, log.recordedTokens would gain
+    // entries [9, 1, 2] from the rejected verify positions.
+    #expect(
+        log?.recordedTokens == [5, 9],
+        "self.processor.recordedTokens=\(log?.recordedTokens ?? []) — expected [5, 9] (1 accepted draft + 1 correction). Verify-loop didSample is leaking from the copy into the canonical processor."
+    )
 }
