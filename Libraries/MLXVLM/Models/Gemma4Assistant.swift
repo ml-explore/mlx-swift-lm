@@ -172,7 +172,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionIds: MLXArray,
+        queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
@@ -207,7 +207,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
             let (newHidden, logits) = forwardHidden(
                 inputsEmbeds: inputsEmbeds,
                 sharedKV: sharedKV,
-                positionIds: positionIds
+                queryOffset: queryOffset
             )
             hPrev = newHidden
             // logits: [B, L, vocab]; take last step → [B, vocab]
@@ -228,7 +228,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
     @_spi(Testing) public func forwardHidden(
         inputsEmbeds: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionIds: MLXArray
+        queryOffset: Int
     ) -> (lastHidden: MLXArray, logits: MLXArray) {
         let textCfg = config.textConfiguration
         var h = preProjection(inputsEmbeds)
@@ -237,13 +237,30 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         // Per-layer-type masks; KV tensor shape is [B, H, S, D] so axis -2 = seq.
         let fullKvLen = sharedKV["full_attention"].map { $0.0.dim(-2) } ?? 0
         let slidingKvLen = sharedKV["sliding_attention"].map { $0.0.dim(-2) } ?? 0
+        // Production invariant: the target's sliding-attention KV cache is
+        // capped at `slidingWindow` by `RotatingKVCache(maxSize:keep:)` (see
+        // `Gemma4TextLanguageModel.newCache`), so `slidingKvLen` is always
+        // bounded by `textCfg.slidingWindow`. That bound is what makes the
+        // bidirectional sliding-window mask's early-exit branch
+        // (`windowSize >= kvLen` → all-zeros mask) fire on every production
+        // call. If this invariant ever changes — e.g. a different cache
+        // policy that lets the sliding KV grow past `slidingWindow` — the
+        // mask helper's `windowSize >= kvLen` branch would NOT fire, and the
+        // helper's non-degenerate path produces an absolute-position mask
+        // that does not match the distance-from-`queryOffset` mask the
+        // drafter actually needs. Catching the violation here is much louder
+        // than a silently wrong attention pattern downstream.
+        precondition(
+            slidingKvLen <= textCfg.slidingWindow,
+            "sliding KV length \(slidingKvLen) exceeds slidingWindow \(textCfg.slidingWindow) — "
+                + "the production invariant that lets the bidirectional sliding-window "
+                + "mask early-exit to all-zeros has been violated"
+        )
         let fullMask = createBidirectionalMask(
             queryLen: queryLen, kvLen: fullKvLen, dtype: h.dtype)
         let slidingMask = createBidirectionalSlidingWindowMask(
             queryLen: queryLen, kvLen: slidingKvLen,
             windowSize: textCfg.slidingWindow, dtype: h.dtype)
-
-        let queryOffset = Int(positionIds[0, 0].item(Int32.self))
 
         for layer in model.layers {
             guard let kvPair = sharedKV[layer.layerType] else {

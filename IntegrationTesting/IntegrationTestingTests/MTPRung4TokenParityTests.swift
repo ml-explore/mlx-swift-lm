@@ -182,12 +182,17 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
     // Read blockSize from output shape: drafted_tokens is [1, blockSize - 1].
     let blockSize = expectedDrafted.dim(1) + 1
 
+    // Fixture stores position_ids as an MLXArray for parity with the Python
+    // tooling; the Swift API now takes a Swift Int. Convert here (one-time
+    // at test setup, not in a hot path).
+    let queryOffset = Int(positionIds[0, 0].item(Int32.self))
+
     let drafted = model.draftBlock(
         target: target,
         lastToken: lastToken,
         lastHidden: lastHidden,
         sharedKV: sharedKV,
-        positionIds: positionIds,
+        queryOffset: queryOffset,
         blockSize: blockSize,
         sampler: ArgMaxSampler()
     )

@@ -24,21 +24,27 @@ public func createBidirectionalMask(
     MLXArray.zeros([queryLen, kvLen], dtype: dtype)
 }
 
-/// Bidirectional sliding-window attention mask: each query attends to a
-/// contiguous window of the first `windowSize` kv positions; the remaining
-/// `kvLen - windowSize` positions are masked with `-inf`.
+/// Bidirectional sliding-window attention mask: when `kvLen` exceeds
+/// `windowSize`, each query attends to a contiguous window of the first
+/// `windowSize` kv positions; the remaining `kvLen - windowSize` positions
+/// are masked with `-inf`. When `windowSize >= kvLen` (the degenerate case
+/// — and the production MTP path, where the sliding-attention KV cache is
+/// capped at `windowSize` by `RotatingKVCache`), the helper early-exits to
+/// an all-zeros mask (every query attends to every kv position).
 ///
 /// Matches the fixture convention in `tools/fixtures/masks/` and HF
 /// Transformers' `create_bidirectional_sliding_window_mask` (after the
-/// kv-axis flip). When `windowSize >= kvLen` the entire kv axis attends
-/// (degenerate case → all zeros).
+/// kv-axis flip).
 ///
-/// Note on runtime semantics: mlx-vlm's drafter computes the SWA mask from
-/// a distance formula `|q_idx - k_idx| < windowSize` that accepts a
-/// `query_offset`. For `queryLen == 1, query_offset == 0` (the dominant MTP
-/// case) the two conventions produce identical output. Drafter call sites
-/// that need a non-zero `query_offset` should build the mask inline rather
-/// than calling this helper.
+/// Contract for the non-degenerate path (`kvLen > windowSize`): the mask
+/// is built from an absolute-position predicate (`kIdx < windowSize`), NOT
+/// a distance-from-`queryOffset` predicate. Callers that need
+/// distance-based windowing around a non-zero query offset (e.g. an mlx-vlm-
+/// style `|q_idx - k_idx| < windowSize` mask) must build the mask inline
+/// rather than calling this helper. MTP production callers don't hit this
+/// path because the target's sliding-attention cache cap keeps `kvLen` at
+/// or under `windowSize`; `Gemma4AssistantDraftModel.forwardHidden` enforces
+/// the invariant with a precondition before calling here.
 ///
 /// - Parameters:
 ///   - queryLen: number of query tokens

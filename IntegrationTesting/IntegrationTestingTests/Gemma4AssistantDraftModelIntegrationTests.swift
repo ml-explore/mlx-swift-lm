@@ -133,10 +133,14 @@ struct Gemma4AssistantIntegrationTests {
             "full_attention": (fullKeys, fullValues),
             "sliding_attention": (slidingKeys, slidingValues),
         ]
+        // Fixture stores position_ids as an MLXArray for parity with the
+        // Python tooling; the Swift API now takes a Swift Int. Convert here
+        // (one-time at test setup, not in a hot path).
+        let queryOffset = Int(positionIds[0, 0].item(Int32.self))
         let (lastHidden, logits) = model.forwardHidden(
             inputsEmbeds: inputsEmbeds,
             sharedKV: sharedKV,
-            positionIds: positionIds
+            queryOffset: queryOffset
         )
 
         // Shape parity.

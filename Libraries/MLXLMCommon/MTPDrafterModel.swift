@@ -39,7 +39,11 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///   - sharedKV: Dict keyed by `layer_type` (`"full_attention"` /
     ///     `"sliding_attention"`) mapping to `(keys, values)` `MLXArray`s for
     ///     the last layer of that layer-type in the target.
-    ///   - positionIds: Constant position for the round, shape `[B, 1]`.
+    ///   - queryOffset: Constant absolute position for the round (the
+    ///     position the bonus token sits at in the target's KV cache).
+    ///     Passed as a Swift `Int` rather than an `MLXArray` to avoid the
+    ///     `.item()` round-trip that would otherwise stall the GPU per
+    ///     speculation round.
     ///   - blockSize: Total tokens in the round (the drafter returns
     ///     `blockSize - 1`; the bonus token is implicit).
     ///   - sampler: `LogitSampler` to apply to each step's logits.
@@ -49,7 +53,7 @@ public protocol MTPDrafterModel: BaseLanguageModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionIds: MLXArray,
+        queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray

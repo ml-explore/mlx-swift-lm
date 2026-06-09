@@ -26,7 +26,7 @@ private final class MockDrafter: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionIds: MLXArray,
+        queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {

@@ -19,7 +19,7 @@ private final class MockMTPDrafter: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionIds: MLXArray,
+        queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
@@ -46,7 +46,7 @@ func testMTPDrafterModelProtocolShape() {
             "full_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
             "sliding_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
         ],
-        positionIds: MLXArray(Int32(0)).reshaped([1, 1]),
+        queryOffset: 0,
         blockSize: 4,
         sampler: ArgMaxSampler()
     )

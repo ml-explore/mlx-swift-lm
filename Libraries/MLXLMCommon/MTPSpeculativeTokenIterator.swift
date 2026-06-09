@@ -231,7 +231,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         let cacheOffset = mainCache.first?.offset ?? 0
-        let positionIds = MLXArray(Int32(cacheOffset)).reshaped([1, 1])
 
         let bonusToken = y.tokens
         let draftTokens = drafter.draftBlock(
@@ -239,7 +238,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             lastToken: bonusToken,
             lastHidden: bonusSlotHidden,
             sharedKV: sharedKV,
-            positionIds: positionIds,
+            queryOffset: cacheOffset,
             blockSize: numDraft + 1,  // total round size: bonus + numDraft
             sampler: sampler
         )
