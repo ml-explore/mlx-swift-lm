@@ -64,8 +64,8 @@ private func loadTargetAndDrafter(
 
     // Drafter — same pattern as `MTPRung4TokenParityTests.loadRung4Drafter`:
     // decode the Gemma4Assistant config, instantiate, then `loadWeights`.
-    // `MTPSpeculativeTokenIterator.init` calls `drafter.bind(target:)`
-    // internally, so explicit binding here would double-bind.
+    // No explicit binding needed: the iterator passes the target through
+    // `draftBlock(target:...)` per round.
     let cfg = try JSONDecoder().decode(
         Gemma4AssistantConfiguration.self,
         from: Data(contentsOf: drafterDir.appendingPathComponent("config.json")))

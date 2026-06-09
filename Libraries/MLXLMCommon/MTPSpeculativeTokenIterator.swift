@@ -27,8 +27,9 @@ import MLX
 ///
 /// Port of `_speculative_walk` from mlx-vlm/generate.py at SHA `d49d428`,
 /// with no-mutation-during-eval idioms (state is threaded through method
-/// args; drafter holds only bind-time references that are read-only during
-/// rounds).
+/// args; drafter holds no target-derived state — the target is passed as
+/// a parameter to `draftBlock(...)` so drafter instances are safe to share
+/// across iterators).
 public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     var y: LMInput.Text
@@ -122,9 +123,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 quantizedKVStart: parameters.quantizedKVStart
             )
         }
-
-        // Bind exactly once for the iterator's lifetime.
-        drafter.bind(target: mainModel)
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -237,6 +235,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let bonusToken = y.tokens
         let draftTokens = drafter.draftBlock(
+            target: mainModel,
             lastToken: bonusToken,
             lastHidden: bonusSlotHidden,
             sharedKV: sharedKV,

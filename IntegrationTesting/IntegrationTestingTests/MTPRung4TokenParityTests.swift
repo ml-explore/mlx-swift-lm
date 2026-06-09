@@ -40,12 +40,12 @@ private func hfSnapshotDir(modelId: String) -> URL? {
 
 // MARK: - Shared bound drafter
 //
-// Rung 4 requires the drafter to be bound against a real target so the
-// `boundInputEmbed` / `boundEmbedScale` state set by `bind(target:)` is
-// available when `draftBlock` runs. Loading the 31B 8-bit target is
+// Rung 4 requires the drafter to be paired with a real target so that the
+// target-derived constants (input embeddings, embed scale) flow through
+// `draftBlock(target:...)` per round. Loading the 31B 8-bit target is
 // expensive (~30–60s); the `@Suite(.serialized)` wrapper below ensures
 // the three Rung 4 case methods run sequentially, and this module-level
-// cache reuses one bound drafter across all three.
+// cache reuses one (drafter, target) pair across all three.
 //
 // `Gemma4AssistantDraftModel` is deliberately non-Sendable (see the
 // design note at Gemma4Assistant.swift:153–155 — Embedding is a
@@ -111,9 +111,6 @@ private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
         model: target,
         perLayerQuantization: targetBase.perLayerQuantization)
 
-    // Production bind path: mirrors `MTPSpeculativeTokenIterator.bind`.
-    drafter.bind(target: target)
-
     return Rung4BoundDrafter(drafter: drafter, target: target)
 }
 
@@ -159,6 +156,7 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
         return
     }
     let model = bound.drafter
+    let target = bound.target
 
     let fixtureURL = fixturesDir.appendingPathComponent("drafter_block/\(name).safetensors")
     let arrays = try MLX.loadArrays(url: fixtureURL)
@@ -185,6 +183,7 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
     let blockSize = expectedDrafted.dim(1) + 1
 
     let drafted = model.draftBlock(
+        target: target,
         lastToken: lastToken,
         lastHidden: lastHidden,
         sharedKV: sharedKV,

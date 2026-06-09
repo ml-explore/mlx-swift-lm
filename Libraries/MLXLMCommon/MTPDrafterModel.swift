@@ -15,22 +15,14 @@ import MLXNN
 /// different: a drafter consumes the target's last hidden state and per
 /// layer-type shared K/V, produces a block of K-1 candidate tokens in a
 /// single call, and holds no transient round-state between calls. The
-/// `MTPSpeculativeTokenIterator` (Phase B) extracts the shared K/V from the
-/// target's `LMOutput.state` and threads it to the drafter as a method
-/// argument.
+/// `MTPSpeculativeTokenIterator` extracts the shared K/V from the target's
+/// `LMOutput.state` and threads it to the drafter as a method argument.
 ///
-/// One-time binding: `bind(target:)` caches read-only references to the
-/// target's input embeddings, embed scale, and per-layer type metadata.
-/// Stored references are read-only during eval (consistent with PR #283's
-/// "no mutation during eval" invariant).
+/// Conforming types are expected to be stateless with respect to the target
+/// model: every per-round input — including the target itself — flows through
+/// `draftBlock(...)` as a method parameter. This makes drafter instances safe
+/// to share across iterators without per-iterator mutable state.
 public protocol MTPDrafterModel: BaseLanguageModel {
-    /// One-time setup. Caches references to the target's input embeddings,
-    /// embed scale, and per-layer type metadata. Must be called before any
-    /// `draftBlock(...)` invocation. Stored state is read-only during eval.
-    ///
-    /// - Parameter target: The main language model that this drafter speculates for.
-    func bind(target: any LanguageModel)
-
     /// K-step drafting from a constant position.
     ///
     /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
@@ -38,6 +30,10 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// input is threaded as a method argument.
     ///
     /// - Parameters:
+    ///   - target: The main language model this drafter is speculating for.
+    ///     Used to look up target-derived constants (input embeddings, embed
+    ///     scale, etc.) inline per round; conformers must not retain or
+    ///     mutate references derived from `target`.
     ///   - lastToken: Bonus token from the target's last verify pass, shape `[B]`.
     ///   - lastHidden: Target's last hidden state, shape `[B, 1, backbone_hidden_size]`.
     ///   - sharedKV: Dict keyed by `layer_type` (`"full_attention"` /
@@ -49,6 +45,7 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///   - sampler: `LogitSampler` to apply to each step's logits.
     /// - Returns: `[B, blockSize - 1]` token array.
     func draftBlock(
+        target: any LanguageModel,
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],

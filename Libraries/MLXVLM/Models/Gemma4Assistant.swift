@@ -149,14 +149,6 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
     @ModuleInfo(key: "lm_head") public var lmHead: Linear?
     @ModuleInfo(key: "masked_embedding") public var maskedEmbedding: Gemma4AssistantMaskedEmbedder?
 
-    // Bind-time state. Read-only during eval (consistent with PR #283's
-    // "no mutation during eval" invariant). Not `Sendable` because Embedding
-    // is a reference type; cross-domain access must go through
-    // `MTPDrafterContainer.perform`.
-    private var boundInputEmbed: Embedding?
-    private var boundEmbedScale: Float = 1.0
-    private var boundTargetLayerTypes: [String] = []
-
     public init(_ config: Gemma4AssistantConfiguration) {
         self.config = config
         let textCfg = config.textConfiguration
@@ -175,23 +167,8 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         super.init()
     }
 
-    public func bind(target: any LanguageModel) {
-        // Mirrors mlx-vlm's bind walk (gemma4_assistant.py:79-101): for Gemma 4
-        // the input embedding lives under `.language_model.model.embed_tokens`.
-        // `Gemma4TextLanguageModel` is not itself a `LanguageModel`, so we
-        // only match the top-level `Gemma4` here.
-        guard let g4 = target as? Gemma4 else {
-            fatalError(
-                "Gemma4AssistantDraftModel.bind: target is not a Gemma 4 VLM "
-                    + "(got \(type(of: target)))")
-        }
-        let backbone = g4.languageModel.model
-        self.boundInputEmbed = backbone.embedTokens
-        self.boundEmbedScale = backbone.embedScale
-        self.boundTargetLayerTypes = g4.languageModel.config.layerTypes
-    }
-
     public func draftBlock(
+        target: any LanguageModel,
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
@@ -199,9 +176,22 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
-        precondition(
-            boundInputEmbed != nil, "bind(target:) must be called before draftBlock")
         precondition(blockSize >= 2, "blockSize must be >= 2 (K-1 drafted + 1 bonus)")
+
+        // Derive target-bound constants inline per round. Mirrors mlx-vlm's
+        // walk (gemma4_assistant.py:79-101): for Gemma 4 the input embedding
+        // lives under `.language_model.model.embed_tokens`. `Gemma4Text‐
+        // LanguageModel` is not itself a `LanguageModel`, so only the
+        // top-level `Gemma4` is accepted here. Stateless wrt target by
+        // construction (no ivars retain anything derived from `target`).
+        guard let g4 = target as? Gemma4 else {
+            fatalError(
+                "Gemma4AssistantDraftModel.draftBlock: target is not a Gemma 4 VLM "
+                    + "(got \(type(of: target)))")
+        }
+        let backbone = g4.languageModel.model
+        let inputEmbed = backbone.embedTokens
+        let embedScale = backbone.embedScale
 
         // tok shape: [B, 1]
         var tok =
@@ -212,7 +202,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
 
         for _ in 0 ..< (blockSize - 1) {
             let tokEmbed =
-                boundInputEmbed!(tok) * MLXArray(boundEmbedScale, dtype: hPrev.dtype)
+                inputEmbed(tok) * MLXArray(embedScale, dtype: hPrev.dtype)
             let inputsEmbeds = concatenated([tokEmbed, hPrev], axis: -1)
             let (newHidden, logits) = forwardHidden(
                 inputsEmbeds: inputsEmbeds,

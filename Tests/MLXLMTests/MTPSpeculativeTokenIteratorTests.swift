@@ -9,11 +9,10 @@ import Testing
 
 // MARK: - Synthetic mocks for iterator plumbing
 
-/// Records `bind(target:)` and `draftBlock(...)` invocations and returns a
-/// fixed token pattern so the iterator's draft/verify/accept flow can be
-/// exercised without a real drafter.
+/// Records `draftBlock(...)` invocations and returns a fixed token pattern
+/// so the iterator's draft/verify/accept flow can be exercised without a
+/// real drafter.
 private final class MockDrafter: Module, MTPDrafterModel {
-    private(set) var bindCallCount = 0
     private(set) var draftBlockCallCount = 0
     var draftedTokenValue: Int32
 
@@ -22,11 +21,8 @@ private final class MockDrafter: Module, MTPDrafterModel {
         super.init()
     }
 
-    func bind(target: any LanguageModel) {
-        bindCallCount += 1
-    }
-
     func draftBlock(
+        target: any LanguageModel,
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
@@ -195,9 +191,6 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
         blockSize: 4
     )
 
-    // `bind` called exactly once in init.
-    #expect(drafter.bindCallCount == 1)
-
     // First token drained from `next()` is the prepare-time bonus; the
     // speculation round runs on the second call.
     let t0 = iter.next()
@@ -221,22 +214,6 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     #expect(iter.acceptedCount == 3)
     // Verify the main model received emit=true on every call after prefill.
     #expect(main.lastIncomingEmitFlag == true)
-}
-
-// MARK: - Bind-once invariant
-
-@Test
-func testMTPIteratorInitCallsBindOnce() throws {
-    let main = MockMainModel(nextLogitTokens: [0, 0, 0])
-    let drafter = MockDrafter()
-    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
-
-    let iter = try MTPSpeculativeTokenIterator(
-        input: input, mainModel: main, drafter: drafter, mainCache: nil,
-        parameters: GenerateParameters(maxTokens: 0), blockSize: 4
-    )
-    #expect(drafter.bindCallCount == 1)
-    #expect(iter.maxTokens == 0)
 }
 
 // MARK: - Passthrough fallback when state is absent

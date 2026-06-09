@@ -1609,8 +1609,10 @@ public func generateTokens(
 ///   - parameters: generation parameters (sampling, max tokens, KV
 ///     quantization, etc.).
 ///   - context: model context for the main (verifier) model.
-///   - mtpDrafter: the ``MTPDrafterModel``. ``MTPDrafterModel/bind(target:)``
-///     is called exactly once by ``MTPSpeculativeTokenIterator``'s init.
+///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
+///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionIds:blockSize:sampler:)``
+///     per round; drafter instances hold no target-derived state and are safe
+///     to share across iterators.
 ///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
 ///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.

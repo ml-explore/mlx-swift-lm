@@ -12,14 +12,10 @@ import Testing
 /// Returns deterministic dummy tokens of the requested shape so the protocol
 /// contract can be exercised end-to-end without bringing in a real drafter.
 private final class MockMTPDrafter: Module, MTPDrafterModel {
-    private(set) var bindCallCount = 0
     private(set) var draftCallCount = 0
 
-    func bind(target: any LanguageModel) {
-        bindCallCount += 1
-    }
-
     func draftBlock(
+        target: any LanguageModel,
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
@@ -38,13 +34,12 @@ private final class MockMTPDrafter: Module, MTPDrafterModel {
 func testMTPDrafterModelProtocolShape() {
     let drafter = MockMTPDrafter()
 
-    // Mock target (not actually used; we just exercise the call).
+    // Mock target (not actually used by MockMTPDrafter; the protocol shape
+    // requires it as a parameter).
     let target: any LanguageModel = DummyLanguageModel()
 
-    drafter.bind(target: target)
-    #expect(drafter.bindCallCount == 1)
-
     let result = drafter.draftBlock(
+        target: target,
         lastToken: MLXArray([Int32(7)]),
         lastHidden: MLXArray.zeros([1, 1, 4]),
         sharedKV: [
