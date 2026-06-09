@@ -17,7 +17,8 @@ public protocol BatchPositionedKVCache: KVCache {
 
 extension BatchPositionedKVCache {
     public var ropeOffset: RoPEOffset {
-        .batch(batchOffset[.ellipsis])
+        // Snapshot the per-sequence offsets before cache.update(...) advances them.
+        .batch(batchOffset + 0)
     }
 }
 

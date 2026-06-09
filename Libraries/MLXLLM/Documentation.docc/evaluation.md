@@ -41,6 +41,38 @@ for try await item in session.streamResponse(to: "Why is the sky blue?") {
 print()
 ```
 
+## Structured Chat Continuation
+
+`ChatSession` can also continue from structured `Chat.Message` values. This
+is useful for agent loops that consume tool calls from `streamDetails(to:role:images:videos:)`
+and then append one or more `.tool` messages without rebuilding the whole
+conversation history:
+
+```swift
+var toolResults: [Chat.Message] = []
+
+for try await item in session.streamDetails(
+    to: "What is the weather in Paris?",
+    images: [],
+    videos: []
+) {
+    if case .toolCall(let toolCall) = item {
+        let toolResult = try await callTool(toolCall)
+        toolResults.append(.tool(toolResult))
+    }
+}
+
+if !toolResults.isEmpty {
+    let answer = try await session.respond(to: toolResults)
+    print(answer)
+}
+```
+
+When a session is initialized with history, the first generation must tokenize
+and prefill that history to create a KV cache. Reuse the same `ChatSession` and
+continue with structured messages to avoid paying that full prefill cost on
+each tool turn.
+
 ## VLMs (Vision Language Models)
 
 This same API supports VLMs as well.  Simply present the image or video

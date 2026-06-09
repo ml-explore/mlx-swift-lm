@@ -592,8 +592,8 @@ final class Gemma4TextExperts: Module {
             x.reshaped(batch * length, hidden),
             topKIndices.reshaped(batch * length, topK)
         )
-        let weights = topKWeights.reshaped(batch * length, topK, 1).asType(expertOutput.dtype)
-        return (expertOutput * weights).sum(axis: -2).reshaped(batch, length, hidden)
+        let weights = topKWeights.reshaped(batch * length, topK).asType(expertOutput.dtype)
+        return weightedExpertSum(expertOutput, weights).reshaped(batch, length, hidden)
     }
 }
 
@@ -905,13 +905,14 @@ final class Gemma4TextBackbone: Module {
     let firstSlidingCacheIdx: Int
     let embedScale: Float
     let embedTokensPerLayerScale: Float
+    let perLayerProjectionScale: Float
     private let _perLayerInputScale: MLXArray
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "layers") var layers: [Gemma4TextDecoderLayer]
     @ModuleInfo(key: "norm") var norm: Gemma4RMSNormZeroShift
     @ModuleInfo(key: "embed_tokens_per_layer") var embedTokensPerLayer: Embedding?
-    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: Gemma4ScaledLinear?
+    @ModuleInfo(key: "per_layer_model_projection") var perLayerModelProjection: Linear?
     @ModuleInfo(key: "per_layer_projection_norm") var perLayerProjectionNorm:
         Gemma4RMSNormZeroShift?
 
@@ -947,17 +948,20 @@ final class Gemma4TextBackbone: Module {
         self._norm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
         if config.hiddenSizePerLayerInput > 0 {
+            self.perLayerProjectionScale = pow(Float(config.hiddenSize), -0.5)
             self._embedTokensPerLayer.wrappedValue = Embedding(
                 embeddingCount: config.vocabularySizePerLayerInput,
                 dimensions: config.hiddenLayers * config.hiddenSizePerLayerInput
             )
-            self._perLayerModelProjection.wrappedValue = Gemma4ScaledLinear(
-                inFeatures: config.hiddenSize,
-                outFeatures: config.hiddenLayers * config.hiddenSizePerLayerInput,
-                scalar: pow(Float(config.hiddenSize), -0.5)
+            self._perLayerModelProjection.wrappedValue = Linear(
+                config.hiddenSize,
+                config.hiddenLayers * config.hiddenSizePerLayerInput,
+                bias: false
             )
             self._perLayerProjectionNorm.wrappedValue = Gemma4RMSNormZeroShift(
                 dimensions: config.hiddenSizePerLayerInput, eps: config.rmsNormEps)
+        } else {
+            self.perLayerProjectionScale = 1.0
         }
 
         super.init()
@@ -985,7 +989,7 @@ final class Gemma4TextBackbone: Module {
             return nil
         }
 
-        var perLayerProjection = perLayerModelProjection(inputsEmbeds)
+        var perLayerProjection = perLayerModelProjection(inputsEmbeds) * perLayerProjectionScale
         perLayerProjection = perLayerProjection.reshaped(
             Array(inputsEmbeds.shape.dropLast()) + [
                 config.hiddenLayers, config.hiddenSizePerLayerInput,

@@ -143,7 +143,7 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
         }
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 

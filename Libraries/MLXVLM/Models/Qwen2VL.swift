@@ -909,18 +909,17 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        // Image content MUST come BEFORE text in the content array, matching
+        // HuggingFace's apply_chat_template output for Qwen2.5-VL which emits
+        // <|vision_start|><|image_pad|><|vision_end|>{text}. Putting text first
+        // shifts image-token positions and skews MROPE position IDs, producing
+        // a deterministic ~9 px bbox offset vs the Python mlx-vlm reference.
         [
             "role": message.role.rawValue,
-            "content": [
-                ["type": "text", "text": message.content]
-            ]
-                // Messages format for Qwen 2 VL, Qwen 2.5 VL. May need to be adapted for other models.
-                + message.images.map { _ in
-                    ["type": "image"]
-                }
-                + message.videos.map { _ in
-                    ["type": "video"]
-                },
+            "content":
+                message.images.map { _ in ["type": "image"] }
+                + message.videos.map { _ in ["type": "video"] }
+                + [["type": "text", "text": message.content]],
         ]
     }
 }

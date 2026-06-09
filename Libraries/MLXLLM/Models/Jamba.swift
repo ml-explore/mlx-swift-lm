@@ -359,7 +359,7 @@ class JambaSparseMoeBlock: Module {
         scores = MLX.softmax(scores, axis: -1, precise: true)
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 

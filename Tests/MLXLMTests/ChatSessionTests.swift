@@ -12,7 +12,22 @@ import XCTest
 /// See also ChatSessionIntegrationTests
 public class ChatSessionTests: XCTestCase {
 
-    private func model() -> ModelContext {
+    private struct RecordedMessage: Equatable, Sendable {
+        var role: Chat.Message.Role
+        var content: String
+    }
+
+    private struct RecordingMessageGenerator: MessageGenerator {
+        let continuation: AsyncStream<[RecordedMessage]>.Continuation
+
+        func generate(messages: [Chat.Message]) -> [Message] {
+            continuation.yield(messages.map { .init(role: $0.role, content: $0.content) })
+
+            return DefaultMessageGenerator().generate(messages: messages)
+        }
+    }
+
+    private func model(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
         let config = Gemma3TextConfiguration(
             modelType: "text",
             hiddenSize: 64, hiddenLayers: 8, intermediateSize: 64, attentionHeads: 4,
@@ -29,8 +44,6 @@ public class ChatSessionTests: XCTestCase {
         // Force evaluation of all model weights before concurrent usage
         // This ensures all weight promises are realized and avoids race conditions
         eval(model)
-
-        let processor = TestInputProcessor()
 
         return .init(
             configuration: processor.configuration,
@@ -68,6 +81,75 @@ public class ChatSessionTests: XCTestCase {
             result2 += part
         }
         XCTAssertGreaterThan(result2.count, targetLength, result2)
+    }
+
+    func testChatSessionRespondToMessages() async throws {
+        let session = ChatSession(model(), generateParameters: generationParameters)
+
+        let result = try await session.respond(to: [
+            .user("hello"),
+            .assistant("hi"),
+            .user("hello again"),
+        ])
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testChatSessionStreamResponseToMessages() async throws {
+        let session = ChatSession(model(), generateParameters: generationParameters)
+
+        var result = ""
+        for try await part in session.streamResponse(to: [
+            .user("hello"),
+            .assistant("hi"),
+            .user("hello again"),
+        ]) {
+            result += part
+        }
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testStructuredContinuationAvoidsReplayingHistoryAcrossToolTurns() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: TestTokenizer(),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let history: [Chat.Message] = (0 ..< 8).flatMap { index in
+            [
+                .user("question \(index)"),
+                .assistant("answer \(index)"),
+            ]
+        }
+        let continuations: [[Chat.Message]] = [
+            [.tool("first tool result")],
+            [.tool("second tool result")],
+            [.user("final answer")],
+        ]
+        let session = ChatSession(
+            model(processor: processor),
+            history: history,
+            generateParameters: GenerateParameters(maxTokens: 1))
+
+        for messages in continuations {
+            _ = try await session.respond(to: messages)
+        }
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.map(\.count), [history.count + 1, 1, 1])
+        XCTAssertEqual(calls[0].map(\.role), history.map(\.role) + [.tool])
+        XCTAssertEqual(calls[1].map(\.role), [.tool])
+        XCTAssertEqual(calls[2].map(\.role), [.user])
+
+        let actualPreparedMessageCount = calls.reduce(0) { $0 + $1.count }
+        let replayedHistoryPreparedMessageCount = continuations.indices.reduce(0) {
+            $0 + history.count + $1 + 1
+        }
+        XCTAssertLessThan(actualPreparedMessageCount, replayedHistoryPreparedMessageCount)
     }
 
     func testChatSessionAsyncInterrupt() async throws {

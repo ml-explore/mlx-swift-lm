@@ -330,7 +330,7 @@ class DeepseekV3MoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, scores) = gate(x)
         var y = switchMLP(x, indices)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        y = weightedExpertSum(y, scores)
 
         if let shared = sharedExperts {
             y = y + shared(x)

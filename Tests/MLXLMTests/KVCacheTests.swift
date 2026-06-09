@@ -65,6 +65,67 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     }
 }
 
+@Test func testQuantizedKVCacheRestoresNonDefaultQuantizationMetadata() throws {
+    let cache = QuantizedKVCache(groupSize: 64, bits: 4)
+    let keys = MLXArray.ones([1, 1, 4, 32], dtype: .bfloat16)
+    let values = MLXArray.ones([1, 1, 4, 32], dtype: .bfloat16)
+    _ = cache.updateQuantized(keys: keys, values: values)
+
+    #expect(cache.groupSize == 32)
+    #expect(cache.bits == 4)
+
+    let url = tempURL()
+    try savePromptCache(url: url, cache: [cache], metadata: [:])
+    let (loaded, _) = try loadPromptCache(url: url)
+
+    let restored = try #require(loaded[0] as? QuantizedKVCache)
+    #expect(restored.groupSize == 32)
+    #expect(restored.bits == 4)
+    #expect(restored.metaState == cache.metaState)
+
+    let moreKeys = MLXArray.zeros([1, 1, 1, 32], dtype: .bfloat16)
+    let moreValues = MLXArray.zeros([1, 1, 1, 32], dtype: .bfloat16)
+    _ = restored.updateQuantized(keys: moreKeys, values: moreValues)
+
+    #expect(restored.groupSize == 32)
+    #expect(restored.bits == 4)
+}
+
+@Test func testQuantizedKVCacheMetaStateRestoresQuantizationMetadataWithoutState() {
+    let cache = QuantizedKVCache()
+
+    cache.metaState = ["256", "11", "32", "4"]
+
+    #expect(cache.offset == 11)
+    #expect(cache.groupSize == 32)
+    #expect(cache.bits == 4)
+    #expect(cache.metaState == ["256", "11", "32", "4"])
+}
+
+@Test func testQuantizedKVCacheCopyPreservesRestoredQuantizationMetadata() throws {
+    let cache = QuantizedKVCache()
+    cache.metaState = ["256", "5", "32", "4"]
+
+    let copied = try #require(cache.copy() as? QuantizedKVCache)
+
+    #expect(copied.offset == 5)
+    #expect(copied.groupSize == 32)
+    #expect(copied.bits == 4)
+    #expect(copied.metaState == cache.metaState)
+}
+
+@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() {
+    let cache = KVCacheSimple()
+    cache.offset = 7
+
+    let quantized = cache.toQuantized(groupSize: 128, bits: 4)
+
+    #expect(quantized.offset == 7)
+    #expect(quantized.groupSize == 128)
+    #expect(quantized.bits == 4)
+    #expect(quantized.metaState == ["256", "7", "128", "4"])
+}
+
 // MARK: - ArraysCache sparse slot round-trip
 
 @Test func testArraysCacheSparseSlots() throws {

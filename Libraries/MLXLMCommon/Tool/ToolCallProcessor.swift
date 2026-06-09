@@ -28,6 +28,9 @@ public class ToolCallProcessor {
 
     private let parser: any ToolCallParser
     private let tools: [[String: any Sendable]]?
+    private let supportsBareJSONFallback: Bool
+    private let maxJSONFallbackBufferLength = 32_768
+    private let jsonObjectScanner = JSONLeadingObjectScanner(startCharacter: "{")
     private var state = State.normal
     private var toolCallBuffer = ""
 
@@ -40,6 +43,13 @@ public class ToolCallProcessor {
         case normal
         case potentialToolCall
         case collectingToolCall
+        case collectingJSONToolCall
+    }
+
+    private enum TaggedStartMode {
+        case none
+        case tagged
+        case bareJSON
     }
 
     // MARK: - Initialization
@@ -51,6 +61,7 @@ public class ToolCallProcessor {
     public init(format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) {
         self.parser = format.createParser()
         self.tools = tools
+        self.supportsBareJSONFallback = format == .json
     }
 
     // MARK: - Computed Properties
@@ -77,6 +88,17 @@ public class ToolCallProcessor {
         return processTaggedChunk(chunk)
     }
 
+    /// Drain queued tool calls in parse order.
+    ///
+    /// This is useful for streaming consumers that need deterministic FIFO dispatch
+    /// of all complete calls discovered while processing a token chunk.
+    func drainToolCalls() -> [ToolCall] {
+        guard !toolCalls.isEmpty else { return [] }
+        let drained = toolCalls
+        toolCalls.removeAll(keepingCapacity: true)
+        return drained
+    }
+
     /// Process end-of-sequence, parsing any buffered content as tool call(s).
     ///
     /// Call this when generation ends (e.g., on EOS token) to handle formats
@@ -86,16 +108,38 @@ public class ToolCallProcessor {
     /// For formats with end tags that appear in the text stream, the buffer
     /// will already be empty at generation end, making this a no-op.
     public func processEOS() {
-        guard state == .collectingToolCall || state == .potentialToolCall else { return }
+        _ = processEOS(returnBufferedText: false)
+    }
+
+    /// Process end-of-sequence and optionally return residual buffered text.
+    ///
+    /// Use this overload when callers need to preserve non-tool trailing content
+    /// that remained buffered until generation end.
+    ///
+    /// - Parameter returnBufferedText: When `true`, returns residual text if no
+    ///   tool call was parsed from the buffered content.
+    /// - Returns: Residual buffered text that should be emitted as regular output,
+    ///   or `nil` when the buffer was fully parsed as tool call content (or when
+    ///   `returnBufferedText` is `false`).
+    @discardableResult
+    public func processEOS(returnBufferedText: Bool = true) -> String? {
+        guard
+            state == .collectingToolCall || state == .potentialToolCall
+                || state == .collectingJSONToolCall
+        else { return nil }
         guard !toolCallBuffer.isEmpty else {
             state = .normal
-            return
+            return nil
         }
 
-        toolCalls.append(contentsOf: parser.parseEOS(toolCallBuffer, tools: tools))
+        let buffered = toolCallBuffer
+        let parsedCalls = parser.parseEOS(buffered, tools: tools)
+        toolCalls.append(contentsOf: parsedCalls)
 
         toolCallBuffer = ""
         state = .normal
+
+        return returnBufferedText && parsedCalls.isEmpty ? buffered : nil
     }
 
     // MARK: - Private Methods
@@ -137,7 +181,7 @@ public class ToolCallProcessor {
             // No brace seen — pass through as regular text
             return chunk
 
-        case .potentialToolCall, .collectingToolCall:
+        case .potentialToolCall, .collectingToolCall, .collectingJSONToolCall:
             toolCallBuffer += chunk
 
             if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
@@ -177,7 +221,11 @@ public class ToolCallProcessor {
             return chunk
         }
 
-        guard (state == .normal && chunk.contains(startChar)) || state != .normal else {
+        let startMode =
+            state == .normal
+            ? taggedStartMode(in: chunk, startChar: startChar)
+            : .none
+        guard startMode != .none || state != .normal else {
             return chunk
         }
 
@@ -186,13 +234,35 @@ public class ToolCallProcessor {
 
         switch state {
         case .normal:
-            // Change state to potential tool call
+            if startMode == .bareJSON {
+                // Fallback for models that sporadically emit bare JSON tool calls.
+                state = .collectingJSONToolCall
+
+                leadingToken = separateToken(
+                    from: &toolCallBuffer,
+                    separator: String(jsonObjectScanner.startCharacter),
+                    returnLeading: true
+                )
+
+                return processCollectingJSONToolCall(
+                    startTag: startTag,
+                    startChar: startChar,
+                    leadingToken: leadingToken
+                )
+            }
+
+            guard startMode == .tagged else {
+                return chunk
+            }
+
+            // Change state to potential tagged tool call.
             state = .potentialToolCall
 
             leadingToken = separateToken(
                 from: &toolCallBuffer, separator: String(startChar), returnLeading: true)
 
             fallthrough
+
         case .potentialToolCall:
             if partialMatch(buffer: toolCallBuffer, tag: startTag) {
                 if toolCallBuffer.starts(with: startTag) {
@@ -202,43 +272,169 @@ public class ToolCallProcessor {
                     return nil
                 }
             } else {
-                // Otherwise, return the collected text and reset the state
+                // Otherwise, return the collected text and reset the state.
                 state = .normal
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
                 return (leadingToken ?? "") + buffer
             }
+
         case .collectingToolCall:
             guard let endTag = parser.endTag else {
                 return nil
             }
 
             if toolCallBuffer.contains(endTag) {
-                // Separate the trailing token
+                // Separate the trailing token.
                 let trailingToken = separateToken(
                     from: &toolCallBuffer, separator: endTag, returnLeading: false)
 
-                // Parse the tool call using the parser
-                if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
+                let bufferedToolCall = toolCallBuffer
+
+                // Parse the tool call using the parser.
+                if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
                     toolCalls.append(toolCall)
+                    state = .normal
+                    toolCallBuffer = ""
+
+                    // If trailing content may contain another tool call, recurse.
+                    if let trailingToken,
+                        tokenCouldContainToolStart(trailingToken, startChar: startChar)
+                    {
+                        return combine(leadingToken, processChunk(trailingToken))
+                    }
+
+                    // Otherwise, return trailing text if non-empty.
+                    let trailingText = trailingToken?.isEmpty ?? true ? nil : trailingToken
+                    return combine(leadingToken, trailingText)
                 }
 
+                // Preserve unparsed tagged payload as plain text, then continue scanning.
                 state = .normal
                 toolCallBuffer = ""
-
-                // If the token contains the start character, there may be more tool calls to come
-                if let trailingToken, let startChar = startTagFirstChar,
-                    trailingToken.contains(startChar)
+                if let trailingToken,
+                    tokenCouldContainToolStart(trailingToken, startChar: startChar)
                 {
-                    return processChunk(trailingToken)
-                } else {
-                    // Otherwise, return the collected token, or nil if it's empty
-                    return trailingToken?.isEmpty ?? true ? nil : trailingToken
+                    return combine(
+                        leadingToken,
+                        combine(bufferedToolCall, processChunk(trailingToken))
+                    )
                 }
-            } else {
-                return nil
+                return combine(leadingToken, combine(bufferedToolCall, trailingToken))
             }
+
+            return nil
+
+        case .collectingJSONToolCall:
+            return processCollectingJSONToolCall(
+                startTag: startTag,
+                startChar: startChar,
+                leadingToken: leadingToken
+            )
         }
+    }
+
+    private func processCollectingJSONToolCall(
+        startTag: String,
+        startChar: Character,
+        leadingToken: String?
+    ) -> String? {
+        if toolCallBuffer.count > maxJSONFallbackBufferLength {
+            // Safety valve: flush pathological unmatched JSON-like buffers as text.
+            state = .normal
+            let buffered = toolCallBuffer
+            toolCallBuffer = ""
+            return combine(leadingToken, buffered)
+        }
+
+        switch jsonObjectScanner.evaluatePrefix(in: toolCallBuffer) {
+        case .invalidObject:
+            state = .normal
+            let buffered = toolCallBuffer
+            toolCallBuffer = ""
+            // vLLM-style recovery: if a tagged tool call exists later, retry tagged parsing.
+            if buffered.contains(startTag) {
+                return combine(leadingToken, processChunk(buffered))
+            }
+            return combine(leadingToken, buffered)
+        case .needsMore, .validObject:
+            break
+        }
+
+        guard let split = jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) else {
+            // Continue buffering until a complete top-level JSON object is available.
+            return leadingToken?.isEmpty ?? true ? nil : leadingToken
+        }
+
+        let jsonCandidate = split.object
+        let trailingToken = split.trailing
+
+        if let toolCall = parser.parse(content: jsonCandidate, tools: tools) {
+            toolCalls.append(toolCall)
+
+            state = .normal
+            toolCallBuffer = ""
+
+            if trailingToken.isEmpty {
+                return leadingToken?.isEmpty ?? true ? nil : leadingToken
+            }
+
+            if tokenCouldContainToolStart(trailingToken, startChar: startChar) {
+                return combine(leadingToken, processChunk(trailingToken))
+            }
+
+            return combine(leadingToken, trailingToken)
+        }
+
+        // If it looked like JSON but is not a valid tool call payload,
+        // flush it back as normal text while still scanning trailing content.
+        state = .normal
+        toolCallBuffer = ""
+        if tokenCouldContainToolStart(trailingToken, startChar: startChar) {
+            return combine(leadingToken, combine(jsonCandidate, processChunk(trailingToken)))
+        }
+        return combine(leadingToken, combine(jsonCandidate, trailingToken))
+    }
+
+    private func taggedStartMode(
+        in chunk: String,
+        startChar: Character
+    ) -> TaggedStartMode {
+        let taggedStartIndex = chunk.firstIndex(of: startChar)
+        let jsonStartIndex =
+            supportsBareJSONFallback
+            ? chunk.firstIndex(of: jsonObjectScanner.startCharacter)
+            : nil
+
+        switch (taggedStartIndex, jsonStartIndex) {
+        case (nil, nil):
+            return .none
+        case (.some, nil):
+            return .tagged
+        case (nil, .some):
+            return .bareJSON
+        case (.some(let tagged), .some(let json)):
+            if json >= tagged {
+                return .tagged
+            }
+
+            // If the earlier `{` cannot begin a JSON object, prefer tagged parsing.
+            if case .invalidObject = jsonObjectScanner.evaluatePrefix(in: chunk, from: json) {
+                return .tagged
+            }
+
+            return .bareJSON
+        }
+    }
+
+    private func tokenCouldContainToolStart(_ token: String, startChar: Character) -> Bool {
+        token.contains(startChar)
+            || (supportsBareJSONFallback && token.contains(jsonObjectScanner.startCharacter))
+    }
+
+    private func combine(_ first: String?, _ second: String?) -> String? {
+        let merged = (first ?? "") + (second ?? "")
+        return merged.isEmpty ? nil : merged
     }
 
     /// Separates a token from a string buffer based on a separator
@@ -272,5 +468,101 @@ public class ToolCallProcessor {
         }
 
         return true
+    }
+}
+
+private struct JSONLeadingObjectScanner {
+    enum PrefixState {
+        case needsMore
+        case validObject
+        case invalidObject
+    }
+
+    let startCharacter: Character
+
+    func evaluatePrefix(in buffer: String) -> PrefixState {
+        guard let start = buffer.firstIndex(where: { !$0.isWhitespace }) else {
+            return .invalidObject
+        }
+        return evaluatePrefix(in: buffer, from: start)
+    }
+
+    func evaluatePrefix(in buffer: String, from start: String.Index) -> PrefixState {
+        var openingIndex = start
+        while openingIndex < buffer.endIndex, buffer[openingIndex].isWhitespace {
+            openingIndex = buffer.index(after: openingIndex)
+        }
+
+        guard openingIndex < buffer.endIndex, buffer[openingIndex] == startCharacter else {
+            return .invalidObject
+        }
+
+        var index = buffer.index(after: openingIndex)
+        while index < buffer.endIndex, buffer[index].isWhitespace {
+            index = buffer.index(after: index)
+        }
+
+        guard index < buffer.endIndex else {
+            return .needsMore
+        }
+
+        let firstToken = buffer[index]
+        if firstToken == "\"" || firstToken == "}" {
+            return .validObject
+        }
+
+        return .invalidObject
+    }
+
+    /// Splits a buffer that starts with optional whitespace + startCharacter into:
+    /// 1) the first complete top-level JSON object
+    /// 2) trailing remainder after that object
+    func splitLeadingObject(from buffer: String) -> (object: String, trailing: String)? {
+        guard let start = buffer.firstIndex(where: { !$0.isWhitespace }),
+            buffer[start] == startCharacter
+        else { return nil }
+
+        var depth = 0
+        var inString = false
+        var isEscaped = false
+
+        var index = start
+        while index < buffer.endIndex {
+            let character = buffer[index]
+
+            if inString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else {
+                switch character {
+                case "\"":
+                    inString = true
+                case "{":
+                    depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 {
+                        let object = String(buffer[start ... index])
+                        let trailingStart = buffer.index(after: index)
+                        let trailing =
+                            trailingStart < buffer.endIndex
+                            ? String(buffer[trailingStart...])
+                            : ""
+                        return (object, trailing)
+                    }
+                default:
+                    break
+                }
+            }
+
+            index = buffer.index(after: index)
+        }
+
+        return nil
     }
 }
