@@ -162,6 +162,160 @@ struct MTPIteratorEndToEndDiagnosticTests {
             "drafts proposed but none accepted — target rejected every draft")
     }
 
+    /// Asserts a healthy acceptance-rate floor at blockSize=4 against the
+    /// 31B sky-blue prompt. Locks in the iterator's per-round hidden-slice
+    /// fix at the canonical production block size: the drafter must see the
+    /// verify-position hidden at the slot that produced the newly-accepted
+    /// bonus's prediction (mlx-lm's `verify.hidden[:, accepted : accepted + 1, :]`
+    /// semantic) — NOT the unconditional last verify position.
+    ///
+    /// Pre-fix measurement (clean 61777c8 on this hardware, sky-blue, bs=4,
+    /// maxTokens=64): 32.3% acceptance, 9.66 tok/s.
+    /// Post-fix measurement: 60.6% acceptance, 13.64 tok/s — +28.3pp,
+    /// +3.98 tok/s. The 45% floor below catches a regression toward the
+    /// pre-fix baseline while leaving ~16pp headroom for natural run-to-run
+    /// variance.
+    ///
+    /// Note: at maxTokens=32 (the basic smoke test `testMTP31BPairProduces‐
+    /// AcceptedDrafts`), the same configuration yields higher acceptance
+    /// (post-fix 72.4%) because shorter streams stay within the regime
+    /// where MLX SDPA shape-determinism keeps verify-position predictions
+    /// aligned with the autoregressive baseline. The maxTokens=64
+    /// measurement here is the more stable rate over a larger sample
+    /// (n=66 vs n=29) and is the better regression gate.
+    @Test
+    func testMTP31BBlockSize4AcceptanceLifted() async throws {
+        guard
+            let loaded = try await loadTargetAndDrafter(
+                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
+                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
+            )
+        else {
+            Issue.record(
+                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
+            )
+            return
+        }
+
+        let userInput = UserInput(chat: [
+            .user("Why is the sky blue? Explain in one paragraph.")
+        ])
+        let lmInput = try await loaded.context.processor.prepare(input: userInput)
+
+        let stream = try generate(
+            input: lmInput,
+            parameters: GenerateParameters(maxTokens: 64, temperature: 0),
+            context: loaded.context,
+            mtpDrafter: loaded.drafter,
+            blockSize: 4
+        )
+
+        var info: GenerateCompletionInfo?
+        for await event in stream {
+            if case .info(let i) = event { info = i }
+        }
+
+        guard let info else {
+            Issue.record("MTP stream completed without emitting an .info event")
+            return
+        }
+
+        let proposed = info.proposedDraftTokens ?? 0
+        let accepted = info.acceptedDraftTokens ?? 0
+        let rate = proposed > 0 ? Double(accepted) / Double(proposed) : 0.0
+        let tokPerSec =
+            info.generateTime > 0 ? Double(info.generationTokenCount) / info.generateTime : 0.0
+
+        print(
+            "[MTPIteratorEndToEndDiagnostic blockSize=4 acceptance] proposed=\(proposed), accepted=\(accepted), rate=\(String(format: "%.1f%%", rate * 100)), generated=\(info.generationTokenCount) tokens in \(info.generateTime.formatted())s, tok/s=\(String(format: "%.2f", tokPerSec))"
+        )
+
+        #expect(
+            info.passthroughReason == nil,
+            "iterator engaged sticky-passthrough: \(info.passthroughReason ?? "")")
+        #expect(
+            proposed > 0,
+            "no tokens proposed across all rounds — speculation did not run")
+        #expect(
+            rate >= 0.45,
+            "blockSize=4 acceptance rate \(String(format: "%.1f%%", rate * 100)) below 45% floor — bonus-slot hidden-slice fix likely regressed (pre-fix 32.3% on this hardware at maxTokens=64 under the unconditional last-position slice)"
+        )
+    }
+
+    /// Asserts a healthy acceptance-rate floor at blockSize=6 against the
+    /// 31B sky-blue prompt. Locks in the iterator's per-round hidden-slice
+    /// fix at the block size where the bug bites hardest: at higher K,
+    /// `accepted < numDraft` happens more often (per the compounding-
+    /// acceptance math), so the wrong-slot bug hurts speculation most here.
+    /// The drafter must see the verify-position hidden at the slot that
+    /// produced the newly-accepted bonus's prediction (mlx-lm's
+    /// `verify.hidden[:, accepted : accepted + 1, :]` semantic) — NOT the
+    /// unconditional last verify position.
+    ///
+    /// Pre-fix measurement (clean 61777c8 on this hardware, sky-blue, bs=6,
+    /// maxTokens=64): 17.9% acceptance, 7.10 tok/s.
+    /// Post-fix measurement: 29.8% acceptance, 8.60 tok/s — +11.9pp,
+    /// +1.50 tok/s. The 25% floor below catches a regression toward the
+    /// pre-fix baseline while leaving ~8pp headroom for variance.
+    @Test
+    func testMTP31BBlockSize6AcceptanceLifted() async throws {
+        guard
+            let loaded = try await loadTargetAndDrafter(
+                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
+                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
+            )
+        else {
+            Issue.record(
+                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
+            )
+            return
+        }
+
+        let userInput = UserInput(chat: [
+            .user("Why is the sky blue? Explain in one paragraph.")
+        ])
+        let lmInput = try await loaded.context.processor.prepare(input: userInput)
+
+        let stream = try generate(
+            input: lmInput,
+            parameters: GenerateParameters(maxTokens: 64, temperature: 0),
+            context: loaded.context,
+            mtpDrafter: loaded.drafter,
+            blockSize: 6
+        )
+
+        var info: GenerateCompletionInfo?
+        for await event in stream {
+            if case .info(let i) = event { info = i }
+        }
+
+        guard let info else {
+            Issue.record("MTP stream completed without emitting an .info event")
+            return
+        }
+
+        let proposed = info.proposedDraftTokens ?? 0
+        let accepted = info.acceptedDraftTokens ?? 0
+        let rate = proposed > 0 ? Double(accepted) / Double(proposed) : 0.0
+        let tokPerSec =
+            info.generateTime > 0 ? Double(info.generationTokenCount) / info.generateTime : 0.0
+
+        print(
+            "[MTPIteratorEndToEndDiagnostic blockSize=6 acceptance] proposed=\(proposed), accepted=\(accepted), rate=\(String(format: "%.1f%%", rate * 100)), generated=\(info.generationTokenCount) tokens in \(info.generateTime.formatted())s, tok/s=\(String(format: "%.2f", tokPerSec))"
+        )
+
+        #expect(
+            info.passthroughReason == nil,
+            "iterator engaged sticky-passthrough: \(info.passthroughReason ?? "")")
+        #expect(
+            proposed > 0,
+            "no tokens proposed across all rounds — speculation did not run")
+        #expect(
+            rate >= 0.25,
+            "blockSize=6 acceptance rate \(String(format: "%.1f%%", rate * 100)) below 25% floor — bonus-slot hidden-slice fix likely regressed (pre-fix 17.9% on this hardware under the unconditional last-position slice)"
+        )
+    }
+
     /// Speculative decoding's load-bearing correctness property: at greedy
     /// decoding (temperature=0), MTP MUST produce token-identical output to
     /// autoregressive generation against the same target. Internal acceptance

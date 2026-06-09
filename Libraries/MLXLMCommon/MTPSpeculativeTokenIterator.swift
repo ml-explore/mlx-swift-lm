@@ -61,6 +61,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     private var passthrough = false
     private var passthroughLoggedOnce = false
 
+    /// Verify-position index in the prior round's emitted hidden that
+    /// produced the newly-accepted bonus's logit prediction. Set at the end
+    /// of each `speculateRound()`. `nil` on the first round means slice the
+    /// last position (round 1's `lastHidden` has shape `[B, 1, hidden]`, so
+    /// last-position == only-position == the correct slot). Round 2+ slices
+    /// at this index, mirroring mlx-lm's `verify.hidden[:, accepted : accepted + 1, :]`.
+    /// Mismatch (e.g. unconditional last-position) is silent: drafter still
+    /// produces tokens, but they're conditioned on the wrong slot → less
+    /// coherent drafts → lower acceptance, especially at higher blockSize.
+    private var lastRoundAccepted: Int? = nil
+
     public var promptPrefillTime: TimeInterval = 0.0
 
     // Optional instrumentation used by acceptance-rate floor tests.
@@ -210,8 +221,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        // Slice last position's hidden -> [B, 1, hidden].
-        let lastPositionHidden = lastHidden[0..., (-1)..., 0...]
+        // Slice the hidden at the slot that produced the newly-accepted
+        // bonus's prediction. Round 1: last (and only) position. Round 2+:
+        // index `lastRoundAccepted`, matching mlx-lm's
+        // `verify.hidden[:, accepted : accepted + 1, :]` semantic.
+        let bonusSlotHidden: MLXArray
+        if let idx = lastRoundAccepted {
+            bonusSlotHidden = lastHidden[0..., idx ..< (idx + 1), 0...]
+        } else {
+            bonusSlotHidden = lastHidden[0..., (-1)..., 0...]
+        }
 
         let cacheOffset = mainCache.first?.offset ?? 0
         let positionIds = MLXArray(Int32(cacheOffset)).reshaped([1, 1])
@@ -219,7 +238,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let bonusToken = y.tokens
         let draftTokens = drafter.draftBlock(
             lastToken: bonusToken,
-            lastHidden: lastPositionHidden,
+            lastHidden: bonusSlotHidden,
             sharedKV: sharedKV,
             positionIds: positionIds,
             blockSize: numDraft + 1,  // total round size: bonus + numDraft
@@ -280,6 +299,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         proposedCount += numDraft
         acceptedCount += accepted
+        lastRoundAccepted = accepted
 
         // Rewind only the main cache by rejected count. Drafter has no cache.
         trimPromptCache(mainCache, numTokens: numDraft - accepted)
