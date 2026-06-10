@@ -1723,18 +1723,54 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let convertedCache = cache.map { $0 }
+        let prefillStepSize = windowSize ?? 512
         if let imagePixels = input.image?.pixels {
-            let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
+            let (allEmbeds, allPerLayerInputs) = try getInputEmbeddings(
                 inputIds: input.text.tokens, pixelValues: imagePixels)
+            // Prefill the merged image+text embeddings (and the aligned
+            // per-layer inputs) in windowSize-sized chunks, evaluating the
+            // KV cache between chunks; the final position yields the
+            // first-token logits. Matches LLMModel.prepare and #297.
+            let totalPositions = allEmbeds.dim(1)
+            var processed = 0
+            while totalPositions - processed > 1 {
+                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+                let range = processed ..< (processed + chunkLength)
+                _ = languageModel(
+                    nil,
+                    cache: convertedCache,
+                    inputsEmbeds: allEmbeds[0..., range, 0...],
+                    perLayerInputs: allPerLayerInputs.map { $0[0..., range, 0..., 0...] }
+                )
+                eval(cache)
+                processed += chunkLength
+            }
             let result = languageModel(
                 nil,
                 cache: convertedCache,
-                inputsEmbeds: inputsEmbeds,
-                perLayerInputs: perLayerInputs
+                inputsEmbeds: allEmbeds[0..., processed..., 0...],
+                perLayerInputs: allPerLayerInputs.map { $0[0..., processed..., 0..., 0...] }
             )
             return .logits(result)
         } else {
-            let result = languageModel(input.text.tokens, cache: convertedCache)
+            // Text-only path: chunk raw tokens (per-layer inputs are derived
+            // from each chunk's tokens inside the backbone).
+            var tokens = input.text.tokens
+            if tokens.ndim == 1 {
+                tokens = tokens.expandedDimensions(axis: 0)
+            }
+            let totalPositions = tokens.dim(1)
+            var processed = 0
+            while totalPositions - processed > 1 {
+                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+                _ = languageModel(
+                    tokens[0..., processed ..< (processed + chunkLength)],
+                    cache: convertedCache
+                )
+                eval(cache)
+                processed += chunkLength
+            }
+            let result = languageModel(tokens[0..., processed...], cache: convertedCache)
             return .logits(result)
         }
     }
