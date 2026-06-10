@@ -8,7 +8,7 @@ import MLX
 ///
 /// Parallels ``SpeculativeTokenIterator`` but for Gemma 4 - style drafters
 /// that share K/V with the target model and produce K - 1 candidate tokens
-/// per round in a single ``MTPDrafterModel/draftBlock(lastToken:lastHidden:sharedKV:positionIds:blockSize:sampler:)`` call (rather
+/// per round in a single ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)`` call (rather
 /// than K sequential single-token calls). The drafter has no own KV cache:
 /// every per-round input — `lastToken`, `lastHidden`, `sharedKV`,
 /// `positionIds` — is threaded as a method argument, with the target's last
