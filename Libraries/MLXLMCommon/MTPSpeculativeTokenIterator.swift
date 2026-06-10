@@ -232,6 +232,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let cacheOffset = mainCache.first?.offset ?? 0
 
+        // Invariant: the span the drafter attends over describes exactly the
+        // true sequence — the rewind site trims the emitted snapshot in
+        // lockstep with the cache. `dim()` is shape metadata (no eval, no GPU
+        // sync). The check stands down if the cache ever leaves the trimmable
+        // regime (post-wrap sliding window), where the rewind machinery
+        // itself no-ops.
+        assert(
+            sharedKV.allSatisfy { $0.value.0.dim(-2) == cacheOffset }
+                || !canTrimPromptCache(mainCache),
+            "stale sharedKV: spans \(sharedKV.mapValues { $0.0.dim(-2) }) != main cache offset \(cacheOffset)"
+        )
+
         let bonusToken = y.tokens
         let draftTokens = drafter.draftBlock(
             target: mainModel,
@@ -305,8 +317,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         acceptedCount += accepted
         lastRoundAccepted = accepted
 
-        // Rewind only the main cache by rejected count. Drafter has no cache.
-        trimPromptCache(mainCache, numTokens: numDraft - accepted)
+        // Rewind the main cache and the emitted sharedKV snapshot by the
+        // rejected count, in lockstep. The drafter has no cache of its own,
+        // but the verify pass's state emission spans the full verify chunk —
+        // stale tail rows must not survive into the next round's draftBlock.
+        // Trimming the snapshot by the amount the cache actually trimmed
+        // keeps the two consistent even if the cache ever reports itself
+        // untrimmable (post-wrap sliding window), where trimPromptCache
+        // no-ops and returns 0.
+        let rejected = numDraft - accepted
+        let trimmed = trimPromptCache(mainCache, numTokens: rejected)
+        trimSharedKVState(&mainState, numTokens: trimmed)
 
         // Dynamic cache quantization may convert `.regular` K/V to `.quantized`,
         // at which point the target's emit-hook returns sharedKV: nil and the
@@ -414,5 +435,35 @@ extension MTPSpeculativeTokenIterator {
     /// accumulated didSample log).
     @_spi(Testing) public var _processorForTesting: LogitProcessor? {
         processor
+    }
+}
+
+/// Rewinds the emitted MTP shared-K/V snapshot by `numTokens` trailing
+/// sequence positions, mirroring `trimPromptCache` on the main cache.
+///
+/// The verify pass emits K/V spanning the full `[bonus, d_1 ... d_numDraft]`
+/// chunk — materialized before acceptance is known. After a partial
+/// acceptance, the rejected tail rows describe tokens that are not part of
+/// the sequence; without this trim, the next round's `draftBlock` would
+/// cross-attend over them. (PR #308 review: discussion_r3391133046,
+/// discussion_r3391147261.)
+///
+/// No-op when `numTokens <= 0`, when `state` is nil, or when the key is
+/// absent (e.g. the quantization-onset round, whose fresh verify state
+/// carries no sharedKV). Cost is metadata-only: the slices are lazy views
+/// consumed by the next `draftBlock` like the rest of the round's inputs;
+/// no `eval`. Iterator-internal — `trimPromptCache` is public because
+/// caches are a public surface, but this snapshot is the iterator's own
+/// cross-round state.
+func trimSharedKVState(_ state: inout LMOutput.State?, numTokens: Int) {
+    guard numTokens > 0,
+        let sharedKV = state?[mtpSharedKVStatesKey]
+    else { return }
+    state?[mtpSharedKVStatesKey] = sharedKV.mapValues { kv in
+        let newLen = kv.0.dim(-2) - numTokens
+        return (
+            kv.0[.ellipsis, ..<newLen, 0...],
+            kv.1[.ellipsis, ..<newLen, 0...]
+        )
     }
 }
