@@ -1728,9 +1728,10 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             let (allEmbeds, allPerLayerInputs) = try getInputEmbeddings(
                 inputIds: input.text.tokens, pixelValues: imagePixels)
             // Prefill the merged image+text embeddings (and the aligned
-            // per-layer inputs) in windowSize-sized chunks, evaluating the
-            // KV cache between chunks; the final position yields the
-            // first-token logits. Matches LLMModel.prepare and #297.
+            // per-layer inputs) in windowSize-sized chunks; the final
+            // position yields the first-token logits. Matches
+            // LLMModel.prepare and #297. asyncEval lets the CPU build
+            // chunk N+1's graph while the GPU evaluates chunk N.
             let totalPositions = allEmbeds.dim(1)
             var processed = 0
             while totalPositions - processed > 1 {
@@ -1742,9 +1743,11 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                     inputsEmbeds: allEmbeds[0..., range, 0...],
                     perLayerInputs: allPerLayerInputs.map { $0[0..., range, 0..., 0...] }
                 )
-                eval(cache)
+                asyncEval(cache)
                 processed += chunkLength
             }
+            // Single sync after the loop to flush any remaining async work.
+            eval(cache)
             let result = languageModel(
                 nil,
                 cache: convertedCache,
@@ -1767,9 +1770,11 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                     tokens[0..., processed ..< (processed + chunkLength)],
                     cache: convertedCache
                 )
-                eval(cache)
+                asyncEval(cache)
                 processed += chunkLength
             }
+            // Single sync after the loop to flush any remaining async work.
+            eval(cache)
             let result = languageModel(tokens[0..., processed...], cache: convertedCache)
             return .logits(result)
         }
