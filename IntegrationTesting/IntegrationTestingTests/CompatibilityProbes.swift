@@ -78,7 +78,7 @@ struct PlatformCompatibilityProbes {
         var lmAvailable = false
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             lmAvailable = true
-            #if canImport(FoundationModels)
+            #if canImport(FoundationModels, _version: 2)
                 // Touch the OS-27 surface to prove it is genuinely reachable here.
                 _ = LanguageModelCapabilities(capabilities: [])
                 _ = (any LanguageModel).self
@@ -96,7 +96,7 @@ struct PlatformCompatibilityProbes {
     func mlxLanguageModelGatedCorrectly() {
         var typeReachable = false
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
-            #if canImport(FoundationModels)
+            #if canImport(FoundationModels, _version: 2)
                 _ = MLXLanguageModel.self
                 typeReachable = true
             #endif
