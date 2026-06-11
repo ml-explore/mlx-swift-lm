@@ -1927,8 +1927,18 @@ public func quantizedScaledDotProductAttention(
 
 /// Dynamically quantize KV caches during generation if conditions are met
 ///
+/// Resolve a kvScheme string to (bits, groupSize) for affine quantization.
+/// Returns nil for unrecognized schemes (custom schemes handle their own caches).
+public func resolveAffineScheme(_ scheme: String?) -> (bits: Int, groupSize: Int)? {
+    switch scheme {
+    case "affine4": return (4, 64)
+    case "affine8": return (8, 64)
+    default: return nil
+    }
+}
+
 /// Converts regular caches to quantized caches when:
-/// - kvBits is specified
+/// - kvBits is specified (or kvScheme resolves to a built-in affine scheme)
 /// - The cache is not already quantized
 /// - The cache offset is greater than quantizedKVStart
 ///
@@ -1937,13 +1947,28 @@ public func quantizedScaledDotProductAttention(
 ///   - kvBits: Number of bits for quantization (nil = no quantization)
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
+///   - kvScheme: Scheme selector; overrides kvBits when it names a built-in
+///     affine scheme ("affine4", "affine8"). Unrecognized schemes are left to
+///     custom cache implementations and do not quantize here.
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
     kvGroupSize: Int = 64,
-    quantizedKVStart: Int = 0
+    quantizedKVStart: Int = 0,
+    kvScheme: String? = nil
 ) {
-    guard let kvBits = kvBits, !cache.isEmpty else { return }
+    // Resolve effective bits: kvScheme overrides kvBits.
+    let effectiveBits: Int
+    let effectiveGroupSize: Int
+    if let scheme = kvScheme, let resolved = resolveAffineScheme(scheme) {
+        effectiveBits = resolved.bits
+        effectiveGroupSize = resolved.groupSize
+    } else if let kvBits {
+        effectiveBits = kvBits
+        effectiveGroupSize = kvGroupSize
+    } else {
+        return
+    }
 
     // Find the first quantizable (non-Mamba, non-already-quantized) cache entry
     guard let firstQuantizable = cache.first(where: { $0 is KVCacheSimple }),
@@ -1954,7 +1979,6 @@ public func maybeQuantizeKVCache(
     }
 
     for i in 0 ..< cache.count {
-        // Handle cache types that support quantization
         if let simpleCache = cache[i] as? KVCacheSimple {
             let state = simpleCache.state
             if state.count == 2 {
@@ -1962,7 +1986,7 @@ public func maybeQuantizeKVCache(
                 let valueHeadDim = state[1].dim(3)
                 guard
                     resolvedKVQuantizationGroupSize(
-                        requested: kvGroupSize,
+                        requested: effectiveGroupSize,
                         keyHeadDim: keyHeadDim,
                         valueHeadDim: valueHeadDim
                     ) != nil
@@ -1970,10 +1994,8 @@ public func maybeQuantizeKVCache(
                     continue
                 }
             }
-            cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
+            cache[i] = simpleCache.toQuantized(groupSize: effectiveGroupSize, bits: effectiveBits)
         }
         // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-        // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
-        // MambaCache and CacheList don't use traditional KV quantization
     }
 }
