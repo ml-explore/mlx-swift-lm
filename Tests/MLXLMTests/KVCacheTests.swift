@@ -8,6 +8,7 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     { KVCacheSimple() },
     { RotatingKVCache(maxSize: 32) },
     { QuantizedKVCache() },
+    { VarianceNormalizedKVCache(tileSize: 32, keyBits: 4, valueBits: 4) },
     { ChunkedKVCache(chunkSize: 16) },
     { ArraysCache(size: 2) },
     { MambaCache() },
@@ -29,6 +30,15 @@ private func assertArraysClose(_ lhs: [MLXArray], _ rhs: [MLXArray], label: Stri
         let close = allClose(a, b).item(Bool.self)
         #expect(close, "values not close at index \(i) \(label)")
     }
+}
+
+private func relativeRMSError(_ actual: MLXArray, _ expected: MLXArray) -> Float {
+    let actual = actual.asType(.float32)
+    let expected = expected.asType(.float32)
+    let diff = actual - expected
+    let mse = mean(diff * diff).item(Float.self)
+    let ref = max(mean(expected * expected).item(Float.self), 1e-6)
+    return sqrt(mse / ref)
 }
 
 // MARK: - Original parameterized test (updated with value assertions)
@@ -124,6 +134,338 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(quantized.groupSize == 128)
     #expect(quantized.bits == 4)
     #expect(quantized.metaState == ["256", "7", "128", "4"])
+}
+
+@Test func testVarianceNormalizedKVCacheStoresCompletedTilesAndTail() throws {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 40, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 40, 32]).asType(.float16)
+
+    let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+    eval(cachedKeys, cachedValues)
+
+    #expect(cache.offset == 40)
+    #expect(cachedKeys.shape == keys.shape)
+    #expect(cachedValues.shape == values.shape)
+    #expect(cache.metaState == ["32", "40", "4", "4", "2", "1", "8"])
+    #expect(cache.state.count == 10)
+    #expect(relativeRMSError(cachedKeys, keys) < 0.5)
+    #expect(relativeRMSError(cachedValues, values) < 0.5)
+}
+
+@Test func testVarianceNormalizedKVCacheSerializationRoundTrip() throws {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 36, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 36, 32]).asType(.float16)
+    let (originalKeys, originalValues) = cache.update(keys: keys, values: values)
+    eval(originalKeys, originalValues)
+
+    let url = tempURL()
+    try savePromptCache(url: url, cache: [cache], metadata: ["kind": "variance-normalized"])
+    let (loaded, metadata) = try loadPromptCache(url: url)
+
+    #expect(metadata["kind"] == "variance-normalized")
+    let restored = try #require(loaded[0] as? VarianceNormalizedKVCache)
+    #expect(restored.metaState == cache.metaState)
+
+    let moreKeys = MLXRandom.normal([1, 1, 1, 32]).asType(.float16)
+    let moreValues = MLXRandom.normal([1, 1, 1, 32]).asType(.float16)
+    let (restoredKeys, restoredValues) = restored.update(keys: moreKeys, values: moreValues)
+    eval(restoredKeys, restoredValues)
+
+    #expect(restored.offset == 37)
+    #expect(restoredKeys.shape == [1, 1, 37, 32])
+    #expect(restoredValues.shape == [1, 1, 37, 32])
+}
+
+@Test func testVarianceNormalizedKVCacheSupportsAsymmetricKeyValueBits() {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 2, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+
+    let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+    eval(cachedKeys, cachedValues)
+
+    #expect(cache.offset == 32)
+    #expect(cache.metaState == ["32", "32", "4", "2", "2", "1", "0"])
+    #expect(cachedKeys.shape == keys.shape)
+    #expect(cachedValues.shape == values.shape)
+}
+
+@Test func testVarianceNormalizedKVCacheSupportsPaperTargetTwoBitKV() {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 2, valueBits: 2, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+
+    let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+    eval(cachedKeys, cachedValues)
+
+    #expect(cache.offset == 32)
+    #expect(cache.metaState == ["32", "32", "2", "2", "2", "1", "0"])
+    #expect(cache.state.count == 8)
+    #expect(cachedKeys.shape == keys.shape)
+    #expect(cachedValues.shape == values.shape)
+}
+
+@Test func testVarianceNormalizedKVCacheQuantizedTileAttentionMatchesMaterializedAttention() {
+    let nativeCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let materializedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let queries = MLXRandom.normal([1, 1, 4, 32]).asType(.float16)
+    let keys = MLXRandom.normal([1, 1, 36, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 36, 32]).asType(.float16)
+    let scale = 1 / sqrt(Float(32))
+
+    let native = attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: nativeCache,
+        scale: scale)
+    let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+    let materialized = attentionWithCacheUpdate(
+        queries: queries,
+        keys: cachedKeys,
+        values: cachedValues,
+        cache: nil,
+        scale: scale)
+    eval(native, materialized)
+
+    #expect(relativeRMSError(native, materialized) < 1e-3)
+    #expect(nativeCache.offset == 36)
+    #expect(nativeCache.metaState == ["32", "36", "4", "4", "2", "1", "4"])
+}
+
+@Test func testVarianceNormalizedKVCacheQuantizedTileAttentionSupportsGQA() {
+    let nativeCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let materializedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let queries = MLXRandom.normal([1, 4, 3, 32]).asType(.float16)
+    let keys = MLXRandom.normal([1, 2, 33, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 2, 33, 32]).asType(.float16)
+    let scale = 1 / sqrt(Float(32))
+
+    let native = attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: nativeCache,
+        scale: scale)
+    let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+    let materialized = attentionWithCacheUpdate(
+        queries: queries,
+        keys: cachedKeys,
+        values: cachedValues,
+        cache: nil,
+        scale: scale)
+    eval(native, materialized)
+
+    #expect(relativeRMSError(native, materialized) < 1e-3)
+    #expect(native.shape == [1, 4, 3, 32])
+    #expect(nativeCache.metaState == ["32", "33", "4", "4", "2", "1", "1"])
+}
+
+@Test func testApplyAttentionMaskSuppressesBoolMaskedLogits() {
+    let scores = MLXArray([Float(-10), Float(-20), Float(-30)]).reshaped(1, 1, 1, 3)
+    let mask = MLXArray([true, false, false]).reshaped(1, 1, 1, 3)
+
+    let weights = softmax(applyAttentionMask(scores: scores, mask: .array(mask)), axis: -1)
+    eval(weights)
+
+    let values = weights.asArray(Float.self)
+    #expect(values[0] > 0.999)
+    #expect(values[1] < 1e-6)
+    #expect(values[2] < 1e-6)
+}
+
+@Test func testVarianceNormalizedKVCacheMaskedAttentionMatchesMaterializedAttention() {
+    let nativeCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let materializedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let queries = MLXArray.ones([1, 1, 4, 32], dtype: .float16) * -1
+    let keys = MLXArray.ones([1, 1, 36, 32], dtype: .float16)
+    let values = concatenated(
+        [
+            MLXArray.zeros([1, 1, 32, 32], dtype: .float16),
+            MLXArray.ones([1, 1, 4, 32], dtype: .float16) * 10,
+        ], axis: 2)
+    let scale = 1 / sqrt(Float(32))
+    let mask = MLXFast.ScaledDotProductAttentionMaskMode.causal
+
+    let native = attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: nativeCache,
+        scale: scale,
+        mask: mask)
+    let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+    let materialized = attentionWithCacheUpdate(
+        queries: queries,
+        keys: cachedKeys,
+        values: cachedValues,
+        cache: nil,
+        scale: scale,
+        mask: mask)
+    eval(native, materialized)
+
+    #expect(relativeRMSError(native, materialized) < 1e-3)
+}
+
+@Test func testVarianceNormalizedKVCacheAttentionTracksFP16OverLongDecode() {
+    MLXRandom.seed(7)
+
+    let fp16Cache = KVCacheSimple()
+    let varianceNormalizedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let scale = 1 / sqrt(Float(32))
+    var totalError: Float = 0
+    var maxError: Float = 0
+    let tokenCount = 96
+
+    for _ in 0 ..< tokenCount {
+        let queries = MLXRandom.normal([1, 1, 1, 32]).asType(.float16)
+        let keys = MLXRandom.normal([1, 1, 1, 32]).asType(.float16)
+        let values = MLXRandom.normal([1, 1, 1, 32]).asType(.float16)
+
+        let fp16 = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: fp16Cache,
+            scale: scale)
+        let compressed = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: varianceNormalizedCache,
+            scale: scale)
+        eval(fp16, compressed)
+
+        let error = relativeRMSError(compressed, fp16)
+        totalError += error
+        maxError = max(maxError, error)
+    }
+
+    #expect(varianceNormalizedCache.metaState == ["32", "96", "4", "4", "2", "3", "0"])
+    #expect(totalError / Float(tokenCount) < 0.15)
+    #expect(maxError < 0.45)
+}
+
+@Test func testVarianceNormalizedKVCacheMemoryAccountingIncludesScaleOverhead() {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 64, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 64, 32]).asType(.float16)
+
+    _ = cache.update(keys: keys, values: values)
+    eval(cache.state)
+
+    let state = cache.state
+    let compressedBytes = state.reduce(0) { $0 + $1.nbytes }
+    let quantizedPayloadBytes = stride(from: 0, to: state.count, by: 8).reduce(0) {
+        $0 + state[$1].nbytes + state[$1 + 4].nbytes
+    }
+    let fp16Bytes = keys.nbytes + values.nbytes
+
+    #expect(cache.metaState == ["32", "64", "4", "4", "2", "2", "0"])
+    #expect(compressedBytes > quantizedPayloadBytes)
+    #expect(compressedBytes < fp16Bytes)
+}
+
+@Test func testVarianceNormalizedKVCacheTwoBitMemoryAccountingIsPaperRelevant() {
+    let cache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 2, valueBits: 2, sinkhornIterations: 2)
+    let keys = MLXRandom.normal([1, 1, 64, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 64, 32]).asType(.float16)
+
+    _ = cache.update(keys: keys, values: values)
+    eval(cache.state)
+
+    let compressedBytes = cache.state.reduce(0) { $0 + $1.nbytes }
+    let fp16Bytes = keys.nbytes + values.nbytes
+
+    #expect(cache.metaState == ["32", "64", "2", "2", "2", "2", "0"])
+    #expect(compressedBytes < fp16Bytes)
+}
+
+@Test func testMaybeQuantizeKVCacheCanUseVarianceNormalizedStrategy() {
+    let simple = KVCacheSimple()
+    let keys = MLXRandom.normal([1, 1, 33, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 33, 32]).asType(.float16)
+    _ = simple.update(keys: keys, values: values)
+
+    var cache: [KVCache] = [simple]
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: 4,
+        quantizedKVStart: 0,
+        strategy: .varianceNormalized,
+        kvValueBits: 4,
+        kvTileSize: 32)
+
+    let converted = cache[0] as? VarianceNormalizedKVCache
+    #expect(converted != nil)
+    #expect(converted?.offset == 33)
+    #expect(converted?.metaState == ["32", "33", "4", "4", "4", "1", "1"])
+}
+
+@Test func testMaybeQuantizeKVCacheDefersVarianceNormalizedStrategyUntilThreshold() {
+    let simple = KVCacheSimple()
+    let keys = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 32, 32]).asType(.float16)
+    _ = simple.update(keys: keys, values: values)
+
+    var cache: [KVCache] = [simple]
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: 4,
+        quantizedKVStart: 64,
+        strategy: .varianceNormalized,
+        kvValueBits: 4,
+        kvTileSize: 32)
+
+    #expect(cache[0] is KVCacheSimple)
+
+    let moreKeys = MLXRandom.normal([1, 1, 33, 32]).asType(.float16)
+    let moreValues = MLXRandom.normal([1, 1, 33, 32]).asType(.float16)
+    _ = cache[0].update(keys: moreKeys, values: moreValues)
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: 4,
+        quantizedKVStart: 64,
+        strategy: .varianceNormalized,
+        kvValueBits: 4,
+        kvTileSize: 32)
+
+    #expect(cache[0] is VarianceNormalizedKVCache)
+    #expect(cache[0].offset == 65)
+}
+
+@Test func testMaybeQuantizeKVCacheSkipsUnsupportedVarianceNormalizedDimensions() {
+    let simple = KVCacheSimple()
+    let keys = MLXRandom.normal([1, 1, 33, 24]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 33, 24]).asType(.float16)
+    _ = simple.update(keys: keys, values: values)
+
+    var cache: [KVCache] = [simple]
+    maybeQuantizeKVCache(
+        cache: &cache,
+        kvBits: 4,
+        quantizedKVStart: 0,
+        strategy: .varianceNormalized,
+        kvValueBits: 4,
+        kvTileSize: 32)
+
+    #expect(cache[0] is KVCacheSimple)
+    #expect(cache[0].offset == 33)
 }
 
 // MARK: - ArraysCache sparse slot round-trip
