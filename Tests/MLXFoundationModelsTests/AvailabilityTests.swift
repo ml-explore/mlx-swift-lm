@@ -8,7 +8,9 @@ import Testing
 
 @testable import MLXFoundationModels
 
-// This target links MLXLLM but references no MLXLLM symbol, so the linker can
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
+    // This target links MLXLLM but references no MLXLLM symbol, so the linker can
 // dead-strip its TrampolineModelFactory. ModelFactoryRegistry seeds itself purely
 // via NSClassFromString("MLXLLM.TrampolineModelFactory"), which then resolves to
 // nil — an empty registry. With no factory, loadModelContainer throws
@@ -261,3 +263,5 @@ private final class BlockingDownloader: Downloader, @unchecked Sendable {
         throw BlockingDownloaderReleased()
     }
 }
+
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

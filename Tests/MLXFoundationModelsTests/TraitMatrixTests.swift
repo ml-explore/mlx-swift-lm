@@ -8,6 +8,13 @@
 // the primary structural assertion — the test bodies reference the symbols
 // that must be present in that set.
 //
+// The two `FoundationModelsIntegration`-on arms additionally require
+// `canImport(FoundationModels, _version: 2)`: the adapter surface
+// (`MLXLanguageModel` et al.) only exists on the 27 SDK, so on the 26 SDK
+// those arms compile to nothing even when the trait is on. The guided-
+// generation primitives (`GuidedGenerationLoop`, `XGConstraint`) are gated on
+// `GuidedGenerationSupport` alone and are SDK-independent.
+//
 // A few behavioral tests are gated on the FM-on combinations because they
 // rely on `MLXLanguageModel.Executor`. The MLXFoundationModelsTests target
 // compiles with the package defaults (both traits on), so only the
@@ -31,7 +38,7 @@ struct TraitMatrixTests {
 
     // MARK: - Both traits on (default)
 
-    #if FoundationModelsIntegration && GuidedGenerationSupport
+    #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2) && GuidedGenerationSupport
         @Test("Both traits on: MLXLanguageModel + guided-generation primitives compile")
         func bothTraitsOnSurface() {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -77,7 +84,7 @@ struct TraitMatrixTests {
     // chat-fallthrough variant lives in the IntegrationTesting xcodeproj
     // (`PlainChatGenerationTests`), since it loads a model.
 
-    #if FoundationModelsIntegration && !GuidedGenerationSupport
+    #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2) && !GuidedGenerationSupport
         @Test("FM on, GG off: MLXLanguageModel compiles; guidedGenerationDisabled defined")
         func fmOnlySurface() {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

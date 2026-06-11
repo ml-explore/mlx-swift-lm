@@ -7,6 +7,8 @@ import Testing
 
 @testable import MLXFoundationModels
 
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
 @Suite
 struct TranscriptConverterTests {
 
@@ -215,3 +217,5 @@ struct TranscriptConverterTests {
     }
 
 }
+
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)
