@@ -73,8 +73,8 @@ public struct GenerateParameters: Sendable {
     public var quantizedKVStart: Int
 
     /// KV cache compression scheme. Overrides kvBits when set.
-    /// Built-in: "affine4", "affine8" (equivalent to kvBits 4/8).
-    /// Extensible for custom schemes (e.g. WHT-based compression).
+    /// Built-in: "affine4", "affine8" (equivalent to kvBits 4/8), plus the
+    /// TurboQuant family ("turbo4", "turbo3", "turbo2", "turbo4v2", "turbo4v3").
     public var kvScheme: String?
 
     /// Sampling temperature
@@ -810,7 +810,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvScheme: parameters.kvScheme
             )
         }
 
