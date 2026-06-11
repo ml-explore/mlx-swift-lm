@@ -1,0 +1,4 @@
+module CXGrammar {
+    header "xgrammar_c.h"
+    export *
+}

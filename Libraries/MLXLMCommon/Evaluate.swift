@@ -1063,14 +1063,15 @@ private struct SynchronousGenerationLoopResult {
 
 private func buildStopTokenIds(
     modelConfiguration: ModelConfiguration,
-    tokenizer: Tokenizer
+    tokenizer: Tokenizer,
+    additionalStopTokens: Set<String> = []
 ) -> Set<Int> {
     // Build complete EOS token set from all sources.
     var stopTokenIds = modelConfiguration.eosTokenIds
     if let tokenizerEOS = tokenizer.eosTokenId {
         stopTokenIds.insert(tokenizerEOS)
     }
-    for token in modelConfiguration.extraEOSTokens {
+    for token in modelConfiguration.extraEOSTokens.union(additionalStopTokens) {
         if let id = tokenizer.convertTokenToId(token) {
             stopTokenIds.insert(id)
         }
@@ -1362,7 +1363,8 @@ public func generate(
 public func generate(
     input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
+    tools: [[String: any Sendable]]? = nil,
+    additionalStopTokens: Set<String> = []
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
@@ -1372,7 +1374,8 @@ public func generate(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tools: tools)
+        tools: tools,
+        additionalStopTokens: additionalStopTokens)
     return stream
 }
 
@@ -1495,7 +1498,8 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     tokenizer: Tokenizer,
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
+    tools: [[String: any Sendable]]? = nil,
+    additionalStopTokens: Set<String> = []
 ) -> (AsyncStream<Generation>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1503,6 +1507,7 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
         tokenizer: tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
+        additionalStopTokens: additionalStopTokens,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
             format: modelConfiguration.toolCallFormat ?? .json,
@@ -1532,7 +1537,8 @@ public func generateTokens(
     parameters: GenerateParameters,
     context: ModelContext,
     includeStopToken: Bool = false,
-    wiredMemoryTicket: WiredMemoryTicket? = nil
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    additionalStopTokens: Set<String> = []
 ) throws -> AsyncStream<TokenGeneration> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
@@ -1542,7 +1548,8 @@ public func generateTokens(
         tokenizer: context.tokenizer,
         iterator: iterator,
         includeStopToken: includeStopToken,
-        wiredMemoryTicket: wiredMemoryTicket
+        wiredMemoryTicket: wiredMemoryTicket,
+        additionalStopTokens: additionalStopTokens
     )
     return stream
 }
@@ -1742,7 +1749,8 @@ public func generateTokenTask(
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
     includeStopToken: Bool = false,
-    wiredMemoryTicket: WiredMemoryTicket? = nil
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    additionalStopTokens: Set<String> = []
 ) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1751,6 +1759,7 @@ public func generateTokenTask(
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
         includeStopToken: includeStopToken,
+        additionalStopTokens: additionalStopTokens,
         handler: RawTokenLoopHandler()
     )
 }
@@ -1762,6 +1771,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     iterator: consuming any TokenIteratorProtocol,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     includeStopToken: Bool = false,
+    additionalStopTokens: Set<String> = [],
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Void, Never>) {
 
@@ -1783,7 +1793,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
 
             let stopTokenIds = buildStopTokenIds(
                 modelConfiguration: modelConfiguration,
-                tokenizer: tokenizer
+                tokenizer: tokenizer,
+                additionalStopTokens: additionalStopTokens
             )
 
             while let token = iterator.next() {

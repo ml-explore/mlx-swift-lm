@@ -1,0 +1,7 @@
+d476a48dcd8fa3b5afeddbe850e73bb3b1dcf505
+
+This directory is a vendored snapshot of https://github.com/mlc-ai/xgrammar.
+Refresh with: scripts/sync-xgrammar-source.sh <sha-or-tag>
+
+Do not edit files under this directory by hand -- changes will be overwritten
+at the next sync. Patches against upstream belong upstream.
