@@ -1,6 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     import Foundation
     import Testing
@@ -117,4 +117,4 @@
         }
     }
 
-#endif  // FoundationModelsIntegration
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

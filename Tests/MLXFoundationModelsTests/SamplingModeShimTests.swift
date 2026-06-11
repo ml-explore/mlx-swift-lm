@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     import Foundation
     import FoundationModels
@@ -60,4 +60,4 @@
         // `@unknown default -> nil` arm is covered by construction, not asserted.
     }
 
-#endif  // FoundationModelsIntegration
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

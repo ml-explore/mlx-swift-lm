@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     import Testing
     import Foundation
@@ -30,4 +30,4 @@
         }
     }
 
-#endif
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

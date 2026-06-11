@@ -19,7 +19,7 @@ import MLXLMCommon
 
 @testable import MLXFoundationModels
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     // MARK: - Stub Downloader / TokenizerLoader
     //
@@ -120,7 +120,7 @@ import MLXLMCommon
         )
     }
 
-#endif  // FoundationModelsIntegration
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)
 
 // MARK: - Shared Test Fixtures (model-free)
 

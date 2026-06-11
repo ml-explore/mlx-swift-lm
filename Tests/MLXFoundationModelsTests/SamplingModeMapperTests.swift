@@ -2,7 +2,7 @@
 
 import Testing
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
     @testable import MLXLMCommon
     import MLXFoundationModels
 
@@ -152,4 +152,4 @@ import Testing
             }
         }
     }
-#endif
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

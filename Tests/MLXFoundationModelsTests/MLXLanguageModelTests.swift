@@ -7,7 +7,9 @@ import Testing
 
 @testable import MLXFoundationModels
 
-@Suite("MLXLanguageModel initialization")
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
+    @Suite("MLXLanguageModel initialization")
 struct MLXLanguageModelInitTests {
 
     @Test("stores modelIdentifier on construction")
@@ -179,4 +181,6 @@ struct TemperaturePlumbingTests {
             #expect(msg == "vocab extraction failed")
         }
     }
-#endif
+#endif  // GuidedGenerationSupport
+
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)
