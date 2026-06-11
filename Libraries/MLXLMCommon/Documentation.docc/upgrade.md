@@ -78,7 +78,7 @@ let model = try await loadModelContainer(
 
 ### Using Integration Packages
 
-If you are using an <doc:using#Integration-Packages>, such as [https://github.com/DePasqualeOrg/swift-tokenizers-mlx](https://github.com/DePasqualeOrg/swift-tokenizers-mlx), you would do something similar:
+If you are using an <doc:using#Integration-Packages> you would do something similar:
 
 ```swift
 import MLXLLM
@@ -96,8 +96,7 @@ becomes:
 import MLXLLM
 import MLXLMCommon
 
-import MLXLMHFAPI
-import MLXLMTokenizers
+import IntegrationPackage
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
 let model = try await loadModelContainer(
@@ -169,51 +168,6 @@ These types are removed or replaced:
 
 Detailed release notes.
 
-### New dependencies
-
-Add your preferred tokenizer and downloader adapters:
-
-```swift
-// Before (2.x) – single dependency
-.package(url: "https://github.com/ml-explore/mlx-swift-lm/", from: "2.30.0"),
-
-// After (3.x) – core + adapters
-.package(url: "https://github.com/ml-explore/mlx-swift-lm/", from: "3.0.0"),
-.package(url: "https://github.com/DePasqualeOrg/swift-tokenizers-mlx/", from: "0.2.0", traits: ["Swift"]),
-.package(url: "https://github.com/DePasqualeOrg/swift-hf-api-mlx/", from: "0.2.0"),
-```
-
-And add their products to your target:
-
-```swift
-.product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
-.product(name: "MLXLMHFAPI", package: "swift-hf-api-mlx"),
-
-// If you use MLXEmbedders:
-.product(name: "MLXEmbeddersTokenizers", package: "swift-tokenizers-mlx"),
-.product(name: "MLXEmbeddersHFAPI", package: "swift-hf-api-mlx"),
-```
-
-### New imports
-
-```swift
-// Before (2.x)
-import MLXLLM
-
-// After (3.x)
-import MLXLLM
-import MLXLMHFAPI      // Downloader adapter
-import MLXLMTokenizers // Tokenizer adapter
-```
-
-If you use MLXEmbedders:
-
-```swift
-import MLXEmbedders
-import MLXEmbeddersHFAPI      // Downloader adapter
-import MLXEmbeddersTokenizers // Tokenizer adapter
-```
-
 ### Loading API changes
 
 The core APIs now include a `from:` parameter of type `URL` or `any Downloader` as well as a `using:` parameter for the tokenizer loader. Tokenizer integration packages may supply convenience methods with a default tokenizer loader, allowing you to omit the `using:` parameter.
@@ -228,13 +182,14 @@ Example when downloading from Hugging Face:
 ```swift
 // Before (2.x) – hub defaulted to HubApi()
 let container = try await loadModelContainer(
-    id: "mlx-community/Qwen3-4B-4bit"
+    configuration: LLMRegistry.gemma3_1B_qat_4bit
 )
 
-// After (3.x) – Using Swift Hugging Face + Swift Tokenizers
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    id: "mlx-community/Qwen3-4B-4bit"
+// After (3.x) – Using HuggingFace integration macros
+import MLXHuggingFace
+
+let model = try await #huggingFaceLoadModelContainer(
+    configuration: LLMRegistry.gemma3_1B_qat_4bit
 )
 ```
 
@@ -263,11 +218,11 @@ Loading an embedder:
 
 ```swift
 import MLXEmbedders
-import MLXEmbeddersHFAPI
-import MLXEmbeddersTokenizers
+import MLXHuggingFace
 
-let container = try await loadModelContainer(
-    from: HubClient.default,
+let container = try await EmbedderModelFactory.load(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .configuration(id: "sentence-transformers/all-MiniLM-L6-v2")
 )
 ```
