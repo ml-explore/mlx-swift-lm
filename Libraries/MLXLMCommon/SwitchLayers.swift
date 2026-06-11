@@ -4,7 +4,7 @@ import MLXNN
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/switch_layers.py
 
-private let compiledSiluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+public let compiledSiluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
     shapeless: true
 ) { gate, up in
     MLXNN.silu(gate) * up
