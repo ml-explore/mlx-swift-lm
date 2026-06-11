@@ -43,7 +43,7 @@
 namespace {
 // The pinned upstream commit sha, kept in sync with
 // Sources/CXGrammar/xgrammar/VERSION by scripts/sync-xgrammar-source.sh.
-constexpr const char kXGrammarVersion[] = "d476a48dcd8fa3b5afeddbe850e73bb3b1dcf505";
+constexpr const char kXGrammarVersion[] = "v0.1.30";
 
 xgrammar::VocabType MapVocabType(XGVocabType type) {
     switch (type) {

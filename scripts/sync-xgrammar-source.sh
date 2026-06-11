@@ -97,7 +97,10 @@ cp "$SOURCE_DIR/NOTICE" "$DEST_ROOT/NOTICE"
 
 echo "==> Writing VERSION"
 cat > "$DEST_ROOT/VERSION" <<EOF
-$RESOLVED_SHA
+$REQUESTED_REV
+
+Pinned to the upstream revision $REQUESTED_REV
+(resolved SHA $RESOLVED_SHA, informational).
 
 This directory is a vendored snapshot of https://github.com/mlc-ai/xgrammar.
 Refresh with: scripts/sync-xgrammar-source.sh <sha-or-tag>
