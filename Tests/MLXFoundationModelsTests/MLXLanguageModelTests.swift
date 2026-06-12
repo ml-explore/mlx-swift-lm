@@ -123,19 +123,19 @@ import Testing
     // MARK: - Typed error mapping
 
     /// Pure-function tests for the `GrammarError → Error` translation in
-    /// `Executor.mapXGError(_:)`. Verifies that the one xgrammar case where
+    /// `Executor.mapGrammarError(_:)`. Verifies that the one xgrammar case where
     /// user-fault is provable (`invalidJSONSchema`) maps to the typed
     /// `LanguageModelError.unsupportedGenerationGuide`, and everything else
     /// passes through untyped so internal-shim failures don't masquerade as
     /// developer mistakes.
     #if GuidedGenerationSupport
         @Suite("GrammarError typed mapping")
-        struct XGErrorMappingTests {
+        struct GrammarErrorMappingTests {
 
             @Test("invalidJSONSchema maps to LanguageModelError.unsupportedGenerationGuide")
             func invalidJSONSchemaMapsToTypedError() throws {
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-                let mapped = MLXLanguageModel.Executor.mapXGError(
+                let mapped = MLXLanguageModel.Executor.mapGrammarError(
                     .invalidJSONSchema(
                         "xgrammar rejected the schema: top-level type must be a string")
                 )
@@ -161,7 +161,7 @@ import Testing
             func constraintCompilationFailedPassesThrough() throws {
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
                 let original = GrammarError.constraintCompilationFailed("matcher init failed")
-                let mapped = MLXLanguageModel.Executor.mapXGError(original)
+                let mapped = MLXLanguageModel.Executor.mapGrammarError(original)
 
                 guard case GrammarError.constraintCompilationFailed(let msg) = mapped else {
                     Issue.record(
@@ -176,7 +176,7 @@ import Testing
             func tokenizerCreationFailedPassesThrough() throws {
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
                 let original = GrammarError.tokenizerCreationFailed("vocab extraction failed")
-                let mapped = MLXLanguageModel.Executor.mapXGError(original)
+                let mapped = MLXLanguageModel.Executor.mapGrammarError(original)
 
                 guard case GrammarError.tokenizerCreationFailed(let msg) = mapped else {
                     Issue.record(
