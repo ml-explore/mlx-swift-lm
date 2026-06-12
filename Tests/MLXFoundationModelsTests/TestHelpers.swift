@@ -24,8 +24,7 @@ import MLXLMCommon
     // MARK: - Stub Downloader / TokenizerLoader
     //
     // For tests that construct an `MLXLanguageModel` but never actually load one:
-    // capability assertions and gate-rejection paths (e.g. `respond` throwing
-    // `guidedGenerationDisabled` before any inference). No network, no weights.
+    // capability assertions and construction paths. No network, no weights.
 
     private struct StubDownloader: MLXLMCommon.Downloader, @unchecked Sendable {
         func download(
@@ -73,9 +72,7 @@ import MLXLMCommon
             capabilities
             ?? {
                 var set: [LanguageModelCapabilities.Capability] = []
-                #if GuidedGenerationSupport
-                    set += [.guidedGeneration, .toolCalling]
-                #endif
+                set += [.guidedGeneration, .toolCalling]
                 return LanguageModelCapabilities(capabilities: set)
             }()
         return MLXLanguageModel(

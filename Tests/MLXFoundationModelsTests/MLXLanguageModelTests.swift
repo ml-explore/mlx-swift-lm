@@ -7,7 +7,7 @@ import Testing
 
 @testable import MLXFoundationModels
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
     import MLXGuidedGeneration
 #endif
 
@@ -128,7 +128,7 @@ import Testing
     /// `LanguageModelError.unsupportedGenerationGuide`, and everything else
     /// passes through untyped so internal-shim failures don't masquerade as
     /// developer mistakes.
-    #if GuidedGenerationSupport
+    #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
         @Suite("GrammarError typed mapping")
         struct GrammarErrorMappingTests {
 
@@ -187,6 +187,6 @@ import Testing
                 #expect(msg == "vocab extraction failed")
             }
         }
-    #endif  // GuidedGenerationSupport
+    #endif  // FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
