@@ -142,8 +142,8 @@ when the `MLXFoundationModels` adapter is compiled in.
 Grammar-constrained ("guided") generation lives in the separate
 `MLXGuidedGeneration` product. `MLXFoundationModels` always uses it when the
 adapter is compiled in, so guided output and tool calling are always available
-there. To use guided generation without FoundationModels (older OS floors,
-Linux), depend on `MLXGuidedGeneration` directly:
+there. To use guided generation without FoundationModels (older OS floors),
+depend on `MLXGuidedGeneration` directly:
 
 ```swift
 .package(
