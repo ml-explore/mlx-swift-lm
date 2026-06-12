@@ -6,6 +6,7 @@
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Golden contract tests for `TokenizerVocabExtractor`.
     ///

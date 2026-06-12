@@ -8,6 +8,7 @@
     import MLX
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Multi-model correctness sweep.
     ///
@@ -123,7 +124,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
@@ -249,7 +250,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
@@ -443,7 +444,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,

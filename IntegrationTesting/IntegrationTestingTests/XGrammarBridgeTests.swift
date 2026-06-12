@@ -2,24 +2,24 @@
 //
 // Tests for XGrammarBridge Swift wrappers over the CXGrammar C shim.
 //
-// XGTokenizer construction against live production vocabularies.
+// GrammarTokenizer construction against live production vocabularies.
 // Each test loads a HuggingFace tokenizer via the shared test loader,
-// feeds its vocab through `TokenizerVocabExtractor.extractForXGrammar`,
-// and constructs an `XGTokenizer` bound to xgrammar's TokenizerInfo.
+// feeds its vocab through `TokenizerVocabExtractor.extractForGrammar`,
+// and constructs an `GrammarTokenizer` bound to xgrammar's TokenizerInfo.
 // The contract under test is:
 //   - construction succeeds on a real vocab containing byte-fallback
 //     / byte-level-encoded tokens
-//   - `XGTokenizer.vocabSize` matches the recorded fixture metadata,
+//   - `GrammarTokenizer.vocabSize` matches the recorded fixture metadata,
 //     which pins the downloader / loader pair to a known snapshot so
 //     silent vocab drift surfaces here and not deep inside mask tests.
 //
-// XGConstraint end-to-end round-trip. Builds on the tokenizer by
+// GrammarConstraint end-to-end round-trip. Builds on the tokenizer by
 // compiling a minimal JSON schema, computing a mask, committing a
 // grammar-accepted token, and recomputing. Asserts the matcher is not
 // terminated and the mask is non-empty at both steps.
 //
 // Single-matcher concurrent-access contract. Spawns two detached
-// tasks hammering `computeMask`/`commitToken` on one `XGConstraint`;
+// tasks hammering `computeMask`/`commitToken` on one `GrammarConstraint`;
 // asserts the bridge serializes the C-level matcher state so neither
 // task crashes and the constraint remains operational afterward. The
 // safety is provided by a Swift-side NSLock — xgrammar's matcher is
@@ -29,7 +29,7 @@
 // Exception-unwinding smoke test. Triggers an
 // `InvalidJSONSchemaError` deep inside xgrammar's `GrammarCompiler`
 // from within a `Task.detached` closure and asserts the shim catches
-// it, maps it to the discriminated `XGError.invalidJSONSchema(_)`
+// it, maps it to the discriminated `GrammarError.invalidJSONSchema(_)`
 // case, and neither crashes the process nor corrupts the detached
 // task's stack. C++ exceptions that traverse a Swift -> C -> C++ frame
 // chain must not escape the shim; this pins that xgrammar's throwing
@@ -37,7 +37,7 @@
 //
 // Gated on `FoundationModelsIntegration` because the live-tokenizer
 // path routes through `loadTestModelContainer`; gated on
-// `GuidedGenerationSupport` because `XGTokenizer` lives under that
+// `GuidedGenerationSupport` because `GrammarTokenizer` lives under that
 // trait.
 //
 // Note on coverage: this exercises gemma-3 and qwen2.5; qwen2.5 stands
@@ -51,28 +51,29 @@
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct XGrammarBridgeTests {
 
-        // MARK: - XGTokenizer construction
+        // MARK: - GrammarTokenizer construction
 
-        /// Construct XGTokenizer from the live gemma-3 vocab.
+        /// Construct GrammarTokenizer from the live gemma-3 vocab.
         ///
         /// Gemma uses SentencePiece with `<0xNN>` byte-fallback tokens for
         /// bytes that the base vocab doesn't cover. The extractor must hand
         /// xgrammar a representation where those tokens survive the Swift →
         /// C string transport; construction must not throw.
-        @Test("XGTokenizer: gemma-3 live vocab constructs; size matches fixture")
+        @Test("GrammarTokenizer: gemma-3 live vocab constructs; size matches fixture")
         func testXGTokenizerGemma3() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try Self.loadTokenizerFixture(named: "tokenizer_gemma3.json")
             let container = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
 
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
 
-                let tokenizer = try XGTokenizer(
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(fixture.eosTokenId)
@@ -80,12 +81,12 @@
 
                 #expect(
                     tokenizer.vocabSize == fixture.vocabSize,
-                    "XGTokenizer reports vocabSize \(tokenizer.vocabSize); fixture expects \(fixture.vocabSize) for \(TestFixtures.gemmaModelID)"
+                    "GrammarTokenizer reports vocabSize \(tokenizer.vocabSize); fixture expects \(fixture.vocabSize) for \(TestFixtures.gemmaModelID)"
                 )
             }
         }
 
-        /// Construct XGTokenizer from the live qwen2.5 vocab.
+        /// Construct GrammarTokenizer from the live qwen2.5 vocab.
         ///
         /// Qwen uses GPT-2 byte-level BPE (via the `bytes_to_unicode` map).
         /// The extractor normalizes those back to raw bytes before handing
@@ -94,16 +95,16 @@
         /// Stands in for a dedicated qwen3 case until a
         /// `tokenizer_qwen3.json` fixture exists. Same tokenizer family;
         /// mechanically equivalent for byte-level BPE coverage.
-        @Test("XGTokenizer: qwen2.5 live vocab constructs; size matches fixture")
+        @Test("GrammarTokenizer: qwen2.5 live vocab constructs; size matches fixture")
         func testXGTokenizerQwen25() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try Self.loadTokenizerFixture(named: "tokenizer_qwen25.json")
             let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
 
-                let tokenizer = try XGTokenizer(
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(fixture.eosTokenId)
@@ -111,7 +112,7 @@
 
                 #expect(
                     tokenizer.vocabSize == fixture.vocabSize,
-                    "XGTokenizer reports vocabSize \(tokenizer.vocabSize); fixture expects \(fixture.vocabSize) for \(TestFixtures.defaultModelID)"
+                    "GrammarTokenizer reports vocabSize \(tokenizer.vocabSize); fixture expects \(fixture.vocabSize) for \(TestFixtures.defaultModelID)"
                 )
             }
         }
@@ -119,9 +120,9 @@
         // TODO: add `testXGTokenizerLlama3()` once `tokenizer_llama3.json`
         // lands, for three-tokenizer coverage (gemma-3, qwen3, llama-3).
 
-        // MARK: - XGConstraint schema round-trip
+        // MARK: - GrammarConstraint schema round-trip
 
-        /// XGConstraint round-trips a JSON schema.
+        /// GrammarConstraint round-trips a JSON schema.
         ///
         /// Compiles `{"type":"object"}` against a live gemma-3 vocab, computes
         /// the initial mask, picks the first grammar-accepted token ID, commits
@@ -139,20 +140,20 @@
         /// `flushLogs()` is validated separately as a placeholder returning
         /// `nil`; xgrammar has no log-accumulation stream, so this method
         /// is a typed no-op.
-        @Test("XGConstraint: JSON schema round-trips; mask non-empty at both steps")
+        @Test("GrammarConstraint: JSON schema round-trips; mask non-empty at both steps")
         func testXGConstraintSchemaRoundTrip() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try Self.loadTokenizerFixture(named: "tokenizer_gemma3.json")
             let container = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
 
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(fixture.eosTokenId)
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: #"{"type":"object"}"#
                 )
@@ -216,7 +217,7 @@
         ///
         /// Test shape: spin up two `Task.detached` workers that each run a
         /// compute-then-commit loop for many iterations against the same
-        /// `XGConstraint`. `Task.detached` escapes the surrounding actor
+        /// `GrammarConstraint`. `Task.detached` escapes the surrounding actor
         /// isolation so the two workers run on the global executor in
         /// parallel. Assertions:
         ///   - both workers complete without throwing from crashes
@@ -236,20 +237,20 @@
         /// directly if the lock is removed. This test's role on a real
         /// device is the smoke signal: survive the concurrent storm without
         /// UB-induced crashes.
-        @Test("XGConstraint: concurrent tasks do not crash or corrupt the matcher")
+        @Test("GrammarConstraint: concurrent tasks do not crash or corrupt the matcher")
         func testConcurrentAccessToSingleMatcherIsSerialized() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try Self.loadTokenizerFixture(named: "tokenizer_gemma3.json")
             let container = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
 
-            let constraint: XGConstraint = try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+            let constraint: GrammarConstraint = try await container.perform { context in
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(fixture.eosTokenId)
                 )
-                return try XGConstraint(
+                return try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: #"{"type":"array"}"#
                 )
@@ -279,11 +280,11 @@
         /// that the grammar rejects (because a peer task advanced state)
         /// are treated as a graceful stop condition for this worker — not
         /// a test failure.
-        private static func stressWorker(on constraint: XGConstraint, iterations: Int) throws -> Int
+        private static func stressWorker(on constraint: GrammarConstraint, iterations: Int) throws -> Int
         {
             var steps = 0
             for _ in 0 ..< iterations {
-                let mask: XGMaskResult
+                let mask: MaskResult
                 do {
                     mask = try constraint.computeMask()
                 } catch {
@@ -313,7 +314,7 @@
         /// CompileJSONSchema` throws `InvalidJSONSchemaError` for this
         /// input. The shim's `WithExceptionBoundary` catches it inside the
         /// C++ translation unit and returns `XG_ERR_INVALID_JSON_SCHEMA`;
-        /// Swift maps the status to `XGError.invalidJSONSchema(_)`.
+        /// Swift maps the status to `GrammarError.invalidJSONSchema(_)`.
         ///
         /// The test runs the construction inside a `Task.detached` closure
         /// to force the throwing call to land on a non-main executor
@@ -328,25 +329,25 @@
         /// entry point in the shim (schema compile, EBNF compile,
         /// accept-token edge cases) is at risk.
         @Test(
-            "xgrammar exceptions surface as XGError.invalidJSONSchema across the C++/Swift boundary"
+            "xgrammar exceptions surface as GrammarError.invalidJSONSchema across the C++/Swift boundary"
         )
         func testShimCatchesXGrammarExceptionAcrossSwiftBoundary() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try Self.loadTokenizerFixture(named: "tokenizer_gemma3.json")
             let container = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
 
-            let tokenizer: XGTokenizer = try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                return try XGTokenizer(
+            let tokenizer: GrammarTokenizer = try await container.perform { context in
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                return try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(fixture.eosTokenId)
                 )
             }
 
-            let result = await Task.detached { [tokenizer] () -> Result<XGConstraint, Error> in
+            let result = await Task.detached { [tokenizer] () -> Result<GrammarConstraint, Error> in
                 do {
-                    let constraint = try XGConstraint(
+                    let constraint = try GrammarConstraint(
                         tokenizer: tokenizer,
                         jsonSchema: #"{"type": 42}"#
                     )
@@ -358,11 +359,11 @@
 
             switch result {
             case .success:
-                Issue.record("constructing XGConstraint from an invalid JSON Schema must throw")
+                Issue.record("constructing GrammarConstraint from an invalid JSON Schema must throw")
             case .failure(let error):
-                guard case XGError.invalidJSONSchema(let message) = error else {
+                guard case GrammarError.invalidJSONSchema(let message) = error else {
                     Issue.record(
-                        "expected XGError.invalidJSONSchema, got \(type(of: error)): \(error)")
+                        "expected GrammarError.invalidJSONSchema, got \(type(of: error)): \(error)")
                     return
                 }
                 #expect(

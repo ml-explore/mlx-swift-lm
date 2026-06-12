@@ -8,6 +8,7 @@
     import MLXLMCommon
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// End-to-end round-trip tests proving guided generation produces valid,
     /// decodable JSON for a variety of schema types.
@@ -285,7 +286,7 @@
                     tokenizer: context.tokenizer
                 )
 
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: jsonSchema,
                     fastForward: true,

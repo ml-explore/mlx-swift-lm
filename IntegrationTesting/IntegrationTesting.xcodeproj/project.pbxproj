@@ -18,6 +18,7 @@
 		57DEAEDD2F83CB0A0050B4ED /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 57DEAEDC2F83CB0A0050B4ED /* MLXHuggingFace */; };
 		57DEAEDF2F83CB0A0050B4ED /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 57DEAEDE2F83CB0A0050B4ED /* MLXLLM */; };
 		FADE00000000000000000002 /* MLXFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = FADE00000000000000000001 /* MLXFoundationModels */; };
+		FADE00000000000000000004 /* MLXGuidedGeneration in Frameworks */ = {isa = PBXBuildFile; productRef = FADE00000000000000000003 /* MLXGuidedGeneration */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -62,6 +63,7 @@
 			files = (
 				57DEAEDF2F83CB0A0050B4ED /* MLXLLM in Frameworks */,
 				FADE00000000000000000002 /* MLXFoundationModels in Frameworks */,
+				FADE00000000000000000004 /* MLXGuidedGeneration in Frameworks */,
 				57408EBC2F82A947001E2121 /* Tokenizers in Frameworks */,
 				57DEAEDD2F83CB0A0050B4ED /* MLXHuggingFace in Frameworks */,
 				57DEAED72F83CB0A0050B4ED /* BenchmarkHelpers in Frameworks */,
@@ -167,6 +169,7 @@
 				57DEAEDC2F83CB0A0050B4ED /* MLXHuggingFace */,
 				57DEAEDE2F83CB0A0050B4ED /* MLXLLM */,
 				FADE00000000000000000001 /* MLXFoundationModels */,
+				FADE00000000000000000003 /* MLXGuidedGeneration */,
 			);
 			productName = IntegrationTestingTests;
 			productReference = 578E559C2F82A3B9001FEF6B /* IntegrationTestingTests.xctest */;
@@ -588,6 +591,10 @@
 		FADE00000000000000000001 /* MLXFoundationModels */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MLXFoundationModels;
+		};
+		FADE00000000000000000003 /* MLXGuidedGeneration */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MLXGuidedGeneration;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

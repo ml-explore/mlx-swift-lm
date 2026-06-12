@@ -2,7 +2,7 @@
 //
 // Fork independence.
 //
-// Asserts `XGConstraint.clone()` returns an independent matcher:
+// Asserts `GrammarConstraint.clone()` returns an independent matcher:
 // commits on the fork must not advance the parent's state, and
 // commits on the parent must not advance the fork's state. Mirrors
 // xgrammar's `GrammarMatcher::Fork()` contract — deep copy of
@@ -27,6 +27,7 @@
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct ForkIndependenceTests {
@@ -47,13 +48,13 @@
 
             let container = try await loadTestModelContainer(id: fixture.modelId)
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
                 )
-                let parent = try XGConstraint(
+                let parent = try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: fixture.schema,
                     fastForward: true,

@@ -9,6 +9,7 @@ import MLXLMCommon
 import Tokenizers
 
 @testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
 // MARK: - Resource Bundle
 //
@@ -422,7 +423,7 @@ enum TestFixtures {
 /// Minimal 256 single-byte tokenizer for tests.
 /// Each byte is its own token ID, enabling exact character-to-ID mapping.
 ///
-/// Conforms to `MLXLMCommon.Tokenizer` because every consumer (`XGTokenizer`
+/// Conforms to `MLXLMCommon.Tokenizer` because every consumer (`GrammarTokenizer`
 /// initialiser, `ClosingTokenBias.compute`, `WhitespaceTokenBias.compute`)
 /// expects that protocol.
 struct ByteTokenizer: MLXLMCommon.Tokenizer {

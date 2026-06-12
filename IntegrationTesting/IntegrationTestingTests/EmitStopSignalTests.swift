@@ -28,6 +28,7 @@
     import MLX
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized, .timeLimit(.minutes(2)))
     struct EmitStopSignalTests {
@@ -56,7 +57,7 @@
                     modelID: TestFixtures.defaultModelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
