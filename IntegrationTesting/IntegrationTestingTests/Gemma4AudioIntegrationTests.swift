@@ -86,6 +86,11 @@ struct Gemma4AudioIntegrationTests {
             !lower.contains("not provided") && !lower.contains("no audio")
                 && !lower.contains("haven't provided") && !lower.contains("have not provided"),
             "model claims no audio; audio not reaching the model: \(answer)")
+        // One content-word hit is the perception bar, not an ASR-quality bar:
+        // the 4-bit QAT checkpoint paraphrases real (non-TTS) speech loosely,
+        // and verbatim transcription quality is a model property rather than an
+        // integration requirement — this test only guards that real audio
+        // reaches the tower and influences the answer.
         let contentWords = ["middle", "class", "welcome", "mr", "mister", "gospel", "apostle"]
         let hits = contentWords.filter { lower.contains($0) }
         #expect(

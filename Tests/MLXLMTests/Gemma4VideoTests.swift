@@ -1,15 +1,15 @@
 // Copyright © 2026 Apple Inc.
 //
 // Covers the public surface introduced by the Gemma 4 video-tower work:
-// processor configuration decode (video-related fields + their iOS-safe
-// defaults) and the message-generator placeholder expansion.
+// processor configuration decode (video-related fields and their defaults)
+// and the message-generator placeholder expansion.
 
 import Foundation
 import MLXLMCommon
 import MLXVLM
 import XCTest
 
-public class Gemma4VideoTests: XCTestCase {
+final class Gemma4VideoTests: XCTestCase {
 
     private static let baseConfigFields = """
         "processor_class": "Gemma4Processor",
@@ -48,7 +48,7 @@ public class Gemma4VideoTests: XCTestCase {
 
     func testProcessorConfigVideoDefaultsApplyWhenMissing() throws {
         // Older `preprocessor_config.json` files predate the video fields. The
-        // decoder must apply iOS-safe defaults rather than failing, so legacy
+        // decoder must apply sensible defaults rather than failing, so legacy
         // configs keep loading and the image-only path stays usable.
         let json = """
             {

@@ -53,7 +53,7 @@ struct Gemma4VideoIntegrationTests {
             audios: []
         )
 
-        print("🎬 Gemma 4 video description:\n\(answer)")
+        print("[e4b/video] \(answer)")
 
         let lower = answer.lowercased()
         // Reject the degenerate <pad>/special-token wall failure mode.
@@ -84,7 +84,7 @@ struct Gemma4VideoIntegrationTests {
             to: "Describe what happens in this video in one or two sentences.",
             images: [], videos: [.url(Self.bbbURL)], audios: [])
 
-        print("🎬 Gemma 4 BBB description:\n\(answer)")
+        print("[e4b/video-bbb] \(answer)")
         let lower = answer.lowercased()
         #expect(!lower.contains("<pad>"), "BBB description is a <pad> wall")
         #expect(

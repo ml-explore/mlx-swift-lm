@@ -9,7 +9,9 @@ import MLXNN
 private enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
     case videoTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
+    case audioTokenCountMismatch(expectedAudioTokens: Int, actualPromptTokens: Int)
     case missingVideoTokenId
+    case multipleAudioInputsUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -19,9 +21,15 @@ private enum Gemma4Error: LocalizedError {
         case .videoTokenCountMismatch(let expectedVisionTokens, let actualPromptTokens):
             return
                 "Gemma4 video token count mismatch: vision encoder produced \(expectedVisionTokens) soft tokens, but the prompt contains \(actualPromptTokens) video tokens."
+        case .audioTokenCountMismatch(let expectedAudioTokens, let actualPromptTokens):
+            return
+                "Gemma4 audio token count mismatch: audio encoder produced \(expectedAudioTokens) soft tokens, but the prompt contains \(actualPromptTokens) audio tokens."
         case .missingVideoTokenId:
             return
                 "Gemma4 video input provided but the configuration does not declare a video_token_id."
+        case .multipleAudioInputsUnsupported:
+            return
+                "Gemma4 supports a single audio input per request; multiple audio clips were provided."
         }
     }
 }
@@ -2049,100 +2057,6 @@ private final class Gemma4ConformerFeedForward: Module {
     }
 }
 
-private final class Gemma4AudioRelativePositionEmbedding: Module {
-    let numHeads: Int
-    let channels: Int
-    let headDim: Int
-    let maxBackward: Int
-    let maxForward: Int
-    let invTimescales: MLXArray
-
-    @ModuleInfo(key: "pos_proj") var posProj: Linear
-
-    init(config: Gemma4AudioConfiguration) {
-        self.numHeads = config.numAttentionHeads
-        self.channels = config.hiddenSize
-        self.headDim = config.hiddenSize / config.numAttentionHeads
-        self.maxBackward = max(0, config.attentionContextLeft - 1)
-        self.maxForward = config.attentionContextRight
-
-        self._posProj.wrappedValue = Linear(
-            config.hiddenSize, config.numAttentionHeads * headDim, bias: false)
-
-        let minTimescale: Float = 1.0
-        let maxTimescale: Float = 10000.0
-        let numTimescales = config.hiddenSize / 2
-        let logTimescaleIncrement =
-            Foundation.log(maxTimescale / minTimescale) / Float(max(numTimescales - 1, 1))
-        self.invTimescales =
-            MLXArray(minTimescale)
-            * MLX.exp(MLXArray(0 ..< numTimescales).asType(.float32) * (-logTimescaleIncrement))
-
-        super.init()
-    }
-
-    private func getTimingSignal(_ position: MLXArray, dtype: DType) -> MLXArray {
-        let posFloat = position.asType(.float32)
-        let pos = expandedDimensions(posFloat, axis: -1)
-        let invTS = invTimescales.reshaped(1, 1, -1)
-        let scaledTime = pos * invTS
-        let signal = concatenated([sin(scaledTime), cos(scaledTime)], axis: -1)
-        return signal.asType(dtype)
-    }
-
-    private func relativeShift(
-        _ termBD: MLXArray, batchSize: Int, numHeads: Int, numBlocks: Int,
-        blockSize: Int, contextSize: Int, maxSpanPlus1: Int
-    ) -> MLXArray {
-        let padAmount = (contextSize + 1) - maxSpanPlus1
-        var shifted = MLX.padded(
-            termBD,
-            widths: [
-                .init((0, 0)), .init((0, 0)), .init((0, 0)), .init((0, 0)), .init((0, padAmount)),
-            ])
-        shifted = shifted.reshaped(batchSize, numHeads, numBlocks, blockSize * (contextSize + 1))
-        shifted = shifted[0..., 0..., 0..., ..<(blockSize * contextSize)]
-        shifted = shifted.reshaped(batchSize, numHeads, numBlocks, blockSize, contextSize)
-        return shifted
-    }
-
-    func callAsFunction(queries: MLXArray, keys: MLXArray) -> MLXArray {
-        // queries: [B, U, W, N, H], keys: [B, U, C, N, H]
-        let batchSize = queries.dim(0)
-        let numBlocks = queries.dim(1)
-        let blockSize = queries.dim(2)
-        let contextSize = keys.dim(2)
-
-        let posIndices = MLXArray(
-            stride(from: maxBackward, through: -maxForward, by: -1).map { Int32($0) }
-        )
-        .reshaped(1, -1)
-        let maxSpanPlus1 = posIndices.dim(1)
-
-        var sinEmb = getTimingSignal(posIndices, dtype: queries.dtype)
-        sinEmb = posProj(sinEmb.asType(posProj.weight.dtype))
-        sinEmb = sinEmb.reshaped(maxSpanPlus1, numHeads, headDim)
-        sinEmb = sinEmb.asType(queries.dtype)
-
-        // queries_p: [B, N, U, W, H], keys_p: [B, N, U, H, C]
-        let queriesP = queries.transposed(0, 3, 1, 2, 4)
-        let keysP = keys.transposed(0, 3, 1, 4, 2)
-        let termAC = queriesP.matmul(keysP)
-
-        // sin_emb_t: [N, H, maxSpan]
-        let sinEmbT = sinEmb.transposed(1, 2, 0)
-        let qReshaped = queriesP.reshaped(batchSize, numHeads, numBlocks * blockSize, headDim)
-        var termBD = qReshaped.matmul(sinEmbT).reshaped(
-            batchSize, numHeads, numBlocks, blockSize, maxSpanPlus1)
-
-        termBD = relativeShift(
-            termBD, batchSize: batchSize, numHeads: numHeads, numBlocks: numBlocks,
-            blockSize: blockSize, contextSize: contextSize, maxSpanPlus1: maxSpanPlus1)
-
-        return termAC + termBD
-    }
-}
-
 private final class Gemma4AudioAttention: Module {
     let numHeads: Int
     let hiddenSize: Int
@@ -2671,6 +2585,13 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             audioEmb = audioEmb.asType(inputsEmbeds.dtype)
 
             let tokenMask = inputIds .== audioTokenId
+            let promptAudioTokens = tokenMask.asType(.int32).sum().item(Int.self)
+            if promptAudioTokens != audioEmb.dim(1) {
+                throw Gemma4Error.audioTokenCountMismatch(
+                    expectedAudioTokens: audioEmb.dim(1),
+                    actualPromptTokens: promptAudioTokens)
+            }
+
             var tokenMaskExpanded = expandedDimensions(tokenMask, axis: -1)
             tokenMaskExpanded = broadcast(tokenMaskExpanded, to: inputsEmbeds.shape)
             inputsEmbeds = gemma4MaskedScatter(
@@ -2853,12 +2774,16 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             }
         }
 
+        // Scope to the vision tower: the audio tower has its own clippable
+        // linears with identically-named clip parameters, governed by its own
+        // configuration — a vision-only flag must not strip them.
         if !config.visionConfiguration.useClippedLinears {
             sanitized = sanitized.filter { key, _ in
-                !key.contains("input_min")
-                    && !key.contains("input_max")
-                    && !key.contains("output_min")
-                    && !key.contains("output_max")
+                !key.contains("vision_tower")
+                    || (!key.contains("input_min")
+                        && !key.contains("input_max")
+                        && !key.contains("output_min")
+                        && !key.contains("output_max"))
             }
         }
 
@@ -2953,7 +2878,7 @@ public struct Gemma4Processor: UserInputProcessor {
         return (pixelValues, THW(images.count, Int(targetSize.height), Int(targetSize.width)))
     }
 
-    private func processVideoFrame(_ frame: CIImage, processing: UserInput.Processing?) -> CIImage {
+    private func processVideoFrame(_ frame: CIImage) -> CIImage {
         // Mirror the SmolVLM2 video frame chain (toSRGB → resampled → normalized)
         // rather than going through `MediaProcessing.apply`. `apply` performs a
         // best-fit `transformed(by:)` scale that leaves `extent` non-(0,0,W,H);
@@ -3009,7 +2934,20 @@ public struct Gemma4Processor: UserInputProcessor {
         // Audio handling: extract mel features, inject <|audio|> placeholder tokens, build ProcessedAudio
         var processedAudio: LMInput.ProcessedAudio? = nil
         if !input.audios.isEmpty, config.audioTokenId != nil {
-            let extractor = Gemma4AudioFeatureExtractor()
+            // The prompt splice below builds exactly one begin/end-of-audio block;
+            // fail loudly rather than silently dropping additional clips.
+            guard input.audios.count == 1 else {
+                throw Gemma4Error.multipleAudioInputsUnsupported
+            }
+            // Honor the checkpoint's feature-extraction parameters when its
+            // processor_config.json carries a `feature_extractor` block;
+            // otherwise the extractor's reference defaults apply.
+            let fe = config.audioFeatureExtraction
+            let extractor = Gemma4AudioFeatureExtractor(
+                featureSize: fe?.numMelFilters ?? 128,
+                samplingRate: fe?.samplingRate ?? 16000,
+                hopLength: fe?.hopLength,
+                fftLength: fe?.fftLength)
             // Bridge main's structured `UserInput.Audio` (.url/.array) to the raw
             // PCM `[Float]` the feature extractor expects. The Conformer mel
             // extractor is built for 16 kHz mono; main's AudioProcessing defaults
@@ -3021,10 +2959,11 @@ public struct Gemma4Processor: UserInputProcessor {
                 .asMLXArray(processing: audioProcessing).asArray(Float.self)
             let (melFeatures, melMask) = extractor.extract(audio: audioSamples)
 
-            // Fix #6: audio token count from actual subsampling math (two 2x conv blocks)
+            // Audio token count comes from the subsampling math (two stride-2 conv
+            // blocks), so it always matches what the audio tower will emit.
             let melFrames = melFeatures.dim(0)
             let afterConv0 = (melFrames + 2 - 3) / 2 + 1
-            let numAudioTokens = min((afterConv0 + 2 - 3) / 2 + 1, 750)
+            let numAudioTokens = min((afterConv0 + 2 - 3) / 2 + 1, config.audioSeqLength)
 
             // Build the begin/audio/end-of-audio block and splice it into the user
             // turn, matching the reference Gemma 4 audio prompt format:
@@ -3049,7 +2988,7 @@ public struct Gemma4Processor: UserInputProcessor {
                 promptTokens = tokenizer.encode(text: audioBlock + "\n" + decoded)
             }
 
-            // Fix #2: mask polarity inversion — extractor outputs 1=valid but encoder expects True=padding
+            // Mask polarity: the extractor emits 1 = valid, the encoder expects True = padding.
             let invertedMask = melMask .== 0
             processedAudio = LMInput.ProcessedAudio(
                 samples: melFeatures.expandedDimensions(axis: 0),
@@ -3066,32 +3005,23 @@ public struct Gemma4Processor: UserInputProcessor {
             var perVideoTimestamps: [[Double]] = []
             var perVideoFrameCount: [Int] = []
 
-            // Cap frames on iOS so video fits alongside the model; macOS keeps
-            // the full config.
-            #if os(iOS)
-            // 8 frames (≈4 s at 2 fps) is the robust iOS ceiling: it survives
-            // sustained thermal stress on iPhone 16/17 Pro Max, whereas 16 frames
-            // crashes when the device is hot (per investigation/gemma4-ios-memory.md).
-            // The app's MultimodalBudget gate also enforces this; this is the engine
-            // safety net. GEMMA4_VIDEO_MAX_FRAMES overrides it for profiling.
-            let iosFrameCap: Int
-            if let raw = ProcessInfo.processInfo.environment["GEMMA4_VIDEO_MAX_FRAMES"],
-                let override = Int(raw), override > 0 {
-                iosFrameCap = override
-            } else {
-                iosFrameCap = 8
-            }
-            let effectiveMaxFrames = min(config.videoMaxFrames, iosFrameCap)
-            #else
-            let effectiveMaxFrames = config.videoMaxFrames
-            #endif
+            // The config's frame budget can be tightened per request via
+            // `UserInput.Processing.videoMaxFrames` — memory-constrained callers
+            // (e.g. mobile apps near the per-process memory limit) pass a lower
+            // cap; the model configuration remains the upper bound.
+            let effectiveMaxFrames =
+                if let requested = input.processing.videoMaxFrames {
+                    min(config.videoMaxFrames, max(1, requested))
+                } else {
+                    config.videoMaxFrames
+                }
             for video in input.videos {
                 let processedFrames = try await MediaProcessing.asProcessedSequence(
                     video,
                     targetFPS: { _ in Double(config.videoFps) },
                     maxFrames: effectiveMaxFrames
                 ) { frame in
-                    let processed = processVideoFrame(frame.frame, processing: input.processing)
+                    let processed = processVideoFrame(frame.frame)
                     return VideoFrame(frame: processed, timeStamp: frame.timeStamp)
                 }
 
@@ -3175,6 +3105,26 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     public let boiTokenString: String
     public let eoiTokenString: String
 
+    /// Maximum number of audio soft tokens per clip (`audio_seq_length`).
+    public let audioSeqLength: Int
+    /// Audio feature-extraction parameters from the checkpoint's
+    /// `feature_extractor` block, when present. Fields the checkpoint omits
+    /// fall back to the extractor's reference defaults.
+    public struct AudioFeatureExtraction: Codable, Sendable {
+        public let samplingRate: Int?
+        public let numMelFilters: Int?
+        public let fftLength: Int?
+        public let hopLength: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case samplingRate = "sampling_rate"
+            case numMelFilters = "num_mel_filters"
+            case fftLength = "fft_length"
+            case hopLength = "hop_length"
+        }
+    }
+    public let audioFeatureExtraction: AudioFeatureExtraction?
+
     enum CodingKeys: String, CodingKey {
         case processorClass = "processor_class"
         case doNormalize = "do_normalize"
@@ -3193,6 +3143,8 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         case videoFps = "video_fps"
         case boiTokenString = "boi_token"
         case eoiTokenString = "eoi_token"
+        case audioSeqLength = "audio_seq_length"
+        case audioFeatureExtraction = "feature_extractor"
     }
 
     public init(from decoder: any Swift.Decoder) throws {
@@ -3209,7 +3161,7 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
-        // Fix #7: default audioTokenId to 258881 when absent from processor_config.json
+        // Default for checkpoints whose processor_config.json omits audio_token_id.
         audioTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioTokenId) ?? 258_881
         videoTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoTokenId)
         // 384x384 frames yield 24x24 patches; with Gemma 4's 3x3 pooling that is
@@ -3219,10 +3171,11 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         videoSeqLength = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoSeqLength) ?? 64
         videoFrameSize = try c.decodeIfPresent(
             Gemma3ProcessorConfiguration.ImageSize.self, forKey: CodingKeys.videoFrameSize)
-        // 16 frames at 384x384 is the iOS-safe default. Each frame's vision
-        // tower forward pass allocates an attention mask of shape
-        // (batch, 1, 2520, 2520) plus per-layer activations; 32 frames in a
-        // single batch reliably OOMs an iPhone running gemma4-E2B + KV cache.
+        // Each 384x384 frame's vision tower forward allocates an attention mask
+        // of shape (batch, 1, 2520, 2520) plus per-layer activations, so the
+        // frame budget bounds peak memory. Callers on memory-constrained
+        // devices can tighten it further per request via
+        // `UserInput.Processing.videoMaxFrames`.
         videoMaxFrames = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoMaxFrames) ?? 16
         videoFps = try c.decodeIfPresent(Float.self, forKey: CodingKeys.videoFps) ?? 2.0
         boiTokenString =
@@ -3231,6 +3184,10 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         eoiTokenString =
             try c.decodeIfPresent(String.self, forKey: CodingKeys.eoiTokenString)
             ?? "<end_of_image>"
+        audioSeqLength =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioSeqLength) ?? 750
+        audioFeatureExtraction = try c.decodeIfPresent(
+            AudioFeatureExtraction.self, forKey: CodingKeys.audioFeatureExtraction)
     }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {

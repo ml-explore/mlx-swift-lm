@@ -1,12 +1,8 @@
-//
-//  Gemma4AudioFeatureExtractor.swift
-//  MLXVLM
-//
-//  Audio feature extractor for Gemma 4 — extracts log-mel spectrograms
-//  from raw audio waveforms using USM preprocessing pipeline.
-//
-//  Ported from: mlx_vlm/models/gemma4/audio_feature_extractor.py
-//
+// Copyright © 2026 Apple Inc.
+
+// Audio feature extractor for Gemma 4 — extracts log-mel spectrograms from raw
+// audio waveforms using the USM preprocessing pipeline.
+// Ported from: mlx_vlm/models/gemma4/audio_feature_extractor.py
 
 import Accelerate
 import Foundation
@@ -15,7 +11,7 @@ import MLX
 // MARK: - Mel Filter Bank
 
 /// Create a mel filter bank matrix [numFrequencyBins, numMelFilters] using HTK scale.
-public func gemma4MelFilterBank(
+func gemma4MelFilterBank(
     numFrequencyBins: Int,
     numMelFilters: Int,
     minFrequency: Float,
@@ -72,23 +68,23 @@ public func gemma4MelFilterBank(
 // MARK: - Feature Extractor
 
 /// Gemma4 audio feature extractor — converts raw waveform to log-mel spectrogram.
-public struct Gemma4AudioFeatureExtractor {
-    public let featureSize: Int
-    public let samplingRate: Int
-    public let frameLength: Int
-    public let hopLength: Int
-    public let fftLength: Int
-    public let melFloor: Float
-    public let preemphasis: Float
-    public let preemphasisHTKFlavor: Bool
-    public let inputScaleFactor: Float
+struct Gemma4AudioFeatureExtractor {
+    let featureSize: Int
+    let samplingRate: Int
+    let frameLength: Int
+    let hopLength: Int
+    let fftLength: Int
+    let melFloor: Float
+    let preemphasis: Float
+    let preemphasisHTKFlavor: Bool
+    let inputScaleFactor: Float
 
     /// Hanning window [frameLength]
     private let window: [Float]
     /// Mel filter bank [fftLength/2+1, featureSize]
     private let melFilters: MLXArray
 
-    public init(
+    init(
         featureSize: Int = 128,
         samplingRate: Int = 16000,
         frameLengthMs: Float = 20.0,
@@ -97,13 +93,23 @@ public struct Gemma4AudioFeatureExtractor {
         maxFrequency: Float = 8000.0,
         preemphasis: Float = 0.0,
         preemphasisHTKFlavor: Bool = true,
-        // processor_config.json specifies fft_length=512 directly; overdrive
-        // (doubling to 1024) yields the wrong spectrum/mel and the audio tower
-        // can't interpret it. Match the reference extractor.
+        // The reference extractor does not double the FFT length ("overdrive");
+        // doubling to 1024 yields the wrong spectrum/mel and the audio tower
+        // can't interpret it.
         fftOverdrive: Bool = false,
         inputScaleFactor: Float = 1.0,
-        melFloor: Float = 1e-3
+        melFloor: Float = 1e-3,
+        // Direct sample-count overrides, used when the checkpoint's
+        // processor_config.json specifies hop_length / fft_length explicitly.
+        hopLength: Int? = nil,
+        fftLength: Int? = nil
     ) {
+        // Only the HTK pre-emphasis flavor is implemented; the defaults disable
+        // pre-emphasis entirely (preemphasis = 0), matching the reference
+        // Gemma 4 extractor.
+        precondition(
+            preemphasis == 0 || preemphasisHTKFlavor,
+            "non-HTK pre-emphasis is not implemented")
         self.featureSize = featureSize
         self.samplingRate = samplingRate
         self.preemphasis = preemphasis
@@ -112,12 +118,21 @@ public struct Gemma4AudioFeatureExtractor {
         self.melFloor = melFloor
 
         self.frameLength = Int(round(Float(samplingRate) * frameLengthMs / 1000.0))
-        self.hopLength = Int(round(Float(samplingRate) * hopLengthMs / 1000.0))
+        self.hopLength = hopLength ?? Int(round(Float(samplingRate) * hopLengthMs / 1000.0))
 
-        var fftLen = 1
-        while fftLen < frameLength { fftLen *= 2 }
-        if fftOverdrive { fftLen *= 2 }
-        self.fftLength = fftLen
+        if let fftLength {
+            self.fftLength = fftLength
+        } else {
+            var fftLen = 1
+            while fftLen < self.frameLength { fftLen *= 2 }
+            if fftOverdrive { fftLen *= 2 }
+            self.fftLength = fftLen
+        }
+        let fftLen = self.fftLength
+        // The radix-2 vDSP FFT below requires a power-of-two length.
+        precondition(
+            fftLen > 0 && fftLen & (fftLen - 1) == 0,
+            "fftLength must be a power of two")
 
         // Periodic Hann window (torch.hann_window(periodic=true) → divisor N, not
         // N-1; zero at i=0), matching the reference extractor.
@@ -141,7 +156,7 @@ public struct Gemma4AudioFeatureExtractor {
     ///   - audio: Raw waveform [numSamples] as Float array
     ///   - maxLength: Maximum number of samples (default 480000 = 30s at 16kHz)
     /// - Returns: (melSpectrogram: [frames, featureSize], mask: [frames])
-    public func extract(audio: [Float], maxLength: Int = 480_000) -> (MLXArray, MLXArray) {
+    func extract(audio: [Float], maxLength: Int = 480_000) -> (MLXArray, MLXArray) {
         var waveform = audio
         if waveform.count > maxLength {
             waveform = Array(waveform.prefix(maxLength))
@@ -155,6 +170,8 @@ public struct Gemma4AudioFeatureExtractor {
         // No multiple-of-128 padding: the reference extractor frames the
         // semicausal-padded waveform directly (all frames valid). The extra
         // 128-pad added trailing zero frames that shifted the token count.
+        // For this single-utterance path the mask is therefore always all-ones;
+        // it exists so batch padding can be represented without API changes.
         let mask = [Float](repeating: 1.0, count: waveform.count)
 
         // Scale
