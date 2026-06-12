@@ -37,6 +37,7 @@ public enum LLMTypeRegistry {
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_unified": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
+        "diffusion_gemma": create(DiffusionGemmaConfiguration.self, DiffusionGemmaModel.init),
         "qwen2": create(Qwen2Configuration.self, Qwen2Model.init),
         "qwen3": create(Qwen3Configuration.self, Qwen3Model.init),
         "qwen3_moe": create(Qwen3MoEConfiguration.self, Qwen3MoEModel.init),
@@ -205,6 +206,12 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma4_e2b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        extraEOSTokens: ["<turn|>"]
+    )
+
+    static public let diffusionGemma_26B_A4B_it = ModelConfiguration(
+        id: "google/diffusiongemma-26B-A4B-it",
+        defaultPrompt: "Write a concise haiku about parallel text generation.",
         extraEOSTokens: ["<turn|>"]
     )
 
@@ -421,6 +428,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3n_E2B_it_lm_4bit,
             gemma4_e4b_it_4bit,
             gemma4_e2b_it_4bit,
+            diffusionGemma_26B_A4B_it,
             granite3_3_2b_4bit,
             granite_4_0_h_tiny_4bit_dwq,
             llama3_1_8B_4bit,

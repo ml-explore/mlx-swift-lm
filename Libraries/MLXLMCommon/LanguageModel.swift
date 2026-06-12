@@ -256,6 +256,34 @@ public protocol LanguageModel: BaseLanguageModel {
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
+/// Optional interface for text diffusion models that generate a block of tokens
+/// at a time instead of predicting one next-token logit.
+public protocol BlockDiffusionLanguageModel: LanguageModel {
+    var diffusionCanvasLength: Int { get }
+    var diffusionMaxDenoisingSteps: Int { get }
+    var diffusionEntropyBound: Float { get }
+    var diffusionTemperatureMin: Float { get }
+    var diffusionTemperatureMax: Float { get }
+    var diffusionStabilityThreshold: Int { get }
+    var diffusionConfidenceThreshold: Float { get }
+    var diffusionVocabularySize: Int { get }
+
+    func prepareDiffusion(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+    func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?)
+    func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningLogits: MLXArray?
+    ) -> MLXArray
+}
+
+extension BlockDiffusionLanguageModel {
+    public var diffusionTemperatureMin: Float { 0.4 }
+    public var diffusionTemperatureMax: Float { 0.8 }
+    public var diffusionStabilityThreshold: Int { 1 }
+    public var diffusionConfidenceThreshold: Float { 0.005 }
+}
+
 extension LanguageModel {
     public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
