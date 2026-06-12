@@ -201,6 +201,14 @@ let package = Package(
                 .headerSearchPath("xgrammar/3rdparty/dlpack/include"),
                 .define("XGRAMMAR_ENABLE_CPPTRACE", to: "0"),
                 .define("XGRAMMAR_ENABLE_INTERNAL_CHECK", to: "0"),
+                // Rename the vendored C++ namespaces at compile time so this
+                // target's symbols cannot collide with another xgrammar in the
+                // same binary (e.g. CoreAI's prebuilt copy). Token-level
+                // substitution: it rewrites bare `xgrammar` / `picojson`
+                // identifiers (namespace decls and `::` uses) but not header
+                // names, string literals, `XGRAMMAR_*` macros, or `xg_*` tokens.
+                .define("xgrammar", to: "mlx_xgrammar"),
+                .define("picojson", to: "mlx_picojson"),
                 // xgrammar throws -- exceptions must stay enabled.
                 .unsafeFlags(["-std=c++17", "-fexceptions"]),
                 // Vendored upstream source emits a curated set of warnings
