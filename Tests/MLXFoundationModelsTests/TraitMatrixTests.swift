@@ -24,6 +24,7 @@ import Testing
 
 #if GuidedGenerationSupport
     import CXGrammar
+    import MLXGuidedGeneration
 #endif
 
 #if FoundationModelsIntegration

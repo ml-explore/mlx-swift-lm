@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
+import MLXLMCommon
 
 /// Utility that identifies whitespace-only tokens in a tokenizer's vocabulary
 /// and produces a negative logit bias array.

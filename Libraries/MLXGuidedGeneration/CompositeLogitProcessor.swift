@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
+import MLXLMCommon
 
 /// Chains multiple `LogitProcessor` instances, applying them in order.
 ///

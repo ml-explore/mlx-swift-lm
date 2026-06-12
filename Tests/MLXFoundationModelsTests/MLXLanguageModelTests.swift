@@ -7,6 +7,10 @@ import Testing
 
 @testable import MLXFoundationModels
 
+#if GuidedGenerationSupport
+    import MLXGuidedGeneration
+#endif
+
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     @Suite("MLXLanguageModel initialization")
