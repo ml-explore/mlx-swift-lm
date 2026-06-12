@@ -684,14 +684,14 @@
                     /// `tokenizerCreationFailed` and `bitmaskRetrievalFailed` are
                     /// internal shim failures with no recovery path on the developer's
                     /// side -- surfacing them untyped is honest.
-                    static func mapXGError(_ xgError: GrammarError) -> Error {
-                        switch xgError {
+                    static func mapGrammarError(_ grammarError: GrammarError) -> Error {
+                        switch grammarError {
                         case .invalidJSONSchema(let message):
                             return LanguageModelError.unsupportedGenerationGuide(
                                 .init(schemaName: nil, debugDescription: message)
                             )
                         default:
-                            return xgError
+                            return grammarError
                         }
                     }
                 #endif
@@ -1350,10 +1350,10 @@
                         Stream.gpu.synchronize()
                         #if GuidedGenerationSupport
                             // Re-map xgrammar errors to typed `LanguageModelError` cases
-                            // where the cause is provably user input (see `mapXGError`).
+                            // where the cause is provably user input (see `mapGrammarError`).
                             // Internal-shim failures pass through unchanged.
-                            if let xgError = error as? GrammarError {
-                                throw Self.mapXGError(xgError)
+                            if let grammarError = error as? GrammarError {
+                                throw Self.mapGrammarError(grammarError)
                             }
                         #endif
                         throw error
