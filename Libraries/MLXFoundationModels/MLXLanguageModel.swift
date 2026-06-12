@@ -131,7 +131,7 @@
                     if let cached = xgTokenizers[modelID] {
                         return cached
                     }
-                    let vocab = TokenizerVocabExtractor.extractForXGrammar(from: tokenizer)
+                    let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
                     let xgTok = try GrammarTokenizer(
                         vocab: vocab.vocab,
                         vocabType: vocab.vocabType,
