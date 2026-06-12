@@ -12,9 +12,9 @@
     /// through to unconstrained generation and emits text deltas.
     ///
     /// Loads a real model, so it lives in the IntegrationTesting xcodeproj. This
-    /// behavior is independent of `GuidedGenerationSupport` — guided generation
-    /// only engages for schema/tool requests — so it runs under the package's
-    /// default (both traits on).
+    /// behavior is independent of guided generation (which only engages for
+    /// schema/tool requests); guided generation lives in the MLXGuidedGeneration
+    /// library and is always available alongside the adapter.
     @Suite(.serialized)
     struct PlainChatGenerationTests {
 

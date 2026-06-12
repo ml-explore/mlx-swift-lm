@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation

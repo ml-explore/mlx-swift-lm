@@ -1,6 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
@@ -18,10 +18,9 @@
             let model = makeTestModel(TestFixtures.defaultModelID)
             let executor = try makeMLXExecutor(for: model)
 
-            // warmUp loads weights, compiles shaders, and (under
-            // GuidedGenerationSupport) pre-creates the model-keyed GrammarTokenizer —
-            // the expensive vocab-extraction step a guided consumer would
-            // otherwise pay on first respond().
+            // warmUp loads weights, compiles shaders, and pre-creates the
+            // model-keyed GrammarTokenizer (the expensive vocab-extraction step
+            // a guided consumer would otherwise pay on first respond()).
             try await model.warmUp()
 
             // Assert the genuine cache hit, not merely that a later respond works

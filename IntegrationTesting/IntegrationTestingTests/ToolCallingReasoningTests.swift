@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Foundation
     import MLX
@@ -213,4 +213,4 @@
         }
     }
 
-#endif  // GuidedGenerationSupport
+#endif  // FoundationModelsIntegration

@@ -30,7 +30,7 @@
 // Gated on both traits because the tokenizer path routes through
 // `loadTestModelContainer` the same as the other integration tests.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation

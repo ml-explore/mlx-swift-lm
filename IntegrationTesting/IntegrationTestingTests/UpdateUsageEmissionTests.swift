@@ -15,7 +15,7 @@
 // Suite is `.serialized` and gated on both traits because the schema/
 // tool-calling tests load `ModelContainer` and require xgrammar.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
@@ -145,4 +145,4 @@
             lastUsage, "Expected at least one .updateUsage event before stream completion")
     }
 
-#endif  // GuidedGenerationSupport && FoundationModelsIntegration
+#endif  // FoundationModelsIntegration
