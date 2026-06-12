@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import CXGrammar
 import MLX
 import MLXLMCommon
 import os
