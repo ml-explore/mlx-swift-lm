@@ -7,9 +7,11 @@ import MLX
 /// Grammar processors should come first (hard constraints that mask invalid tokens),
 /// followed by soft preference processors (repetition penalty, temperature scaling).
 ///
-/// Thread safety: marked `@unchecked Sendable` because all access is serialized
-/// through `ModelContainer.perform`.
-public struct CompositeLogitProcessor: LogitProcessor, @unchecked Sendable {
+/// Like the other `LogitProcessor` value types in this module, this is not
+/// `Sendable`: `LogitProcessor` has `mutating` requirements and erases potentially
+/// stateful conformers, and the generation loop (`TokenIterator`) is itself not
+/// `Sendable`, so no concurrency boundary requires it.
+public struct CompositeLogitProcessor: LogitProcessor {
     private var processors: [any LogitProcessor]
 
     public init(_ processors: [any LogitProcessor]) {
