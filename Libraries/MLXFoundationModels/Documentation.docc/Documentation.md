@@ -45,35 +45,21 @@ identifier.
 
 ## Package traits
 
-`MLXFoundationModels` is gated by two orthogonal SwiftPM traits, both
-default-on:
+`MLXFoundationModels` is gated by one SwiftPM trait, default-on:
 
 - `FoundationModelsIntegration` controls the `MLXLanguageModel` /
   `MLXLanguageModel.Executor` surface. Disabling it compiles this target
   down to just ``MLXDownloadProgress``.
-- `GuidedGenerationSupport` controls grammar-constrained generation via
-  vendored xgrammar. Disabling it skips compiling the xgrammar C++
-  sources and makes `respond(to:schema:)` / tool-calling paths throw
-  `MLXLanguageModelError.guidedGenerationDisabled`.
+
+Grammar-constrained generation lives in the separate `MLXGuidedGeneration`
+product, which this target always uses when the adapter is compiled in.
 
 Consumer configurations:
 
-| Traits enabled | MLXLanguageModel | Guided generation | Chat / tools |
+| `FoundationModelsIntegration` | MLXLanguageModel | Guided generation | Chat / tools |
 |---|---|---|---|
-| Both (default) | Yes | Yes | Yes |
-| `FoundationModelsIntegration` only | Yes | No (throws) | Chat yes, tools throw |
-| `GuidedGenerationSupport` only | No (symbol absent) | Yes (direct API) | Caller's responsibility |
-| Neither | No | No | Only `MLXDownloadProgress` remains |
-
-Select a subset in your `Package.swift`:
-
-```swift
-.package(
-    url: "https://github.com/ml-explore/mlx-swift-lm",
-    from: "3.33.0",
-    traits: ["GuidedGenerationSupport"]
-)
-```
+| On (default) | Yes | Yes | Yes |
+| Off | No (symbol absent) | Use `MLXGuidedGeneration` directly | Only `MLXDownloadProgress` remains |
 
 ## Topics
 
