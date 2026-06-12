@@ -6,6 +6,7 @@
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Model-loading regression tests for the stop-token set that
     /// `GuidedGenerationLoop` uses to detect end-of-generation. These load real

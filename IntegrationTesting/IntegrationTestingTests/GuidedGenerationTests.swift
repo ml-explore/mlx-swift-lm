@@ -8,6 +8,7 @@
     import MLX
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Incremental guided generation tests with increasing schema complexity.
     ///
@@ -327,7 +328,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
@@ -493,7 +494,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,

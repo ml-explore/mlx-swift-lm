@@ -6,8 +6,9 @@
     import Foundation
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
-    /// Tests that `warmUp()` pre-creates the XGTokenizer for guided generation.
+    /// Tests that `warmUp()` pre-creates the GrammarTokenizer for guided generation.
     @Suite(.serialized, .timeLimit(.minutes(5)))
     struct PrewarmGrammarTests {
 
@@ -18,7 +19,7 @@
             let executor = try makeMLXExecutor(for: model)
 
             // warmUp loads weights, compiles shaders, and (under
-            // GuidedGenerationSupport) pre-creates the model-keyed XGTokenizer —
+            // GuidedGenerationSupport) pre-creates the model-keyed GrammarTokenizer —
             // the expensive vocab-extraction step a guided consumer would
             // otherwise pay on first respond().
             try await model.warmUp()
@@ -27,7 +28,7 @@
             // (a guided respond succeeds with or without warmup — only the seam
             // proves warmUp did the pre-creation).
             let cached = await MLXLanguageModel.hasCachedXGTokenizer(modelID: model.modelIdentifier)
-            #expect(cached, "warmUp should pre-create the XGTokenizer")
+            #expect(cached, "warmUp should pre-create the GrammarTokenizer")
 
             // And a guided generation still succeeds end-to-end after warmUp.
             let transcript = Transcript(entries: [
@@ -61,8 +62,8 @@
             let model = makeTestModel(TestFixtures.defaultModelID)
             let executor = try makeMLXExecutor(for: model)
 
-            // warmUp warms weights + shaders (+ the XGTokenizer); an unconstrained
-            // respond afterward must still work — the XGTokenizer pre-creation must
+            // warmUp warms weights + shaders (+ the GrammarTokenizer); an unconstrained
+            // respond afterward must still work — the GrammarTokenizer pre-creation must
             // not interfere with the no-schema path.
             try await model.warmUp()
 

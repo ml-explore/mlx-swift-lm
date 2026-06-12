@@ -4,7 +4,7 @@
 //
 // Loads the live Qwen2.5-3B tokenizer, compiles the structural-tag JSON
 // emitted by `SchemaConverter.encodeToolCallingGrammar` into an
-// `XGConstraint`, and asserts the integration is wired up end-to-end:
+// `GrammarConstraint`, and asserts the integration is wired up end-to-end:
 //
 //   1. The structural tag compiles without throwing (xgrammar accepts
 //      the JSON we synthesize).
@@ -38,6 +38,7 @@
     import MLXLMCommon
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Must live at file scope so `@Generable` can emit the schema outside
     /// a function body.
@@ -65,8 +66,8 @@
 
             let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
@@ -75,8 +76,8 @@
                 // fastForward: false so commitToken advances exactly one
                 // token without auto-emitting jump-forward ids. Compile-time
                 // error on malformed structural tag would surface here as a
-                // thrown XGError.
-                let constraint = try XGConstraint(
+                // thrown GrammarError.
+                let constraint = try GrammarConstraint(
                     tokenizer: tokenizer,
                     structuralTag: structuralTag,
                     fastForward: false,

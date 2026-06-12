@@ -8,6 +8,7 @@
     import MLX
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Stress tests for the hardReserve multiplier across increasing schema complexity.
     ///
@@ -161,7 +162,7 @@
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
