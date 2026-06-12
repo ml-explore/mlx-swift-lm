@@ -2210,7 +2210,7 @@ private final class Gemma4AudioAttention: Module {
         let ctxSize = keys.dim(2)
 
         // Past-only relative positions [maxPastHorizon ... 0], matching Google's
-        // reference (`torch.arange(max_past_horizon, -1, -1)`). pr-192 originally
+        // reference (`torch.arange(max_past_horizon, -1, -1)`). PR #192 originally
         // used a symmetric [maxBackward ... -maxForward] span, which over-counts
         // positions by maxFutureHorizon and misaligns relPosRelativeShift's pad
         // math → semantically-wrong attention bias (audio not understood).
