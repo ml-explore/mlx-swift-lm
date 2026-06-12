@@ -18,6 +18,7 @@
         import os.log
         #if GuidedGenerationSupport
             import CXGrammar
+            import MLXGuidedGeneration
         #endif
 
         // MARK: - Constraint Cache Kind

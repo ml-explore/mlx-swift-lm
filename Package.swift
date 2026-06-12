@@ -32,6 +32,9 @@ let package = Package(
             name: "MLXFoundationModels",
             targets: ["MLXFoundationModels"]),
         .library(
+            name: "MLXGuidedGeneration",
+            targets: ["MLXGuidedGeneration"]),
+        .library(
             name: "BenchmarkHelpers",
             targets: ["BenchmarkHelpers"]),
         .library(
@@ -230,6 +233,19 @@ let package = Package(
                 .linkedLibrary("c++")
             ]
         ),
+        // Grammar-constrained ("guided") generation engine built on the
+        // vendored xgrammar C++ via CXGrammar. Standalone: depends only on
+        // CXGrammar + MLXLMCommon + MLX, with no FoundationModels coupling and
+        // no @available floor beyond the package's macOS 14 / iOS 17 minimum.
+        .target(
+            name: "MLXGuidedGeneration",
+            dependencies: [
+                "MLXLMCommon",
+                "CXGrammar",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/MLXGuidedGeneration"
+        ),
         // Bridges Apple's FoundationModels framework to MLX-powered on-device
         // inference. Public surface is gated by @available(macOS 27 / iOS 27 /
         // visionOS 27, *) and #if canImport(FoundationModels), so the target
@@ -242,7 +258,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .target(
-                    name: "CXGrammar",
+                    name: "MLXGuidedGeneration",
                     condition: .when(traits: ["GuidedGenerationSupport"])
                 ),
                 .product(name: "MLX", package: "mlx-swift"),
@@ -255,6 +271,10 @@ let package = Package(
             dependencies: [
                 "MLXFoundationModels",
                 "MLXLMCommon",
+                .target(
+                    name: "MLXGuidedGeneration",
+                    condition: .when(traits: ["GuidedGenerationSupport"])
+                ),
                 // MLXLLM is linked here (not by MLXFoundationModels itself) so its
                 // module-init registers a factory with MLXLMCommon's
                 // ModelFactoryRegistry. Without it, loadModelContainer throws
@@ -265,6 +285,19 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Tests/MLXFoundationModelsTests"
+        ),
+        // FM-independent guided-generation tests. Depends only on the engine
+        // (+ CXGrammar for the byte-fallback vocab constant used by some
+        // fixtures) and MLXLMCommon. No FoundationModels.
+        .testTarget(
+            name: "MLXGuidedGenerationTests",
+            dependencies: [
+                "MLXGuidedGeneration",
+                "MLXLMCommon",
+                "CXGrammar",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Tests/MLXGuidedGenerationTests"
         ),
         // Direct C-API tests for the CXGrammar shim. No FoundationModels
         // dependency; exercises the vendored xgrammar C++ library through

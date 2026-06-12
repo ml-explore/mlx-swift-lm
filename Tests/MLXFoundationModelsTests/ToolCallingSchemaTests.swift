@@ -5,6 +5,7 @@
     import Testing
     import Foundation
     import CXGrammar
+    import MLXGuidedGeneration
     import FoundationModels
     @testable import MLXFoundationModels
 
