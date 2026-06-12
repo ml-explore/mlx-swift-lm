@@ -51,7 +51,23 @@ public func attentionWithCacheUpdate(
             mask: mask
         )
     }
-    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
+    if let turboCache = cache as? TurboQuantKVCache {
+        let L = queries.dim(2)
+        if L > 1 {
+            // Prefill (L>1): raw update + standard SDPA. Zero overhead.
+            let (cachedKeys, cachedValues) = turboCache.update(keys: keys, values: values)
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: cachedKeys, values: cachedValues,
+                scale: scale, mask: mask
+            )
+        }
+        // Decode (L=1): compressed cache path. First call triggers
+        // compressRawCache() inside compressedAttention.
+        return turboCache.compressedAttention(
+            queries: queries, keys: keys, values: values,
+            scale: scale, mask: mask
+        )
+    } else if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
         return quantizedScaledDotProductAttention(
