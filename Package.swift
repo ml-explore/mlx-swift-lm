@@ -55,16 +55,7 @@ let package = Package(
             description:
                 "Enables the MLXLanguageModel adapter for Apple's FoundationModels framework. Disabling removes the MLXLanguageModel / MLXLanguageModel.Executor types."
         ),
-        // Grammar-constrained generation via the vendored xgrammar library.
-        // Default-on. Disabling the trait removes MLXFoundationModels's
-        // dependency on CXGrammar so consumers who don't need guided
-        // generation skip compiling the vendored C++ source tree.
-        .trait(
-            name: "GuidedGenerationSupport",
-            description:
-                "Enables grammar-constrained generation via xgrammar. When disabled, MLXFoundationModels still builds and provides chat / tool calling, but guided-output APIs are unavailable."
-        ),
-        .default(enabledTraits: ["FoundationModelsIntegration", "GuidedGenerationSupport"]),
+        .default(enabledTraits: ["FoundationModelsIntegration"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.4")),
@@ -250,16 +241,16 @@ let package = Package(
         // inference. Public surface is gated by @available(macOS 27 / iOS 27 /
         // visionOS 27, *) and #if canImport(FoundationModels), so the target
         // builds on every Xcode that compiles the rest of mlx-swift-lm. The
-        // CXGrammar dependency is trait-conditional: with the
-        // GuidedGenerationSupport trait disabled, the xgrammar backend is
-        // not linked and grammar-constrained generation is unavailable.
+        // MLXGuidedGeneration dependency is trait-conditional: it is linked only
+        // when FoundationModelsIntegration is enabled, since the adapter
+        // references the engine exclusively inside that gate.
         .target(
             name: "MLXFoundationModels",
             dependencies: [
                 "MLXLMCommon",
                 .target(
                     name: "MLXGuidedGeneration",
-                    condition: .when(traits: ["GuidedGenerationSupport"])
+                    condition: .when(traits: ["FoundationModelsIntegration"])
                 ),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -273,7 +264,7 @@ let package = Package(
                 "MLXLMCommon",
                 .target(
                     name: "MLXGuidedGeneration",
-                    condition: .when(traits: ["GuidedGenerationSupport"])
+                    condition: .when(traits: ["FoundationModelsIntegration"])
                 ),
                 // MLXLLM is linked here (not by MLXFoundationModels itself) so its
                 // module-init registers a factory with MLXLMCommon's
