@@ -8,8 +8,8 @@ import MLXLMCommon
 /// - `extract(from:)` returns a packed `(tokenBytes, tokenLens)` buffer
 ///   useful for testing that the per-token byte decoding agrees with
 ///   the tokenizer's own `decode(ids)` output.
-/// - `extractForXGrammar(from:)` returns the raw per-token piece strings
-///   plus a detected `XGVocabType`, which xgrammar consumes directly.
+/// - `extractForGrammar(from:)` returns the raw per-token piece strings
+///   plus a detected `VocabType`, which xgrammar consumes directly.
 ///
 /// Three token-model conventions are normalized by `tokenToBytes` (used
 /// by the packed-buffer path):
@@ -84,7 +84,7 @@ public enum TokenizerVocabExtractor {
     /// pieces) unmodified. Pre-normalizing here would duplicate
     /// xgrammar's decoding path and lose fidelity for non-UTF-8 raw
     /// bytes when transporting through Swift `String`.
-    public struct XGrammarVocab {
+    public struct GrammarVocab {
         public let vocab: [String]
         public let vocabType: VocabType
     }
@@ -103,7 +103,7 @@ public enum TokenizerVocabExtractor {
     /// tokens beyond the ASCII prefix are still classified correctly.
     /// The cost is one pass at construction time, which is negligible
     /// next to xgrammar's own vocab-processing work.
-    public static func extractForXGrammar(from tokenizer: any Tokenizer) -> XGrammarVocab {
+    public static func extractForGrammar(from tokenizer: any Tokenizer) -> GrammarVocab {
         var vocabSize = 0
         while tokenizer.convertIdToToken(vocabSize) != nil {
             vocabSize += 1
@@ -137,7 +137,7 @@ public enum TokenizerVocabExtractor {
             vocabType = .raw
         }
 
-        return XGrammarVocab(vocab: vocab, vocabType: vocabType)
+        return GrammarVocab(vocab: vocab, vocabType: vocabType)
     }
 
     /// True for SentencePiece `<0xNN>` byte-fallback piece strings.
