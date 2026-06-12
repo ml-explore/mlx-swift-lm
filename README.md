@@ -29,7 +29,7 @@ Developers can use these examples in their own programs -- just import the swift
 - [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
 - [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
 - [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
-- [MLXFoundationModels](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxfoundationmodel): Bridge MLX models into Apple's `FoundationModels.LanguageModel` so they can plug into `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK. Gated by two orthogonal package traits: `FoundationModelsIntegration` (the adapter types; default on) and `GuidedGenerationSupport` (grammar-constrained generation via xgrammar; default on).
+- [MLXFoundationModels](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxfoundationmodel): Bridge MLX models into Apple's `FoundationModels.LanguageModel` so they can plug into `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK. Gated by the `FoundationModelsIntegration` package trait (the adapter types; default on). Grammar-constrained generation comes from the separate `MLXGuidedGeneration` library, which this adapter always uses.
 
 ## Usage
 
@@ -127,34 +127,31 @@ print(try await session.respond(to: "Explain MLX in one sentence."))
 ```
 
 Pass a `GenerationSchema` to `respond(to:schema:)` for grammar-constrained
-output. The constraint is enforced via the vendored xgrammar library;
-opt out with `--disable-default-traits` to skip compiling the xgrammar
-C++ source tree.
+output. The constraint is enforced via the vendored xgrammar library, which
+ships in the separate `MLXGuidedGeneration` product and is always available
+when the `MLXFoundationModels` adapter is compiled in.
 
 #### Trait matrix
 
-`MLXFoundationModels` exposes two orthogonal SwiftPM traits, both default-on:
+`MLXFoundationModels` exposes one SwiftPM trait, default-on:
 
 | Trait | Gates |
 |---|---|
-| `FoundationModelsIntegration` | The `MLXLanguageModel` / `MLXLanguageModel.Executor` adapter types that bridge to `FoundationModels.LanguageModel`. Requires the 27.0 SDK to compile. |
-| `GuidedGenerationSupport` | Grammar-constrained generation via vendored xgrammar. Compiles the xgrammar C++ source tree (~1 MB compiled, per platform). |
+| `FoundationModelsIntegration` | The `MLXLanguageModel` / `MLXLanguageModel.Executor` adapter types that bridge to `FoundationModels.LanguageModel`. Requires the 27.0 SDK to compile. Disabling it compiles `MLXFoundationModels` down to `MLXDownloadProgress` alone. |
 
-Consumer options:
-
-| Traits enabled | Surface |
-|---|---|
-| Both (default) | `MLXLanguageModel`, guided generation, tool calling all work. |
-| `FoundationModelsIntegration` only | `MLXLanguageModel` present; `respond(to:schema:)` and tool-calling paths throw `MLXLanguageModelError.guidedGenerationDisabled`; plain chat works. |
-| `GuidedGenerationSupport` only | `MLXLanguageModel` type is absent; guided-generation primitives (`GuidedGenerationLoop`, `XGConstraint`, bias helpers) are usable against any `ModelContext`. |
-| Neither | `MLXFoundationModels` compiles to `MLXDownloadProgress` alone. Use this for iOS-17-era consumers that want `MLXLLM` / `MLXLMCommon` without either adapter. |
-
-Select a subset in your `Package.swift`:
+Grammar-constrained ("guided") generation lives in the separate
+`MLXGuidedGeneration` product. `MLXFoundationModels` always uses it when the
+adapter is compiled in, so guided output and tool calling are always available
+there. To use guided generation without FoundationModels (older OS floors,
+Linux), depend on `MLXGuidedGeneration` directly:
 
 ```swift
 .package(
     url: "https://github.com/ml-explore/mlx-swift-lm",
-    from: "3.33.0",
-    traits: ["GuidedGenerationSupport"]   // FM off, GG on
+    from: "3.33.0"
 )
 ```
+
+`FoundationModelsIntegration` is default-on; disable it with
+`.disableDefaultTraits` (or by not enabling it) for iOS-17-era consumers that
+want `MLXLLM` / `MLXLMCommon` without the FoundationModels adapter.
