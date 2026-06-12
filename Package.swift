@@ -135,6 +135,7 @@ let package = Package(
                 .process("Resources/gemma_speech_test2.wav"),
                 .process("Resources/gemma_speech_long.wav"),
                 .process("Resources/gemma_audio_librispeech.wav"),
+                .process("Resources/gemma_video_bbb.mp4"),
                 .process("Resources/FIXTURES_LICENSES.md"),
                 .process("Fixtures/gemma4_mel_reference.json"),
                 .process("Fixtures/gemma4_mel_alignment.json"),
