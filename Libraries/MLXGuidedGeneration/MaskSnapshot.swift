@@ -15,7 +15,7 @@ struct MaskSnapshot {
     /// Captures a snapshot of the current mask state.
     ///
     /// - Parameters:
-    ///   - sampleMask: Bitmask pointer from `XGMaskResult.mask` (rebound
+    ///   - sampleMask: Bitmask pointer from `MaskResult.mask` (rebound
     ///     to `UnsafePointer<UInt32>`), or nil when the mask needs no
     ///     application (unconditional splice).
     ///   - vocabSize: Number of valid bits in the mask. Determines how many

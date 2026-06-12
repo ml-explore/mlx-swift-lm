@@ -287,14 +287,12 @@ let package = Package(
             path: "Tests/MLXFoundationModelsTests"
         ),
         // FM-independent guided-generation tests. Depends only on the engine
-        // (+ CXGrammar for the byte-fallback vocab constant used by some
-        // fixtures) and MLXLMCommon. No FoundationModels.
+        // and MLXLMCommon. No FoundationModels, no direct CXGrammar.
         .testTarget(
             name: "MLXGuidedGenerationTests",
             dependencies: [
                 "MLXGuidedGeneration",
                 "MLXLMCommon",
-                "CXGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Tests/MLXGuidedGenerationTests"
