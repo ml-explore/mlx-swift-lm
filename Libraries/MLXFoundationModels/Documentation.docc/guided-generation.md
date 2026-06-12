@@ -26,7 +26,7 @@ whenever the FoundationModels adapter is compiled in (the
 available alongside the adapter. The FoundationModels-to-grammar glue lives in
 `Libraries/MLXFoundationModels/GuidedGeneration/SchemaConverter.swift`.
 
-To use guided generation without FoundationModels (older OS floors, Linux),
+To use guided generation without FoundationModels (older OS floors),
 depend on the `MLXGuidedGeneration` product directly.
 
 ## Cold-compile latency and `@MainActor`
