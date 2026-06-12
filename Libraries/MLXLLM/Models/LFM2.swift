@@ -222,7 +222,8 @@ class LFM2ShortConv: Module {
 
         Bx = concatenated([state!, Bx], axis: -2)
         if let cache {
-            cache[0] = Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...]
+            cache[0] = contiguous(Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...])
+            cache.advance(x.dim(1))
         }
 
         let convOut = conv(Bx)

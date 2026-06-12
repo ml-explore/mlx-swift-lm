@@ -408,7 +408,8 @@ private enum Language {
 
             Bx = concatenated([state!, Bx], axis: -2)
             if let cache {
-                cache[0] = Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...]
+                cache[0] = contiguous(Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...])
+                cache.advance(x.dim(1))
             }
 
             let convOut = conv(Bx)
@@ -1033,7 +1034,9 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             pixelAttentionMask: pixelAttentionMask
         )
 
-        let result = languageModel(nil, cache: cache, inputsEmbeds: inputEmbeddings)
+        let result = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
+            languageModel(nil, cache: cache, inputsEmbeds: inputEmbeddings)
+        }
 
         return .logits(result)
     }

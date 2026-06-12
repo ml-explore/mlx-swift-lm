@@ -88,6 +88,15 @@ public struct LMInput {
         ) -> Text {
             Text(tokens: tokens[indices, stream: stream], mask: mask)
         }
+
+        /// Per-batch sequence lengths derived from the optional attention mask.
+        public var sequenceLengths: [Int]? {
+            if let mask {
+                return mask.asType(.int32).sum(axis: -1).asArray(Int.self)
+            }
+            guard tokens.ndim == 2 else { return nil }
+            return Array(repeating: tokens.dim(1), count: tokens.dim(0))
+        }
     }
 
     /// Representation of prepared input image(s).
