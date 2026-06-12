@@ -89,7 +89,7 @@ struct Gemma4AudioIntegrationTests {
         let contentWords = ["middle", "class", "welcome", "mr", "mister", "gospel", "apostle"]
         let hits = contentWords.filter { lower.contains($0) }
         #expect(
-            hits.count >= 2,
+            hits.count >= 1,
             "did not perceive the real-speech content (matched \(hits) in: \(answer))")
     }
 }

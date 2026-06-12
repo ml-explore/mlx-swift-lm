@@ -1007,9 +1007,15 @@ final class Gemma4TextBackbone: Module {
     @ModuleInfo(key: "per_layer_projection_norm") var perLayerProjectionNorm:
         Gemma4RMSNormZeroShift?
 
+    static func isKVSharedOnlyLayer(_ layerIdx: Int, textConfig: Gemma4TextConfiguration) -> Bool {
+        guard textConfig.numKVSharedLayers > 0 else { return false }
+        return layerIdx >= textConfig.hiddenLayers - textConfig.numKVSharedLayers
+    }
+
     init(_ config: Gemma4TextConfiguration) {
         self.config = config
-        self.firstKVSharedLayerIdx = config.hiddenLayers - config.numKVSharedLayers
+        let firstKVSharedLayerIdx = config.hiddenLayers - config.numKVSharedLayers
+        self.firstKVSharedLayerIdx = firstKVSharedLayerIdx
         self.embedScale = pow(Float(config.hiddenSize), 0.5)
         self.embedTokensPerLayerScale = pow(Float(max(config.hiddenSizePerLayerInput, 1)), 0.5)
         self._perLayerInputScale = rsqrt(MLXArray(2.0))
@@ -1034,7 +1040,10 @@ final class Gemma4TextBackbone: Module {
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
         self._layers.wrappedValue = (0 ..< config.hiddenLayers).map {
-            Gemma4TextDecoderLayer(config: config, layerIdx: $0)
+            Gemma4TextDecoderLayer(
+                config: config,
+                layerIdx: $0,
+                kvSharedOnly: Self.isKVSharedOnlyLayer($0, textConfig: config))
         }
         self._norm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -2817,6 +2826,23 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         )
     }
 
+    static func isRedundantTextKVSharedWeight(
+        _ key: String, textConfig: Gemma4TextConfiguration
+    ) -> Bool {
+        guard textConfig.numKVSharedLayers > 0 else { return false }
+        let textLayerPrefix = "language_model.model.layers."
+        guard key.hasPrefix(textLayerPrefix), key.contains(".self_attn."),
+            key.contains(".k_proj.") || key.contains(".v_proj.")
+                || key.contains(".k_norm.") || key.contains(".v_norm.")
+        else { return false }
+
+        let firstKVSharedLayer = textConfig.hiddenLayers - textConfig.numKVSharedLayers
+        let tail = key.dropFirst(textLayerPrefix.count)
+        let digits = tail.prefix { $0.isNumber }
+        guard let layerIdx = Int(digits) else { return false }
+        return layerIdx >= firstKVSharedLayer
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = languageModel.sanitize(weights: weights)
 
@@ -2836,6 +2862,18 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             }
         }
 
+        // KV-shared layers have no local K/V projections or K/V norms (they
+        // reuse an earlier layer's KV). The slim QAT checkpoints already omit
+        // these; the non-QAT checkpoints redundantly ship them. Drop those
+        // orphaned weights so both load cleanly (otherwise `update(verify:
+        // .all)` rejects the extras).
+        // Scope strictly to the text backbone (`language_model.model.layers.N`).
+        // The vision and audio towers have their own `self_attn.k_proj/v_proj`
+        // layers; matching on a bare `layers.N.self_attn.` would wrongly strip
+        // tower weights whose index crosses the text threshold.
+        sanitized = sanitized.filter {
+            !Self.isRedundantTextKVSharedWeight($0.key, textConfig: config.textConfiguration)
+        }
         return sanitized
     }
 }
@@ -3110,8 +3148,8 @@ public struct Gemma4Processor: UserInputProcessor {
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
             image: processedImage,
-            audio: processedAudio,
-            video: processedVideo
+            video: processedVideo,
+            audio: processedAudio
         )
     }
 }
