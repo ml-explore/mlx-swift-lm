@@ -48,3 +48,31 @@ extension EmbeddingModel {
             attentionMask: attentionMask)
     }
 }
+
+extension MaterializedModule: EmbeddingModel, BaseLanguageModel where LayerType: EmbeddingModel {
+
+    public var vocabularySize: Int { _base.vocabularySize }
+    public var poolingStrategy: Pooling.Strategy? { _base.poolingStrategy }
+    public var maxPositionEmbeddings: Int? { _base.maxPositionEmbeddings }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        _base.sanitize(weights: weights)
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+        MLXArray]
+    {
+        _base.sanitize(weights: weights, metadata: metadata)
+    }
+
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> EmbeddingModelOutput {
+        return _base(
+            inputs, positionIds: positionIds, tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+    }
+}
