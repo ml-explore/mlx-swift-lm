@@ -1035,7 +1035,20 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         )
 
         let result = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
-            languageModel(nil, cache: cache, inputsEmbeds: inputEmbeddings)
+            let prefillStepSize = windowSize ?? 512
+            let totalPositions = inputEmbeddings.dim(1)
+            var processed = 0
+            while totalPositions - processed > 1 {
+                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+                let range = processed ..< (processed + chunkLength)
+                _ = languageModel(nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., range, 0...])
+                asyncEval(cache)
+                processed += chunkLength
+            }
+            eval(cache)
+            
+            let result = languageModel(nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., processed..., 0...])
+            return result
         }
 
         return .logits(result)
