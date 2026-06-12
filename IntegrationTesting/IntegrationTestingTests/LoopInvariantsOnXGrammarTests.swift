@@ -33,11 +33,11 @@
 //      is consumable in the same position the Loop's commit-handling
 //      code reads it.
 //
-// Gated on both traits — the tokenizer path goes through
-// `loadTestModelContainer` (needs FoundationModelsIntegration), and
-// `GrammarConstraint` lives behind `GuidedGenerationSupport`.
+// Gated on FoundationModelsIntegration: the tokenizer path goes through
+// `loadTestModelContainer`. `GrammarConstraint` lives in the
+// MLXGuidedGeneration library and is always available alongside the adapter.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation

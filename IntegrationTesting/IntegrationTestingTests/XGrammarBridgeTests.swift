@@ -36,16 +36,16 @@
 // paths survive on-device unwinding.
 //
 // Gated on `FoundationModelsIntegration` because the live-tokenizer
-// path routes through `loadTestModelContainer`; gated on
-// `GuidedGenerationSupport` because `GrammarTokenizer` lives under that
-// trait.
+// path routes through `loadTestModelContainer`. `GrammarTokenizer` lives
+// in the MLXGuidedGeneration library and is always available alongside
+// the adapter.
 //
 // Note on coverage: this exercises gemma-3 and qwen2.5; qwen2.5 stands
 // in for qwen3 since both are byte-level BPE and the recorded qwen3
 // fixture is not yet available. Llama-3 coverage is pending its
 // `tokenizer_llama3.json` fixture.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation

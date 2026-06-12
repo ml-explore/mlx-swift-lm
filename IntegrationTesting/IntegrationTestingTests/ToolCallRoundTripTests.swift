@@ -31,7 +31,7 @@
 // `loadTestModelContainer` and the schema path requires `@Generable`,
 // which is behind `FoundationModelsIntegration`.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation

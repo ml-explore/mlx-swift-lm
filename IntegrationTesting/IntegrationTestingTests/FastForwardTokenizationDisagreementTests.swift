@@ -91,11 +91,11 @@
 //   validate the bridge-level contract that the FF accept loop
 //   survives a rejection and the constraint remains usable.
 //
-// Gated on both traits — tokenizer paths go through
-// `loadTestModelContainer` (FoundationModelsIntegration) and the
-// GrammarConstraint type itself lives behind GuidedGenerationSupport.
+// Gated on FoundationModelsIntegration: tokenizer paths go through
+// `loadTestModelContainer`. The GrammarConstraint type lives in the
+// MLXGuidedGeneration library and is always available alongside the adapter.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
