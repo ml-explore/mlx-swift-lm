@@ -1,9 +1,9 @@
 // Copyright © 2026 Apple Inc.
 //
 // Swift wrappers over the CXGrammar C shim. These are the guided-
-// generation surface the library exposes to callers: `XGTokenizer`,
-// `XGConstraint`, `XGError`, `XGMaskResult`, and `XGCommitResult`.
-// `XGConstraint` owns three C handles (`XGGrammarCompiler`,
+// generation surface the library exposes to callers: `GrammarTokenizer`,
+// `GrammarConstraint`, `GrammarError`, `MaskResult`, and `CommitResult`.
+// `GrammarConstraint` owns three C handles (`XGGrammarCompiler`,
 // `XGCompiledGrammar`, `XGMatcher`) and frees them in
 // construction-reverse order in `deinit`.
 
@@ -13,12 +13,12 @@ import MLXLMCommon
 
 // MARK: - Errors
 
-public enum XGError: Error {
+public enum GrammarError: Error {
     /// `xg_tokenizer_info_new` returned a non-OK status. The string is
     /// the thread-local `xg_last_error_message()` captured at the
     /// failure site, or a fallback if no message surfaced.
     case tokenizerCreationFailed(String)
-    /// Any step of `XGConstraint.init` — compiler creation, schema
+    /// Any step of `GrammarConstraint.init` — compiler creation, schema
     /// compilation, or matcher construction — failed with a status
     /// that did not map to a more specific case. The string is the
     /// best-available error message: xgrammar's `what()` via
@@ -51,7 +51,7 @@ public enum XGError: Error {
     case forkFailed(String)
 }
 
-// MARK: - XGTokenizer
+// MARK: - GrammarTokenizer
 
 /// Swift wrapper around `XGTokenizerInfo*`. Manages C pointer lifetime
 /// via `deinit`.
@@ -63,7 +63,7 @@ public enum XGError: Error {
 /// `@unchecked Sendable`: tokenizers are cached on the model cache
 /// actor and handed across actors. The underlying `XGTokenizerInfo*`
 /// is read-only after construction and xgrammar does not mutate it.
-public final class XGTokenizer: @unchecked Sendable {
+public final class GrammarTokenizer: @unchecked Sendable {
     let pointer: OpaquePointer
     public let vocabSize: Int
 
@@ -80,7 +80,7 @@ public final class XGTokenizer: @unchecked Sendable {
     ///     decoding.
     ///   - eosTokenId: End-of-sequence token ID, registered as a stop
     ///     token on the xgrammar TokenizerInfo.
-    public init(vocab: [String], vocabType: XGVocabType, eosTokenId: Int32) throws {
+    public init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
         self.vocabSize = vocab.count
 
         var info: OpaquePointer?
@@ -91,7 +91,7 @@ public final class XGTokenizer: @unchecked Sendable {
                 xg_tokenizer_info_new(
                     ptrs.baseAddress,
                     ptrs.count,
-                    vocabType,
+                    vocabType.xgVocabType,
                     stopBuf.baseAddress,
                     stopBuf.count,
                     &info
@@ -103,7 +103,7 @@ public final class XGTokenizer: @unchecked Sendable {
             let detail =
                 xg_last_error_message().map { String(cString: $0) }
                 ?? "xg_tokenizer_info_new returned status \(status)"
-            throw XGError.tokenizerCreationFailed(detail)
+            throw GrammarError.tokenizerCreationFailed(detail)
         }
         self.pointer = ptr
     }
@@ -113,12 +113,12 @@ public final class XGTokenizer: @unchecked Sendable {
     }
 }
 
-// MARK: - XGMaskResult
+// MARK: - MaskResult
 
 /// Result of a mask computation step. The `mask` array is an LSB-first
 /// int32 bitmask over the tokenizer's vocab: bit `i` of word `w` is
 /// token `w * 32 + i`. The array is caller-owned — xgrammar does not
-/// alias a mask pointer into its own memory, so `XGMaskResult.mask`
+/// alias a mask pointer into its own memory, so `MaskResult.mask`
 /// stays valid independently of subsequent calls on the same
 /// constraint.
 ///
@@ -129,34 +129,34 @@ public final class XGTokenizer: @unchecked Sendable {
 ///
 /// `needsApply` tracks whether at least one token is excluded by the
 /// grammar; when false, callers can skip applying the mask.
-public struct XGMaskResult {
+public struct MaskResult {
     public let mask: [Int32]
     public let isTerminated: Bool
     public let needsApply: Bool
 }
 
-// MARK: - XGCommitResult
+// MARK: - CommitResult
 
 /// Result of committing a token to advance grammar state.
 ///
 /// `tokens` carries the fast-forward token ids emitted by xgrammar's
 /// `FindJumpForwardString` path, in the order they advanced the
 /// matcher. Empty when `fastForward` is disabled on the owning
-/// `XGConstraint`, when xgrammar returned no forced suffix, or when
+/// `GrammarConstraint`, when xgrammar returned no forced suffix, or when
 /// mid-FF tokenization disagreement stopped emission before any token
-/// was accepted. See `XGConstraint.commitToken` for the
+/// was accepted. See `GrammarConstraint.commitToken` for the
 /// mid-FF-rejection policy.
 ///
-/// `isTerminated` matches `XGMaskResult.isTerminated`: true iff the
+/// `isTerminated` matches `MaskResult.isTerminated`: true iff the
 /// matcher has accepted a stop token. Reflects the state *after* any
 /// FF advancement, so a FF sequence that lands on the stop token
 /// surfaces here as `isTerminated = true`.
-public struct XGCommitResult {
+public struct CommitResult {
     public let tokens: [Int32]
     public let isTerminated: Bool
 }
 
-// MARK: - XGConstraint
+// MARK: - GrammarConstraint
 
 /// Swift wrapper around a compiled xgrammar constraint plus its
 /// associated matcher. Manages the lifetime of three C handles — the
@@ -181,8 +181,8 @@ public struct XGCommitResult {
 /// model cache, but the underlying matcher is not thread-safe. Callers
 /// serialize access through their session's isolation domain (e.g. a
 /// `ModelContainer.perform` closure).
-public final class XGConstraint: @unchecked Sendable {
-    private let tokenizer: XGTokenizer
+public final class GrammarConstraint: @unchecked Sendable {
+    private let tokenizer: GrammarTokenizer
     private let compiler: OpaquePointer
     private let compiled: OpaquePointer
     private let matcher: OpaquePointer
@@ -202,13 +202,13 @@ public final class XGConstraint: @unchecked Sendable {
     /// fork paths so the parent's `deinit` (and thus the `xg_*_free`
     /// calls on the shared handles) cannot run while this fork is
     /// alive. `nil` on root constraints.
-    private let forkParent: XGConstraint?
+    private let forkParent: GrammarConstraint?
     /// Fast-forward emission toggle. When `true`, every successful
     /// `commitToken` queries xgrammar's `FindJumpForwardString`,
     /// encodes it through `hostTokenizer`, advances the matcher once
     /// per resulting token, and returns those ids. When `false` or
     /// when `hostTokenizer` is `nil`, no FF emission happens and
-    /// `XGCommitResult.tokens` is empty.
+    /// `CommitResult.tokens` is empty.
     private let fastForward: Bool
     /// Host-side tokenizer used to encode FF strings into token ids.
     /// Optional because not every caller needs FF; required when
@@ -249,7 +249,7 @@ public final class XGConstraint: @unchecked Sendable {
     ///     whose vocab built `tokenizer`. Ignored when `fastForward`
     ///     is `false`.
     public init(
-        tokenizer: XGTokenizer,
+        tokenizer: GrammarTokenizer,
         jsonSchema: String,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
@@ -264,7 +264,7 @@ public final class XGConstraint: @unchecked Sendable {
         var compilerPtr: OpaquePointer?
         let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
         guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(
                     status: compilerStatus, fallback: "xg_grammar_compiler_new")
             )
@@ -287,9 +287,9 @@ public final class XGConstraint: @unchecked Sendable {
             if compileStatus == XG_ERR_INVALID_JSON_SCHEMA
                 || compileStatus == XG_ERR_INVALID_JSON
             {
-                throw XGError.invalidJSONSchema(message)
+                throw GrammarError.invalidJSONSchema(message)
             }
-            throw XGError.constraintCompilationFailed(message)
+            throw GrammarError.constraintCompilationFailed(message)
         }
 
         var matcherPtr: OpaquePointer?
@@ -297,7 +297,7 @@ public final class XGConstraint: @unchecked Sendable {
         guard matcherStatus == XG_OK, let matcherHandle = matcherPtr else {
             xg_compiled_grammar_free(compiledHandle)
             xg_grammar_compiler_free(compilerHandle)
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
             )
         }
@@ -324,7 +324,7 @@ public final class XGConstraint: @unchecked Sendable {
     ///     this constraint; a Swift reference is retained here.
     ///   - grammar: The EBNF/GBNF source. Anything xgrammar's
     ///     `Grammar::FromEBNF` rejects (including Lark syntax) surfaces
-    ///     as `XGError.constraintCompilationFailed` with the parser's
+    ///     as `GrammarError.constraintCompilationFailed` with the parser's
     ///     line/column message in the payload.
     ///   - rootRule: The name of the top-level production. Pass `nil`
     ///     to use xgrammar's default of `"root"`. The tool-calling
@@ -332,7 +332,7 @@ public final class XGConstraint: @unchecked Sendable {
     ///   - fastForward: Same semantics as the `jsonSchema:` init.
     ///   - hostTokenizer: Same semantics as the `jsonSchema:` init.
     public init(
-        tokenizer: XGTokenizer,
+        tokenizer: GrammarTokenizer,
         grammar: String,
         rootRule: String? = nil,
         fastForward: Bool = false,
@@ -348,7 +348,7 @@ public final class XGConstraint: @unchecked Sendable {
         var compilerPtr: OpaquePointer?
         let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
         guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(
                     status: compilerStatus, fallback: "xg_grammar_compiler_new")
             )
@@ -366,7 +366,7 @@ public final class XGConstraint: @unchecked Sendable {
         }
         guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
             xg_grammar_compiler_free(compilerHandle)
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(
                     status: compileStatus, fallback: "xg_compile_grammar_from_ebnf")
             )
@@ -377,7 +377,7 @@ public final class XGConstraint: @unchecked Sendable {
         guard matcherStatus == XG_OK, let matcherHandle = matcherPtr else {
             xg_compiled_grammar_free(compiledHandle)
             xg_grammar_compiler_free(compilerHandle)
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
             )
         }
@@ -406,22 +406,22 @@ public final class XGConstraint: @unchecked Sendable {
     /// `std::nullopt` for `tokenizer_info`. A future caller that wants
     /// to use `token` / `token_dispatch` / `token_triggered_tags` in
     /// the body will need a variant of this init that threads the
-    /// bound `XGTokenizer` through to
+    /// bound `GrammarTokenizer` through to
     /// `Grammar::FromStructuralTag`'s second argument.
     ///
     /// - Parameters:
     ///   - tokenizer: The tokenizer the grammar binds to. Must outlive
     ///     this constraint; a Swift reference is retained here.
     ///   - structuralTag: The structural-tag JSON source. Malformed
-    ///     input surfaces either as `XGError.invalidJSONSchema` (bad
+    ///     input surfaces either as `GrammarError.invalidJSONSchema` (bad
     ///     JSON or bad embedded schema) or as
-    ///     `XGError.constraintCompilationFailed` (structural-tag-level
+    ///     `GrammarError.constraintCompilationFailed` (structural-tag-level
     ///     rejection or any other shim failure); both carry xgrammar's
     ///     `what()` text in the payload.
     ///   - fastForward: Same semantics as the `jsonSchema:` init.
     ///   - hostTokenizer: Same semantics as the `jsonSchema:` init.
     public init(
-        tokenizer: XGTokenizer,
+        tokenizer: GrammarTokenizer,
         structuralTag: String,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
@@ -436,7 +436,7 @@ public final class XGConstraint: @unchecked Sendable {
         var compilerPtr: OpaquePointer?
         let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
         guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(
                     status: compilerStatus, fallback: "xg_grammar_compiler_new")
             )
@@ -459,9 +459,9 @@ public final class XGConstraint: @unchecked Sendable {
             if compileStatus == XG_ERR_INVALID_JSON_SCHEMA
                 || compileStatus == XG_ERR_INVALID_JSON
             {
-                throw XGError.invalidJSONSchema(message)
+                throw GrammarError.invalidJSONSchema(message)
             }
-            throw XGError.constraintCompilationFailed(message)
+            throw GrammarError.constraintCompilationFailed(message)
         }
 
         var matcherPtr: OpaquePointer?
@@ -469,7 +469,7 @@ public final class XGConstraint: @unchecked Sendable {
         guard matcherStatus == XG_OK, let matcherHandle = matcherPtr else {
             xg_compiled_grammar_free(compiledHandle)
             xg_grammar_compiler_free(compilerHandle)
-            throw XGError.constraintCompilationFailed(
+            throw GrammarError.constraintCompilationFailed(
                 Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
             )
         }
@@ -488,7 +488,7 @@ public final class XGConstraint: @unchecked Sendable {
     /// so its `deinit` is deferred past this fork's own lifetime.
     private init(
         fromFork matcherHandle: OpaquePointer,
-        parent: XGConstraint
+        parent: GrammarConstraint
     ) {
         self.tokenizer = parent.tokenizer
         self.compiler = parent.compiler
@@ -512,7 +512,7 @@ public final class XGConstraint: @unchecked Sendable {
 
     /// Compute the bitmask of grammar-accepted next tokens at the
     /// matcher's current state.
-    public func computeMask() throws -> XGMaskResult {
+    public func computeMask() throws -> MaskResult {
         lock.lock()
         defer { lock.unlock() }
         var mask = [Int32](repeating: 0, count: bitmaskWords)
@@ -527,12 +527,12 @@ public final class XGConstraint: @unchecked Sendable {
             )
         }
         guard status == XG_OK else {
-            throw XGError.maskComputationFailed(
+            throw GrammarError.maskComputationFailed(
                 Self.captureShimError(
                     status: status, fallback: "xg_matcher_fill_next_token_bitmask")
             )
         }
-        return XGMaskResult(
+        return MaskResult(
             mask: mask,
             isTerminated: isMatcherTerminatedLocked(),
             needsApply: needsApplyFlag != 0
@@ -541,7 +541,7 @@ public final class XGConstraint: @unchecked Sendable {
 
     /// Commit a sampled token to advance grammar state.
     ///
-    /// Throws `XGError.commitFailed` if the token is not in the most
+    /// Throws `GrammarError.commitFailed` if the token is not in the most
     /// recent mask (xgrammar returns `XG_ERR_INVALID_ARG` in that
     /// case). Matcher state is unchanged on rejection.
     ///
@@ -550,19 +550,19 @@ public final class XGConstraint: @unchecked Sendable {
     /// surfaces the longest currently-forced suffix via
     /// `FindJumpForwardString`, the host tokenizer encodes that
     /// suffix, and the matcher accepts each resulting token id in
-    /// turn. The accepted ids are returned in `XGCommitResult.tokens`
+    /// turn. The accepted ids are returned in `CommitResult.tokens`
     /// in the order they advanced the matcher, and `isTerminated`
     /// reflects the final post-FF state. If a mid-FF `AcceptToken`
     /// is rejected (tokenization disagreement — the encoded tokens
     /// cross the FF-valid boundary), emission stops at that point
     /// and the already-accepted prefix is returned; the matcher's
     /// state reflects exactly those accepts.
-    public func commitToken(_ tokenId: Int32) throws -> XGCommitResult {
+    public func commitToken(_ tokenId: Int32) throws -> CommitResult {
         lock.lock()
         defer { lock.unlock() }
         let status = xg_matcher_accept_token(matcher, tokenId)
         guard status == XG_OK else {
-            throw XGError.commitFailed(
+            throw GrammarError.commitFailed(
                 Self.captureShimError(
                     status: status, fallback: "xg_matcher_accept_token token=\(tokenId)")
             )
@@ -577,7 +577,7 @@ public final class XGConstraint: @unchecked Sendable {
             ffTokens = []
         }
 
-        return XGCommitResult(tokens: ffTokens, isTerminated: terminated)
+        return CommitResult(tokens: ffTokens, isTerminated: terminated)
     }
 
     /// Query xgrammar's current jump-forward string and feed it back
@@ -601,7 +601,7 @@ public final class XGConstraint: @unchecked Sendable {
         var length: Int = 0
         let status = xg_matcher_find_jump_forward_string(matcher, &ptr, &length)
         guard status == XG_OK else {
-            throw XGError.commitFailed(
+            throw GrammarError.commitFailed(
                 Self.captureShimError(
                     status: status, fallback: "xg_matcher_find_jump_forward_string")
             )
@@ -700,13 +700,13 @@ public final class XGConstraint: @unchecked Sendable {
         defer { lock.unlock() }
         let status = xg_matcher_rollback(matcher, n)
         guard status == XG_OK else {
-            throw XGError.rollbackFailed(
+            throw GrammarError.rollbackFailed(
                 Self.captureShimError(status: status, fallback: "xg_matcher_rollback n=\(n)")
             )
         }
     }
 
-    /// Fork the matcher, returning a new `XGConstraint` that shares the
+    /// Fork the matcher, returning a new `GrammarConstraint` that shares the
     /// compiler and compiled-grammar handles with this one but carries
     /// an independent `GrammarMatcher` state. Mirrors xgrammar's
     /// `GrammarMatcher::Fork()` contract: deep-copy of per-session
@@ -719,18 +719,18 @@ public final class XGConstraint: @unchecked Sendable {
     /// parent to prevent the parent's `deinit` from running (and
     /// invalidating the shared handles) while the fork is still alive.
     /// The fork owns its own matcher handle and frees it on deinit.
-    public func clone() throws -> XGConstraint {
+    public func clone() throws -> GrammarConstraint {
         lock.lock()
         defer { lock.unlock() }
 
         var forkedMatcher: OpaquePointer?
         let status = xg_matcher_fork(matcher, &forkedMatcher)
         guard status == XG_OK, let forkedHandle = forkedMatcher else {
-            throw XGError.forkFailed(
+            throw GrammarError.forkFailed(
                 Self.captureShimError(status: status, fallback: "xg_matcher_fork")
             )
         }
-        return XGConstraint(fromFork: forkedHandle, parent: self)
+        return GrammarConstraint(fromFork: forkedHandle, parent: self)
     }
 
     /// Query termination while already holding `lock`. Named `Locked`
@@ -775,7 +775,7 @@ extension Array where Element == String {
     /// nested `withUnsafeBufferPointer` scopes — no dangling pointers
     /// escape.
     ///
-    /// Used by `XGTokenizer` and shared by any other path that needs
+    /// Used by `GrammarTokenizer` and shared by any other path that needs
     /// the same `[String]` -> C bridge.
     func withCStringPointers<R>(
         _ body: (UnsafeBufferPointer<UnsafePointer<CChar>?>) throws -> R

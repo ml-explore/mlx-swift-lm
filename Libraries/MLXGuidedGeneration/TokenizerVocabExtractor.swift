@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import CXGrammar
 import MLXLMCommon
 
 /// Extracts vocabulary byte data from a HuggingFace Tokenizer.
@@ -87,7 +86,7 @@ public enum TokenizerVocabExtractor {
     /// bytes when transporting through Swift `String`.
     public struct XGrammarVocab {
         public let vocab: [String]
-        public let vocabType: XGVocabType
+        public let vocabType: VocabType
     }
 
     /// Extract vocabulary for xgrammar.
@@ -129,13 +128,13 @@ public enum TokenizerVocabExtractor {
             }
         }
 
-        let vocabType: XGVocabType
+        let vocabType: VocabType
         if sawByteFallback {
-            vocabType = XG_VOCAB_TYPE_BYTE_FALLBACK
+            vocabType = .byteFallback
         } else if sawByteLevelScalar {
-            vocabType = XG_VOCAB_TYPE_BYTE_LEVEL
+            vocabType = .byteLevel
         } else {
-            vocabType = XG_VOCAB_TYPE_RAW
+            vocabType = .raw
         }
 
         return XGrammarVocab(vocab: vocab, vocabType: vocabType)

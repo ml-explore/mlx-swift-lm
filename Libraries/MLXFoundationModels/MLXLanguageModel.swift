@@ -17,7 +17,6 @@
         import MLX
         import os.log
         #if GuidedGenerationSupport
-            import CXGrammar
             import MLXGuidedGeneration
         #endif
 
@@ -44,10 +43,10 @@
             /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
             private var suppressedLoadIDs: Set<String> = []
             #if GuidedGenerationSupport
-                private var xgTokenizers: [String: XGTokenizer] = [:]
+                private var xgTokenizers: [String: GrammarTokenizer] = [:]
                 /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
                 /// Clone from template instead of recompiling the grammar each request.
-                private var constraintTemplates: [String: XGConstraint] = [:]
+                private var constraintTemplates: [String: GrammarConstraint] = [:]
             #endif
             /// Most recent load error per model. Cleared on a subsequent successful
             /// load. Surfaced through `MLXLanguageModel.availability` so callers can
@@ -124,16 +123,16 @@
             }
 
             #if GuidedGenerationSupport
-                /// Gets or creates a cached XGTokenizer for the given model.
+                /// Gets or creates a cached GrammarTokenizer for the given model.
                 func makeXGTokenizer(
                     modelID: String,
                     tokenizer: any Tokenizer
-                ) throws -> XGTokenizer {
+                ) throws -> GrammarTokenizer {
                     if let cached = xgTokenizers[modelID] {
                         return cached
                     }
                     let vocab = TokenizerVocabExtractor.extractForXGrammar(from: tokenizer)
-                    let xgTok = try XGTokenizer(
+                    let xgTok = try GrammarTokenizer(
                         vocab: vocab.vocab,
                         vocabType: vocab.vocabType,
                         eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
@@ -142,7 +141,7 @@
                     return xgTok
                 }
 
-                /// Whether an `XGTokenizer` is already cached for the given model.
+                /// Whether an `GrammarTokenizer` is already cached for the given model.
                 /// Used by `MLXLanguageModel.hasCachedXGTokenizer` so tests can assert
                 /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
                 /// that a later guided respond happens to succeed.
@@ -160,29 +159,29 @@
                     modelID: String,
                     kind: ConstraintKind,
                     source: String,
-                    tokenizer: XGTokenizer,
+                    tokenizer: GrammarTokenizer,
                     hostTokenizer: any Tokenizer,
                     fastForward: Bool
-                ) throws -> XGConstraint {
+                ) throws -> GrammarConstraint {
                     let cacheKey = "\(modelID):\(kind):\(source)"
                     if let template = constraintTemplates[cacheKey] {
                         do {
                             return try template.clone()
-                        } catch XGError.forkFailed {
+                        } catch GrammarError.forkFailed {
                             constraintTemplates.removeValue(forKey: cacheKey)
                         }
                     }
-                    let constraint: XGConstraint
+                    let constraint: GrammarConstraint
                     switch kind {
                     case .json:
-                        constraint = try XGConstraint(
+                        constraint = try GrammarConstraint(
                             tokenizer: tokenizer,
                             jsonSchema: source,
                             fastForward: fastForward,
                             hostTokenizer: hostTokenizer
                         )
                     case .structuralTag:
-                        constraint = try XGConstraint(
+                        constraint = try GrammarConstraint(
                             tokenizer: tokenizer,
                             structuralTag: source,
                             fastForward: fastForward,
@@ -344,11 +343,11 @@
             }
 
             #if GuidedGenerationSupport
-                /// Gets or creates a cached XGTokenizer for the given model.
+                /// Gets or creates a cached GrammarTokenizer for the given model.
                 static func makeXGTokenizer(
                     modelID: String,
                     tokenizer: any Tokenizer
-                ) async throws -> XGTokenizer {
+                ) async throws -> GrammarTokenizer {
                     try await cache.makeXGTokenizer(modelID: modelID, tokenizer: tokenizer)
                 }
 
@@ -357,10 +356,10 @@
                     modelID: String,
                     kind: ConstraintKind,
                     source: String,
-                    tokenizer: XGTokenizer,
+                    tokenizer: GrammarTokenizer,
                     hostTokenizer: any Tokenizer,
                     fastForward: Bool
-                ) async throws -> XGConstraint {
+                ) async throws -> GrammarConstraint {
                     try await cache.makeConstraint(
                         modelID: modelID,
                         kind: kind,
@@ -371,7 +370,7 @@
                     )
                 }
 
-                /// Whether the shared cache already holds an `XGTokenizer` for the model.
+                /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
                 /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
                 /// `warmUp()` pre-created the tokenizer.
                 static func hasCachedXGTokenizer(modelID: String) async -> Bool {
@@ -544,7 +543,7 @@
                 )
 
                 #if GuidedGenerationSupport
-                    // Pre-create the model-keyed XGTokenizer so a guided / tool-calling
+                    // Pre-create the model-keyed GrammarTokenizer so a guided / tool-calling
                     // consumer skips the expensive vocab-extraction step on first
                     // respond(). It's keyed on modelID alone — the same cache entry
                     // respond()'s guided path reads — so this is a genuine cache hit.
@@ -669,7 +668,7 @@
                     /// cause is provably the user's input; pass everything else through
                     /// unchanged.
                     ///
-                    /// Only `XGError.invalidJSONSchema` is mapped: that case fires when
+                    /// Only `GrammarError.invalidJSONSchema` is mapped: that case fires when
                     /// xgrammar's JSON-Schema validator outright rejects the schema text
                     /// we synthesized from `GenerationSchema`, which is a problem the
                     /// developer can fix (simplify the schema, drop an unsupported
@@ -685,7 +684,7 @@
                     /// `tokenizerCreationFailed` and `bitmaskRetrievalFailed` are
                     /// internal shim failures with no recovery path on the developer's
                     /// side -- surfacing them untyped is honest.
-                    static func mapXGError(_ xgError: XGError) -> Error {
+                    static func mapXGError(_ xgError: GrammarError) -> Error {
                         switch xgError {
                         case .invalidJSONSchema(let message):
                             return LanguageModelError.unsupportedGenerationGuide(
@@ -1353,7 +1352,7 @@
                             // Re-map xgrammar errors to typed `LanguageModelError` cases
                             // where the cause is provably user input (see `mapXGError`).
                             // Internal-shim failures pass through unchanged.
-                            if let xgError = error as? XGError {
+                            if let xgError = error as? GrammarError {
                                 throw Self.mapXGError(xgError)
                             }
                         #endif

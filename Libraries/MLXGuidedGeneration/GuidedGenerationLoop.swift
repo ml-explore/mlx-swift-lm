@@ -71,7 +71,7 @@ public enum GuidedGenerationLoop {
     public static func run(
         input: LMInput,
         context: ModelContext,
-        constraint: XGConstraint,
+        constraint: GrammarConstraint,
         maxTokens: Int,
         vocabSize: Int,
         completionReserve: Int = 64,
@@ -303,7 +303,7 @@ public enum GuidedGenerationLoop {
                 break
             }
 
-            // Handle fast-forward tokens. XGCommitResult.tokens carries
+            // Handle fast-forward tokens. CommitResult.tokens carries
             // ONLY the jump-forward ids (the sampled token is not echoed
             // back by xgrammar), so use the array directly.
             let ffTokens: [Int32] = commitResult.tokens
@@ -456,7 +456,7 @@ public enum GuidedGenerationLoop {
     ///
     /// - Parameters:
     ///   - logits: Raw model output logits (shape: [batch, seq, vocab])
-    ///   - sampleMask: Packed bitmask from `XGConstraint.computeMask()`
+    ///   - sampleMask: Packed bitmask from `GrammarConstraint.computeMask()`
     ///     (rebound to `UnsafePointer<UInt32>` from the `[Int32]` buffer
     ///     the matcher fills), or nil when the mask needs no application
     ///     (all tokens forced by grammar).

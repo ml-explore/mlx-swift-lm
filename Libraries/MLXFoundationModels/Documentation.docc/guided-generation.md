@@ -50,7 +50,7 @@ literally vanish from the binary when the trait is off.
 > grammar + tokenizer pair reuse the cached matcher state and do not
 > pay the compile cost again.
 >
-> Pre-warming an expected schema with a throwaway `XGConstraint` from a
+> Pre-warming an expected schema with a throwaway `GrammarConstraint` from a
 > background task before the user-visible request lands eliminates the
 > blocking window entirely.
 

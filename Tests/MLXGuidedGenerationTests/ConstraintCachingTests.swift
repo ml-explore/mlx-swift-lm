@@ -1,6 +1,5 @@
 // Copyright © 2025 Apple Inc.
 
-import CXGrammar
 import Foundation
 import Testing
 
@@ -13,7 +12,7 @@ import Testing
 @Suite(
     .disabled(
         """
-        XGConstraint.clone() requires xgrammar's GrammarMatcher::Fork() (xgrammar >= \
+        GrammarConstraint.clone() requires xgrammar's GrammarMatcher::Fork() (xgrammar >= \
         v0.1.34); the vendored version (v0.1.30) does not provide it, so every clone() \
         in this suite throws. Production handles the absence gracefully — makeConstraint() \
         catches forkFailed and recompiles a fresh constraint — so constraint caching is a \
@@ -22,16 +21,16 @@ import Testing
         """))
 struct ConstraintCachingTests {
 
-    // MARK: - XGConstraint.clone() Tests
+    // MARK: - GrammarConstraint.clone() Tests
 
-    private func makeByteFallbackTokenizer() throws -> XGTokenizer {
+    private func makeByteFallbackTokenizer() throws -> GrammarTokenizer {
         let vocabSize = 256
         let vocab: [String] = (0 ..< vocabSize).map { byte in
             String(format: "<0x%02X>", byte)
         }
-        return try XGTokenizer(
+        return try GrammarTokenizer(
             vocab: vocab,
-            vocabType: XG_VOCAB_TYPE_BYTE_FALLBACK,
+            vocabType: .byteFallback,
             eosTokenId: Int32(vocabSize - 1)
         )
     }
@@ -44,7 +43,7 @@ struct ConstraintCachingTests {
             { "type": "integer" }
             """
 
-        let original = try XGConstraint(
+        let original = try GrammarConstraint(
             tokenizer: tokenizer,
             jsonSchema: schema
         )
@@ -69,7 +68,7 @@ struct ConstraintCachingTests {
             { "type": "integer" }
             """
 
-        let original = try XGConstraint(
+        let original = try GrammarConstraint(
             tokenizer: tokenizer,
             jsonSchema: schema
         )
@@ -98,7 +97,7 @@ struct ConstraintCachingTests {
             { "type": "integer" }
             """
 
-        let template = try XGConstraint(
+        let template = try GrammarConstraint(
             tokenizer: tokenizer,
             jsonSchema: schema
         )

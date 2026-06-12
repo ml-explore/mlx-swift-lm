@@ -12,7 +12,7 @@
 // `canImport(FoundationModels, _version: 2)`: the adapter surface
 // (`MLXLanguageModel` et al.) only exists on the 27 SDK, so on the 26 SDK
 // those arms compile to nothing even when the trait is on. The guided-
-// generation primitives (`GuidedGenerationLoop`, `XGConstraint`) are gated on
+// generation primitives (`GuidedGenerationLoop`, `GrammarConstraint`) are gated on
 // `GuidedGenerationSupport` alone and are SDK-independent.
 //
 // A few behavioral tests are gated on the FM-on combinations because they
@@ -23,7 +23,6 @@
 import Testing
 
 #if GuidedGenerationSupport
-    import CXGrammar
     import MLXGuidedGeneration
 #endif
 
@@ -46,7 +45,7 @@ struct TraitMatrixTests {
             _ = MLXLanguageModel.self
             _ = MLXLanguageModel.Executor.self
             _ = GuidedGenerationLoop.self
-            _ = XGConstraint.self
+            _ = GrammarConstraint.self
             _ = MLXDownloadProgress.self
         }
 
@@ -175,25 +174,25 @@ struct TraitMatrixTests {
         @Test("FM off, GG on: guided-generation primitives compile; MLXLanguageModel absent")
         func ggOnlySurface() {
             _ = GuidedGenerationLoop.self
-            _ = XGConstraint.self
+            _ = GrammarConstraint.self
             _ = MLXDownloadProgress.self
             // MLXLanguageModel is not a type in this configuration; the fact that
             // this file compiles without referencing it is the assertion.
         }
 
-        @Test("FM off, GG on: XGConstraint compiles a simple JSON schema")
+        @Test("FM off, GG on: GrammarConstraint compiles a simple JSON schema")
         func xgConstraintUsableWithoutFM() throws {
             let vocabSize = 256
             let vocab: [String] = (0 ..< vocabSize).map { byte in
                 String(format: "<0x%02X>", byte)
             }
-            let tokenizer = try XGTokenizer(
+            let tokenizer = try GrammarTokenizer(
                 vocab: vocab,
-                vocabType: XG_VOCAB_TYPE_BYTE_FALLBACK,
+                vocabType: .byteFallback,
                 eosTokenId: Int32(vocabSize - 1)
             )
             let schema = #"{ "type": "integer" }"#
-            _ = try XGConstraint(tokenizer: tokenizer, jsonSchema: schema)
+            _ = try GrammarConstraint(tokenizer: tokenizer, jsonSchema: schema)
         }
     #endif
 
@@ -203,7 +202,7 @@ struct TraitMatrixTests {
         @Test("Neither trait: MLXFoundationModels exposes only MLXDownloadProgress")
         func neitherTrait() {
             _ = MLXDownloadProgress.self
-            // No MLXLanguageModel, no GuidedGenerationLoop, no XGConstraint.
+            // No MLXLanguageModel, no GuidedGenerationLoop, no GrammarConstraint.
         }
     #endif
 }
