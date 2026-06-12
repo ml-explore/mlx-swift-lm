@@ -1,0 +1,1 @@
+{"model": "mlx-community/gemma-4-e2b-it-4bit", "prompt": "Transcribe this audio verbatim.", "audio_file": "7E9A42BA-8AD9-44D7-BED3-95BAEDA2B699.m4a", "output_text": "GenerationResult(text='好的,我來更新100。', token=106, logprobs=array([-33.5, -11.4375, -17.75, ..., -33.5, -33.75, -33.25], dtype=bfloat16), prompt_tokens=64, generation_tokens=10, total_tokens=74, prompt_t"}

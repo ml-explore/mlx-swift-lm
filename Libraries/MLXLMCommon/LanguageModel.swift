@@ -125,11 +125,14 @@ public struct LMInput {
     public struct ProcessedAudio {
 
         public let samples: MLXArray
+        public let mask: MLXArray?
 
         public init(
-            samples: MLXArray
+            samples: MLXArray,
+            mask: MLXArray? = nil
         ) {
             self.samples = samples
+            self.mask = mask
         }
     }
 
