@@ -495,6 +495,13 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var maxTokens: Int? { get }
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
+    var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
+    mutating func discardGeneratedToken()
+}
+
+extension TokenIteratorProtocol {
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
+    public mutating func discardGeneratedToken() {}
 }
 
 /// Generator of tokens.
@@ -756,6 +763,14 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
+    private var telemetry = SpeculativeDecodingTelemetry()
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
+        telemetry.roundCount > 0 ? telemetry : nil
+    }
+
+    public mutating func discardGeneratedToken() {
+        telemetry.discardGeneratedToken()
+    }
 
     /// Initialize a `SpeculativeTokenIterator` with the given input.
     ///
@@ -909,6 +924,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.didSample(token: finalToken)
         pendingTokens.append(mainTokensList[accepted])
 
+        telemetry.recordRound(
+            drafted: numDraft,
+            accepted: accepted,
+            targetVerified: numDraft + 1
+        )
+
         // Rewind caches for rejected tokens
         trimPromptCache(mainCache, numTokens: numDraft - accepted)
         trimPromptCache(draftCache, numTokens: Swift.max(numDraft - accepted - 1, 0))
@@ -943,6 +964,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             let token = pendingTokens[pendingIndex]
             pendingIndex += 1
             tokenCount += 1
+            telemetry.recordGeneratedToken()
             return token
         }
 
@@ -958,6 +980,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
         tokenCount += 1
+        telemetry.recordGeneratedToken()
         return token
     }
 }
@@ -1807,6 +1830,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                             stopReason = .cancelled
                             break
                         }
+                    } else {
+                        iterator.discardGeneratedToken()
                     }
                     stopReason = .stop
                     break
@@ -1843,7 +1868,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 stopReason: stopReason ?? .cancelled,
                 proposedDraftTokens: mtpStats?.proposedDraftTokens,
                 acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
-                passthroughReason: mtpStats?.passthroughReason
+                passthroughReason: mtpStats?.passthroughReason,
+                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -1930,6 +1956,9 @@ public struct GenerateCompletionInfo: Sendable {
     /// speculative for the full stream or for non-MTP streams.
     public let passthroughReason: String?
 
+    /// Speculative decoding telemetry, when generation used speculative decoding.
+    public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -1948,7 +1977,8 @@ public struct GenerateCompletionInfo: Sendable {
         stopReason: GenerateStopReason = .stop,
         proposedDraftTokens: Int? = nil,
         acceptedDraftTokens: Int? = nil,
-        passthroughReason: String? = nil
+        passthroughReason: String? = nil,
+        speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
@@ -1958,6 +1988,7 @@ public struct GenerateCompletionInfo: Sendable {
         self.proposedDraftTokens = proposedDraftTokens
         self.acceptedDraftTokens = acceptedDraftTokens
         self.passthroughReason = passthroughReason
+        self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
     }
 
     public func summary() -> String {
