@@ -13,23 +13,23 @@ import MLXLMCommon
 import MLXNN
 
 public struct Gemma3TextConfiguration: Codable {
-    let modelType: String
-    let hiddenSize: Int
-    let hiddenLayers: Int
-    let intermediateSize: Int
-    let attentionHeads: Int
-    let headDim: Int
-    let rmsNormEps: Float
-    let vocabularySize: Int
-    let kvHeads: Int
-    let ropeTheta: Float
-    let ropeLocalBaseFreq: Float
-    let ropeTraditional: Bool
-    let queryPreAttnScalar: Float
-    let slidingWindow: Int
-    let slidingWindowPattern: Int
-    let maxPositionEmbeddings: Int
-    let ropeScaling: [String: StringOrNumber]?
+    public let modelType: String
+    public let hiddenSize: Int
+    public let hiddenLayers: Int
+    public let intermediateSize: Int
+    public let attentionHeads: Int
+    public let headDim: Int
+    public let rmsNormEps: Float
+    public let vocabularySize: Int
+    public let kvHeads: Int
+    public let ropeTheta: Float
+    public let ropeLocalBaseFreq: Float
+    public let ropeTraditional: Bool
+    public let queryPreAttnScalar: Float
+    public let slidingWindow: Int
+    public let slidingWindowPattern: Int
+    public let maxPositionEmbeddings: Int
+    public let ropeScaling: [String: StringOrNumber]?
 
     public init(
         modelType: String, hiddenSize: Int, hiddenLayers: Int, intermediateSize: Int,
@@ -431,6 +431,66 @@ public class Gemma3TextModel: Module, LLMModel {
         }
 
         return .tokens(input.text)
+    }
+
+    public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {
+        Gemma3MessageGenerator()
+    }
+}
+
+/// Message generator for the Gemma 3 text path.
+///
+/// TranslateGemma's chat template needs each user turn tagged with `source_lang_code` /
+/// `target_lang_code` (ISO 639-1); supply them via `UserInput.additionalContext`. Without
+/// those codes this behaves exactly like ``DefaultMessageGenerator``.
+public struct Gemma3MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(from input: UserInput) -> [Message] {
+        guard
+            let source = input.additionalContext?["source_lang_code"] as? String,
+            let target = input.additionalContext?["target_lang_code"] as? String
+        else {
+            return DefaultMessageGenerator().generate(from: input)
+        }
+        return translationMessages(from: input, source: source, target: target)
+    }
+
+    private func translationMessages(
+        from input: UserInput, source: String, target: String
+    ) -> [Message] {
+        let messages: [Chat.Message]
+        switch input.prompt {
+        case .text(let text):
+            messages = [.user(text)]
+        case .chat(let chat):
+            messages = chat
+        case .messages(let raw):
+            // Already model-specific dictionaries; pass through unchanged.
+            return raw
+        }
+
+        // The TranslateGemma template only supports alternating user/assistant turns.
+        return messages.compactMap { message in
+            switch message.role {
+            case .user:
+                return [
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "text",
+                            "source_lang_code": source,
+                            "target_lang_code": target,
+                            "text": message.content,
+                        ]
+                    ],
+                ]
+            case .assistant:
+                return ["role": "assistant", "content": message.content]
+            case .system, .tool:
+                return nil
+            }
+        }
     }
 }
 
