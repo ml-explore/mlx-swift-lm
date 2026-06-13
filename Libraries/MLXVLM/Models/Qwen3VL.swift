@@ -162,6 +162,8 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
 public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
 
+    /// The synthesized min/max-pixel budget the processor consumes. Always
+    /// resolved (non-optional) — see `var size`.
     public struct Size: Codable, Sendable {
         public let maxPixels: Int
         public let minPixels: Int
@@ -172,17 +174,47 @@ public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
         }
     }
 
+    /// The raw JSON `"size"` block. Newer Qwen3-VL configs (e.g. Qwen3.6-27B
+    /// PARO) ship *only* `{longest_edge, shortest_edge}` — pixel-area budgets
+    /// under the HF convention `shortest_edge → min_pixels`,
+    /// `longest_edge → max_pixels` (same direct mapping GlmOcr uses); older
+    /// configs ship `{min_pixels, max_pixels}`. Every field is optional so a
+    /// config that omits any one still decodes: the processor loader swallows
+    /// decode throws into a silent text-only fallback, so a hard requirement
+    /// would make vision disappear instead of erroring.
+    public struct SizeBudget: Codable, Sendable {
+        public let maxPixels: Int?
+        public let minPixels: Int?
+        public let longestEdge: Int?
+        public let shortestEdge: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case maxPixels = "max_pixels"
+            case minPixels = "min_pixels"
+            case longestEdge = "longest_edge"
+            case shortestEdge = "shortest_edge"
+        }
+    }
+
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
     private let _minPixels: Int?
     private let _maxPixels: Int?
+    private let _size: SizeBudget?
     public let mergeSize: Int
     public let patchSize: Int
     public let temporalPatchSize: Int
     public let imageProcessorType: String
 
-    public var minPixels: Int { _minPixels ?? 4 * 28 * 28 }  // 3,136
-    public var maxPixels: Int { _maxPixels ?? 16384 * 28 * 28 }  // 12,845,056
+    // Budget resolution order: explicit top-level legacy keys, then the
+    // `size` block's legacy keys, then its new-style edges, then defaults.
+    // The defaults are only reached when the config carries no budget at all.
+    public var minPixels: Int {
+        _minPixels ?? _size?.minPixels ?? _size?.shortestEdge ?? 4 * 28 * 28
+    }  // default 3,136
+    public var maxPixels: Int {
+        _maxPixels ?? _size?.maxPixels ?? _size?.longestEdge ?? 16384 * 28 * 28
+    }  // default 12,845,056
 
     public var size: Size { .init(maxPixels: maxPixels, minPixels: minPixels) }
 
@@ -199,6 +231,7 @@ public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
         case imageStd = "image_std"
         case _minPixels = "min_pixels"
         case _maxPixels = "max_pixels"
+        case _size = "size"
         case mergeSize = "merge_size"
         case patchSize = "patch_size"
         case temporalPatchSize = "temporal_patch_size"
@@ -1328,6 +1361,15 @@ enum Qwen3VLLanguage {
 
 extension Qwen3VLLanguage {
 
+    /// - Parameter positionOffset: the absolute M-RoPE position the first
+    ///   token should occupy. Zero (the default) starts the index at absolute
+    ///   zero — correct for a cold full prefill. A warm continuation that
+    ///   resumes a cached prefix passes the **Position Anchor** (cache offset +
+    ///   the rope delta accumulated by the cached images), so a *new* image in
+    ///   the remainder gets its diverging temporal/height/width positions
+    ///   computed *from* the anchor instead of resetting to zero. The returned
+    ///   delta is shifted with the positions, so it remains
+    ///   `maxPositionId + 1 − tokenCount` in the offset frame.
     static func getRopeIndex(
         inputIds: MLXArray,
         imageGridTHW: [THW]?,
@@ -1336,7 +1378,8 @@ extension Qwen3VLLanguage {
         imageTokenId: Int,
         videoTokenId: Int,
         visionStartTokenId: Int,
-        attentionMask: MLXArray? = nil
+        attentionMask: MLXArray? = nil,
+        positionOffset: Int = 0
     ) -> (MLXArray, MLXArray) {
 
         let (batchSize, seqLength) = (inputIds.dim(0), inputIds.dim(1))
@@ -1345,10 +1388,15 @@ extension Qwen3VLLanguage {
         positionIds = broadcast(positionIds[.newAxis, 0...], to: [batchSize, seqLength])
 
         guard inputIds.ndim > 0, imageGridTHW != nil || videoGridTHW != nil else {
-            let positionIds3D = broadcast(
+            var positionIds3D = broadcast(
                 positionIds[.newAxis, 0..., 0...], to: [3, batchSize, seqLength])
-            let zeros = MLXArray.zeros([batchSize], dtype: .int32)
-            return (positionIds3D, zeros)
+            if positionOffset != 0 {
+                positionIds3D = positionIds3D + MLXArray(Int32(positionOffset))
+            }
+            // Text-only positions are `arange + positionOffset`, so the delta
+            // (`maxPos + 1 − tokenCount`) collapses to `positionOffset`.
+            let deltas = MLXArray(Array(repeating: Int32(positionOffset), count: batchSize))
+            return (positionIds3D, deltas)
         }
 
         positionIds = ones(like: inputIds).asType(.int32)
@@ -1484,7 +1532,14 @@ extension Qwen3VLLanguage {
 
             // Concatenate all position IDs for this batch item
             if !llmPosIdsList.isEmpty {
-                let llmPositions = concatenated(llmPosIdsList, axis: 1)  // [3, seq]
+                var llmPositions = concatenated(llmPosIdsList, axis: 1)  // [3, seq]
+                // Shift the whole batch item into the anchor frame. Applied to
+                // `llmPositions` (not just the final array) so `maxPosId` below
+                // — and therefore the returned delta — is computed in the same
+                // offset frame the positions live in.
+                if positionOffset != 0 {
+                    llmPositions = llmPositions + MLXArray(Int32(positionOffset))
+                }
 
                 // Update position_ids for this batch
                 let expandedMask = broadcast(

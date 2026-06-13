@@ -979,13 +979,14 @@ public class Qwen35: Module, VLMModel {
         return frames
     }
 
-    public func prepare(
-        _ input: LMInput,
-        cache: [any KVCache],
-        windowSize _: Int?
-    ) throws -> PrepareResult {
-        let inputIds = input.text.tokens
-
+    /// Vision tower + image→token merge over the input, shared by `prepare`
+    /// and `prepareContinuation` (mirrors `Qwen25VL.inputEmbeddings`).
+    private func visionInputEmbeddings(
+        _ input: LMInput
+    ) throws -> (
+        pixelValues: MLXArray?, imageFrames: [THW]?, videoFrames: [THW]?,
+        inputEmbeddings: MLXArray?
+    ) {
         var pixelValues: MLXArray?
         var imageFrames: [THW]?
         var videoFrames: [THW]?
@@ -1011,6 +1012,7 @@ public class Qwen35: Module, VLMModel {
             let frames = combinedFrames(imageFrames: imageFrames, videoFrames: videoFrames)
                 .nilIfEmpty
         {
+            let inputIds = input.text.tokens
             let textEmbeds = languageModel.model.embedTokens(inputIds)
             let (visionHidden, _) = visionModel(pixelValues, gridTHW: frames)
             let visionFeatures = visionHidden.asType(textEmbeds.dtype)
@@ -1024,6 +1026,32 @@ public class Qwen35: Module, VLMModel {
             )
             inputEmbeddings = mergedEmbeds
         }
+
+        return (pixelValues, imageFrames, videoFrames, inputEmbeddings)
+    }
+
+    public func prepare(
+        _ input: LMInput,
+        cache: [any KVCache],
+        windowSize: Int?
+    ) throws -> PrepareResult {
+        let inputIds = input.text.tokens
+
+        // Windowed (chunked) prefill — the remaining #344 deferred item for
+        // Qwen3.5. A cold cache is just a continuation anchored at offset 0,
+        // so the windowed forward in `prepareContinuation` serves both paths
+        // and bounds the full-attention scratch to [heads, window, L]. The
+        // windowed forward is single-sequence; batched inputs keep the
+        // single-shot path below.
+        if let windowSize, inputIds.ndim == 2, inputIds.dim(0) == 1,
+            inputIds.dim(-1) > windowSize
+        {
+            return try prepareContinuation(
+                input, cache: cache, state: nil, windowSize: windowSize)
+        }
+
+        let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
+            try visionInputEmbeddings(input)
 
         let typedCache = castCache(cache)
         let output = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
@@ -1041,6 +1069,113 @@ public class Qwen35: Module, VLMModel {
         }
 
         return .logits(output)
+    }
+
+    /// Warm, windowed continuation through an image-bearing remainder — the
+    /// windowed forward that `prepare` also delegates to for long prompts.
+    ///
+    /// It runs the vision tower and the image→token merge **once** over the
+    /// remainder, computes the new image's M-RoPE positions **once** from the
+    /// seeded **Position Anchor** (so the image's diverging t/h/w indices
+    /// start at the anchor, not zero), then drives the language-model forward
+    /// in chunks of `windowSize`. The full-attention scratch is bounded to
+    /// `[heads, chunk, L]` instead of `[heads, L, L]`, so it cannot crash on
+    /// a long prefix or a large image.
+    ///
+    /// `cache` must already be warmed to the restore offset `P` (a fresh cache
+    /// means `P = 0`, a crash-safe cold prefill). `state` carries the anchor's
+    /// rope delta in the `qwen35.ropeDeltas` slot (zero / absent for an
+    /// image-free prefix). The returned state carries the rope delta the
+    /// post-image text tail resumes with (`getRopeIndex` delta − `P`), so a
+    /// caller threading state end-to-end continues that tail with the ordinary
+    /// flat-continuation branch. Decode stays caller-owned.
+    public func prepareContinuation(
+        _ input: LMInput,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        windowSize: Int
+    ) throws -> PrepareResult {
+        let inputIds = input.text.tokens
+        let remainderLength = inputIds.dim(-1)
+        precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
+
+        // The Position Anchor: token offset already in the cache (P) plus the
+        // rope delta the cached images accumulated, carried in `state`.
+        let faIdx = languageModel.model.faIdx
+        let cacheOffset = cache.indices.contains(faIdx) ? cache[faIdx].offset : 0
+        var anchorRopeDelta = 0
+        if let seeded = state?[ropeDeltasKey] {
+            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
+        }
+        let positionOffset = cacheOffset + anchorRopeDelta
+
+        // Vision tower + image→token merge — once, over the whole remainder;
+        // chunks slice the merged embeddings below.
+        let (_, imageFrames, videoFrames, inputEmbeddings) =
+            try visionInputEmbeddings(input)
+
+        // Offset-aware M-RoPE positions for the whole remainder — once. The new
+        // image's t/h/w indices diverge from the anchor; the returned delta is
+        // in the same offset frame.
+        let (positionIds, ropeDeltas) = Qwen3VLLanguage.getRopeIndex(
+            inputIds: inputIds,
+            imageGridTHW: imageFrames,
+            videoGridTHW: videoFrames,
+            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
+            imageTokenId: config.imageTokenId,
+            videoTokenId: config.videoTokenId,
+            visionStartTokenId: config.visionStartTokenId,
+            attentionMask: input.text.mask,
+            positionOffset: positionOffset
+        )
+
+        // Chunk the forward. Each window forwards `chunk` query tokens against
+        // the growing cache, so the full-attention scratch stays `[heads,
+        // chunk, L]`. Intermediate logits are dropped un-evaluated (only the
+        // cache is realized between windows), so `lm_head` never materializes a
+        // `[1, L, vocab]` tensor. `asyncEval` bounds the un-evaluated graph
+        // while letting the GPU run window i as the CPU builds window i+1
+        // (same shape as the sibling chunked prefills, e.g. Gemma3).
+        let typedCache = castCache(cache)
+        let step = max(1, windowSize)
+        var lastLogits: MLXArray
+        var start = 0
+        repeat {
+            try Task.checkCancellation()
+            let end = min(start + step, remainderLength)
+            let chunkInputs = inputIds[0..., start ..< end]
+            let chunkEmbeds = inputEmbeddings.map { $0[0..., start ..< end, 0...] }
+            let chunkPositions = positionIds[0..., 0..., start ..< end]
+            let output = languageModel(
+                chunkInputs,
+                inputsEmbeds: chunkEmbeds,
+                cache: typedCache,
+                state: nil,
+                mask: nil,
+                positionIds: chunkPositions,
+                pixelValues: nil,
+                imageGridTHW: nil,
+                videoGridTHW: nil
+            )
+            lastLogits = output.logits
+            if let typedCache {
+                asyncEval(typedCache)
+            }
+            start = end
+        } while start < remainderLength
+        if let typedCache {
+            eval(typedCache)
+        }
+
+        // Seed the post-image text tail's anchor. The vendor's flat-continuation
+        // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
+        // after this remainder `tailCacheOffset = P + remainderLength`, so the
+        // delta the tail needs is the offset-frame `getRopeIndex` delta minus
+        // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
+        var resumeState = LMOutput.State()
+        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
+
+        return .logits(LMOutput(logits: lastLogits, state: resumeState))
     }
 
     public func callAsFunction(
@@ -1137,3 +1272,6 @@ extension Qwen35 {
         return castCache(cache)
     }
 }
+
+// `prepareContinuation` is defined on `Qwen35` above; `Qwen35MoE` inherits it.
+extension Qwen35: WindowedVisionContinuation {}
