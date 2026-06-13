@@ -31,4 +31,12 @@ public actor ModelTypeRegistry<T> {
         return try creator(configuration)
     }
 
+    /// Whether a creator is registered for `modelType` — i.e. this registry can
+    /// instantiate that architecture. Lets a caller check support without
+    /// attempting a (throwing, allocating) `createModel`, e.g. to decide before
+    /// a multi-GB download whether a Hub repo's `model_type` is runnable.
+    public func contains(_ modelType: String) -> Bool {
+        creators[modelType] != nil
+    }
+
 }
