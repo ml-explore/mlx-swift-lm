@@ -204,14 +204,15 @@ private class Gemma4Attention: Module {
     let nKvHeads: Int
     let useKeqV: Bool
     let scale: Float
+    let isKVSharedLayer: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
     @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale
 
     @ModuleInfo var rope: RoPELayer
@@ -238,17 +239,26 @@ private class Gemma4Attention: Module {
         }
 
         self.scale = 1.0
+        self.isKVSharedLayer =
+            config.numKvSharedLayers > 0
+            && layerIdx >= config.numHiddenLayers - config.numKvSharedLayers
 
         self._qProj.wrappedValue = Linear(dim, nHeads * effectiveHeadDim, bias: false)
-        self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        if !useKeqV {
-            self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        }
         self._oProj.wrappedValue = Linear(nHeads * effectiveHeadDim, dim, bias: false)
-
         self._qNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
         self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
+
+        // KV-shared layers reuse an earlier layer's keys/values, so they own no
+        // key/value projection or k_norm. Conversions that drop those redundant
+        // weights (e.g. OptiQ) would otherwise fail to load; standard conversions
+        // keep them and are handled by the matching drop in `sanitize`.
+        if !isKVSharedLayer {
+            self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            if !useKeqV {
+                self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            }
+            self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
+        }
 
         // RoPE: sliding uses default, full uses proportional with partial rotation
         if isSliding {
@@ -287,6 +297,11 @@ private class Gemma4Attention: Module {
             // KV-shared layers use pre-computed KV from an earlier layer.
             kvState = sharedKV
         } else {
+            // Non-shared layer: compute its own K/V. Shared layers always
+            // receive `sharedKV` from the backbone, so kProj/kNorm are present.
+            guard let kProj, let kNorm else {
+                fatalError("Gemma4 attention called without sharedKV on a KV-shared layer")
+            }
             let kRaw = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             var k = kNorm(kRaw)
             k = k.transposed(0, 2, 1, 3)
@@ -659,6 +674,15 @@ private class Gemma4TextModelInner: Module {
 
 // MARK: - Public Model
 
+/// Extracts the decoder layer index from a `…layers.N.self_attn.…` weight key,
+/// or nil when the key is not a self-attention tensor.
+private func gemma4SelfAttnLayerIndex(in key: String) -> Int? {
+    guard key.contains(".self_attn.") else { return nil }
+    let parts = key.split(separator: ".")
+    guard let i = parts.firstIndex(of: "layers"), i + 1 < parts.count else { return nil }
+    return Int(parts[i + 1])
+}
+
 public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -691,6 +715,7 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let firstKVSharedLayer = config.numHiddenLayers - config.numKvSharedLayers
         var sanitized = [String: MLXArray]()
         for (k, v) in weights {
             // Skip vision/audio/rotary weights
@@ -699,6 +724,19 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
                 || k.contains("input_min")
                 || k.contains("output_max")
                 || k.contains("output_min")
+            {
+                continue
+            }
+            // KV-shared layers own no K/V projection or k_norm (they reuse an
+            // earlier layer's KV). Drop those tensors when a conversion ships
+            // them (stock quants) so the loader doesn't reject them as unused;
+            // conversions that already omit them (OptiQ) are unaffected.
+            if config.numKvSharedLayers > 0,
+                let layerIdx = gemma4SelfAttnLayerIndex(in: k),
+                layerIdx >= firstKVSharedLayer,
+                k.contains(".self_attn.k_proj.")
+                    || k.contains(".self_attn.v_proj.")
+                    || k.contains(".self_attn.k_norm.")
             {
                 continue
             }
