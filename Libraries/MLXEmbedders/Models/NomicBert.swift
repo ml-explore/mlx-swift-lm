@@ -59,8 +59,10 @@ class NomicEmbedding: Module {
             )
         }
 
-        // Conditionally initialize Position Embeddings
-        if config.maxPositionEmbeddings > 0 {
+        // Conditionally initialize position embeddings (no RoPE or fractional RoPE)
+        // Models like nomic-embed-text-v1.5 rely entirely on
+        // rotary positional embeddings and ship no `position_embeddings.weight` tensor.
+        if config.maxPositionEmbeddings > 0 && config.rotaryEmbFraction < 1.0 {
             _positionEmbeddings.wrappedValue = Embedding(
                 embeddingCount: config.maxPositionEmbeddings,
                 dimensions: config.embedDim
