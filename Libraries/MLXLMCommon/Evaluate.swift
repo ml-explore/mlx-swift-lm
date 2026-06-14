@@ -1612,7 +1612,7 @@ public func generateTokens(
 ///     quantization, etc.).
 ///   - context: model context for the main (verifier) model.
 ///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
-///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)``
+///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``
 ///     per round; drafter instances hold no target-derived state and are safe
 ///     to share across iterators.
 ///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the

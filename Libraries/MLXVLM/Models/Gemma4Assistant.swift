@@ -172,6 +172,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas _: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler

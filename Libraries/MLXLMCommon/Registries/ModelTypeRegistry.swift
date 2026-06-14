@@ -4,7 +4,12 @@ import Foundation
 
 public actor ModelTypeRegistry<T> {
 
-    private var creators: [String: (Data) throws -> T]
+    private struct CreatorEntry {
+        var matches: (Data) -> Bool
+        var create: (Data) throws -> T
+    }
+
+    private var creators: [String: [CreatorEntry]]
 
     /// Creates an empty registry.
     public init() {
@@ -13,22 +18,37 @@ public actor ModelTypeRegistry<T> {
 
     /// Creates a registry with given creators.
     public init(creators: [String: (Data) throws -> T]) {
-        self.creators = creators
+        self.creators = creators.mapValues { creator in
+            [CreatorEntry(matches: { _ in true }, create: creator)]
+        }
     }
 
     /// Add a new model to the type registry.
     public func registerModelType(
         _ type: String, creator: @escaping (Data) throws -> T
     ) {
-        creators[type] = creator
+        creators[type] = [CreatorEntry(matches: { _ in true }, create: creator)]
+    }
+
+    /// Add a new model to the type registry with a predicate for ambiguous
+    /// `model_type` strings shared by multiple package targets.
+    public func registerModelType(
+        _ type: String,
+        matches: @escaping (Data) -> Bool,
+        creator: @escaping (Data) throws -> T
+    ) {
+        creators[type, default: []].append(CreatorEntry(matches: matches, create: creator))
     }
 
     /// Given a `modelType` and configuration data instantiate a new `LanguageModel`.
     public func createModel(configuration: Data, modelType: String) throws -> sending T {
-        guard let creator = creators[modelType] else {
+        guard let entries = creators[modelType] else {
             throw ModelFactoryError.unsupportedModelType(modelType)
         }
-        return try creator(configuration)
+        for entry in entries where entry.matches(configuration) {
+            return try entry.create(configuration)
+        }
+        throw ModelFactoryError.unsupportedModelType(modelType)
     }
 
 }
