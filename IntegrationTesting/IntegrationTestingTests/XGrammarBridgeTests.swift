@@ -280,7 +280,8 @@
         /// that the grammar rejects (because a peer task advanced state)
         /// are treated as a graceful stop condition for this worker — not
         /// a test failure.
-        private static func stressWorker(on constraint: GrammarConstraint, iterations: Int) throws -> Int
+        private static func stressWorker(on constraint: GrammarConstraint, iterations: Int) throws
+            -> Int
         {
             var steps = 0
             for _ in 0 ..< iterations {
@@ -359,7 +360,8 @@
 
             switch result {
             case .success:
-                Issue.record("constructing GrammarConstraint from an invalid JSON Schema must throw")
+                Issue.record(
+                    "constructing GrammarConstraint from an invalid JSON Schema must throw")
             case .failure(let error):
                 guard case GrammarError.invalidJSONSchema(let message) = error else {
                     Issue.record(
