@@ -714,7 +714,7 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
-                                guard !(draftModel is any BlockDiffusionLanguageModel) else {
+                                guard !draftModel.capabilities.contains(.blockDiffusion) else {
                                     throw GenerateError.unsupportedSpeculativeDecoding(
                                         String(describing: type(of: draftModel)))
                                 }

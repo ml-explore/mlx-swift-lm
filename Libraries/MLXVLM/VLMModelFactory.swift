@@ -97,6 +97,7 @@ public enum VLMTypeRegistry {
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4.init),
         "gemma4_unified": create(Gemma4UnifiedConfiguration.self, Gemma4Unified.init),
+        "diffusion_gemma": create(DiffusionGemmaVLMConfiguration.self, DiffusionGemma.init),
         "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
@@ -128,6 +129,8 @@ public enum VLMProcessorTypeRegistry {
             Gemma4ProcessorConfiguration.self, Gemma4Processor.init),
         "Gemma4UnifiedProcessor": create(
             Gemma4UnifiedProcessorConfiguration.self, Gemma4UnifiedProcessor.init),
+        "DiffusionGemma4Processor": create(
+            DiffusionGemma4ProcessorConfiguration.self, DiffusionGemma4Processor.init),
         "SmolVLMProcessor": create(
             SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         "FastVLMProcessor": create(
@@ -245,6 +248,12 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<turn|>"]
     )
 
+    static public let diffusionGemma_26BA4B_it_mxfp4 = ModelConfiguration(
+        id: "mlx-community/diffusiongemma-26B-A4B-it-mxfp4",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
     static public let smolvlm = ModelConfiguration(
         id: "HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx",
         defaultPrompt:
@@ -282,6 +291,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma4_E2B_it_4bit,
             gemma4_E4B_it_4bit,
             gemma4_26BA4B_it_4bit,
+            diffusionGemma_26BA4B_it_mxfp4,
             gemma4_31B_it_4bit,
             smolvlm,
             fastvlm,
@@ -419,6 +429,7 @@ public final class VLMModelFactory: GenericModelFactory {
         let processorTypeOverrides: [String: String] = [
             "mistral3": "Mistral3Processor",
             "gemma4_unified": "Gemma4UnifiedProcessor",
+            "diffusion_gemma": "DiffusionGemma4Processor",
         ]
         let processorType =
             processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass

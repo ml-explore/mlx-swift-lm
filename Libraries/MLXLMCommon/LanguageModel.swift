@@ -70,6 +70,7 @@ public struct LMInput {
     public let image: ProcessedImage?
     public let video: ProcessedVideo?
     public let audio: ProcessedAudio?
+    public let multimodalTokenTypes: MLXArray?
 
     /// Representation of tokenized input text.
     public struct Text {
@@ -166,12 +167,14 @@ public struct LMInput {
         text: LMInput.Text,
         image: LMInput.ProcessedImage? = nil,
         video: LMInput.ProcessedVideo? = nil,
-        audio: LMInput.ProcessedAudio? = nil
+        audio: LMInput.ProcessedAudio? = nil,
+        multimodalTokenTypes: MLXArray? = nil
     ) {
         self.text = text
         self.image = image
         self.video = video
         self.audio = audio
+        self.multimodalTokenTypes = multimodalTokenTypes
     }
 }
 
@@ -227,6 +230,17 @@ public enum PrepareResult {
     case logits(LMOutput)
 }
 
+/// Feature flags that describe generation behavior supported by a language model.
+public struct LanguageModelCapabilities: OptionSet, Sendable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let blockDiffusion = Self(rawValue: 1 << 0)
+}
+
 /// Interface for all Language Models (e.g. LLM, VLM).
 ///
 /// The language model is typically called by the ``TokenIterator`` and it:
@@ -236,6 +250,9 @@ public enum PrepareResult {
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel {
+
+    /// Feature flags that describe generation behavior supported by the model.
+    var capabilities: LanguageModelCapabilities { get }
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
@@ -260,6 +277,7 @@ public protocol LanguageModel: BaseLanguageModel {
 /// at a time instead of predicting one next-token logit.
 public protocol BlockDiffusionLanguageModel: LanguageModel {
     var diffusionCanvasLength: Int { get }
+    var diffusionMinimumCanvasLength: Int { get }
     var diffusionMaxDenoisingSteps: Int { get }
     var diffusionEntropyBound: Float { get }
     var diffusionTemperatureMin: Float { get }
@@ -267,6 +285,7 @@ public protocol BlockDiffusionLanguageModel: LanguageModel {
     var diffusionStabilityThreshold: Int { get }
     var diffusionConfidenceThreshold: Float { get }
     var diffusionVocabularySize: Int { get }
+    var diffusionDefaultMaxTokens: Int? { get }
 
     func prepareDiffusion(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
     func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?)
@@ -275,16 +294,53 @@ public protocol BlockDiffusionLanguageModel: LanguageModel {
         cache: [KVCache],
         selfConditioningLogits: MLXArray?
     ) -> MLXArray
+    func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningEmbeddings: MLXArray?
+    ) -> MLXArray
+    func diffusionSelfConditioningWeight() -> MLXArray?
+    func diffusionSelfConditioningEmbeddings(logits: MLXArray, weight: MLXArray?) -> MLXArray
 }
 
 extension BlockDiffusionLanguageModel {
+    public var diffusionMinimumCanvasLength: Int { 64 }
     public var diffusionTemperatureMin: Float { 0.4 }
     public var diffusionTemperatureMax: Float { 0.8 }
     public var diffusionStabilityThreshold: Int { 1 }
     public var diffusionConfidenceThreshold: Float { 0.005 }
+    public var diffusionDefaultMaxTokens: Int? { nil }
+
+    public func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningEmbeddings: MLXArray?
+    ) -> MLXArray {
+        diffusionLogits(
+            canvasTokens: canvasTokens,
+            cache: cache,
+            selfConditioningLogits: selfConditioningEmbeddings)
+    }
+
+    public func diffusionSelfConditioningWeight() -> MLXArray? {
+        nil
+    }
+
+    public func diffusionSelfConditioningEmbeddings(logits: MLXArray, weight: MLXArray?) -> MLXArray
+    {
+        logits
+    }
 }
 
 extension LanguageModel {
+    public var capabilities: LanguageModelCapabilities {
+        var capabilities: LanguageModelCapabilities = []
+        if self is any BlockDiffusionLanguageModel {
+            capabilities.insert(.blockDiffusion)
+        }
+        return capabilities
+    }
+
     public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
     {

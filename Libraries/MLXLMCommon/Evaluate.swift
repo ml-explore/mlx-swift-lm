@@ -107,6 +107,21 @@ public struct GenerateParameters: Sendable {
     /// number of tokens to consider for frequency penalty
     public var frequencyContextSize: Int
 
+    /// Block-diffusion sampler used inside each denoising canvas.
+    public var diffusionSampler: DiffusionSampler
+
+    /// Confidence threshold used by ``DiffusionSampler/confidenceThreshold``.
+    public var diffusionThreshold: Float
+
+    /// Force diffusion generation to denoise full model-size canvases.
+    public var diffusionFullCanvas: Bool
+
+    /// Optional lower bound for denoised canvas length.
+    public var diffusionMinCanvasLength: Int?
+
+    /// Optional upper bound for denoised canvas length.
+    public var diffusionMaxCanvasLength: Int?
+
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -124,7 +139,12 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512
+        prefillStepSize: Int = 512,
+        diffusionSampler: DiffusionSampler = .entropyBound,
+        diffusionThreshold: Float = 0.9,
+        diffusionFullCanvas: Bool = false,
+        diffusionMinCanvasLength: Int? = nil,
+        diffusionMaxCanvasLength: Int? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -143,6 +163,11 @@ public struct GenerateParameters: Sendable {
         self.frequencyPenalty = frequencyPenalty
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
+        self.diffusionSampler = diffusionSampler
+        self.diffusionThreshold = diffusionThreshold
+        self.diffusionFullCanvas = diffusionFullCanvas
+        self.diffusionMinCanvasLength = diffusionMinCanvasLength
+        self.diffusionMaxCanvasLength = diffusionMaxCanvasLength
     }
 
     public func sampler() -> LogitSampler {
@@ -202,10 +227,16 @@ public struct GenerateParameters: Sendable {
     }
 }
 
+public enum DiffusionSampler: String, Sendable {
+    case entropyBound
+    case confidenceThreshold
+}
+
 /// Errors raised by generation helpers before starting an invalid decode mode.
 public enum GenerateError: LocalizedError {
     case unsupportedAutoregressiveGeneration(String)
     case unsupportedSpeculativeDecoding(String)
+    case unsupportedMultimodalGeneration(String)
 
     public var errorDescription: String? {
         switch self {
@@ -215,6 +246,9 @@ public enum GenerateError: LocalizedError {
         case .unsupportedSpeculativeDecoding(let modelName):
             return
                 "Speculative decoding is only supported for autoregressive language models; \(modelName) generates tokens with block diffusion."
+        case .unsupportedMultimodalGeneration(let modelName):
+            return
+                "\(modelName) is the shared DiffusionGemma language core. Use the VLM implementation for image, video, or audio inputs."
         }
     }
 }
@@ -690,6 +724,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             asyncEval(y.tokens)
 
         case .logits(let result):
+            state = result.state
             y = .init(tokens: convertToToken(logits: result.logits))
             asyncEval(y.tokens)
 
@@ -745,230 +780,6 @@ public struct TokenIterator: TokenIteratorProtocol {
         tokenCount += 1
 
         return previousY.tokens.item(Int.self)
-    }
-}
-
-/// Generator for block-diffusion language models.
-///
-/// The model first encodes the prompt into a KV cache, then repeatedly denoises
-/// a full canvas. The iterator exposes the finalized canvas tokens one by one
-/// so existing detokenization, EOS handling, tool parsing, and timing code can
-/// remain shared with autoregressive iterators.
-public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
-    let model: any BlockDiffusionLanguageModel
-    var cache: [KVCache]
-    let prefillStepSize: Int
-    let maxDenoisingSteps: Int
-    let entropyBound: Float
-    let temperatureMin: Float
-    let temperatureMax: Float
-    let stabilityThreshold: Int
-    let confidenceThreshold: Float
-    var processor: LogitProcessor?
-
-    public var tokenCount = 0
-    public let maxTokens: Int?
-    public var promptPrefillTime: TimeInterval = 0.0
-
-    private var pendingTokens = [Int]()
-    private var pendingIndex = 0
-    private var randomState = MLXRandom.RandomState()
-    private var committedPendingIndex = 0
-    private var argmaxCanvasHistory: [MLXArray]?
-
-    public init(
-        input: LMInput,
-        model: any BlockDiffusionLanguageModel,
-        cache: [KVCache]? = nil,
-        parameters: GenerateParameters
-    ) throws {
-        self.model = model
-        self.cache = cache ?? model.newCache(parameters: parameters)
-        self.prefillStepSize = parameters.prefillStepSize
-        self.maxTokens = parameters.maxTokens
-        self.maxDenoisingSteps = model.diffusionMaxDenoisingSteps
-        self.entropyBound = model.diffusionEntropyBound
-        self.temperatureMin = model.diffusionTemperatureMin
-        self.temperatureMax = model.diffusionTemperatureMax
-        self.stabilityThreshold = model.diffusionStabilityThreshold
-        self.confidenceThreshold = model.diffusionConfidenceThreshold
-        self.processor = parameters.processor()
-
-        self.promptPrefillTime = try measure {
-            processor?.prompt(input.text.tokens)
-            try model.prepareDiffusion(input, cache: self.cache, windowSize: parameters.prefillStepSize)
-        }
-    }
-
-    private func nextCanvasLength() -> Int {
-        guard let maxTokens else { return model.diffusionCanvasLength }
-        return Swift.min(model.diffusionCanvasLength, Swift.max(0, maxTokens - tokenCount))
-    }
-
-    private mutating func makeInitialCanvas(length: Int) -> MLXArray {
-        withRandomState(randomState) {
-            MLXRandom.randInt(
-                low: Int32(0),
-                high: Int32(model.diffusionVocabularySize),
-                [1, length],
-                type: Int32.self
-            )
-        }
-    }
-
-    private func temperature(curStep: Int) -> Float {
-        temperatureMin
-            + ((temperatureMax - temperatureMin) * Float(curStep) / Float(maxDenoisingSteps))
-    }
-
-    private mutating func processLogits(_ logits: MLXArray, curStep: Int) -> MLXArray {
-        let temperature = MLXArray(temperature(curStep: curStep))
-        guard processor != nil else {
-            return logits / temperature
-        }
-
-        let length = logits.dim(1)
-        let processed = (0 ..< length).map { index in
-            var tokenLogits = logits[0..., index, 0...]
-            tokenLogits = processor?.process(logits: tokenLogits) ?? tokenLogits
-            return (tokenLogits / temperature).expandedDimensions(axis: 1)
-        }
-        return concatenated(processed, axis: 1)
-    }
-
-    private mutating func sampleDenoiserCanvas(logits: MLXArray) -> MLXArray {
-        withRandomState(randomState) {
-            categorical(logits).asType(.int32)
-        }
-    }
-
-    private func entropy(logits: MLXArray) -> MLXArray {
-        let logprobs = logSoftmax(logits)
-        let probs = exp(logprobs)
-        return -(probs * logprobs).sum(axis: -1)
-    }
-
-    private func acceptedTokenMask(entropy: MLXArray) -> MLXArray {
-        let sortedIndices = argSort(entropy, axis: -1)
-        let sortedEntropy = takeAlong(entropy, sortedIndices, axis: -1)
-        let cumulativeEntropy = cumsum(sortedEntropy, axis: -1)
-        let sortedSelection = (cumulativeEntropy - sortedEntropy) .<= entropyBound
-        return putAlong(
-            MLXArray.zeros(entropy.shape, type: Bool.self),
-            sortedIndices,
-            values: sortedSelection,
-            axis: -1)
-    }
-
-    private mutating func diffusionShouldStop(argmaxCanvas: MLXArray, entropy: MLXArray) -> Bool {
-        let stable: Bool
-
-        if stabilityThreshold == 0 {
-            stable = true
-        } else {
-            if argmaxCanvasHistory == nil {
-                argmaxCanvasHistory = Array(
-                    repeating: MLXArray.full(
-                        argmaxCanvas.shape, values: MLXArray(Int32(-1)), type: Int32.self),
-                    count: stabilityThreshold)
-            }
-
-            stable =
-                argmaxCanvasHistory?.allSatisfy {
-                    ($0 .== argmaxCanvas).all().item(Bool.self)
-                } ?? false
-            argmaxCanvasHistory?.removeFirst()
-            argmaxCanvasHistory?.append(argmaxCanvas)
-        }
-
-        let meanEntropy = entropy.mean().item(Float.self)
-        return stable && meanEntropy < confidenceThreshold
-    }
-
-    private mutating func refillPendingTokens() {
-        let length = nextCanvasLength()
-        guard length > 0 else { return }
-
-        var currentCanvas = makeInitialCanvas(length: length)
-        var argmaxCanvas = currentCanvas
-        var selfConditioningLogits: MLXArray?
-        argmaxCanvasHistory = nil
-
-        for curStep in stride(from: maxDenoisingSteps, through: 1, by: -1) {
-            let rawLogits = model.diffusionLogits(
-                canvasTokens: currentCanvas,
-                cache: cache,
-                selfConditioningLogits: selfConditioningLogits
-            )
-
-            let processedLogits = processLogits(rawLogits, curStep: curStep)
-            let tokenEntropy = entropy(logits: processedLogits)
-            let denoiserCanvas = sampleDenoiserCanvas(logits: processedLogits).asType(.int32)
-            argmaxCanvas = argMax(processedLogits, axis: -1).asType(.int32)
-
-            let acceptedMask = acceptedTokenMask(entropy: tokenEntropy)
-            let acceptedCanvas = MLX.where(acceptedMask, denoiserCanvas, currentCanvas)
-            let randomCanvas = makeInitialCanvas(length: length)
-            currentCanvas = MLX.where(acceptedMask, acceptedCanvas, randomCanvas)
-            selfConditioningLogits = processedLogits
-            asyncEval(currentCanvas, argmaxCanvas, selfConditioningLogits!)
-
-            if diffusionShouldStop(argmaxCanvas: argmaxCanvas, entropy: tokenEntropy) {
-                break
-            }
-        }
-
-        eval(argmaxCanvas)
-        pendingTokens = argmaxCanvas.flattened().asArray(Int.self)
-        pendingIndex = 0
-        committedPendingIndex = 0
-    }
-
-    private mutating func commitPendingTokens(upTo targetIndex: Int) {
-        let targetIndex = Swift.min(targetIndex, pendingIndex)
-        guard targetIndex > committedPendingIndex else { return }
-
-        let tokens = pendingTokens[committedPendingIndex ..< targetIndex].map(Int32.init)
-        for token in tokens {
-            processor?.didSample(token: MLXArray([token]))
-        }
-        model.acceptDiffusionTokens(
-            MLXArray(tokens).reshaped([1, tokens.count]),
-            cache: cache,
-            windowSize: prefillStepSize)
-        committedPendingIndex = targetIndex
-        asyncEval(cache)
-    }
-
-    mutating public func next() -> Int? {
-        if let maxTokens, tokenCount >= maxTokens {
-            commitPendingTokens(upTo: pendingIndex)
-            return nil
-        }
-
-        if pendingIndex >= pendingTokens.count {
-            commitPendingTokens(upTo: pendingIndex)
-            pendingTokens.removeAll(keepingCapacity: true)
-            pendingIndex = 0
-            committedPendingIndex = 0
-            refillPendingTokens()
-        }
-
-        guard pendingIndex < pendingTokens.count else {
-            return nil
-        }
-
-        let token = pendingTokens[pendingIndex]
-        pendingIndex += 1
-        tokenCount += 1
-        return token
-    }
-
-    mutating public func finalize(tokenCount emittedTokenCount: Int) {
-        let blockStartTokenCount = tokenCount - pendingIndex
-        let emittedInCurrentBlock = Swift.max(
-            0, Swift.min(pendingIndex, emittedTokenCount - blockStartTokenCount))
-        commitPendingTokens(upTo: emittedInCurrentBlock)
     }
 }
 
@@ -1051,11 +862,13 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         numDraftTokens: Int
     ) throws {
-        guard !(mainModel is any BlockDiffusionLanguageModel) else {
-            throw GenerateError.unsupportedSpeculativeDecoding(String(describing: type(of: mainModel)))
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
         }
-        guard !(draftModel is any BlockDiffusionLanguageModel) else {
-            throw GenerateError.unsupportedSpeculativeDecoding(String(describing: type(of: draftModel)))
+        guard !draftModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: draftModel)))
         }
 
         self.y = input.text
@@ -1732,8 +1545,11 @@ public func generate(
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<Generation> {
-    if context.model is any BlockDiffusionLanguageModel || draftModel is any BlockDiffusionLanguageModel {
-        throw GenerateError.unsupportedSpeculativeDecoding(String(describing: type(of: context.model)))
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
     }
 
     let iterator = try SpeculativeTokenIterator(
@@ -1896,8 +1712,11 @@ public func generateTokens(
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
-    if context.model is any BlockDiffusionLanguageModel || draftModel is any BlockDiffusionLanguageModel {
-        throw GenerateError.unsupportedSpeculativeDecoding(String(describing: type(of: context.model)))
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
     }
 
     let iterator = try SpeculativeTokenIterator(
