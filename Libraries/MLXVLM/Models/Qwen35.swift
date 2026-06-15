@@ -47,6 +47,8 @@ public struct Qwen35Configuration: Codable, Sendable {
         public var headDim: Int?
         public var ropeParameters: [String: StringOrNumber]?
         public var fullAttentionInterval: Int = 4
+        public var mtpNumHiddenLayers: Int = 0
+        public var mtpUseDedicatedEmbeddings: Bool = false
 
         // MoE fields
         public var numExperts: Int = 0
@@ -78,6 +80,8 @@ public struct Qwen35Configuration: Codable, Sendable {
             case headDim = "head_dim"
             case ropeParameters = "rope_parameters"
             case fullAttentionInterval = "full_attention_interval"
+            case mtpNumHiddenLayers = "mtp_num_hidden_layers"
+            case mtpUseDedicatedEmbeddings = "mtp_use_dedicated_embeddings"
             case numExperts = "num_experts"
             case numExpertsPerTok = "num_experts_per_tok"
             case decoderSparseStep = "decoder_sparse_step"
@@ -119,6 +123,11 @@ public struct Qwen35Configuration: Codable, Sendable {
             self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
             self.fullAttentionInterval =
                 try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+            self.mtpNumHiddenLayers =
+                try container.decodeIfPresent(Int.self, forKey: .mtpNumHiddenLayers) ?? 0
+            self.mtpUseDedicatedEmbeddings =
+                try container.decodeIfPresent(Bool.self, forKey: .mtpUseDedicatedEmbeddings)
+                ?? false
 
             self.numExperts = try container.decodeIfPresent(Int.self, forKey: .numExperts) ?? 0
             self.numExpertsPerTok =
@@ -642,8 +651,13 @@ enum Qwen35Language {
 
         @ModuleInfo(key: "mlp") var mlp: Module
 
-        init(_ args: Qwen35Configuration.TextConfiguration, layerIdx: Int) {
-            self.isLinear = (layerIdx + 1) % args.fullAttentionInterval != 0
+        init(
+            _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
+            forceFullAttention: Bool = false
+        ) {
+            self.isLinear =
+                forceFullAttention
+                ? false : (layerIdx + 1) % args.fullAttentionInterval != 0
 
             if isLinear {
                 _linearAttn.wrappedValue = GatedDeltaNet(args)
@@ -864,17 +878,27 @@ enum Qwen35Language {
                 }
             }
 
-            var out = model(
+            let hiddenStates = model(
                 inputs,
                 inputsEmbeds: inputsEmbeds,
                 cache: cache,
                 positionIds: positionIds
             )
 
+            var out = hiddenStates
             if let lmHead {
                 out = lmHead(out)
             } else {
                 out = model.embedTokens.asLinear(out)
+            }
+
+            if state[mtpEmitFlagKey] ?? false {
+                state[mtpLastHiddenStatesKey] = hiddenStates
+                state[mtpSharedKVStatesKey] = qwen35VLMSharedKVState(
+                    cache: cache, fullAttentionIndex: model.faIdx)
+                state[mtpSharedKVOffsetsKey] = qwen35VLMSharedKVOffsets(
+                    cache: cache, fullAttentionIndex: model.faIdx)
+                state[mtpPositionDeltasKey] = state[ropeDeltasKey]
             }
 
             return LMOutput(logits: out, state: state)
@@ -894,11 +918,41 @@ enum Qwen35Language {
     }
 }
 
+private func qwen35VLMSharedKVState(
+    cache: [KVCache?]?,
+    fullAttentionIndex: Int
+) -> [String: (MLXArray, MLXArray)] {
+    guard let cache,
+        fullAttentionIndex < cache.count,
+        let faCache = cache[fullAttentionIndex]
+    else {
+        return [:]
+    }
+    let state = faCache.state
+    guard state.count == 2 else {
+        return [:]
+    }
+    return ["full_attention": (state[0], state[1])]
+}
+
+private func qwen35VLMSharedKVOffsets(
+    cache: [KVCache?]?,
+    fullAttentionIndex: Int
+) -> [String: Int]? {
+    guard let cache,
+        fullAttentionIndex < cache.count,
+        let faCache = cache[fullAttentionIndex]
+    else {
+        return nil
+    }
+    return ["full_attention": faCache.offset]
+}
+
 // MARK: - Model
 
 public class Qwen35: Module, VLMModel {
     @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel
-    @ModuleInfo(key: "language_model") fileprivate var languageModel: Qwen35Language.LanguageModel
+    @ModuleInfo(key: "language_model") var languageModel: Qwen35Language.LanguageModel
 
     public let config: Qwen35Configuration
 

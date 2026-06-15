@@ -40,6 +40,8 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
     var headDim: Int?
     var ropeScaling: [String: StringOrNumber]?
     var fullAttentionInterval: Int = 4
+    var mtpNumHiddenLayers: Int = 0
+    var mtpUseDedicatedEmbeddings: Bool = false
 
     // MoE fields
     var numExperts: Int = 0
@@ -71,6 +73,8 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
         case headDim = "head_dim"
         case ropeScaling = "rope_scaling"
         case fullAttentionInterval = "full_attention_interval"
+        case mtpNumHiddenLayers = "mtp_num_hidden_layers"
+        case mtpUseDedicatedEmbeddings = "mtp_use_dedicated_embeddings"
         case numExperts = "num_experts"
         case numExpertsPerTok = "num_experts_per_tok"
         case decoderSparseStep = "decoder_sparse_step"
@@ -117,6 +121,10 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
         self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
         self.fullAttentionInterval =
             try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+        self.mtpNumHiddenLayers =
+            try container.decodeIfPresent(Int.self, forKey: .mtpNumHiddenLayers) ?? 0
+        self.mtpUseDedicatedEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .mtpUseDedicatedEmbeddings) ?? false
 
         // MoE fields
         self.numExperts = try container.decodeIfPresent(Int.self, forKey: .numExperts) ?? 0
@@ -342,7 +350,8 @@ final class Qwen35Attention: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        positionOffset: Int? = nil
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -359,7 +368,7 @@ final class Qwen35Attention: Module {
         keys = kNorm(keys.reshaped(B, L, kvHeads, -1)).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, kvHeads, -1).transposed(0, 2, 1, 3)
 
-        let offset = cache?.ropeOffset
+        let offset = positionOffset.map { RoPEOffset.scalar($0) } ?? cache?.ropeOffset
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
@@ -445,8 +454,9 @@ final class Qwen35DecoderLayer: Module {
 
     @ModuleInfo(key: "mlp") var mlp: Module
 
-    init(_ args: Qwen35TextConfiguration, layerIdx: Int) {
-        self.isLinear = (layerIdx + 1) % args.fullAttentionInterval != 0
+    init(_ args: Qwen35TextConfiguration, layerIdx: Int, forceFullAttention: Bool = false) {
+        self.isLinear =
+            forceFullAttention ? false : (layerIdx + 1) % args.fullAttentionInterval != 0
 
         if isLinear {
             _linearAttn.wrappedValue = Qwen35GatedDeltaNet(args)
@@ -479,13 +489,16 @@ final class Qwen35DecoderLayer: Module {
         _ x: MLXArray,
         attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
         ssmMask: MLXArray?,
-        cache: KVCache?
+        cache: KVCache?,
+        positionOffset: Int? = nil
     ) -> MLXArray {
         let r: MLXArray
         if isLinear {
             r = linearAttn!(inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache)
         } else {
-            r = selfAttn!(inputLayerNorm(x), mask: attentionMask, cache: cache)
+            r = selfAttn!(
+                inputLayerNorm(x), mask: attentionMask, cache: cache,
+                positionOffset: positionOffset)
         }
 
         let h = x + r
@@ -578,6 +591,32 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         return out
     }
 
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let emitDrafterState = state?[mtpEmitFlagKey] ?? false
+        let hiddenStates = model(input.tokens, cache: cache)
+
+        let logits: MLXArray
+        if let lmHead {
+            logits = lmHead(hiddenStates)
+        } else {
+            logits = model.embedTokens.asLinear(hiddenStates)
+        }
+
+        guard emitDrafterState else {
+            return LMOutput(logits: logits)
+        }
+
+        var outState = state ?? LMOutput.State()
+        outState[mtpLastHiddenStatesKey] = hiddenStates
+        outState[mtpSharedKVStatesKey] = qwen35SharedKVState(
+            cache: cache, fullAttentionIndex: model.faIdx)
+        outState[mtpSharedKVOffsetsKey] = qwen35SharedKVOffsets(
+            cache: cache, fullAttentionIndex: model.faIdx)
+        return LMOutput(logits: logits, state: outState)
+    }
+
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         return model.layers.map { layer in
             if layer.isLinear {
@@ -626,6 +665,30 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
+private func qwen35SharedKVState(
+    cache: [KVCache]?,
+    fullAttentionIndex: Int
+) -> [String: (MLXArray, MLXArray)] {
+    guard let cache, fullAttentionIndex < cache.count else {
+        return [:]
+    }
+    let state = cache[fullAttentionIndex].state
+    guard state.count == 2 else {
+        return [:]
+    }
+    return ["full_attention": (state[0], state[1])]
+}
+
+private func qwen35SharedKVOffsets(
+    cache: [KVCache]?,
+    fullAttentionIndex: Int
+) -> [String: Int]? {
+    guard let cache, fullAttentionIndex < cache.count else {
+        return nil
+    }
+    return ["full_attention": cache[fullAttentionIndex].offset]
+}
+
 extension Qwen35TextModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
@@ -649,6 +712,12 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         languageModel(inputs, cache: cache)
+    }
+
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        languageModel(input, cache: cache, state: state)
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {

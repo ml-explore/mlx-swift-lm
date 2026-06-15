@@ -39,6 +39,9 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///   - sharedKV: Dict keyed by `layer_type` (`"full_attention"` /
     ///     `"sliding_attention"`) mapping to `(keys, values)` `MLXArray`s for
     ///     the last layer of that layer-type in the target.
+    ///   - positionDeltas: Optional target-emitted position delta state for
+    ///     multimodal RoPE models whose continuation positions are not
+    ///     derivable from cache length alone.
     ///   - queryOffset: Constant absolute position for the round (the
     ///     position the bonus token sits at in the target's KV cache).
     ///     Passed as a Swift `Int` rather than an `MLXArray` to avoid the
@@ -53,6 +56,7 @@ public protocol MTPDrafterModel: BaseLanguageModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
@@ -124,6 +128,18 @@ public let mtpLastHiddenStatesKey =
 /// it to the drafter as `sharedKV`.
 public let mtpSharedKVStatesKey =
     LMOutput.Key<[String: (MLXArray, MLXArray)]>("mtp.sharedKVStates")
+
+/// Target writes the absolute cache offset for each emitted shared-K/V
+/// layer-type here. The K/V tensors themselves may have a capped sequence
+/// axis when backed by a rotating cache, so their shape is not always the
+/// absolute RoPE/query position.
+public let mtpSharedKVOffsetsKey =
+    LMOutput.Key<[String: Int]>("mtp.sharedKVOffsets")
+
+/// Target writes optional position delta state here for MTP drafters that
+/// need to reproduce target-specific RoPE continuation positions.
+public let mtpPositionDeltasKey =
+    LMOutput.Key<MLXArray>("mtp.positionDeltas")
 
 /// The MTP iterator sets this key on the ``LMOutput/State`` it passes into
 /// the main model on each call to opt the target into emitting
