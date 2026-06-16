@@ -1238,9 +1238,17 @@ final class Gemma4TextBackbone: Module {
                 } else {
                     false
                 }
+            let hasVisualTokens =
+                if let tokenTypeIds {
+                    ((tokenTypeIds .== 1) | (tokenTypeIds .== 2))
+                        .asType(.int32).sum().item(Int.self) > 0
+                } else {
+                    false
+                }
             let useBidirectionalVision =
                 config.useBidirectionalAttention == "vision"
                 && tokenTypeIds != nil
+                && hasVisualTokens
                 && !hasAudioTokens
                 && h0.dim(1) > 1
 
