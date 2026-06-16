@@ -852,8 +852,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         var draftTokens = [MLXArray]()
         var draftState: LMOutput.State?
         for _ in 0 ..< numDraft {
-            let draftResult = draftModel(
-                draftY[text: .newAxis], cache: draftCache, state: draftState)
+            let draftResult = withPreparedCache(draftCache, lengths: draftY.sequenceLengths) {
+                draftModel(draftY[text: .newAxis], cache: draftCache, state: draftState)
+            }
             draftState = draftResult.state
             var draftLogits = draftResult.logits[0..., -1, 0...]
             draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
@@ -868,7 +869,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = [y.tokens] + draftTokens
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        let mainResult = withPreparedCache(mainCache, lengths: verifyInput.sequenceLengths) {
+            mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        }
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
