@@ -729,7 +729,8 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
             processed += chunkLength
         }
         eval(cache)
-        let result = languageModel(nil, cache: cache, inputEmbedding: inputEmbeddings[0..., processed..., 0...])
+        let result = languageModel(
+            nil, cache: cache, inputEmbedding: inputEmbeddings[0..., processed..., 0...])
 
         return .logits(result)
     }

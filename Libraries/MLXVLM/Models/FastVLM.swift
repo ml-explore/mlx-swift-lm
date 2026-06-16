@@ -1146,7 +1146,8 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
             processed += chunkLength
         }
         eval(cache)
-        let result = languageModel(nil, cache: cache, inputEmbedding: embeddings[0..., processed..., 0...])
+        let result = languageModel(
+            nil, cache: cache, inputEmbedding: embeddings[0..., processed..., 0...])
         return .logits(result)
     }
 
