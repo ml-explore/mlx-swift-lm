@@ -9,6 +9,7 @@ import MLXLMCommon
 import Tokenizers
 
 @testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
 // MARK: - Resource Bundle
 //
@@ -120,10 +121,9 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     /// Constructs an `MLXLanguageModel` using the test downloader / tokenizer loader
     /// and a `HubApi.shared.localRepoLocation`-backed `locatedBy:` closure.
     ///
-    /// Capabilities default to `[.guidedGeneration, .toolCalling]` when the
-    /// `GuidedGenerationSupport` trait is enabled (the common case for tests that
-    /// do not exercise reasoning). Pass an explicit set for reasoning models or
-    /// any other shape — capabilities are authoritative.
+    /// Capabilities default to `[.guidedGeneration, .toolCalling]` (the common
+    /// case for tests that do not exercise reasoning). Pass an explicit set for
+    /// reasoning models or any other shape: capabilities are authoritative.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func makeTestModel(
         _ id: String,
@@ -153,9 +153,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func defaultTestCapabilities() -> LanguageModelCapabilities {
         var capabilitySet: [LanguageModelCapabilities.Capability] = []
-        #if GuidedGenerationSupport
-            capabilitySet += [.guidedGeneration, .toolCalling]
-        #endif
+        capabilitySet += [.guidedGeneration, .toolCalling]
         return LanguageModelCapabilities(capabilities: capabilitySet)
     }
 
@@ -168,9 +166,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
         customizer: (any ModelCustomizer)? = nil
     ) -> MLXLanguageModel {
         var capabilitySet: [LanguageModelCapabilities.Capability] = [.reasoning]
-        #if GuidedGenerationSupport
-            capabilitySet += [.guidedGeneration, .toolCalling]
-        #endif
+        capabilitySet += [.guidedGeneration, .toolCalling]
         return makeTestModel(
             id,
             capabilities: LanguageModelCapabilities(capabilities: capabilitySet),
@@ -422,7 +418,7 @@ enum TestFixtures {
 /// Minimal 256 single-byte tokenizer for tests.
 /// Each byte is its own token ID, enabling exact character-to-ID mapping.
 ///
-/// Conforms to `MLXLMCommon.Tokenizer` because every consumer (`XGTokenizer`
+/// Conforms to `MLXLMCommon.Tokenizer` because every consumer (`GrammarTokenizer`
 /// initialiser, `ClosingTokenBias.compute`, `WhitespaceTokenBias.compute`)
 /// expects that protocol.
 struct ByteTokenizer: MLXLMCommon.Tokenizer {

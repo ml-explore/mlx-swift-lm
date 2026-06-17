@@ -21,13 +21,14 @@
 // text because the schema -- a single `const` string field -- forces
 // the entire body as FF after the opening `{`.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLX
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized, .timeLimit(.minutes(2)))
     struct EmitStopSignalTests {
@@ -56,7 +57,7 @@
                     modelID: TestFixtures.defaultModelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,

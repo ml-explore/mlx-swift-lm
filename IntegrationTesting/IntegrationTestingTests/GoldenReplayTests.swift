@@ -12,7 +12,7 @@
 //     asserted — see the structural-divergence note below.
 //   - Functional token-mask superset: every token the reference
 //     committed, xgrammar must also accept. Enforced implicitly —
-//     commitToken throws XGError.invalidArgument if xgrammar's mask
+//     commitToken throws GrammarError.invalidArgument if xgrammar's mask
 //     rejected a token the reference accepted.
 //   - Non-empty mask on live matcher: non-terminal steps must offer
 //     at least one valid token (an empty mask on a live matcher is
@@ -66,12 +66,13 @@
 // Gated on both traits because the tokenizer path routes through the
 // same `loadTestModelContainer` as the bridge tests.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct GoldenReplayTests {
@@ -110,7 +111,7 @@
 
         // MARK: - Replay
 
-        /// Load the named fixture, construct an XGConstraint against its
+        /// Load the named fixture, construct an GrammarConstraint against its
         /// recorded schema on the live tokenizer, and walk the fixture's
         /// steps asserting per-step functional parity. Each commit
         /// implicitly verifies the token the recorded backend accepted at
@@ -132,13 +133,13 @@
             let container = try await loadTestModelContainer(id: fixture.modelId)
 
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: fixture.schema,
                     fastForward: true,
@@ -192,7 +193,7 @@
 
                     // Functional superset check: if xgrammar's mask
                     // rejected a token the recorded backend committed,
-                    // commitToken throws XGError.invalidArgument and the
+                    // commitToken throws GrammarError.invalidArgument and the
                     // test fails with a clear cause, not a silent drift.
                     let commit = try constraint.commitToken(Int32(committedId))
 

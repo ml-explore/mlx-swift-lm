@@ -4,16 +4,16 @@
 //
 // Verifies the Loop's constraint contract: the sequence of operations
 // the Loop performs on a constraint each decode step. The Loop accepts
-// `XGConstraint` and reads `mask.sampleMask`
+// `GrammarConstraint` and reads `mask.sampleMask`
 // (`UnsafePointer<UInt32>?`) before handing it to
-// `applyMaskAndSample`. `XGMaskResult.mask` is a Swift `[Int32]`
+// `applyMaskAndSample`. `MaskResult.mask` is a Swift `[Int32]`
 // array — same wire shape (LSB-first int32 bitmask words) but a
 // different Swift surface. The rebind from `[Int32]` to
 // `UnsafePointer<UInt32>` is the moving part this test exercises.
 //
 // The test here composes that rebind end-to-end on live gemma-3
 // infrastructure:
-//   1. Build an XGConstraint bound to the gemma-3 tokenizer with a
+//   1. Build an GrammarConstraint bound to the gemma-3 tokenizer with a
 //      permissive `{"type":"object"}` schema.
 //   2. Compute the initial mask and walk its words to find a valid
 //      token (non-empty bitmask precondition — already a property
@@ -29,45 +29,46 @@
 //      disallowed token winning argmax).
 //   5. Commit the sampled token via the constraint and confirm the
 //      matcher advanced without terminating, demonstrating the
-//      constraint's `commitToken` return value shape (`XGCommitResult`)
+//      constraint's `commitToken` return value shape (`CommitResult`)
 //      is consumable in the same position the Loop's commit-handling
 //      code reads it.
 //
-// Gated on both traits — the tokenizer path goes through
-// `loadTestModelContainer` (needs FoundationModelsIntegration), and
-// `XGConstraint` lives behind `GuidedGenerationSupport`.
+// Gated on FoundationModelsIntegration: the tokenizer path goes through
+// `loadTestModelContainer`. `GrammarConstraint` lives in the
+// MLXGuidedGeneration library and is always available alongside the adapter.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLX
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct LoopInvariantsOnXGrammarTests {
 
-        @Test("XGConstraint satisfies GuidedGenerationLoop's constraint contract end-to-end")
+        @Test("GrammarConstraint satisfies GuidedGenerationLoop's constraint contract end-to-end")
         func testLoopConstraintContractComposesWithXGConstraint() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let container = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
 
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: #"{"type":"object"}"#
                 )
 
                 // Step 1: Loop's first move each iteration — computeMask.
                 // The Loop reads `mask.sampleMask` (UnsafePointer<UInt32>?)
-                // and `mask.isStop`. `XGMaskResult` exposes `mask: [Int32]`
+                // and `mask.isStop`. `MaskResult` exposes `mask: [Int32]`
                 // and `isTerminated: Bool` for the same semantic roles.
                 let xgMask = try constraint.computeMask()
                 #expect(
@@ -129,7 +130,7 @@
                 // Step 4: the Loop commits the sampled token through
                 // `commitToken`, reads `result.tokens` for fast-forward
                 // advancement, and checks `result.isStop` (here,
-                // `isTerminated`). `XGCommitResult` matches that shape.
+                // `isTerminated`). `CommitResult` matches that shape.
                 let commit = try constraint.commitToken(Int32(sampledToken))
                 #expect(
                     !commit.isTerminated,

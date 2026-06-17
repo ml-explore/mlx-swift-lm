@@ -1,6 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
-#if FoundationModelsIntegration && GuidedGenerationSupport
+#if FoundationModelsIntegration
     #if canImport(FoundationModels, _version: 2)
 
         import Foundation
@@ -117,7 +117,7 @@
             /// idiomatic structural-tag form for Qwen would use a
             /// `TokenFormat` for `<tool_call>` / `</tool_call>` (Qwen encodes
             /// them as single special tokens). That would require threading
-            /// the bound `XGTokenizer` through to `Grammar::FromStructuralTag`
+            /// the bound `GrammarTokenizer` through to `Grammar::FromStructuralTag`
             /// for token-string resolution, which the shim entry point
             /// (`xg_compile_structural_tag`) currently declines to do. The
             /// plain-string form is equivalent at the byte level: xgrammar
@@ -202,4 +202,4 @@
         }
 
     #endif  // canImport(FoundationModels)
-#endif  // FoundationModelsIntegration && GuidedGenerationSupport
+#endif  // FoundationModelsIntegration

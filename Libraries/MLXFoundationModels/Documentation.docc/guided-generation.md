@@ -17,27 +17,17 @@ The resulting text is guaranteed to be valid JSON instance of the schema,
 not just probably-valid: even with temperature > 0 the model cannot emit
 a token that would break the structure.
 
-## The `GuidedGenerationSupport` package trait
+## Where the engine lives
 
-xgrammar is opt-in at the package-trait level:
+Schema enforcement is implemented by the separate `MLXGuidedGeneration`
+library (the vendored xgrammar engine). `MLXFoundationModels` depends on it
+whenever the FoundationModels adapter is compiled in (the
+`FoundationModelsIntegration` trait, default-on), so guided output is always
+available alongside the adapter. The FoundationModels-to-grammar glue lives in
+`Libraries/MLXFoundationModels/GuidedGeneration/SchemaConverter.swift`.
 
-```swift
-.package(
-    url: "https://github.com/ml-explore/mlx-swift-lm",
-    from: "3.32.0",
-    traits: ["GuidedGenerationSupport"]   // default ON
-)
-```
-
-The trait is enabled by default. With it enabled, `MLXFoundationModels`
-compiles the vendored xgrammar C++ sources and exposes the
-schema-enforcement path. With it disabled (`--disable-default-traits`),
-`MLXFoundationModels` still builds and provides chat / tool calling, but
-schema-driven respond() calls return unconstrained text.
-
-The trait gate lives in `Libraries/MLXFoundationModels/GuidedGeneration/`:
-every file there is wrapped in `#if GuidedGenerationSupport`, so symbols
-literally vanish from the binary when the trait is off.
+To use guided generation without FoundationModels (older OS floors),
+depend on the `MLXGuidedGeneration` product directly.
 
 ## Cold-compile latency and `@MainActor`
 
@@ -50,7 +40,7 @@ literally vanish from the binary when the trait is off.
 > grammar + tokenizer pair reuse the cached matcher state and do not
 > pay the compile cost again.
 >
-> Pre-warming an expected schema with a throwaway `XGConstraint` from a
+> Pre-warming an expected schema with a throwaway `GrammarConstraint` from a
 > background task before the user-visible request lands eliminates the
 > blocking window entirely.
 
@@ -69,6 +59,6 @@ Schema enforcement is most valuable when:
   schema from the developer's tool definitions; the model can only emit
   a structurally-valid tool call.
 
-For pure chat / completion with no schema, the trait doesn't change
-output behavior; you can disable it to skip compiling the xgrammar
-source tree.
+For pure chat / completion with no schema, guided generation doesn't change
+output behavior. To skip compiling the xgrammar source tree entirely, don't
+link `MLXFoundationModels` or `MLXGuidedGeneration`.

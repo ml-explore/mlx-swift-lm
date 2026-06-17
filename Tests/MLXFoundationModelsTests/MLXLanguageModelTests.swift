@@ -7,6 +7,10 @@ import Testing
 
 @testable import MLXFoundationModels
 
+#if FoundationModelsIntegration
+    import MLXGuidedGeneration
+#endif
+
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     @Suite("MLXLanguageModel initialization")
@@ -118,71 +122,69 @@ import Testing
 
     // MARK: - Typed error mapping
 
-    /// Pure-function tests for the `XGError → Error` translation in
-    /// `Executor.mapXGError(_:)`. Verifies that the one xgrammar case where
+    /// Pure-function tests for the `GrammarError → Error` translation in
+    /// `Executor.mapGrammarError(_:)`. Verifies that the one xgrammar case where
     /// user-fault is provable (`invalidJSONSchema`) maps to the typed
     /// `LanguageModelError.unsupportedGenerationGuide`, and everything else
     /// passes through untyped so internal-shim failures don't masquerade as
     /// developer mistakes.
-    #if GuidedGenerationSupport
-        @Suite("XGError typed mapping")
-        struct XGErrorMappingTests {
+    @Suite("GrammarError typed mapping")
+    struct GrammarErrorMappingTests {
 
-            @Test("invalidJSONSchema maps to LanguageModelError.unsupportedGenerationGuide")
-            func invalidJSONSchemaMapsToTypedError() throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-                let mapped = MLXLanguageModel.Executor.mapXGError(
-                    .invalidJSONSchema(
-                        "xgrammar rejected the schema: top-level type must be a string")
+        @Test("invalidJSONSchema maps to LanguageModelError.unsupportedGenerationGuide")
+        func invalidJSONSchemaMapsToTypedError() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let mapped = MLXLanguageModel.Executor.mapGrammarError(
+                .invalidJSONSchema(
+                    "xgrammar rejected the schema: top-level type must be a string")
+            )
+
+            guard case LanguageModelError.unsupportedGenerationGuide(let payload) = mapped
+            else {
+                Issue.record(
+                    "Expected LanguageModelError.unsupportedGenerationGuide, got \(type(of: mapped)): \(mapped)"
                 )
-
-                guard case LanguageModelError.unsupportedGenerationGuide(let payload) = mapped
-                else {
-                    Issue.record(
-                        "Expected LanguageModelError.unsupportedGenerationGuide, got \(type(of: mapped)): \(mapped)"
-                    )
-                    return
-                }
-                #expect(
-                    payload.schemaName == nil,
-                    "We can't recover the schema name from the xgrammar error path")
-                #expect(
-                    payload.debugDescription
-                        == "xgrammar rejected the schema: top-level type must be a string",
-                    "Provider's raw error message should pass through verbatim into debugDescription"
-                )
+                return
             }
-
-            @Test("constraintCompilationFailed passes through unchanged (origin is ambiguous)")
-            func constraintCompilationFailedPassesThrough() throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-                let original = XGError.constraintCompilationFailed("matcher init failed")
-                let mapped = MLXLanguageModel.Executor.mapXGError(original)
-
-                guard case XGError.constraintCompilationFailed(let msg) = mapped else {
-                    Issue.record(
-                        "Expected XGError.constraintCompilationFailed unchanged, got \(type(of: mapped)): \(mapped)"
-                    )
-                    return
-                }
-                #expect(msg == "matcher init failed")
-            }
-
-            @Test("tokenizerCreationFailed passes through unchanged (internal shim failure)")
-            func tokenizerCreationFailedPassesThrough() throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-                let original = XGError.tokenizerCreationFailed("vocab extraction failed")
-                let mapped = MLXLanguageModel.Executor.mapXGError(original)
-
-                guard case XGError.tokenizerCreationFailed(let msg) = mapped else {
-                    Issue.record(
-                        "Expected XGError.tokenizerCreationFailed unchanged, got \(type(of: mapped)): \(mapped)"
-                    )
-                    return
-                }
-                #expect(msg == "vocab extraction failed")
-            }
+            #expect(
+                payload.schemaName == nil,
+                "We can't recover the schema name from the xgrammar error path")
+            #expect(
+                payload.debugDescription
+                    == "xgrammar rejected the schema: top-level type must be a string",
+                "Provider's raw error message should pass through verbatim into debugDescription"
+            )
         }
-    #endif  // GuidedGenerationSupport
+
+        @Test("constraintCompilationFailed passes through unchanged (origin is ambiguous)")
+        func constraintCompilationFailedPassesThrough() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let original = GrammarError.constraintCompilationFailed("matcher init failed")
+            let mapped = MLXLanguageModel.Executor.mapGrammarError(original)
+
+            guard case GrammarError.constraintCompilationFailed(let msg) = mapped else {
+                Issue.record(
+                    "Expected GrammarError.constraintCompilationFailed unchanged, got \(type(of: mapped)): \(mapped)"
+                )
+                return
+            }
+            #expect(msg == "matcher init failed")
+        }
+
+        @Test("tokenizerCreationFailed passes through unchanged (internal shim failure)")
+        func tokenizerCreationFailedPassesThrough() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let original = GrammarError.tokenizerCreationFailed("vocab extraction failed")
+            let mapped = MLXLanguageModel.Executor.mapGrammarError(original)
+
+            guard case GrammarError.tokenizerCreationFailed(let msg) = mapped else {
+                Issue.record(
+                    "Expected GrammarError.tokenizerCreationFailed unchanged, got \(type(of: mapped)): \(mapped)"
+                )
+                return
+            }
+            #expect(msg == "vocab extraction failed")
+        }
+    }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

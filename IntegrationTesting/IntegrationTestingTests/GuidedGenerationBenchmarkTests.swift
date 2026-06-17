@@ -1,12 +1,13 @@
 // Copyright © 2025 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLXLMCommon
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Performance benchmarks for guided generation.
     ///
@@ -291,7 +292,7 @@
             let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
             let modelID = TestFixtures.defaultModelID
-            let (xgTokenizer, hostTokenizer): (XGTokenizer, any Tokenizer) =
+            let (xgTokenizer, hostTokenizer): (GrammarTokenizer, any Tokenizer) =
                 try await container.perform { context in
                     let xg = try await MLXLanguageModel.makeXGTokenizer(
                         modelID: modelID,
@@ -317,7 +318,7 @@
             var durations: [Duration] = []
             for _ in 0 ..< iterations {
                 let start = ContinuousClock.now
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: schema,
                     fastForward: true,
@@ -419,7 +420,7 @@
                     modelID: TestFixtures.defaultModelID,
                     tokenizer: context.tokenizer
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: Self.benchmarkSchema,
                     fastForward: true,

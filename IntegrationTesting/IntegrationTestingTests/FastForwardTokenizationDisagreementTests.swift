@@ -4,7 +4,7 @@
 //
 // ## The failure mode
 //
-// When `fastForward: true`, `XGConstraint.commitToken` walks xgrammar's
+// When `fastForward: true`, `GrammarConstraint.commitToken` walks xgrammar's
 // `FindJumpForwardString` suffix, asks the host tokenizer to re-encode
 // those bytes, and accepts the resulting ids against the matcher one
 // at a time. The host tokenizer's encoding decision is a function of
@@ -25,9 +25,9 @@
 // tokenizer divergence, not from Swift-side test scaffolding. The
 // cross-tokenizer setup here is the minimal such fixture:
 //
-//   - `XGTokenizer` is built from Gemma-3's vocab (byte-fallback
+//   - `GrammarTokenizer` is built from Gemma-3's vocab (byte-fallback
 //     SentencePiece, ~262k tokens).
-//   - `hostTokenizer` passed to `XGConstraint` is Qwen2.5-3B's live
+//   - `hostTokenizer` passed to `GrammarConstraint` is Qwen2.5-3B's live
 //     tokenizer (GPT-2 byte-level BPE, ~152k tokens, different merges).
 //
 // Every id Qwen produces for the FF string bytes is reinterpreted by
@@ -58,7 +58,7 @@
 // ## The committed-token seed: Gemma's `p`
 //
 // To enter a state with a non-empty FF suffix, we commit the first
-// byte of the payload. `XGConstraint` is bound to Gemma's vocab, so
+// byte of the payload. `GrammarConstraint` is bound to Gemma's vocab, so
 // the seed must be a Gemma id. Gemma encodes literal `p` as a
 // specific token id; we look it up via
 // `tokenizer.convertTokenToId("p")` so this test survives vocab
@@ -72,7 +72,7 @@
 // 2. After one `commitToken(gemmaSeed)` call, the counter is
 //    strictly greater than zero — at least one FF accept step saw
 //    a Qwen-encoded id that the Gemma-bound matcher rejected.
-// 3. The commit itself returned a `XGCommitResult` — the test did
+// 3. The commit itself returned a `CommitResult` — the test did
 //    not crash or throw.
 //
 // Assertion (2) holds because `emitFastForwardLocked` increments the
@@ -91,17 +91,17 @@
 //   validate the bridge-level contract that the FF accept loop
 //   survives a rejection and the constraint remains usable.
 //
-// Gated on both traits — tokenizer paths go through
-// `loadTestModelContainer` (FoundationModelsIntegration) and the
-// XGConstraint type itself lives behind GuidedGenerationSupport.
+// Gated on FoundationModelsIntegration: tokenizer paths go through
+// `loadTestModelContainer`. The GrammarConstraint type lives in the
+// MLXGuidedGeneration library and is always available alongside the adapter.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
-    import CXGrammar
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct FastForwardTokenizationDisagreementTests {
@@ -115,13 +115,13 @@
         }
 
         /// Sendable bundle of everything we need from Gemma's container so
-        /// the second `perform` (on Qwen) can build `XGTokenizer` and issue
+        /// the second `perform` (on Qwen) can build `GrammarTokenizer` and issue
         /// the seed commit without capturing Gemma's non-Sendable
         /// `ModelContext`. Every field is already Sendable: `[String]`,
         /// the C enum, and `Int` primitives.
         private struct GemmaSeeds: Sendable {
             let vocab: [String]
-            let vocabType: XGVocabType
+            let vocabType: VocabType
             let eosTokenId: Int32
             let seedTokenId: Int32
         }
@@ -142,7 +142,7 @@
             let qwenContainer = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
             let seeds: GemmaSeeds = try await gemmaContainer.perform { gemmaContext in
-                let gemmaVocab = TokenizerVocabExtractor.extractForXGrammar(
+                let gemmaVocab = TokenizerVocabExtractor.extractForGrammar(
                     from: gemmaContext.tokenizer
                 )
                 let encoded = gemmaContext.tokenizer.encode(
@@ -162,17 +162,17 @@
             }
 
             try await qwenContainer.perform { qwenContext in
-                let xgTokenizer = try XGTokenizer(
+                let xgTokenizer = try GrammarTokenizer(
                     vocab: seeds.vocab,
                     vocabType: seeds.vocabType,
                     eosTokenId: seeds.eosTokenId
                 )
 
-                // Cross-wire: XGTokenizer is Gemma, hostTokenizer is Qwen.
+                // Cross-wire: GrammarTokenizer is Gemma, hostTokenizer is Qwen.
                 // Qwen's re-encoding of the FF bytes will land on ids the
                 // Gemma-bound matcher does not have in its current mask.
                 let grammar = "root ::= \"\(Self.forcedPayload)\"\n"
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     grammar: grammar,
                     fastForward: true,

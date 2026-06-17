@@ -1,11 +1,12 @@
 // Copyright © 2025 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Schema used by `incompleteOutputYieldsMetadata`. Five required string
     /// properties guarantee the grammar cannot reach a stop state within a

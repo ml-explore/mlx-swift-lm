@@ -2,7 +2,7 @@
 //
 // Direct C-API tests for the CXGrammar shim's `xg_tokenizer_info_*` surface.
 
-import CXGrammar
+import MLXCXGrammar
 import Foundation
 import Testing
 

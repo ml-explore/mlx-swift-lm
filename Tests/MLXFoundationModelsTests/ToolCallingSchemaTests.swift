@@ -1,10 +1,10 @@
 // Copyright © 2026 Apple Inc.
 
-#if FoundationModelsIntegration && GuidedGenerationSupport && canImport(FoundationModels, _version: 2)
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
     import Testing
     import Foundation
-    import CXGrammar
+    import MLXGuidedGeneration
     import FoundationModels
     @testable import MLXFoundationModels
 
@@ -154,7 +154,7 @@
             // Build a minimal byte-fallback tokenizer and attempt to compile the
             // envelope as a grammar.
             let tokenizer = try makeByteTokenizer()
-            _ = try XGConstraint(tokenizer: tokenizer, jsonSchema: json, fastForward: false)
+            _ = try GrammarConstraint(tokenizer: tokenizer, jsonSchema: json, fastForward: false)
         }
 
         // MARK: - Grammar Builder
@@ -243,17 +243,17 @@
             return obj
         }
 
-        private func makeByteTokenizer() throws -> XGTokenizer {
+        private func makeByteTokenizer() throws -> GrammarTokenizer {
             let vocabSize = 256
             let vocab: [String] = (0 ..< vocabSize).map { byte in
                 String(format: "<0x%02X>", byte)
             }
-            return try XGTokenizer(
+            return try GrammarTokenizer(
                 vocab: vocab,
-                vocabType: XG_VOCAB_TYPE_BYTE_FALLBACK,
+                vocabType: .byteFallback,
                 eosTokenId: Int32(vocabSize - 1)
             )
         }
     }
 
-#endif  // FoundationModelsIntegration && GuidedGenerationSupport && canImport(FoundationModels)
+#endif  // FoundationModelsIntegration && canImport(FoundationModels)

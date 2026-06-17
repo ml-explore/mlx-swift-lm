@@ -1,11 +1,12 @@
 // Copyright © 2026 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Golden contract tests for `TokenizerVocabExtractor`.
     ///

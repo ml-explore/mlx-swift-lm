@@ -1,6 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
-#if GuidedGenerationSupport
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
@@ -8,6 +8,7 @@
     import MLX
     import FoundationModels
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     /// Tests that guided generation surfaces typed errors when maxTokens is
     /// exhausted before the grammar reaches an accepting state.
@@ -47,7 +48,7 @@
                     tokenizer: context.tokenizer
                 )
 
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: complexSchema,
                     fastForward: true,
@@ -138,7 +139,7 @@
                     }
                     """
 
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: xgTokenizer,
                     jsonSchema: arraySchema,
                     fastForward: true,

@@ -19,12 +19,13 @@
 // Gated on both traits because the tokenizer path routes through
 // the same `loadTestModelContainer` as the other tests.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct RollbackDeterminismTests {
@@ -38,13 +39,13 @@
 
             let container = try await loadTestModelContainer(id: fixture.modelId)
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
                 )
-                let constraint = try XGConstraint(
+                let constraint = try GrammarConstraint(
                     tokenizer: tokenizer,
                     jsonSchema: fixture.schema,
                     fastForward: true,

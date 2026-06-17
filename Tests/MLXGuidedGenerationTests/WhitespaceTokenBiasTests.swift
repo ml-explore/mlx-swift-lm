@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
+import MLXGuidedGeneration
 import MLXLMCommon
 import Testing
 

@@ -16,7 +16,7 @@
 // flavors of bad input at compile time — `InvalidJSONError` (bytes
 // don't parse as JSON) and `InvalidJSONSchemaError` (parses as JSON
 // but rejected as a schema). Both map through the shim's
-// discriminated-status path to `XGError.invalidJSONSchema`, so the
+// discriminated-status path to `GrammarError.invalidJSONSchema`, so the
 // "bad JSON" and "bad schema" categories collapse onto a single Swift
 // case. The fixture's 6 inputs span both:
 //   - `not_json`, `empty_string`      → InvalidJSONError path
@@ -30,17 +30,18 @@
 // Gated on both traits because the tokenizer path routes through
 // `loadTestModelContainer` the same as the other integration tests.
 
-#if GuidedGenerationSupport && FoundationModelsIntegration
+#if FoundationModelsIntegration
 
     import Testing
     import Foundation
     import MLXLMCommon
     @testable import MLXFoundationModels
+    @testable import MLXGuidedGeneration
 
     @Suite(.serialized)
     struct MalformedSchemaErrorParityTests {
 
-        @Test("every malformed-schema input surfaces as XGError.invalidJSONSchema")
+        @Test("every malformed-schema input surfaces as GrammarError.invalidJSONSchema")
         func testMalformedSchemaErrorsMatchGolden() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let fixture = try loadMalformedSchemaFixture()
@@ -54,8 +55,8 @@
 
             let container = try await loadTestModelContainer(id: fixture.modelId)
             try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForXGrammar(from: context.tokenizer)
-                let tokenizer = try XGTokenizer(
+                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+                let tokenizer = try GrammarTokenizer(
                     vocab: vocab.vocab,
                     vocabType: vocab.vocabType,
                     eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
@@ -66,14 +67,14 @@
                     // successful compile or a non-throwing error — is a
                     // category collapse.
                     do {
-                        _ = try XGConstraint(
+                        _ = try GrammarConstraint(
                             tokenizer: tokenizer,
                             jsonSchema: entry.schema
                         )
                         Issue.record(
-                            "fixture entry #\(entry.index) (\(entry.label)): XGConstraint compiled without throwing; the recorded goldens rejected this as \(entry.errorCase). Category collapse — xgrammar accepts what the prior backend rejected."
+                            "fixture entry #\(entry.index) (\(entry.label)): GrammarConstraint compiled without throwing; the recorded goldens rejected this as \(entry.errorCase). Category collapse — xgrammar accepts what the prior backend rejected."
                         )
-                    } catch let error as XGError {
+                    } catch let error as GrammarError {
                         // Category-level parity: every recorded
                         // compile-time rejection must surface as
                         // xgrammar's `.invalidJSONSchema`. Any other
@@ -88,12 +89,12 @@
                             break
                         default:
                             Issue.record(
-                                "fixture entry #\(entry.index) (\(entry.label)): expected XGError.invalidJSONSchema, got \(error). Category collapse."
+                                "fixture entry #\(entry.index) (\(entry.label)): expected GrammarError.invalidJSONSchema, got \(error). Category collapse."
                             )
                         }
                     } catch {
                         Issue.record(
-                            "fixture entry #\(entry.index) (\(entry.label)): expected XGError, got \(type(of: error)) — \(error)"
+                            "fixture entry #\(entry.index) (\(entry.label)): expected GrammarError, got \(type(of: error)) — \(error)"
                         )
                     }
                 }
