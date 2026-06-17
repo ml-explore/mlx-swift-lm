@@ -278,7 +278,12 @@
             /// First call downloads the model and loads weights. Subsequent calls
             /// return the cached instance immediately. Concurrent callers share the
             /// same loading task, preventing duplicate loads.
-            public static func loadContainer(
+            ///
+            /// Internal: returns the lower-level `ModelContainer`, which is not part of
+            /// the adapter's public surface. Consumers that want to download/load a model
+            /// ahead of use should call the public ``preload()`` (weights) or trigger
+            /// `session.prewarm()` (weights + shaders) on an `MLXLanguageModel` instance.
+            static func loadContainer(
                 modelID: String,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader
@@ -293,8 +298,8 @@
             /// Same as ``loadContainer(modelID:from:using:)`` but lets ``warmUp()``
             /// suppress the spurious `.downloading` availability flip when the model is
             /// already present on disk. Internal: `suppressDownloadingState` is an
-            /// availability-state-machine detail, not a public concept — the public
-            /// `loadContainer` always reports `.downloading` while a load is in flight.
+            /// availability-state-machine detail, not a public concept — `loadContainer`
+            /// always reports `.downloading` while a load is in flight.
             /// See `ModelCache.load`.
             static func loadContainerForWarmup(
                 modelID: String,
