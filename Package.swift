@@ -176,7 +176,7 @@ let package = Package(
         // The pinned upstream sha lives in Sources/CXGrammar/xgrammar/VERSION
         // and is mirrored in shim.cc's kXGrammarVersion.
         .target(
-            name: "CXGrammar",
+            name: "MLXCXGrammar",
             path: "Sources/CXGrammar",
             exclude: [
                 // Compiled via Sources/CXGrammar/grammar_functor_wrapper.cc to
@@ -229,7 +229,7 @@ let package = Package(
             name: "MLXGuidedGeneration",
             dependencies: [
                 "MLXLMCommon",
-                "CXGrammar",
+                "MLXCXGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Libraries/MLXGuidedGeneration"
@@ -290,7 +290,7 @@ let package = Package(
         // the shim's public C entry points.
         .testTarget(
             name: "CXGrammarTests",
-            dependencies: ["CXGrammar"],
+            dependencies: ["MLXCXGrammar"],
             path: "Tests/CXGrammarTests",
             // tokenizer_gemma3.json is read at runtime via a #filePath-relative
             // path (see goldensDirectory in the test sources), not bundled, so

@@ -7,7 +7,7 @@
 // `XGCompiledGrammar`, `XGMatcher`) and frees them in
 // construction-reverse order in `deinit`.
 
-import CXGrammar
+import MLXCXGrammar
 import Foundation
 import MLXLMCommon
 

@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-import CXGrammar
+import MLXCXGrammar
 
 /// Selects xgrammar's token-decoding path when building a ``GrammarTokenizer``.
 ///
