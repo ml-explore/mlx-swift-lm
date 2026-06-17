@@ -202,20 +202,13 @@ let package = Package(
                 .define("picojson", to: "mlx_picojson"),
                 // xgrammar throws -- exceptions must stay enabled.
                 .unsafeFlags(["-std=c++17", "-fexceptions"]),
-                // Vendored upstream source emits a curated set of warnings
-                // under -Wall -Wextra. We silence only the ones produced by
-                // unmodified upstream, and only on Apple platforms where
-                // we compile.
-                .unsafeFlags(
-                    [
-                        "-Wno-unused-parameter",
-                        "-Wno-shadow",
-                        "-Wno-sign-compare",
-                        "-Wno-deprecated-declarations",
-                        "-Wno-unused-but-set-variable",
-                    ],
-                    .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])
-                ),
+                // Vendored upstream xgrammar/picojson is compiled as-is and is
+                // not warning-clean under Xcode's default warning set (e.g.
+                // -Wshorten-64-to-32). Suppress all warnings for this target so
+                // the unmodified upstream C++ does not spam consumers' builds.
+                // `-w` wins over any preceding -W flags. Scoped to this target
+                // only; our own shim (shim.cc) is small and stable.
+                .unsafeFlags(["-w"], .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])),
             ],
             linkerSettings: [
                 .linkedLibrary("c++")
