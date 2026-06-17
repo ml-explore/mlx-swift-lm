@@ -129,9 +129,21 @@ let package = Package(
             ],
             path: "Tests/MLXLMTests",
             exclude: [
-                "README.md"
+                "README.md",
+                "Resources/FIXTURES_LICENSES.md",
             ],
-            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
+            resources: [
+                .process("Resources/1080p_30.mov"),
+                .process("Resources/audio_only.mov"),
+                // Speech/video clips consumed by the Gemma 4 integration tests
+                // (IntegrationTesting project); provenance and licenses in
+                // Resources/FIXTURES_LICENSES.md.
+                .process("Resources/gemma_speech_test.wav"),
+                .process("Resources/gemma_speech_long.wav"),
+                .process("Resources/gemma_audio_librispeech.wav"),
+                .process("Resources/gemma_video_bbb.mp4"),
+                .process("Fixtures/gemma4_mel_alignment.json"),
+            ]
         ),
         .macro(
             name: "MLXHuggingFaceMacros",

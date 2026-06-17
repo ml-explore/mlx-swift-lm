@@ -135,10 +135,17 @@ public struct LMInput {
 
         public let samples: MLXArray
 
+        /// Optional padding mask over the time axis of `samples`, where `true`
+        /// marks padding positions (frames the audio encoder should ignore)
+        /// and `false` marks valid audio. `nil` means all positions are valid.
+        public let mask: MLXArray?
+
         public init(
-            samples: MLXArray
+            samples: MLXArray,
+            mask: MLXArray? = nil
         ) {
             self.samples = samples
+            self.mask = mask
         }
     }
 

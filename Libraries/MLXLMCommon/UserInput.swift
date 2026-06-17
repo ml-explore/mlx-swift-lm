@@ -159,10 +159,21 @@ public struct UserInput {
         public var minPixels: Int?
         public var maxPixels: Int?
 
-        public init(resize: CGSize? = nil, minPixels: Int? = nil, maxPixels: Int? = nil) {
+        /// Optional per-call cap on the number of frames sampled from each
+        /// video, for processors that support it. When set, the effective cap
+        /// is `min(model configured maximum, videoMaxFrames)`; when `nil` the
+        /// model configuration is used. Memory-constrained callers (e.g. apps
+        /// near a per-process memory limit) can lower this per request.
+        public var videoMaxFrames: Int?
+
+        public init(
+            resize: CGSize? = nil, minPixels: Int? = nil, maxPixels: Int? = nil,
+            videoMaxFrames: Int? = nil
+        ) {
             self.resize = resize
             self.minPixels = minPixels
             self.maxPixels = maxPixels
+            self.videoMaxFrames = videoMaxFrames
         }
     }
 
