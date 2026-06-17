@@ -9,12 +9,12 @@
 #
 set -euo pipefail
 
-echo "==> Building CXGrammar"
-swift build --disable-sandbox --skip-update -Xswiftc -disable-sandbox --target CXGrammar >/dev/null
+echo "==> Building MLXCXGrammar"
+swift build --disable-sandbox --skip-update -Xswiftc -disable-sandbox --target MLXCXGrammar >/dev/null
 
-obj_dir="$(find .build -type d \( -name 'CXGrammar.build' -o -name 'CXGrammar-t.build' \) | head -1)"
+obj_dir="$(find .build -type d \( -name 'MLXCXGrammar.build' -o -name 'MLXCXGrammar-t.build' \) | head -1)"
 if [[ -z "$obj_dir" ]]; then
-    echo "FAIL: could not locate CXGrammar.build object directory" >&2
+    echo "FAIL: could not locate MLXCXGrammar.build object directory" >&2
     exit 1
 fi
 echo "    object dir: $obj_dir"
