@@ -321,7 +321,7 @@
                     // NOTE: this is a process-global setting called on every model
                     // load. Should move to once-per-process init and/or a
                     // configurable surface so consumers can tune for their own footprint.
-                    GPU.set(cacheLimit: 256 * 1024 * 1024)
+                    MLX.Memory.cacheLimit = 256 * 1024 * 1024
                     let container = try await loadModelContainer(
                         from: downloader,
                         using: tokenizerLoader,
