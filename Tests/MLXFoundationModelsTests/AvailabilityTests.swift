@@ -33,7 +33,7 @@ import Testing
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
             let model = MLXLanguageModel(
-                modelIdentifier: "org/repo",
+                modelID: "org/repo",
                 capabilities: LanguageModelCapabilities(capabilities: []),
                 from: StubAvailabilityDownloader(),
                 using: StubAvailabilityTokenizerLoader(),
@@ -74,7 +74,7 @@ import Testing
             defer { try? FileManager.default.removeItem(at: dir) }
             let gate = LoadGate()
             let model = MLXLanguageModel(
-                modelIdentifier: "org/warmup-present-\(UUID().uuidString)",
+                modelID: "org/warmup-present-\(UUID().uuidString)",
                 capabilities: LanguageModelCapabilities(capabilities: []),
                 from: BlockingDownloader(gate: gate),
                 using: StubAvailabilityTokenizerLoader(),
@@ -103,7 +103,7 @@ import Testing
             defer { try? FileManager.default.removeItem(at: dir) }
             let gate = LoadGate()
             let model = MLXLanguageModel(
-                modelIdentifier: "org/genuine-present-\(UUID().uuidString)",
+                modelID: "org/genuine-present-\(UUID().uuidString)",
                 capabilities: LanguageModelCapabilities(capabilities: []),
                 from: BlockingDownloader(gate: gate),
                 using: StubAvailabilityTokenizerLoader(),
@@ -136,7 +136,7 @@ import Testing
             let missing = URL(fileURLWithPath: "/definitely/not/a/real/path/\(UUID().uuidString)")
             let gate = LoadGate()
             let model = MLXLanguageModel(
-                modelIdentifier: "org/warmup-absent-\(UUID().uuidString)",
+                modelID: "org/warmup-absent-\(UUID().uuidString)",
                 capabilities: LanguageModelCapabilities(capabilities: []),
                 from: BlockingDownloader(gate: gate),
                 using: StubAvailabilityTokenizerLoader(),

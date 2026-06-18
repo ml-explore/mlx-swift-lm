@@ -219,7 +219,7 @@
         /// let cache = HubCache.default
         /// let repoID = Repo.ID(rawValue: "mlx-community/Qwen2.5-3B-Instruct-4bit")!
         /// let model = MLXLanguageModel(
-        ///     modelIdentifier: repoID.rawValue,
+        ///     modelID: repoID.rawValue,
         ///     capabilities: LanguageModelCapabilities(
         ///         capabilities: [.guidedGeneration, .toolCalling]),
         ///     from: HubClient.default,
@@ -250,7 +250,7 @@
             private static let cache = ModelCache()
 
             /// The model identifier to load.
-            public let modelIdentifier: String
+            public let modelID: String
 
             /// Downloader used to fetch model snapshots when the cache misses.
             public let downloader: any Downloader
@@ -401,7 +401,7 @@
             /// calling via the synthetic-final-answer envelope, and reasoning
             /// (chain-of-thought) routing on the unconstrained generation path.
             ///
-            /// Capabilities are declared explicitly by the caller at ``init(modelIdentifier:capabilities:configurationResolver:from:using:locatedBy:)``
+            /// Capabilities are declared explicitly by the caller at ``init(modelID:capabilities:configurationResolver:from:using:locatedBy:)``
             /// and stored verbatim. The caller includes
             /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
             /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -421,7 +421,7 @@
 
             /// Configuration the framework uses to create and cache executors.
             public var executorConfiguration: Executor.Configuration {
-                Executor.Configuration(modelIdentifier: modelIdentifier)
+                Executor.Configuration(modelID: modelID)
             }
 
             // MARK: - Initialization
@@ -432,7 +432,7 @@
             /// Model loading is deferred until first inference or preload.
             ///
             /// - Parameters:
-            ///   - modelIdentifier: The model identifier (e.g., "mlx-community/Qwen3-4B-4bit").
+            ///   - modelID: The model identifier (e.g., "mlx-community/Qwen3-4B-4bit").
             ///   - capabilities: The capabilities this model supports
             ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`). Declared
             ///     verbatim; the adapter does not infer or expand the set.
@@ -443,14 +443,14 @@
             ///   - tokenizerLoader: The ``TokenizerLoader`` used to materialize the tokenizer.
             ///   - weightsLocation: Resolves a model identifier to the on-disk weights URL.
             public init(
-                modelIdentifier: String,
+                modelID: String,
                 capabilities: LanguageModelCapabilities,
                 configurationResolver: any ModelConfigurationResolver,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
                 locatedBy weightsLocation: @Sendable @escaping (String) -> URL
             ) {
-                self.modelIdentifier = modelIdentifier
+                self.modelID = modelID
                 self.capabilities = capabilities
                 self.configurationResolver = configurationResolver
                 self.downloader = downloader
@@ -462,14 +462,14 @@
             /// ``DefaultConfigurationResolver`` — the zero-config path where the
             /// factory-inferred ``ModelConfiguration`` drives all per-model behavior.
             public init(
-                modelIdentifier: String,
+                modelID: String,
                 capabilities: LanguageModelCapabilities,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
                 locatedBy weightsLocation: @Sendable @escaping (String) -> URL
             ) {
                 self.init(
-                    modelIdentifier: modelIdentifier,
+                    modelID: modelID,
                     capabilities: capabilities,
                     configurationResolver: DefaultConfigurationResolver(),
                     from: downloader,
@@ -492,7 +492,7 @@
             /// Safe to call multiple times -- subsequent calls return immediately from cache.
             public func preload() async throws {
                 _ = try await Self.loadContainer(
-                    modelID: modelIdentifier,
+                    modelID: modelID,
                     from: downloader,
                     using: tokenizerLoader
                 )
@@ -532,7 +532,7 @@
                 // present falsely report `.available`).
                 let alreadyOnDisk = modelExistsOnDisk()
                 let container = try await Self.loadContainerForWarmup(
-                    modelID: modelIdentifier,
+                    modelID: modelID,
                     from: downloader,
                     using: tokenizerLoader,
                     suppressDownloadingState: alreadyOnDisk
@@ -555,7 +555,7 @@
                 // pre-built constraint would land under a key no real respond() reads.
                 let tokenizer = await container.tokenizer
                 _ = try await Self.makeXGTokenizer(
-                    modelID: modelIdentifier, tokenizer: tokenizer)
+                    modelID: modelID, tokenizer: tokenizer)
 
                 // Force Metal shader JIT with a minimal 1-token generate, run inside
                 // `perform` so the forward pass + synchronize serialize against any
@@ -691,15 +691,15 @@
                 /// Configuration for creating and caching executors.
                 public struct Configuration: Hashable, Sendable {
                     /// The model identifier this executor uses for loading and metadata.
-                    public let modelIdentifier: String
+                    public let modelID: String
                 }
 
                 /// The model identifier this executor uses for loading and metadata.
-                let modelIdentifier: String
+                let modelID: String
 
                 /// Creates an executor from a configuration.
                 public init(configuration: Configuration) throws {
-                    self.modelIdentifier = configuration.modelIdentifier
+                    self.modelID = configuration.modelID
                 }
 
                 /// Logs warmup failures from the fire-and-forget `prewarm` path. A
@@ -738,7 +738,7 @@
                             try await model.warmUp()
                         } catch {
                             Self.logger.error(
-                                "MLX prewarm failed for \(model.modelIdentifier, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                                "MLX prewarm failed for \(model.modelID, privacy: .public): \(error.localizedDescription, privacy: .public)"
                             )
                         }
                     }
@@ -762,7 +762,7 @@
                     }
                     let messages = collected
                     let container = try await MLXLanguageModel.loadContainer(
-                        modelID: model.modelIdentifier,
+                        modelID: model.modelID,
                         from: model.downloader,
                         using: model.tokenizerLoader
                     )
@@ -775,7 +775,7 @@
                         schemaJSON = nil
                     }
 
-                    let modelID = modelIdentifier
+                    let modelID = self.modelID
                     let requestedMaxTokens = request.generationOptions.maximumResponseTokens
                     // Translate the SDK sampling mode once, here where generationOptions
                     // is in scope; thread the bridge-local value down to every
@@ -802,7 +802,7 @@
                             .response(
                                 entryID: entryID,
                                 action: .updateMetadata([
-                                    "modelIdentifier": modelID,
+                                    "modelID": modelID,
                                     "requestID": request.id.uuidString,
                                 ])))
 

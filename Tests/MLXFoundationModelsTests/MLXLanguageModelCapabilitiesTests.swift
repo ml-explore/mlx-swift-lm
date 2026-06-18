@@ -24,7 +24,7 @@
             let caps = LanguageModelCapabilities(capabilities: capabilities)
             if let resolver {
                 return MLXLanguageModel(
-                    modelIdentifier: id,
+                    modelID: id,
                     capabilities: caps,
                     configurationResolver: resolver,
                     from: CapabilitiesStubDownloader(),
@@ -32,7 +32,7 @@
                     locatedBy: { _ in URL(fileURLWithPath: "/tmp") })
             }
             return MLXLanguageModel(
-                modelIdentifier: id,
+                modelID: id,
                 capabilities: caps,
                 from: CapabilitiesStubDownloader(),
                 using: CapabilitiesStubTokenizerLoader(),

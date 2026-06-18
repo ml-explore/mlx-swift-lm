@@ -115,7 +115,7 @@ import FoundationModels
 import Hub
 
 let model = MLXLanguageModel(
-    modelIdentifier: "mlx-community/Qwen3-4B-4bit",
+    modelID: "mlx-community/Qwen3-4B-4bit",
     capabilities: LanguageModelCapabilities(
         capabilities: [.guidedGeneration, .toolCalling]),
     from: #hubDownloader(),

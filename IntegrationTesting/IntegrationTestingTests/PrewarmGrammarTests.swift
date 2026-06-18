@@ -26,7 +26,7 @@
             // Assert the genuine cache hit, not merely that a later respond works
             // (a guided respond succeeds with or without warmup — only the seam
             // proves warmUp did the pre-creation).
-            let cached = await MLXLanguageModel.hasCachedXGTokenizer(modelID: model.modelIdentifier)
+            let cached = await MLXLanguageModel.hasCachedXGTokenizer(modelID: model.modelID)
             #expect(cached, "warmUp should pre-create the GrammarTokenizer")
 
             // And a guided generation still succeeds end-to-end after warmUp.
