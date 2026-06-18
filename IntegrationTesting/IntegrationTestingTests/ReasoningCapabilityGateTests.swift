@@ -33,7 +33,7 @@
             ])
         }
 
-        /// .reasoning omitted on a model whose inferred profile is .alwaysOn must
+        /// .reasoning omitted on a model whose inferred reasoning strategy is .alwaysOn must
         /// raise `unsupportedCapability` before generation — never silently leak
         /// `<think>` into the response.
         @Test func alwaysOnRefusesWhenReasoningOmitted() async throws {

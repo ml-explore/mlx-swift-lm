@@ -11,7 +11,7 @@
 
     /// Verifies the authoritative-capabilities contract: the adapter stores what
     /// the caller passes, never inferring from the model id. The convenience init
-    /// wires in `InferringCustomizer`.
+    /// wires in `DefaultConfigurationResolver`.
     @Suite("MLXLanguageModel capabilities")
     struct MLXLanguageModelCapabilitiesTests {
 
@@ -19,14 +19,14 @@
         private func model(
             id: String,
             capabilities: [LanguageModelCapabilities.Capability],
-            customizer: (any ModelCustomizer)? = nil
+            resolver: (any ModelConfigurationResolver)? = nil
         ) -> MLXLanguageModel {
             let caps = LanguageModelCapabilities(capabilities: capabilities)
-            if let customizer {
+            if let resolver {
                 return MLXLanguageModel(
                     modelIdentifier: id,
                     capabilities: caps,
-                    customizer: customizer,
+                    configurationResolver: resolver,
                     from: CapabilitiesStubDownloader(),
                     using: CapabilitiesStubTokenizerLoader(),
                     locatedBy: { _ in URL(fileURLWithPath: "/tmp") })
@@ -59,23 +59,27 @@
             #expect(!m.capabilities.contains(.toolCalling))
         }
 
-        @Test("Convenience init (no customizer) stores InferringCustomizer")
-        func convenienceInitDefaultsCustomizer() {
+        @Test("Convenience init (no resolver) stores DefaultConfigurationResolver")
+        func convenienceInitDefaultsResolver() {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let m = model(id: "any", capabilities: [])
-            #expect(m.customizer is InferringCustomizer)
+            #expect(m.configurationResolver is DefaultConfigurationResolver)
         }
 
-        @Test("Designated init stores the supplied customizer")
-        func designatedInitHoldsExplicitCustomizer() {
+        @Test("Designated init stores the supplied resolver")
+        func designatedInitHoldsExplicitResolver() {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            struct CustomCustomizer: ModelCustomizer {
-                func profile(for context: LoadedModelContext) -> ModelProfile {
-                    ModelProfile(extraEOSTokens: ["<|done|>"])
+            struct CustomResolver: ModelConfigurationResolver {
+                func resolve(
+                    _ configuration: ModelConfiguration, for descriptor: ModelDescriptor
+                ) -> ModelConfiguration {
+                    var c = configuration
+                    c.extraEOSTokens.insert("<|done|>")
+                    return c
                 }
             }
-            let m = model(id: "any", capabilities: [], customizer: CustomCustomizer())
-            #expect(m.customizer is CustomCustomizer)
+            let m = model(id: "any", capabilities: [], resolver: CustomResolver())
+            #expect(m.configurationResolver is CustomResolver)
         }
     }
 

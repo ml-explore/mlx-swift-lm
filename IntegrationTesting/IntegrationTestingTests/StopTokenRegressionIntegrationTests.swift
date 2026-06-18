@@ -73,12 +73,12 @@
             }
         }
 
-        /// A customizer-supplied stop token unions into the stop set
+        /// A resolver-supplied stop token unions into the stop set
         /// without mutating the cached `ModelConfiguration`. Uses Qwen because its
         /// `<|endoftext|>` token id is well-known and absent from the default
         /// chat-stop set.
-        @Test("additionalStopTokens unions into stop set without mutating cached config")
-        func additionalStopTokensUnioned() async throws {
+        @Test("resolver-style extra stop tokens union into stop set via configuration copy")
+        func extraStopTokensUnioned() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             try await withContext(modelID: TestFixtures.defaultModelID) {
                 tokenizer, configuration in
@@ -88,37 +88,31 @@
                         "Test fixture tokenizer is missing <|endoftext|>; cannot verify union")
                     return
                 }
-                // Baseline: <|endoftext|> isn't in the default stop set for the
-                // unconstrained-chat path (Qwen's chat turn-ender is <|im_end|>).
                 let baseline = GuidedGenerationLoop.buildStopTokenIDs(
                     tokenizer: tokenizer, configuration: configuration)
-                // The cached configuration's extraEOSTokens is untouched by this
-                // call site — assert that the union happens at the boundary.
+                var extendedConfig = configuration
+                extendedConfig.extraEOSTokens.insert("<|endoftext|>")
                 let extended = GuidedGenerationLoop.buildStopTokenIDs(
-                    tokenizer: tokenizer, configuration: configuration,
-                    additionalStopTokens: ["<|endoftext|>"])
+                    tokenizer: tokenizer, configuration: extendedConfig)
                 #expect(extended.contains(extraTokenID))
-                #expect(
-                    extended == baseline.union([extraTokenID]),
-                    "extended set must be exactly baseline ∪ {<|endoftext|>}; got \(extended.subtracting(baseline.union([extraTokenID])))"
-                )
-                // The cached configuration must not have been mutated.
+                #expect(extended == baseline.union([extraTokenID]))
+                // The cached configuration is a separate value; mutating the copy
+                // did not touch it.
                 #expect(!configuration.extraEOSTokens.contains("<|endoftext|>"))
             }
         }
 
-        /// An empty `additionalStopTokens` argument is a no-op — the stop set
-        /// matches the baseline.
-        @Test("empty additionalStopTokens preserves the baseline stop set")
-        func additionalStopTokensEmptyIsNoop() async throws {
+        /// Two `buildStopTokenIDs` calls with the same inputs produce the same
+        /// stop set — the function is a pure projection of tokenizer + config.
+        @Test("buildStopTokenIDs is deterministic for identical inputs")
+        func buildStopTokenIDsIsDeterministic() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             try await withContext(modelID: TestFixtures.gemmaModelID) { tokenizer, configuration in
                 let baseline = GuidedGenerationLoop.buildStopTokenIDs(
                     tokenizer: tokenizer, configuration: configuration)
-                let withEmpty = GuidedGenerationLoop.buildStopTokenIDs(
-                    tokenizer: tokenizer, configuration: configuration,
-                    additionalStopTokens: [])
-                #expect(baseline == withEmpty)
+                let repeated = GuidedGenerationLoop.buildStopTokenIDs(
+                    tokenizer: tokenizer, configuration: configuration)
+                #expect(baseline == repeated)
             }
         }
 
