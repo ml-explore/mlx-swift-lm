@@ -1,24 +1,11 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import IntegrationTestHelpers
 import MLX
 import MLXLMCommon
 import MLXVLM
 import Testing
-
-// MARK: - Helpers
-
-private func hfSnapshotDir(modelId: String) -> URL? {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let hub = home.appendingPathComponent(".cache/huggingface/hub")
-    let folderName = "models--" + modelId.replacingOccurrences(of: "/", with: "--")
-    let snapshots = hub.appendingPathComponent(folderName).appendingPathComponent("snapshots")
-    guard
-        let entries = try? FileManager.default.contentsOfDirectory(
-            at: snapshots, includingPropertiesForKeys: nil)
-    else { return nil }
-    return entries.first
-}
 
 // MARK: - R13 — mid-generation KV cache quantization onset
 
