@@ -425,11 +425,10 @@ public enum GuidedGenerationLoop {
     /// 3. `configuration.extraEOSTokens` — hardcoded-by-token-string
     ///    additions from registry entries (e.g. `["<end_of_turn>"]` on
     ///    some Gemma variants in `LLMModelFactory`).
-    /// 4. `additionalStopTokens` — per-call stop tokens supplied via a
-    ///    ``ModelCustomizer``'s ``ModelProfile/extraEOSTokens``. Added
-    ///    without mutating the cached `ModelConfiguration` so two
-    ///    instances with the same id but different customizers do not
-    ///    cross-contaminate.
+    /// 4. `additionalStopTokens` — per-call stop tokens supplied by the
+    ///    caller. Added without mutating the cached `ModelConfiguration` so
+    ///    two callers sharing a model id but passing different stop tokens do
+    ///    not cross-contaminate.
     static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration,
