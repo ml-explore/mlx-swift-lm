@@ -45,7 +45,7 @@ a given model identifier comes from the closure you supply at init:
 
 ```swift
 public init(
-    modelIdentifier: String,
+    modelID: String,
     from downloader: any Downloader,
     using tokenizerLoader: any TokenizerLoader,
     locatedBy weightsLocation: @Sendable @escaping (String) -> URL
@@ -60,7 +60,7 @@ import MLXHuggingFace
 import Hub
 
 let model = MLXLanguageModel(
-    modelIdentifier: "mlx-community/Qwen3-4B-4bit",
+    modelID: "mlx-community/Qwen3-4B-4bit",
     capabilities: LanguageModelCapabilities(
         capabilities: [.guidedGeneration, .toolCalling]),
     from: #hubDownloader(),
@@ -73,7 +73,7 @@ For a private CDN, custom on-disk layout, or shared cache:
 
 ```swift
 let model = MLXLanguageModel(
-    modelIdentifier: "internal/MyModel-v3",
+    modelID: "internal/MyModel-v3",
     capabilities: LanguageModelCapabilities(
         capabilities: [.guidedGeneration, .toolCalling]),
     from: corpDownloader,
@@ -107,7 +107,7 @@ try await model.preload()
 in the repo and returns the sizes; it requires network.
 ``MLXLanguageModel/freeDiskSpaceBytes`` is a synchronous
 `URLResourceValues` lookup against the volume hosting
-`weightsLocation(modelIdentifier)`.
+`weightsLocation(modelID)`.
 
 If your weights live on a custom CDN, expose your own remote-size helper
 and feed its result into the same comparison.

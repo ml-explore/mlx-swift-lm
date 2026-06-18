@@ -133,20 +133,20 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
         let resolved = capabilities ?? defaultTestCapabilities()
         if let resolver {
             return MLXLanguageModel(
-                modelIdentifier: id,
+                modelID: id,
                 capabilities: resolved,
                 configurationResolver: resolver,
                 from: TestHubDownloader(),
                 using: TestHuggingFaceTokenizerLoader(),
-                locatedBy: testWeightsLocation(modelIdentifier:)
+                locatedBy: testWeightsLocation(modelID:)
             )
         }
         return MLXLanguageModel(
-            modelIdentifier: id,
+            modelID: id,
             capabilities: resolved,
             from: TestHubDownloader(),
             using: TestHuggingFaceTokenizerLoader(),
-            locatedBy: testWeightsLocation(modelIdentifier:)
+            locatedBy: testWeightsLocation(modelID:)
         )
     }
 
@@ -207,8 +207,8 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     /// to `HubApi.shared.localRepoLocation(_:)` to match the cache layout used by
     /// `TestHubDownloader`'s `HubApi.shared.snapshot` — the two must agree so
     /// `MLXLanguageModel.modelExistsOnDisk()` can probe for `config.json`.
-    func testWeightsLocation(modelIdentifier: String) -> URL {
-        HubApi.shared.localRepoLocation(HubApi.Repo(id: modelIdentifier))
+    func testWeightsLocation(modelID: String) -> URL {
+        HubApi.shared.localRepoLocation(HubApi.Repo(id: modelID))
     }
 
     // MARK: - Executor Helpers
@@ -218,7 +218,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
         try MLXLanguageModel.Executor(
             configuration: MLXLanguageModel.Executor.Configuration(
-                modelIdentifier: model.modelIdentifier)
+                modelID: model.modelID)
         )
     }
 

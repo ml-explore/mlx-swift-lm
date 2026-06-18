@@ -19,7 +19,7 @@ struct ApplyChatTemplateProbeTests {
     func applyChatTemplateWithoutToolsDoesNotCrash() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
-        let container = try await loadTestModelContainer(id: model.modelIdentifier)
+        let container = try await loadTestModelContainer(id: model.modelID)
 
         try await container.perform { context in
             let messages: [[String: any Sendable]] = [
@@ -34,7 +34,7 @@ struct ApplyChatTemplateProbeTests {
     func applyChatTemplateWithToolsDoesNotCrash() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
-        let container = try await loadTestModelContainer(id: model.modelIdentifier)
+        let container = try await loadTestModelContainer(id: model.modelID)
 
         try await container.perform { context in
             let messages: [[String: any Sendable]] = [

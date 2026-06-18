@@ -97,7 +97,7 @@
             await container.perform { context in
                 let configData = try? Data(
                     contentsOf:
-                        testWeightsLocation(modelIdentifier: Self.qwen3)
+                        testWeightsLocation(modelID: Self.qwen3)
                         .appendingPathComponent("config.json"))
                 let modelType =
                     configData.flatMap {

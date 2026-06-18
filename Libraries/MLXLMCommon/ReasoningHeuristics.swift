@@ -25,8 +25,8 @@ public enum ReasoningHeuristics {
     ]
 
     /// Whether the model identifier looks like a reasoning-capable model.
-    public static func isLikelyReasoningModel(_ modelIdentifier: String) -> Bool {
-        let lower = modelIdentifier.lowercased()
+    public static func isLikelyReasoningModel(_ modelID: String) -> Bool {
+        let lower = modelID.lowercased()
         return reasoningModelMarkers.contains { lower.contains($0) }
     }
 }

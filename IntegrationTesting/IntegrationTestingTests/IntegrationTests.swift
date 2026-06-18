@@ -70,7 +70,7 @@ struct IntegrationTests {
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try MLXLanguageModel.Executor(
             configuration: MLXLanguageModel.Executor.Configuration(
-                modelIdentifier: model.modelIdentifier)
+                modelID: model.modelID)
         )
 
         let transcript = Transcript(entries: [
@@ -113,7 +113,7 @@ struct IntegrationTests {
         }
 
         #expect(
-            metadata.values["modelIdentifier"] != nil,
+            metadata.values["modelID"] != nil,
             "Metadata should contain model identifier"
         )
     }
@@ -287,7 +287,7 @@ struct IntegrationTests {
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try MLXLanguageModel.Executor(
             configuration: MLXLanguageModel.Executor.Configuration(
-                modelIdentifier: model.modelIdentifier)
+                modelID: model.modelID)
         )
 
         let transcript = Transcript(entries: [
