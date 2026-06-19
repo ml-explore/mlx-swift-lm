@@ -1,9 +1,9 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
+import CoreImage
 import Foundation
 import FoundationModels
-import ImageIO
+import IntegrationTestHelpers
 import Testing
 
 @testable import MLXFoundationModels
@@ -14,6 +14,11 @@ import Testing
     /// the FoundationModels adapter with a labeled image attachment and `.vision`
     /// declared, proving the labeled-attachment path reaches the already
     /// multimodal MLX pipeline.
+    ///
+    /// The input is a synthetic solid-red square built in-memory (no binary
+    /// fixture), and the test asserts the model names the color "red". This
+    /// keeps the adapter end-to-end coverage while removing the photographic
+    /// fixture.
     ///
     /// Skipped unless `MLX_RUN_VLM_INTEGRATION=1`, so default CI never downloads
     /// multi-GB weights; run on Apple silicon on demand.
@@ -29,54 +34,18 @@ import Testing
     struct VisionIntegrationTests {
 
         @Test
-        func describesAndReadsScoreboard() async throws {
+        func namesImageColor() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 "mlx-community/gemma-4-e2b-it-4bit",
                 capabilities: LanguageModelCapabilities(capabilities: [.vision]))
             let session = LanguageModelSession(model: model, tools: [], instructions: nil)
-            let cgImage = try Self.loadScoreboardCGImage()
-
-            // Turn 1: attach the image and ask for a description.
-            let described = try await session.respond {
-                "Describe this photo in one or two sentences."
-                Attachment(cgImage).label("photo")
+            let redImage = VisionTestImages.solidColor(.red)
+            let response = try await session.respond {
+                "What color is this image? Reply with just the color name."
+                Attachment(redImage).label("color")
             }
-            #expect(!described.content.isEmpty)
-
-            // Turn 2: text-only follow-up. The turn-1 image rides forward via
-            // the transcript history, which TranscriptConverter re-extracts, so
-            // no re-attachment is needed. OCR legibility is bounded by Gemma4's
-            // internal ~800x800 resize, so the assertion stays loose.
-            let quarter = try await session.respond {
-                "According to the scoreboard, what quarter is the football game in? Answer with just the quarter."
-            }
-            #expect(!quarter.content.isEmpty)
-        }
-
-        // MARK: - Fixture
-
-        private enum FixtureError: Error {
-            case missingResource(String)
-            case unreadable(URL)
-        }
-
-        /// Decodes the bundled `scoreboard.jpg` fixture to a `CGImage`.
-        ///
-        /// The fixture ships as a bundled test resource (resolved through
-        /// `fixturesBundle`, the same accessor the golden fixtures use), so it is
-        /// present on-device where a source-tree path would not exist.
-        private static func loadScoreboardCGImage() throws -> CGImage {
-            guard let url = fixturesBundle.url(forResource: "scoreboard", withExtension: "jpg")
-            else {
-                throw FixtureError.missingResource("scoreboard.jpg")
-            }
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-            else {
-                throw FixtureError.unreadable(url)
-            }
-            return image
+            #expect(response.content.lowercased().contains("red"))
         }
     }
 
