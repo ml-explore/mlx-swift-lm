@@ -263,9 +263,18 @@ let package = Package(
                 // which deadlocks AvailabilityTests' in-flight gate. Model-free:
                 // the tests inject a stub downloader — no network, no real weights.
                 "MLXLLM",
+                // Registers the VLM trampoline factory so gemma4 resolves at
+                // load time (spec §5.2). The MLXFoundationModels product target
+                // deliberately does NOT depend on MLXVLM; runtime trampoline
+                // discovery is by design and unchanged.
+                "MLXVLM",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "Tests/MLXFoundationModelsTests"
+            path: "Tests/MLXFoundationModelsTests",
+            // scoreboard.jpg is read at runtime via a #filePath-relative path
+            // (see VisionIntegrationTests), not bundled, so the Fixtures tree is
+            // excluded from the build graph (mirrors the CXGrammarTests target).
+            exclude: ["Fixtures"]
         ),
         // FM-independent guided-generation tests. Depends only on the engine
         // and MLXLMCommon. No FoundationModels, no direct CXGrammar.
