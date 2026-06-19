@@ -56,25 +56,21 @@ import Testing
 
         // MARK: - Fixture
 
-        private enum FixtureError: Error { case unreadable(URL) }
-
-        /// Resolves `Tests/MLXFoundationModelsTests/Fixtures/scoreboard.jpg`
-        /// relative to this source file (mirrors the CXGrammarTests `#filePath`
-        /// convention; no `Bundle.module`). The opt-in test only runs from an
-        /// intact source checkout, so walking to the package root is safe.
-        private static func scoreboardURL() -> URL {
-            URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()  // IntegrationTestingTests
-                .deletingLastPathComponent()  // IntegrationTesting
-                .deletingLastPathComponent()  // <package root>
-                .appendingPathComponent("Tests", isDirectory: true)
-                .appendingPathComponent("MLXFoundationModelsTests", isDirectory: true)
-                .appendingPathComponent("Fixtures", isDirectory: true)
-                .appendingPathComponent("scoreboard.jpg")
+        private enum FixtureError: Error {
+            case missingResource(String)
+            case unreadable(URL)
         }
 
+        /// Decodes the bundled `scoreboard.jpg` fixture to a `CGImage`.
+        ///
+        /// The fixture ships as a bundled test resource (resolved through
+        /// `fixturesBundle`, the same accessor the golden fixtures use), so it is
+        /// present on-device where a source-tree path would not exist.
         private static func loadScoreboardCGImage() throws -> CGImage {
-            let url = scoreboardURL()
+            guard let url = fixturesBundle.url(forResource: "scoreboard", withExtension: "jpg")
+            else {
+                throw FixtureError.missingResource("scoreboard.jpg")
+            }
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                 let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
             else {
