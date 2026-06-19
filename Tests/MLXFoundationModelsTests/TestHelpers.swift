@@ -12,6 +12,7 @@
 // construction / capability / gate-rejection tests, and the download-free
 // executor machinery.
 
+import CoreGraphics
 import Foundation
 import FoundationModels
 import MLX
@@ -230,4 +231,23 @@ struct ByteTokenizer: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] { [] }
+}
+
+// MARK: - Synthetic image (model-free)
+
+/// A tiny solid-color `CGImage` for converter / gate tests that only need a
+/// valid image, not real pixels. Avoids any fixture I/O so unit tests stay fast.
+func makeSolidCGImage(width: Int = 2, height: Int = 2) -> CGImage {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1.0))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    return context.makeImage()!
 }

@@ -32,12 +32,16 @@
                         return Chat.Message.system(text)
 
                     case .prompt(let prompt):
-                        // User message for prompts
-                        guard let text = extractText(from: prompt.segments) else {
-                            logger.warning("Skipping prompt entry with no text content")
+                        // User message for prompts. Labeled image attachments
+                        // (public `.attachment` segments) ride along as message
+                        // images; text is still concatenated as before.
+                        let text = extractText(from: prompt.segments)
+                        let images = extractImages(from: prompt.segments)
+                        guard text != nil || !images.isEmpty else {
+                            logger.warning("Skipping prompt entry with no text or image content")
                             return nil
                         }
-                        return Chat.Message.user(text)
+                        return Chat.Message.user(text ?? "", images: images)
 
                     case .response(let response):
                         // Assistant message for previous responses
@@ -86,6 +90,31 @@
 
                 let combined = texts.joined(separator: "\n")
                 return combined.isEmpty ? nil : combined
+            }
+
+            /// Extracts image inputs from labeled image attachment segments.
+            ///
+            /// Only the public `.attachment` segment carrying `.image(_)` is
+            /// handled. When the attachment exposes a file URL we pass it through
+            /// as `UserInput.Image.url` to defer decoding; otherwise we hand over
+            /// the decoded `CIImage`. All other segment kinds are ignored.
+            ///
+            /// - Parameter segments: Array of transcript segments
+            /// - Returns: The image inputs found, in segment order
+            private static func extractImages(from segments: [Transcript.Segment])
+                -> [UserInput.Image]
+            {
+                segments.compactMap { segment -> UserInput.Image? in
+                    guard case .attachment(let attachment) = segment,
+                        case .image(let imageAttachment) = attachment.content
+                    else {
+                        return nil
+                    }
+                    if let url = imageAttachment.url {
+                        return .url(url)
+                    }
+                    return .ciImage(imageAttachment.ciImage)
+                }
             }
         }
 
