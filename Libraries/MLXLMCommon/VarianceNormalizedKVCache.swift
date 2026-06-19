@@ -382,15 +382,131 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         }
     }
 
+    private func stackedTileScores(
+        rotatedQueries: MLXArray,
+        scale: Float
+    ) -> MLXArray {
+        let tileCount = tiles.count
+        let (batchSize, queryHeadCount, queryLength, headDim) = (
+            rotatedQueries.dim(0), rotatedQueries.dim(1), rotatedQueries.dim(2),
+            rotatedQueries.dim(3)
+        )
+        let kvHeadCount = tiles[0].keyWeight.dim(1)
+        let repeats = queryHeadCount / kvHeadCount
+        let keyWeights = MLX.stacked(tiles.map(\.keyWeight), axis: 2)
+        let keyScales = MLX.stacked(tiles.map(\.keyScales), axis: 2)
+        let keyBiases = MLX.stacked(tiles.map(\.keyBiases), axis: 2)
+        let keyColumnScales = MLX.stacked(tiles.map(\.keyColumnScales), axis: 2)
+
+        if repeats > 1 {
+            let groupedQueries = rotatedQueries.reshaped([
+                batchSize, kvHeadCount, repeats, queryLength, headDim,
+            ])
+            let scores =
+                quantizedMM(
+                    expandedDimensions(groupedQueries, axis: 2),
+                    expandedDimensions(keyWeights, axis: 3),
+                    scales: expandedDimensions(keyScales, axis: 3),
+                    biases: expandedDimensions(keyBiases, axis: 3),
+                    transpose: false,
+                    groupSize: tileSize,
+                    bits: keyBits,
+                    mode: .affine
+                ) * expandedDimensions(keyColumnScales, axis: 3) * scale
+            return
+                scores
+                .transposed(0, 1, 3, 4, 2, 5)
+                .reshaped(batchSize, queryHeadCount, queryLength, tileCount * tileSize)
+        } else {
+            let scores =
+                quantizedMM(
+                    expandedDimensions(rotatedQueries, axis: 2),
+                    keyWeights,
+                    scales: keyScales,
+                    biases: keyBiases,
+                    transpose: false,
+                    groupSize: tileSize,
+                    bits: keyBits,
+                    mode: .affine
+                ) * keyColumnScales * scale
+            return
+                scores
+                .transposed(0, 1, 3, 2, 4)
+                .reshaped(batchSize, queryHeadCount, queryLength, tileCount * tileSize)
+        }
+    }
+
+    private func stackedTileValues(
+        weights: MLXArray,
+        queryHeadCount: Int
+    ) -> MLXArray {
+        let tileCount = tiles.count
+        let (batchSize, _, queryLength, _) = (
+            weights.dim(0), weights.dim(1), weights.dim(2), weights.dim(3)
+        )
+        let kvHeadCount = tiles[0].valueWeight.dim(1)
+        let repeats = queryHeadCount / kvHeadCount
+        let valueHeadDim = tiles[0].valueColumnScales.dim(-1)
+        let groupSize = validatedValueGroupSize(valueHeadDim)
+        let valueWeights = MLX.stacked(tiles.map(\.valueWeight), axis: 2)
+        let valueScales = MLX.stacked(tiles.map(\.valueScales), axis: 2)
+        let valueBiases = MLX.stacked(tiles.map(\.valueBiases), axis: 2)
+        let valueColumnScales = MLX.stacked(tiles.map(\.valueColumnScales), axis: 2)
+
+        if repeats > 1 {
+            let groupedWeights =
+                weights
+                .reshaped([batchSize, kvHeadCount, repeats, queryLength, tileCount, tileSize])
+                .transposed(0, 1, 4, 2, 3, 5)
+            let output =
+                quantizedMM(
+                    groupedWeights,
+                    expandedDimensions(valueWeights, axis: 3),
+                    scales: expandedDimensions(valueScales, axis: 3),
+                    biases: expandedDimensions(valueBiases, axis: 3),
+                    transpose: false,
+                    groupSize: groupSize,
+                    bits: valueBits,
+                    mode: .affine
+                ) * expandedDimensions(valueColumnScales, axis: 3)
+            return
+                output
+                .sum(axis: 2)
+                .reshaped(batchSize, queryHeadCount, queryLength, valueHeadDim)
+        } else {
+            let groupedWeights =
+                weights
+                .reshaped([batchSize, queryHeadCount, queryLength, tileCount, tileSize])
+                .transposed(0, 1, 3, 2, 4)
+            let output =
+                quantizedMM(
+                    groupedWeights,
+                    valueWeights,
+                    scales: valueScales,
+                    biases: valueBiases,
+                    transpose: false,
+                    groupSize: groupSize,
+                    bits: valueBits,
+                    mode: .affine
+                ) * valueColumnScales
+            return output.sum(axis: 2)
+        }
+    }
+
     private func quantizedRotatedAttention(
         queries: MLXArray,
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
         let rotatedQueries = rotate(queries)
-        var scoreParts = tiles.map { tile in
-            quantizedTileScores(rotatedQueries: rotatedQueries, tile: tile, scale: scale)
-        }
+        var scoreParts =
+            if tiles.count > 1 {
+                [stackedTileScores(rotatedQueries: rotatedQueries, scale: scale)]
+            } else {
+                tiles.map { tile in
+                    quantizedTileScores(rotatedQueries: rotatedQueries, tile: tile, scale: scale)
+                }
+            }
         if let tailKeys {
             scoreParts.append(
                 attentionScores(queries: rotatedQueries, keys: tailKeys, scale: scale))
@@ -401,15 +517,24 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
 
         var start = 0
         var rotatedOutputParts: [MLXArray] = []
-        for tile in tiles {
-            let end = start + tileSize
-            let tileWeights = weights[.ellipsis, start ..< end]
+        if tiles.count > 1 {
+            let end = tiles.count * tileSize
             rotatedOutputParts.append(
-                quantizedTileValues(
-                    weights: tileWeights,
-                    tile: tile,
+                stackedTileValues(
+                    weights: weights[.ellipsis, start ..< end],
                     queryHeadCount: queries.dim(1)))
             start = end
+        } else {
+            for tile in tiles {
+                let end = start + tileSize
+                let tileWeights = weights[.ellipsis, start ..< end]
+                rotatedOutputParts.append(
+                    quantizedTileValues(
+                        weights: tileWeights,
+                        tile: tile,
+                        queryHeadCount: queries.dim(1)))
+                start = end
+            }
         }
 
         if let tailValues {

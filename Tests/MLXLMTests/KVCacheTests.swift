@@ -291,6 +291,65 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(nativeCache.metaState == ["32", "33", "4", "4", "2", "1", "1"])
 }
 
+@Test func testVarianceNormalizedKVCacheStackedTileAttentionMatchesMaterializedAttention() {
+    let nativeCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let materializedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let queries = MLXRandom.normal([1, 1, 2, 32]).asType(.float16)
+    let keys = MLXRandom.normal([1, 1, 96, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 1, 96, 32]).asType(.float16)
+    let scale = 1 / sqrt(Float(32))
+
+    let native = attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: nativeCache,
+        scale: scale)
+    let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+    let materialized = attentionWithCacheUpdate(
+        queries: queries,
+        keys: cachedKeys,
+        values: cachedValues,
+        cache: nil,
+        scale: scale)
+    eval(native, materialized)
+
+    #expect(relativeRMSError(native, materialized) < 1e-3)
+    #expect(nativeCache.metaState == ["32", "96", "4", "4", "2", "3", "0"])
+}
+
+@Test func testVarianceNormalizedKVCacheStackedTileAttentionSupportsGQA() {
+    let nativeCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let materializedCache = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let queries = MLXRandom.normal([1, 4, 2, 32]).asType(.float16)
+    let keys = MLXRandom.normal([1, 2, 96, 32]).asType(.float16)
+    let values = MLXRandom.normal([1, 2, 96, 32]).asType(.float16)
+    let scale = 1 / sqrt(Float(32))
+
+    let native = attentionWithCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: nativeCache,
+        scale: scale)
+    let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+    let materialized = attentionWithCacheUpdate(
+        queries: queries,
+        keys: cachedKeys,
+        values: cachedValues,
+        cache: nil,
+        scale: scale)
+    eval(native, materialized)
+
+    #expect(relativeRMSError(native, materialized) < 1e-3)
+    #expect(native.shape == [1, 4, 2, 32])
+    #expect(nativeCache.metaState == ["32", "96", "4", "4", "2", "3", "0"])
+}
+
 @Test func testApplyAttentionMaskSuppressesBoolMaskedLogits() {
     let scores = MLXArray([Float(-10), Float(-20), Float(-30)]).reshaped(1, 1, 1, 3)
     let mask = MLXArray([true, false, false]).reshaped(1, 1, 1, 3)
