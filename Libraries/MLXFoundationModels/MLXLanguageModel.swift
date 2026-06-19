@@ -886,6 +886,25 @@
                         collected = [Chat.Message.user("")]
                     }
                     let messages = collected
+
+                    // Vision capability gate (adapter-side). Labeled image
+                    // attachments arrive as public `.attachment` segments that
+                    // the SDK's own vision guard never inspects, so the adapter
+                    // is the only place that can enforce `.vision` for this path.
+                    // Throw the same typed error the SDK would, before loading
+                    // any weights, so a model declared without `.vision` fails
+                    // fast and identically across the tool / schema / plain paths.
+                    if !model.capabilities.contains(.vision),
+                        messages.contains(where: { !$0.images.isEmpty })
+                    {
+                        throw LanguageModelError.unsupportedCapability(
+                            LanguageModelError.UnsupportedCapability(
+                                capability: .vision,
+                                debugDescription:
+                                    "This request includes an image, but .vision was not declared at MLXLanguageModel init. Declare .vision to accept image inputs."
+                            ))
+                    }
+
                     let container = try await MLXLanguageModel.loadContainer(
                         modelID: model.modelID,
                         from: model.downloader,
