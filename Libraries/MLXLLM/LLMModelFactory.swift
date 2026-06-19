@@ -32,6 +32,7 @@ public enum LLMTypeRegistry {
         "gemma3_text": create(Gemma3TextConfiguration.self, Gemma3TextModel.init),
         "gemma3n": create(Gemma3nTextConfiguration.self, Gemma3nTextModel.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
+        "gemma4_unified": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
         "qwen2": create(Qwen2Configuration.self, Qwen2Model.init),
         "qwen3": create(Qwen3Configuration.self, Qwen3Model.init),
@@ -76,6 +77,8 @@ public enum LLMTypeRegistry {
         "jamba": create(JambaConfiguration.self, JambaModel.init),
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
+        "nemotron_labs_diffusion": create(
+            NemotronLabsDiffusionConfiguration.self, NemotronLabsDiffusionModel.init),
     ])
 }
 
@@ -376,6 +379,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: ""
     )
 
+    static public let nemotron_labs_diffusion_3b_4bit = ModelConfiguration(
+        id: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
+        defaultPrompt: "Explain quaternions."
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -431,6 +439,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             nanochat_d20_mlx,
             gpt_oss_20b_MXFP4_Q8,
             jamba_3b_4bit,
+            nemotron_labs_diffusion_3b_4bit,
         ]
     }
 

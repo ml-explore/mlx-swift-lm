@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import IntegrationTestHelpers
 import MLXLMCommon
 import MLXVLM
 import Testing
@@ -11,15 +12,9 @@ import Testing
 func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws {
     // Look for the 31B-assistant-bf16 checkpoint in the HF cache; skip
     // gracefully when absent.
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let hub = home.appendingPathComponent(".cache/huggingface/hub")
-    let folder = hub.appendingPathComponent(
-        "models--mlx-community--gemma-4-31B-it-assistant-bf16/snapshots"
-    )
     guard
-        let entries = try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil),
-        let snapshot = entries.first
+        let snapshot = hfSnapshotDir(
+            modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
     else {
         Issue.record("31B-assistant-bf16 checkpoint not in HF cache; skipping factory load test")
         return

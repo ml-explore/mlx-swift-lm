@@ -85,12 +85,46 @@ public protocol KVCache: Evaluatable {
 
     /// Create an independent deep copy of this cache.
     func copy() -> any KVCache
+
+    /// Prepare cache metadata for a batched sequence.
+    func prepare(lengths: [Int]?)
+
+    /// Prepare cache metadata for a batched sequence.
+    func prepare(lengths: MLXArray?)
+
+    /// Clear transient cache metadata after generation.
+    func finalize()
 }
 
 extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
     }
+
+    public func prepare(lengths: [Int]?) {}
+
+    public func prepare(lengths: MLXArray?) {}
+
+    public func finalize() {}
+}
+
+public func withPreparedCache<Result>(
+    _ cache: [any KVCache],
+    lengths: [Int]?,
+    _ body: () throws -> Result
+) rethrows -> Result {
+    guard let lengths else {
+        return try body()
+    }
+    for cache in cache {
+        cache.prepare(lengths: lengths)
+    }
+    defer {
+        for cache in cache {
+            cache.finalize()
+        }
+    }
+    return try body()
 }
 
 /// Protocol for caches that support efficient quantized operations
@@ -172,6 +206,12 @@ open class BaseKVCache: KVCache {
     open func copy() -> any KVCache {
         fatalError("copy() must be implemented by subclass")
     }
+
+    open func prepare(lengths: [Int]?) {}
+
+    open func prepare(lengths: MLXArray?) {}
+
+    open func finalize() {}
 
     /// Default implementation for caches without special mask requirements
     open func makeMask(
@@ -1163,7 +1203,7 @@ public class ChunkedKVCache: KVCacheSimple {
 
 /// Base cache for array-based state storage
 public class ArraysCache: BaseKVCache {
-    private var cache: [MLXArray?]
+    fileprivate var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
 
@@ -1198,10 +1238,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     internal func copyContents(to new: ArraysCache) {
-        let s = self.state
-        if !s.isEmpty {
-            new.state = s.map { $0[.ellipsis] }
-        }
+        new.cache = cache.map { $0?[.ellipsis] }
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
@@ -1244,15 +1281,15 @@ public class ArraysCache: BaseKVCache {
         lengths = concatenate(lengths, other.lengths)
     }
 
-    public func prepare(lengths: [Int]?) {
+    public override func prepare(lengths: [Int]?) {
         self.lengths = lengths.map { MLXArray($0) }
     }
 
-    public func prepare(lengths: MLXArray?) {
+    public override func prepare(lengths: MLXArray?) {
         self.lengths = lengths
     }
 
-    public func finalize() {
+    public override func finalize() {
         lengths = nil
         leftPadding = nil
     }
@@ -1273,6 +1310,11 @@ public class ArraysCache: BaseKVCache {
     internal var leftPaddingValues: [Int]? {
         guard let leftPadding else { return nil }
         return leftPadding.asArray(Int.self)
+    }
+
+    internal var lengthsValues: [Int]? {
+        guard let lengths else { return nil }
+        return lengths.asArray(Int.self)
     }
 
     internal var presentSlotIndices: [Int] {
@@ -1412,26 +1454,16 @@ public class CacheList: BaseKVCache {
         return new
     }
 
-    public func prepare(lengths: [Int]?) {
-        forEachArraysCache { $0.prepare(lengths: lengths) }
+    public override func prepare(lengths: [Int]?) {
+        caches.forEach { $0.prepare(lengths: lengths) }
     }
 
-    public func prepare(lengths: MLXArray?) {
-        forEachArraysCache { $0.prepare(lengths: lengths) }
+    public override func prepare(lengths: MLXArray?) {
+        caches.forEach { $0.prepare(lengths: lengths) }
     }
 
-    public func finalize() {
-        forEachArraysCache { $0.finalize() }
-    }
-
-    private func forEachArraysCache(_ body: (ArraysCache) -> Void) {
-        for cache in caches {
-            if let arrays = cache as? ArraysCache {
-                body(arrays)
-            } else if let list = cache as? CacheList {
-                list.forEachArraysCache(body)
-            }
-        }
+    public override func finalize() {
+        caches.forEach { $0.finalize() }
     }
 
     public override var isTrimmable: Bool {

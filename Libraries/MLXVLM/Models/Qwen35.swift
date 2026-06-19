@@ -538,7 +538,7 @@ enum Qwen35Language {
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
             if let cache, convKernelSize > 1 {
-                cache[0] = convInput[0..., (-(convKernelSize - 1))...]
+                cache[0] = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
             }
 
             let convOut = silu(conv1d(convInput))
@@ -572,6 +572,7 @@ enum Qwen35Language {
 
             if let cache {
                 cache[1] = state
+                cache.advance(S)
             }
 
             out = norm(out, gate: z)
@@ -1025,17 +1026,19 @@ public class Qwen35: Module, VLMModel {
         }
 
         let typedCache = castCache(cache)
-        let output = languageModel(
-            inputIds,
-            inputsEmbeds: inputEmbeddings,
-            cache: typedCache,
-            state: nil,
-            mask: input.text.mask,
-            positionIds: nil,
-            pixelValues: pixelValues,
-            imageGridTHW: imageFrames,
-            videoGridTHW: videoFrames
-        )
+        let output = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
+            languageModel(
+                inputIds,
+                inputsEmbeds: inputEmbeddings,
+                cache: typedCache,
+                state: nil,
+                mask: input.text.mask,
+                positionIds: nil,
+                pixelValues: pixelValues,
+                imageGridTHW: imageFrames,
+                videoGridTHW: videoFrames
+            )
+        }
 
         return .logits(output)
     }

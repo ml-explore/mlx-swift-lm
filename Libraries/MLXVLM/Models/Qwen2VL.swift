@@ -1007,6 +1007,13 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
         // ropeDeltas (both nil on the no-image path). The LMOutput's `state`
         // returned here is consumed by subsequent decode steps via
         // `callAsFunction(_:cache:state:)`.
+        //
+        // NOTE: this intentionally does a single-shot prefill rather than the
+        // windowSize-chunked prefill added for other VLMs in #344. Mirroring
+        // Qwen25VL.swift, M-RoPE feeds `positionIds` ([3, batch, seq]) through
+        // decoder state; chunking the embeddings without slicing positionIds in
+        // lockstep would feed wrong positions to M-RoPE. Qwen25VL.swift is
+        // likewise left un-chunked for the same reason.
         var state = LMOutput.State()
         if let positionIds {
             state[positionIdsKey] = positionIds

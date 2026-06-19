@@ -31,6 +31,26 @@ private func assertArraysClose(_ lhs: [MLXArray], _ rhs: [MLXArray], label: Stri
     }
 }
 
+private final class LifecycleRecordingCache: BaseKVCache {
+    private(set) var preparedLengths: [Int]?
+    private(set) var finalizeCallCount = 0
+
+    override func prepare(lengths: [Int]?) {
+        preparedLengths = lengths
+    }
+
+    override func finalize() {
+        finalizeCallCount += 1
+    }
+
+    override func copy() -> any KVCache {
+        let new = LifecycleRecordingCache()
+        new.preparedLengths = preparedLengths
+        new.finalizeCallCount = finalizeCallCount
+        return new
+    }
+}
+
 // MARK: - Original parameterized test (updated with value assertions)
 
 @Test(
@@ -168,6 +188,88 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     assertArraysClose(restored.state, cache.state)
 }
 
+@Test func testArraysCacheMaskUsesLeftPaddingAfterStateUpdate() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [1, 3])
+    cache[0] = MLXArray.ones([2, 4], dtype: .float32)
+
+    let mask = try #require(cache.makeMask(N: 4))
+    #expect(
+        mask.asArray(Bool.self) == [
+            false, true, true, true,
+            false, false, false, true,
+        ])
+}
+
+@Test func testArraysCacheAdvanceUpdatesSequenceMetadataOnly() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [3, 5])
+    cache.offset = 7
+    cache.prepare(lengths: [4, 6])
+
+    cache.advance(2)
+
+    #expect(cache.offset == 7)
+    #expect(cache.leftPaddingValues == [1, 3])
+    #expect(cache.lengthsValues == [2, 4])
+}
+
+@Test func testArraysCacheMaskUsesLengthsWhenLeftPaddingIsAbsent() throws {
+    let cache = ArraysCache(size: 2)
+    cache.prepare(lengths: [1, 3])
+
+    let mask = try #require(cache.makeMask(N: 4))
+    #expect(
+        mask.asArray(Bool.self) == [
+            true, false, false, false,
+            true, true, true, false,
+        ])
+}
+
+@Test func testTextSequenceLengthsComeFromAttentionMask() throws {
+    let tokens = MLXArray(0 ..< 8).reshaped(2, 4)
+    let mask = MLXArray([1, 1, 0, 0, 1, 1, 1, 0]).reshaped(2, 4)
+    let text = LMInput.Text(tokens: tokens, mask: mask)
+
+    #expect(text.sequenceLengths == [2, 3])
+}
+
+@Test func testTextSequenceLengthsInferUniformBatches() throws {
+    let text = LMInput.Text(tokens: MLXArray(0 ..< 8).reshaped(2, 4))
+
+    #expect(text.sequenceLengths == [4, 4])
+}
+
+@Test func testCacheListForwardsPrepareAndFinalize() throws {
+    let arrays = ArraysCache(size: 2)
+    let cache = CacheList(arrays, KVCacheSimple())
+
+    cache.prepare(lengths: [2, 4])
+    #expect(arrays.lengthsValues == [2, 4])
+
+    cache.finalize()
+    #expect(arrays.lengthsValues == nil)
+}
+
+@Test func testCacheListForwardsLifecycleThroughKVCacheProtocol() throws {
+    let lifecycle = LifecycleRecordingCache()
+    let cache = CacheList(KVCacheSimple(), lifecycle)
+
+    cache.prepare(lengths: [2, 4])
+    #expect(lifecycle.preparedLengths == [2, 4])
+
+    cache.finalize()
+    #expect(lifecycle.finalizeCallCount == 1)
+}
+
+@Test func testWithPreparedCacheScopesSequenceMetadata() throws {
+    let cache = ArraysCache(size: 2)
+
+    withPreparedCache([cache], lengths: [2, 4]) {
+        #expect(cache.lengthsValues == [2, 4])
+    }
+
+    #expect(cache.lengthsValues == nil)
+}
+
 @Test func testArraysCacheLengthsRoundTrip() throws {
     let cache = ArraysCache(size: 2)
     cache.prepare(lengths: [4, 2])
@@ -179,6 +281,7 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 
     let restored = try #require(loaded[0] as? ArraysCache)
     #expect(restored.currentLengths?.asArray(Int.self) == [4, 2])
+    #expect(restored.lengthsValues == [4, 2])
     assertArraysClose(restored.state, cache.state)
 }
 
@@ -307,6 +410,48 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(copied.currentLengths?.asArray(Int.self) == [5, 3])
     #expect(copied[0]?.shape == [2, 3, 4])
     #expect(copied[1]?.shape == [2, 1, 4, 4])
+}
+
+@Test func testArraysCacheFilterKeepsSequenceMetadata() throws {
+    let cache = ArraysCache(size: 2, leftPadding: [1, 3])
+    cache.prepare(lengths: [2, 4])
+    cache[0] = MLXArray.ones([2, 4], dtype: .float32)
+
+    cache.filter(batchIndices: MLXArray([1]))
+
+    #expect(cache.leftPaddingValues == [3])
+    #expect(cache.lengthsValues == [4])
+}
+
+@Test func testArraysCacheExtendPadsMissingSlotsAndMetadata() throws {
+    let first = ArraysCache(size: 2, leftPadding: [1, 3])
+    first.prepare(lengths: [2, 4])
+    first[0] = MLXArray.ones([2, 4], dtype: .float32)
+
+    let second = ArraysCache(size: 2)
+    second[1] = MLXArray.ones([1, 4], dtype: .float32) * 2
+
+    first.extend(other: second)
+
+    #expect(first[0]?.shape == [3, 4])
+    #expect(first[1]?.shape == [3, 4])
+    #expect(first.leftPaddingValues == [1, 3, 0])
+    #expect(first.lengthsValues == [2, 4, 0])
+}
+
+@Test func testArraysCacheCopyPreservesSparseSlotsAndMetadata() throws {
+    let cache = ArraysCache(size: 3, leftPadding: [2])
+    cache.prepare(lengths: [5])
+    cache[2] = MLXArray.ones([1, 4], dtype: .float32)
+
+    let copied = try #require(cache.copy() as? ArraysCache)
+
+    #expect(copied.slotCount == 3)
+    #expect(copied[0] == nil)
+    #expect(copied[1] == nil)
+    #expect(copied[2] != nil)
+    #expect(copied.leftPaddingValues == [2])
+    #expect(copied.lengthsValues == [5])
 }
 
 // MARK: - MambaCache type preservation
