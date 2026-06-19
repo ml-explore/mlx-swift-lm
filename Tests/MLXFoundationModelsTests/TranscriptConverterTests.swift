@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+import CoreGraphics
 import Foundation
 import FoundationModels
 import MLXLMCommon
@@ -216,6 +217,49 @@ import Testing
             #expect(messages.count == 1)
             #expect(messages[0].role == .user)
             #expect(messages[0].content == "Hi")
+        }
+
+        @Test
+        func testLabeledImageAttachmentBecomesUserMessageImage() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let attachment = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+                label: "photo")
+            let prompt = Transcript.Prompt(
+                segments: [
+                    .text(Transcript.TextSegment(content: "Describe this")),
+                    .attachment(attachment),
+                ],
+                responseFormat: nil
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].role == .user)
+            #expect(messages[0].content == "Describe this")
+            #expect(messages[0].images.count == 1)
+        }
+
+        @Test
+        func testImageOnlyPromptStillProducesMessageWithImage() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let attachment = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+                label: "photo")
+            let prompt = Transcript.Prompt(
+                segments: [.attachment(attachment)],
+                responseFormat: nil
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].role == .user)
+            #expect(messages[0].content == "")
+            #expect(messages[0].images.count == 1)
         }
 
     }
