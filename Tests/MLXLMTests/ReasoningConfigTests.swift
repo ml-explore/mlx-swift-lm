@@ -119,8 +119,8 @@ struct ReasoningConfigTests {
     /// thinking on a `.none` strategy must throw `cannotDisableReasoning`
     /// rather than silently returning nil. The capability gate in the FM
     /// adapter relies on this throw to surface `unsupportedCapability` for
-    /// any future profile that resolves `.none` (today nothing in
-    /// `ReasoningConfig.infer` does, but a custom customizer could).
+    /// any future configuration that resolves `.none` (today nothing in
+    /// `ReasoningConfig.infer` does, but a custom resolver could).
     @Test func noneStrategyThrowsWhenDisabled() {
         #expect(throws: ReasoningError.cannotDisableReasoning) {
             try ReasoningPromptStrategy.none.additionalContext(forThinkingEnabled: false)

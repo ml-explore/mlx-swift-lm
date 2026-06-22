@@ -219,7 +219,7 @@
         /// let cache = HubCache.default
         /// let repoID = Repo.ID(rawValue: "mlx-community/Qwen2.5-3B-Instruct-4bit")!
         /// let model = MLXLanguageModel(
-        ///     modelIdentifier: repoID.rawValue,
+        ///     modelID: repoID.rawValue,
         ///     capabilities: LanguageModelCapabilities(
         ///         capabilities: [.guidedGeneration, .toolCalling]),
         ///     from: HubClient.default,
@@ -250,7 +250,7 @@
             private static let cache = ModelCache()
 
             /// The model identifier to load.
-            public let modelIdentifier: String
+            public let modelID: String
 
             /// Downloader used to fetch model snapshots when the cache misses.
             public let downloader: any Downloader
@@ -401,7 +401,7 @@
             /// calling via the synthetic-final-answer envelope, and reasoning
             /// (chain-of-thought) routing on the unconstrained generation path.
             ///
-            /// Capabilities are declared explicitly by the caller at ``init(modelIdentifier:capabilities:customizer:from:using:locatedBy:)``
+            /// Capabilities are declared explicitly by the caller at ``init(modelID:capabilities:configurationResolver:from:using:locatedBy:)``
             /// and stored verbatim. The caller includes
             /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
             /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -414,63 +414,64 @@
             /// capability was declared.
             public let capabilities: LanguageModelCapabilities
 
-            /// The model customizer that vends a per-call ``ModelProfile`` for this
-            /// instance. Defaults to ``InferringCustomizer`` via the convenience init.
-            public let customizer: any ModelCustomizer
+            /// The configuration resolver that patches a per-call ``ModelConfiguration``
+            /// for this instance. Defaults to ``DefaultConfigurationResolver`` via the
+            /// convenience init.
+            public let configurationResolver: any ModelConfigurationResolver
 
             /// Configuration the framework uses to create and cache executors.
             public var executorConfiguration: Executor.Configuration {
-                Executor.Configuration(modelIdentifier: modelIdentifier)
+                Executor.Configuration(modelID: modelID)
             }
 
             // MARK: - Initialization
 
             /// Creates an MLXLanguageModel instance with explicitly declared
-            /// capabilities and an optional model customizer.
+            /// capabilities and a configuration resolver.
             ///
             /// Model loading is deferred until first inference or preload.
             ///
             /// - Parameters:
-            ///   - modelIdentifier: The model identifier (e.g., "mlx-community/Qwen3-4B-4bit").
+            ///   - modelID: The model identifier (e.g., "mlx-community/Qwen3-4B-4bit").
             ///   - capabilities: The capabilities this model supports
             ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`). Declared
             ///     verbatim; the adapter does not infer or expand the set.
-            ///   - customizer: The ``ModelCustomizer`` that vends a per-call
-            ///     ``ModelProfile`` (reasoning config, tool-call format, extra stop
-            ///     tokens) for this instance.
+            ///   - configurationResolver: The ``ModelConfigurationResolver`` that
+            ///     patches a per-call ``ModelConfiguration`` (reasoning config, extra
+            ///     stop tokens) for this instance.
             ///   - downloader: The ``Downloader`` used to fetch model snapshots.
             ///   - tokenizerLoader: The ``TokenizerLoader`` used to materialize the tokenizer.
             ///   - weightsLocation: Resolves a model identifier to the on-disk weights URL.
             public init(
-                modelIdentifier: String,
+                modelID: String,
                 capabilities: LanguageModelCapabilities,
-                customizer: any ModelCustomizer,
+                configurationResolver: any ModelConfigurationResolver,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
                 locatedBy weightsLocation: @Sendable @escaping (String) -> URL
             ) {
-                self.modelIdentifier = modelIdentifier
+                self.modelID = modelID
                 self.capabilities = capabilities
-                self.customizer = customizer
+                self.configurationResolver = configurationResolver
                 self.downloader = downloader
                 self.tokenizerLoader = tokenizerLoader
                 self.weightsLocation = weightsLocation
             }
 
-            /// Convenience init that defaults the customizer to ``InferringCustomizer``
-            /// — the zero-config path where ``ModelProfile/inferred(for:)`` drives all
-            /// per-model behavior.
+            /// Convenience init that defaults the configuration resolver to
+            /// ``DefaultConfigurationResolver`` — the zero-config path where the
+            /// factory-inferred ``ModelConfiguration`` drives all per-model behavior.
             public init(
-                modelIdentifier: String,
+                modelID: String,
                 capabilities: LanguageModelCapabilities,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
                 locatedBy weightsLocation: @Sendable @escaping (String) -> URL
             ) {
                 self.init(
-                    modelIdentifier: modelIdentifier,
+                    modelID: modelID,
                     capabilities: capabilities,
-                    customizer: InferringCustomizer(),
+                    configurationResolver: DefaultConfigurationResolver(),
                     from: downloader,
                     using: tokenizerLoader,
                     locatedBy: weightsLocation)
@@ -491,7 +492,7 @@
             /// Safe to call multiple times -- subsequent calls return immediately from cache.
             public func preload() async throws {
                 _ = try await Self.loadContainer(
-                    modelID: modelIdentifier,
+                    modelID: modelID,
                     from: downloader,
                     using: tokenizerLoader
                 )
@@ -531,7 +532,7 @@
                 // present falsely report `.available`).
                 let alreadyOnDisk = modelExistsOnDisk()
                 let container = try await Self.loadContainerForWarmup(
-                    modelID: modelIdentifier,
+                    modelID: modelID,
                     from: downloader,
                     using: tokenizerLoader,
                     suppressDownloadingState: alreadyOnDisk
@@ -554,7 +555,7 @@
                 // pre-built constraint would land under a key no real respond() reads.
                 let tokenizer = await container.tokenizer
                 _ = try await Self.makeXGTokenizer(
-                    modelID: modelIdentifier, tokenizer: tokenizer)
+                    modelID: modelID, tokenizer: tokenizer)
 
                 // Force Metal shader JIT with a minimal 1-token generate, run inside
                 // `perform` so the forward pass + synchronize serialize against any
@@ -690,15 +691,15 @@
                 /// Configuration for creating and caching executors.
                 public struct Configuration: Hashable, Sendable {
                     /// The model identifier this executor uses for loading and metadata.
-                    public let modelIdentifier: String
+                    public let modelID: String
                 }
 
                 /// The model identifier this executor uses for loading and metadata.
-                let modelIdentifier: String
+                let modelID: String
 
                 /// Creates an executor from a configuration.
                 public init(configuration: Configuration) throws {
-                    self.modelIdentifier = configuration.modelIdentifier
+                    self.modelID = configuration.modelID
                 }
 
                 /// Logs warmup failures from the fire-and-forget `prewarm` path. A
@@ -737,7 +738,7 @@
                             try await model.warmUp()
                         } catch {
                             Self.logger.error(
-                                "MLX prewarm failed for \(model.modelIdentifier, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                                "MLX prewarm failed for \(model.modelID, privacy: .public): \(error.localizedDescription, privacy: .public)"
                             )
                         }
                     }
@@ -761,7 +762,7 @@
                     }
                     let messages = collected
                     let container = try await MLXLanguageModel.loadContainer(
-                        modelID: model.modelIdentifier,
+                        modelID: model.modelID,
                         from: model.downloader,
                         using: model.tokenizerLoader
                     )
@@ -774,7 +775,7 @@
                         schemaJSON = nil
                     }
 
-                    let modelID = modelIdentifier
+                    let modelID = self.modelID
                     let requestedMaxTokens = request.generationOptions.maximumResponseTokens
                     // Translate the SDK sampling mode once, here where generationOptions
                     // is in scope; thread the bridge-local value down to every
@@ -790,10 +791,10 @@
                     let reasoningEntryID = UUID().uuidString
                     // Captured before the actor hop so the perform closure doesn't
                     // capture `model`. Reasoning is gated strictly on the declared
-                    // capability; the customizer-vended ModelProfile
-                    // supplies the reasoning config we route on.
+                    // capability; the resolver-patched configuration supplies the
+                    // reasoning config we route on.
                     let declaresReasoning = model.capabilities.contains(.reasoning)
-                    let customizer = model.customizer
+                    let configurationResolver = model.configurationResolver
 
                     do {
                         // Send metadata first
@@ -801,7 +802,7 @@
                             .response(
                                 entryID: entryID,
                                 action: .updateMetadata([
-                                    "modelIdentifier": modelID,
+                                    "modelID": modelID,
                                     "requestID": request.id.uuidString,
                                 ])))
 
@@ -837,11 +838,13 @@
                                 }
                             }
 
-                            // Resolve the per-instance ModelProfile.
-                            // Held strictly as a local; it never lands in
-                            // context.configuration or Executor.Configuration, so two
-                            // instances with the same id but different customizers
-                            // don't cross-contaminate through the shared caches.
+                            // Resolve the per-instance configuration. Held strictly as
+                            // a local; it never lands in context.configuration or
+                            // Executor.Configuration, so two instances with the same id
+                            // but different resolvers don't cross-contaminate through
+                            // the shared caches. Identity is read from
+                            // context.configuration (above, at load time) and never
+                            // from `resolved`.
                             let configData = try? Data(
                                 contentsOf:
                                     context.configuration.modelDirectory
@@ -852,16 +855,17 @@
                                         BaseConfiguration.self, from: $0
                                     ).modelType
                                 } ?? ""
-                            let loadedContext = LoadedModelContext(
+                            let descriptor = ModelDescriptor(
                                 modelType: modelType,
                                 modelId: modelID,
                                 configData: configData,
                                 tokenizer: context.tokenizer)
-                            let profile = customizer.profile(for: loadedContext)
+                            let resolved = configurationResolver.resolve(
+                                context.configuration, for: descriptor)
 
-                            // Capability gate. When the caller omits
-                            // `.reasoning` but the profile resolved a reasoning config,
-                            // the model must not be allowed to think:
+                            // Capability gate. When the caller omits `.reasoning`
+                            // but the resolved configuration carries a reasoning
+                            // config, the model must not be allowed to think:
                             //
                             // - Toggleable strategies (`.templateFlag`) re-render the
                             //   prompt with thinking off (handled below per path).
@@ -874,7 +878,8 @@
                             //   same typed error the unconstrained path does, never a
                             //   silent leak through the grammar's malformed-output
                             //   fallback.
-                            if !declaresReasoning, let suppressionConfig = profile.reasoningConfig {
+                            if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig
+                            {
                                 do {
                                     _ = try suppressionConfig.promptStrategy
                                         .additionalContext(forThinkingEnabled: false)
@@ -903,7 +908,7 @@
                             // .alwaysOn was already rejected above.
                             let suppressedInput: LMInput?
                             if mayRunReasoningPath, !declaresReasoning,
-                                let suppressionConfig = profile.reasoningConfig
+                                let suppressionConfig = resolved.reasoningConfig
                             {
                                 suppressedInput = try await Self.preparedInput(
                                     messages: messages, config: suppressionConfig,
@@ -918,7 +923,7 @@
                             let reasoningSetup:
                                 (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
                             if mayRunReasoningPath, declaresReasoning,
-                                let reasoningConfig = profile.reasoningConfig
+                                let reasoningConfig = resolved.reasoningConfig
                             {
                                 let thinkingEnabled = Self.thinkingEnabled(
                                     for: request.contextOptions.reasoningLevel)
@@ -982,7 +987,7 @@
                                 // thinking-disabled requests stay single-phase too.
                                 let thinkThenCallConfig: ReasoningConfig? = {
                                     guard declaresReasoning,
-                                        let cfg = profile.reasoningConfig,
+                                        let cfg = resolved.reasoningConfig,
                                         case .templateFlag = cfg.promptStrategy,
                                         Self.thinkingEnabled(
                                             for: request.contextOptions.reasoningLevel) != false
@@ -1122,7 +1127,7 @@
                                         closingBias: closingBias,
                                         whitespaceBias: whitespaceBias,
                                         whitespaceTokenIDs: whitespaceTokenIDs,
-                                        additionalStopTokens: profile.extraEOSTokens
+                                        additionalStopTokens: resolved.extraEOSTokens
                                     ) { text in
                                         outputBuffer += text
                                         return !Task.isCancelled
@@ -1246,7 +1251,7 @@
                                         closingBias: closingBias,
                                         whitespaceBias: whitespaceBias,
                                         whitespaceTokenIDs: whitespaceTokenIDs,
-                                        additionalStopTokens: profile.extraEOSTokens
+                                        additionalStopTokens: resolved.extraEOSTokens
                                     ) { text in
                                         textContinuation.yield(text)
                                         return !Task.isCancelled
@@ -1290,7 +1295,7 @@
                                     requestedMaxTokens: requestedMaxTokens,
                                     requestedTemperature: request.generationOptions.temperature,
                                     samplingMode: requestedSamplingMode,
-                                    additionalStopTokens: profile.extraEOSTokens,
+                                    additionalStopTokens: resolved.extraEOSTokens,
                                     responseEntryID: entryID,
                                     reasoningEntryID: reasoningEntryID,
                                     context: context,

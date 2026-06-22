@@ -95,7 +95,7 @@
                     // warmup of an already-present model is deliberately excluded here
                     // (it is not a user-facing download), so it does not flip an
                     // already-`.available` model to `.downloading`.
-                    if await Self.isDownloadingInCache(modelID: modelIdentifier) {
+                    if await Self.isDownloadingInCache(modelID: modelID) {
                         return .downloading
                     }
 
@@ -109,7 +109,7 @@
                     // Nothing on disk and nothing in flight. Distinguish "tried and
                     // failed" from "never tried" so callers can show a retry vs. a
                     // first-time download affordance.
-                    if await Self.lastLoadErrorInCache(modelID: modelIdentifier) != nil {
+                    if await Self.lastLoadErrorInCache(modelID: modelID) != nil {
                         return .unavailable(.downloadFailed)
                     }
 
@@ -132,7 +132,7 @@
             /// Free bytes on the volume hosting this model's configured weights
             /// location, or `nil` if the volume can't be resolved.
             ///
-            /// Walks up `weightsLocation(modelIdentifier)` to the first extant
+            /// Walks up `weightsLocation(modelID)` to the first extant
             /// ancestor and queries `URLResourceKey.volumeAvailableCapacityForImportantUsageKey`
             /// against it. Returns `nil` rather than `0` on lookup failure so callers
             /// can distinguish "low" from "unknown". Synchronous because it's just an
@@ -141,7 +141,7 @@
                 // The per-model location won't exist until after a download, so walk
                 // up to the first extant ancestor (usually the caches directory,
                 // which the app sandbox always provides).
-                var probe = weightsLocation(modelIdentifier)
+                var probe = weightsLocation(modelID)
                 while !FileManager.default.fileExists(atPath: probe.path) {
                     let parent = probe.deletingLastPathComponent()
                     // `deletingLastPathComponent()` is a fixed point at the
@@ -180,7 +180,7 @@
             /// shards will report `.available` here and fail at load time; that's an
             /// acceptable trade-off versus walking the full file list on every check.
             func modelExistsOnDisk() -> Bool {
-                let configPath = weightsLocation(modelIdentifier).appending(path: "config.json")
+                let configPath = weightsLocation(modelID).appending(path: "config.json")
                 return FileManager.default.fileExists(atPath: configPath.path)
             }
         }

@@ -76,7 +76,7 @@ import MLXLMCommon
                 return LanguageModelCapabilities(capabilities: set)
             }()
         return MLXLanguageModel(
-            modelIdentifier: id,
+            modelID: id,
             capabilities: resolved,
             from: StubDownloader(),
             using: StubTokenizerLoader(),
@@ -91,7 +91,7 @@ import MLXLMCommon
     func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
         try MLXLanguageModel.Executor(
             configuration: MLXLanguageModel.Executor.Configuration(
-                modelIdentifier: model.modelIdentifier)
+                modelID: model.modelID)
         )
     }
 

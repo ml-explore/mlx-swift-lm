@@ -16,18 +16,18 @@ import Testing
     @Suite("MLXLanguageModel initialization")
     struct MLXLanguageModelInitTests {
 
-        @Test("stores modelIdentifier on construction")
+        @Test("stores modelID on construction")
         func identifier() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
             let model = MLXLanguageModel(
-                modelIdentifier: "mlx-community/Qwen3-4B-4bit",
+                modelID: "mlx-community/Qwen3-4B-4bit",
                 capabilities: LanguageModelCapabilities(capabilities: [.reasoning]),
                 from: StubDownloader(),
                 using: StubTokenizerLoader(),
                 locatedBy: { _ in URL(fileURLWithPath: "/tmp") }
             )
-            #expect(model.modelIdentifier == "mlx-community/Qwen3-4B-4bit")
+            #expect(model.modelID == "mlx-community/Qwen3-4B-4bit")
         }
     }
 
