@@ -3,7 +3,7 @@
 /// Routes a model's decoded generation stream into reasoning (chain-of-thought)
 /// vs response segments by scanning for the model's reasoning delimiters.
 ///
-/// A value-type streaming scanner modeled on ``WhitespaceRunTracker``: feed it
+/// A value-type streaming scanner: feed it
 /// each decoded chunk via ``process(_:)`` and it returns the routed segments,
 /// holding back any partial delimiter that straddles a chunk boundary
 /// (`pendingPrefix`). This makes detection robust to the detokenizer or

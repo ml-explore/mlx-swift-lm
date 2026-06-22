@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 
 /// Estimates the minimum token reserve needed to force-complete a valid JSON
 /// instance of a given schema.
