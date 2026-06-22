@@ -380,15 +380,15 @@ public final class LFM2BidirectionalModel: Module, EmbeddingModel {
             // CLS == BOS at position 0; caller pools .cls + normalize.
             return EmbeddingModelOutput(hiddenStates: lhs, pooledOutput: nil)
         case .colbert:
-            // Per-token projection; caller pools .none + normalize (per-token L2), then MaxSim.
-            var tok = dense!(lhs)
-            // Zero padded positions so they don't pollute MaxSim for batched callers
-            // (matches the reference's `tok * attention_mask`). `l2Normalized` keeps
-            // zeros as zeros, so a later `.none` + normalize remains correct.
-            if let mask {
-                tok = tok * mask.asType(tok.dtype).expandedDimensions(axis: -1)
-            }
-            return EmbeddingModelOutput(hiddenStates: tok, pooledOutput: nil)
+            // Per-token projection -> raw multi-vectors. The encoder does NOT mask or
+            // filter outputs: in ColBERT the attention mask serves double duty — for
+            // documents `0` is batch padding to drop, but for queries `0` marks
+            // expansion tokens that PyLate keeps and scores — so the model cannot
+            // decide which to zero. Matching the upstream model, dropping padding /
+            // keeping query expansion and the document skiplist filter are the
+            // retrieval layer's job. Callers pool `.none` + normalize (per-token L2),
+            // then apply their own token masks before MaxSim.
+            return EmbeddingModelOutput(hiddenStates: dense!(lhs), pooledOutput: nil)
         }
     }
 

@@ -197,8 +197,8 @@ struct LFM2BidirectionalTests {
         }
     }
 
-    @Test("ColBERT zeroes padded positions when given an attention mask")
-    func testColbertZeroesPaddedPositions() throws {
+    @Test("ColBERT returns raw per-token vectors and does not erase masked positions")
+    func testColbertKeepsMaskedPositions() throws {
         let c = try decode(colbertConfigJSON)
         Device.withDefaultDevice(.cpu) {
             let model = LFM2BidirectionalModel(c)
@@ -208,10 +208,12 @@ struct LFM2BidirectionalTests {
             let out = model(ids, positionIds: nil, tokenTypeIds: nil, attentionMask: mask)
             let tok = out.hiddenStates!  // (1, 6, projDim)
             tok.eval()
-            // Padded positions (indices 4, 5) must be all-zero; real ones must not be.
-            let padNorm = sqrt((tok[0, 4] * tok[0, 4]).sum()).item(Float.self)
+            // Masked positions (4, 5) are NOT zeroed: the encoder returns raw vectors,
+            // so ColBERT query-expansion tokens survive for the retrieval layer to keep
+            // (documents drop padding + apply the skiplist outside the model).
+            let maskedNorm = sqrt((tok[0, 4] * tok[0, 4]).sum()).item(Float.self)
             let realNorm = sqrt((tok[0, 0] * tok[0, 0]).sum()).item(Float.self)
-            #expect(padNorm == 0)
+            #expect(maskedNorm > 0)
             #expect(realNorm > 0)
         }
     }
