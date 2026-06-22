@@ -215,12 +215,14 @@ private final class LFM2BiShortConv: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray, keep: MLXArray?) -> MLXArray {
+    // The conv runs over the full hidden states even for padded inputs. The
+    // checkpoints were trained WITHOUT zeroing the conv stream on the eager/sdpa
+    // path (only flash-attention-2 zeros it); zeroing padding / ColBERT
+    // query-expansion positions here shifts per-token embeddings and hurts MaxSim.
+    // Padding is handled only via the attention key-padding mask.
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
         let s = inProj(x).split(parts: 3, axis: -1)  // [B, C, x]
-        var Bx = s[0] * s[2]
-        if let keep {
-            Bx = Bx * keep.expandedDimensions(axis: -1)
-        }
+        let Bx = s[0] * s[2]
         var convOut = conv(Bx)
         if convOut.dim(1) != Bx.dim(1) {
             convOut = convOut[0..., 0 ..< Bx.dim(1), 0...]
@@ -276,10 +278,9 @@ private final class LFM2BiDecoderLayer: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, keep: MLXArray?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        let r =
-            isAttention ? attn!(operatorNorm(x), mask: mask) : conv!(operatorNorm(x), keep: keep)
+        let r = isAttention ? attn!(operatorNorm(x), mask: mask) : conv!(operatorNorm(x))
         let h = x + r
         return h + feedForward(ffnNorm(h))
     }
@@ -288,9 +289,10 @@ private final class LFM2BiDecoderLayer: Module {
 // MARK: - Backbone
 
 /// Token ids `(B, L)` -> last hidden state `(B, L, hidden)` after `embedding_norm`.
-/// Builds the bidirectional additive pad mask and the conv keep-mask from
-/// `attentionMask` (1 = real token, 0 = padding); when `attentionMask` is nil the
-/// sequence is assumed unpadded (single-sequence encoding).
+/// Builds the bidirectional additive attention key-padding mask from `attentionMask`
+/// (1 = real token, 0 = padding). The short-conv is intentionally left unmasked to
+/// match the trained eager/sdpa behavior; `attentionMask == nil` means a single
+/// unpadded sequence.
 private final class LFM2BiBackbone: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
@@ -308,18 +310,16 @@ private final class LFM2BiBackbone: Module {
         var h = embedTokens(ids)
 
         var maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none
-        var keep: MLXArray? = nil
         if let attentionMask {
-            // conv keep-mask: (B, L) float, 1 = real, 0 = pad
-            keep = attentionMask.asType(h.dtype)
-            // additive attention mask: (B, 1, 1, L), 0 where real, -inf where pad.
-            // log(1) = 0, log(0) = -inf — matches the Bert idiom in this module.
+            // additive attention key-padding mask: (B, 1, 1, L), 0 where real, -inf
+            // where pad. log(1) = 0, log(0) = -inf — matches the Bert idiom here.
+            // Padding affects attention only; the short-conv sees the full stream.
             let additive = attentionMask.asType(h.dtype).expandedDimensions(axes: [1, 2]).log()
             maskMode = .array(additive)
         }
 
         for layer in layers {
-            h = layer(h, mask: maskMode, keep: keep)
+            h = layer(h, mask: maskMode)
         }
         return embeddingNorm(h)
     }
