@@ -68,10 +68,13 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
             let startsWithModel = k.hasPrefix("model.")
             k = k.replacingOccurrences(of: "model.", with: "", options: .anchored)
 
-            // Skip vision/audio weights
+            // Skip vision/audio weights. `vision_embedder` is the gemma4_unified
+            // (12B) encoder-free vision module; without it, loading a multimodal
+            // gemma4_unified checkpoint (e.g. mlx-community/gemma-4-12B-it-4bit)
+            // through the text path fails with `Unhandled keys ["vision_embedder"]`.
             if k.hasPrefix("vision_tower") || k.hasPrefix("multi_modal_projector")
                 || k.hasPrefix("audio_tower") || k.hasPrefix("embed_audio")
-                || k.hasPrefix("embed_vision")
+                || k.hasPrefix("embed_vision") || k.hasPrefix("vision_embedder")
             {
                 continue
             }
