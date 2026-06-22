@@ -78,22 +78,22 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     /// LFM2.5 Embedding 350M — CLS-pooled 1024-d dense vectors (cosine).
     public static let lfm2_embedding_350m = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-Embedding-350M-bf16")
+        id: "mlx-community/LFM2.5-Embedding-350M-bf16")
     /// LFM2.5 Embedding 350M — 4-bit quantized.
     public static let lfm2_embedding_350m_4bit = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-Embedding-350M-4bit")
+        id: "mlx-community/LFM2.5-Embedding-350M-4bit")
     /// LFM2.5 Embedding 350M — 8-bit quantized.
     public static let lfm2_embedding_350m_8bit = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-Embedding-350M-8bit")
+        id: "mlx-community/LFM2.5-Embedding-350M-8bit")
     /// LFM2.5 ColBERT 350M — per-token 128-d multi-vectors (MaxSim late interaction).
     public static let lfm2_colbert_350m = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-ColBERT-350M-bf16")
+        id: "mlx-community/LFM2.5-ColBERT-350M-bf16")
     /// LFM2.5 ColBERT 350M — 4-bit quantized.
     public static let lfm2_colbert_350m_4bit = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-ColBERT-350M-4bit")
+        id: "mlx-community/LFM2.5-ColBERT-350M-4bit")
     /// LFM2.5 ColBERT 350M — 8-bit quantized.
     public static let lfm2_colbert_350m_8bit = ModelConfiguration(
-        id: "ronaldmannak/LFM2.5-ColBERT-350M-8bit")
+        id: "mlx-community/LFM2.5-ColBERT-350M-8bit")
 
     private static func all() -> [ModelConfiguration] {
         [
