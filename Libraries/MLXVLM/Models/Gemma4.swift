@@ -2558,13 +2558,14 @@ public struct Gemma4MessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        var dictionary: MLXLMCommon.Message
         if message.role == .system {
-            [
+            dictionary = [
                 "role": message.role.rawValue,
                 "content": message.content,
             ]
         } else {
-            [
+            dictionary = [
                 "role": message.role.rawValue,
                 "content": message.images.map { _ in
                     ["type": "image"]
@@ -2577,6 +2578,8 @@ public struct Gemma4MessageGenerator: MessageGenerator {
                     ],
             ]
         }
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }
 

@@ -777,7 +777,7 @@ public final class ChatSession {
                         {
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
-                                messages.append(.tool(toolResult))
+                                messages.append(.tool(toolResult, id: toolCall.id))
                             }
                             continue restart
                         }

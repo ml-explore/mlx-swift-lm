@@ -1769,9 +1769,11 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
             ["type": "video"]
         }
 
-        return [
+        var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": imageContent + videoContent + textContent,
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }

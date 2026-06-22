@@ -1059,6 +1059,7 @@ struct ToolTests {
 
         let toolCall = try #require(parser.parse(content: content, tools: nil))
 
+        #expect(toolCall.id == "abc123xyz")
         #expect(toolCall.function.name == "get_weather")
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }

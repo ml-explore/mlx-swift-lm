@@ -930,12 +930,14 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
         // <|vision_start|><|image_pad|><|vision_end|>{text}. Putting text first
         // shifts image-token positions and skews MROPE position IDs, producing
         // a deterministic ~9 px bbox offset vs the Python mlx-vlm reference.
-        [
+        var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content":
                 message.images.map { _ in ["type": "image"] }
                 + message.videos.map { _ in ["type": "video"] }
                 + [["type": "text", "text": message.content]],
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }
