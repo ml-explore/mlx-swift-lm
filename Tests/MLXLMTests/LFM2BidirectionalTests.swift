@@ -1,4 +1,5 @@
 import Foundation
+import IntegrationTestHelpers
 import MLX
 import MLXLMCommon
 import MLXNN
@@ -11,17 +12,17 @@ import Testing
 // (identical math). The default device is a task-local, so each test scopes its
 // own work and they remain safe to run in parallel.
 
-// Real model dirs + HF float32 parity fixtures (exported by Models/mlx/export_swift_ref.py).
-// The parity test is skipped automatically when these aren't present (e.g. CI).
-private let lfm2EmbeddingDir = URL(
-    fileURLWithPath:
-        "/Users/ronaldmannak/Developer/Projects/Models/mlx-models/LFM2.5-Embedding-350M-bf16")
-private let lfm2ColbertDir = URL(
-    fileURLWithPath:
-        "/Users/ronaldmannak/Developer/Projects/Models/mlx-models/LFM2.5-ColBERT-350M-bf16")
+// Parity fixtures: the real bf16 models resolved from the default Hugging Face hub
+// cache (`~/.cache/huggingface`, via `hfSnapshotDir`), plus the HF float32 reference
+// exported by Models/mlx/export_swift_ref.py. The parity test is skipped automatically
+// when these aren't present locally (CI, or a machine that hasn't downloaded the models);
+// it never triggers a download.
+private let lfm2EmbeddingDir = hfSnapshotDir(modelId: "mlx-community/LFM2.5-Embedding-350M-bf16")
+private let lfm2ColbertDir = hfSnapshotDir(modelId: "mlx-community/LFM2.5-ColBERT-350M-bf16")
 private let lfm2RefURL = URL(fileURLWithPath: "/tmp/ref/swift_ref.safetensors")
 
 private let lfm2FixturesAvailable: Bool = {
+    guard let lfm2EmbeddingDir, let lfm2ColbertDir else { return false }
     let fm = FileManager.default
     return fm.fileExists(atPath: lfm2RefURL.path)
         && fm.fileExists(atPath: lfm2EmbeddingDir.appendingPathComponent("config.json").path)
@@ -228,7 +229,8 @@ struct LFM2BidirectionalTests {
             let ref = try loadArrays(url: lfm2RefURL)
 
             // Embedding: compare the raw CLS vector (cosine is scale-invariant).
-            let emb = try loadLFM2(lfm2EmbeddingDir)
+            // Force-unwrap is safe: `lfm2FixturesAvailable` already proved both dirs exist.
+            let emb = try loadLFM2(lfm2EmbeddingDir!)
             var worstEmb: Float = 1
             var i = 0
             while let idsArr = ref["emb_ids_\(i)"] {
@@ -241,7 +243,7 @@ struct LFM2BidirectionalTests {
             #expect(worstEmb > 0.999, "worst embedding cosine \(worstEmb)")
 
             // ColBERT: compare the per-token projection.
-            let col = try loadLFM2(lfm2ColbertDir)
+            let col = try loadLFM2(lfm2ColbertDir!)
             var worstCol: Float = 1
             i = 0
             while let idsArr = ref["col_ids_\(i)"] {
