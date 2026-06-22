@@ -206,12 +206,17 @@ private class Gemma4Attention: Module {
     let scale: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    // K/V projections and k_norm are absent on KV-shared layers (Gemma 3n /
+    // gemma4 architecture: the last `num_kv_shared_layers` layers reuse an
+    // earlier layer's K/V), so they are optional and only built when this
+    // layer owns its K/V. The forward pass only dereferences them on the
+    // non-shared `else` path (`sharedKV == nil`).
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
     @ModuleInfo(key: "v_norm") var vNorm: RMSNormNoScale
 
     @ModuleInfo var rope: RoPELayer
@@ -240,15 +245,24 @@ private class Gemma4Attention: Module {
         self.scale = 1.0
 
         self._qProj.wrappedValue = Linear(dim, nHeads * effectiveHeadDim, bias: false)
-        self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        if !useKeqV {
-            self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
-        }
         self._oProj.wrappedValue = Linear(nHeads * effectiveHeadDim, dim, bias: false)
-
         self._qNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = RMSNorm(dimensions: effectiveHeadDim, eps: config.rmsNormEps)
         self._vNorm.wrappedValue = RMSNormNoScale(eps: config.rmsNormEps)
+
+        // KV-shared layers (the last `num_kv_shared_layers`) carry no K/V
+        // projections or k_norm in the checkpoint — they reuse an earlier
+        // layer's K/V at runtime. Only build (and thus require weights for)
+        // these modules on layers that own their K/V.
+        let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
+        let isKvSharedLayer = config.numKvSharedLayers > 0 && layerIdx >= firstKvSharedLayerIdx
+        if !isKvSharedLayer {
+            self._kProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            if !useKeqV {
+                self._vProj.wrappedValue = Linear(dim, nKvHeads * effectiveHeadDim, bias: false)
+            }
+            self._kNorm.wrappedValue = RMSNorm(
+                dimensions: effectiveHeadDim, eps: config.rmsNormEps)
+        }
 
         // RoPE: sliding uses default, full uses proportional with partial rotation
         if isSliding {
@@ -287,6 +301,13 @@ private class Gemma4Attention: Module {
             // KV-shared layers use pre-computed KV from an earlier layer.
             kvState = sharedKV
         } else {
+            // Non-shared layer: K/V projections and k_norm are guaranteed built
+            // (this branch is only reached when `sharedKV == nil`, i.e. a layer
+            // that owns its K/V).
+            guard let kProj, let kNorm else {
+                fatalError(
+                    "Gemma4 layer \(layerIdx): missing k_proj/k_norm on a non-KV-shared layer")
+            }
             let kRaw = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             var k = kNorm(kRaw)
             k = k.transposed(0, 2, 1, 3)
