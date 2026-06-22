@@ -133,7 +133,16 @@ public struct LFM2BidirectionalConfiguration: Decodable, Sendable {
         let ropeParameters = try c.decodeIfPresent(RopeParameters.self, forKey: .ropeParameters)
         ropeTheta = theta ?? ropeParameters?.ropeTheta ?? 1_000_000.0
 
-        mlx = try c.decode(MLXHead.self, forKey: .mlx)
+        // The custom `mlx` block is present on the converted checkpoints. If a config
+        // omits it (e.g. a raw SentenceTransformer LFM2.5 export), default to a
+        // CLS-pooled embedding head — a plain encoder with no projection — rather than
+        // throwing. ColBERT still requires the block, since the projection head can't
+        // be inferred from config.json alone.
+        mlx =
+            try c.decodeIfPresent(MLXHead.self, forKey: .mlx)
+            ?? MLXHead(
+                head: .embedding, pooling: "cls", prompts: nil, projDim: nil,
+                queryPrefix: nil, documentPrefix: nil, queryLength: nil, documentLength: nil)
     }
 }
 
@@ -372,7 +381,14 @@ public final class LFM2BidirectionalModel: Module, EmbeddingModel {
             return EmbeddingModelOutput(hiddenStates: lhs, pooledOutput: nil)
         case .colbert:
             // Per-token projection; caller pools .none + normalize (per-token L2), then MaxSim.
-            return EmbeddingModelOutput(hiddenStates: dense!(lhs), pooledOutput: nil)
+            var tok = dense!(lhs)
+            // Zero padded positions so they don't pollute MaxSim for batched callers
+            // (matches the reference's `tok * attention_mask`). `l2Normalized` keeps
+            // zeros as zeros, so a later `.none` + normalize remains correct.
+            if let mask {
+                tok = tok * mask.asType(tok.dtype).expandedDimensions(axis: -1)
+            }
+            return EmbeddingModelOutput(hiddenStates: tok, pooledOutput: nil)
         }
     }
 
