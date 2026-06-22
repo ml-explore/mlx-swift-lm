@@ -358,7 +358,13 @@ public final class LFM2BidirectionalModel: Module, EmbeddingModel {
         if inp.ndim == 1 {
             inp = inp.reshaped(1, -1)
         }
-        let lhs = model(inp, attentionMask: attentionMask)  // (B, L, hidden)
+        // Reshape a 1-D mask to match the 1-D input reshape above, so the additive
+        // mask the backbone builds broadcasts cleanly over (B, heads, L, L) in SDPA.
+        var mask = attentionMask
+        if let m = mask, m.ndim == 1 {
+            mask = m.reshaped(1, -1)
+        }
+        let lhs = model(inp, attentionMask: mask)  // (B, L, hidden)
 
         switch head {
         case .embedding:
