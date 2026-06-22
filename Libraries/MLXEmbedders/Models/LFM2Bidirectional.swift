@@ -195,8 +195,9 @@ private final class LFM2BiAttention: Module {
     }
 }
 
-/// Non-causal gated short convolution (centered, symmetric padding). Padded
-/// positions are zeroed via the `keep` mask so they cannot leak through the kernel.
+/// Non-causal gated short convolution (centered, symmetric padding). The conv
+/// intentionally runs unmasked over the full sequence — see `callAsFunction` for why
+/// padded / ColBERT query-expansion positions are deliberately not zeroed.
 private final class LFM2BiShortConv: Module {
     @ModuleInfo(key: "conv") var conv: Conv1d
     @ModuleInfo(key: "in_proj") var inProj: Linear
