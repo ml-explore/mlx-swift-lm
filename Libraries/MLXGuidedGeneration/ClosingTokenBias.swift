@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
+import MLXLMCommon
 
 /// Utility that identifies JSON-closing tokens in a tokenizer's vocabulary
 /// and produces a logit bias array.
