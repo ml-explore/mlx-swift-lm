@@ -126,7 +126,6 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
-                "IntegrationTestHelpers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

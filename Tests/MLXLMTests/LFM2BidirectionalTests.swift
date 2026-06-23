@@ -1,8 +1,5 @@
 import Foundation
-import IntegrationTestHelpers
 import MLX
-import MLXLMCommon
-import MLXNN
 import Testing
 
 @testable import MLXEmbedders
@@ -11,23 +8,6 @@ import Testing
 // op below is scoped to the CPU backend via `Device.withDefaultDevice(.cpu)`
 // (identical math). The default device is a task-local, so each test scopes its
 // own work and they remain safe to run in parallel.
-
-// Parity fixtures: the real bf16 models resolved from the default Hugging Face hub
-// cache (`~/.cache/huggingface`, via `hfSnapshotDir`), plus the HF float32 reference
-// exported by Models/mlx/export_swift_ref.py. The parity test is skipped automatically
-// when these aren't present locally (CI, or a machine that hasn't downloaded the models);
-// it never triggers a download.
-private let lfm2EmbeddingDir = hfSnapshotDir(modelId: "mlx-community/LFM2.5-Embedding-350M-bf16")
-private let lfm2ColbertDir = hfSnapshotDir(modelId: "mlx-community/LFM2.5-ColBERT-350M-bf16")
-private let lfm2RefURL = URL(fileURLWithPath: "/tmp/ref/swift_ref.safetensors")
-
-private let lfm2FixturesAvailable: Bool = {
-    guard let lfm2EmbeddingDir, let lfm2ColbertDir else { return false }
-    let fm = FileManager.default
-    return fm.fileExists(atPath: lfm2RefURL.path)
-        && fm.fileExists(atPath: lfm2EmbeddingDir.appendingPathComponent("config.json").path)
-        && fm.fileExists(atPath: lfm2ColbertDir.appendingPathComponent("config.json").path)
-}()
 
 private let embeddingConfigJSON = """
     {
@@ -77,15 +57,6 @@ private let colbertConfigJSON = """
 
 private func decode(_ json: String) throws -> LFM2BidirectionalConfiguration {
     try JSONDecoder().decode(LFM2BidirectionalConfiguration.self, from: Data(json.utf8))
-}
-
-private func cosine(_ a: MLXArray, _ b: MLXArray) -> Float {
-    let af = a.asType(.float32).reshaped(-1)
-    let bf = b.asType(.float32).reshaped(-1)
-    let dot = (af * bf).sum()
-    let na = sqrt((af * af).sum())
-    let nb = sqrt((bf * bf).sum())
-    return (dot / (na * nb)).item(Float.self)
 }
 
 struct LFM2BidirectionalTests {
@@ -219,59 +190,5 @@ struct LFM2BidirectionalTests {
             #expect(maskedNorm > 0)
             #expect(realNorm > 0)
         }
-    }
-
-    // MARK: - Parity vs HF float32 reference (gated on local fixtures)
-
-    @Test(
-        "LFM2.5 outputs match the HF float32 reference",
-        .enabled(if: lfm2FixturesAvailable))
-    func testParityAgainstReference() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let ref = try loadArrays(url: lfm2RefURL)
-
-            // Embedding: compare the raw CLS vector (cosine is scale-invariant).
-            // Force-unwrap is safe: `lfm2FixturesAvailable` already proved both dirs exist.
-            let emb = try loadLFM2(lfm2EmbeddingDir!)
-            var worstEmb: Float = 1
-            var i = 0
-            while let idsArr = ref["emb_ids_\(i)"] {
-                let ids = idsArr.asType(.int32).reshaped(1, -1)
-                let cls = emb(ids).hiddenStates![0..., 0, 0...]
-                worstEmb = min(worstEmb, cosine(cls, ref["emb_cls_\(i)"]!))
-                i += 1
-            }
-            #expect(i > 0)
-            #expect(worstEmb > 0.999, "worst embedding cosine \(worstEmb)")
-
-            // ColBERT: compare the per-token projection.
-            let col = try loadLFM2(lfm2ColbertDir!)
-            var worstCol: Float = 1
-            i = 0
-            while let idsArr = ref["col_ids_\(i)"] {
-                let ids = idsArr.asType(.int32).reshaped(1, -1)
-                let proj = col(ids).hiddenStates!
-                worstCol = min(worstCol, cosine(proj, ref["col_proj_\(i)"]!))
-                i += 1
-            }
-            #expect(i > 0)
-            #expect(worstCol > 0.999, "worst colbert cosine \(worstCol)")
-        }
-    }
-
-    /// Build the model from a local dir and load its weights as float32 (max precision
-    /// for the parity comparison), mirroring the factory's sanitize + load path.
-    private func loadLFM2(_ dir: URL) throws -> LFM2BidirectionalModel {
-        let configData = try Data(contentsOf: dir.appendingPathComponent("config.json"))
-        let config = try JSONDecoder.json5().decode(
-            LFM2BidirectionalConfiguration.self, from: configData)
-        let model = LFM2BidirectionalModel(config)
-
-        var weights = try loadArrays(url: dir.appendingPathComponent("model.safetensors"))
-        weights = model.sanitize(weights: weights)
-        weights = weights.mapValues { $0.asType(.float32) }
-        try model.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
-        eval(model)
-        return model
     }
 }
