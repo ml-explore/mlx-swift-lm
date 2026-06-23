@@ -1428,11 +1428,30 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let firstKVSharedLayer = config.hiddenLayers - config.numKVSharedLayers
         var sanitized: [String: MLXArray] = [:]
         sanitized.reserveCapacity(weights.count + 1)
 
         for (key, value) in weights {
             if key.contains("rotary_emb") {
+                continue
+            }
+            // Drop redundant k_proj/v_proj/k_norm for KV-shared layers: they reuse an
+            // earlier layer's K/V and own no K projection or K norm, so the module tree
+            // has none. QAT checkpoints already omit these; some (PTQ) checkpoints still
+            // ship them, and keeping them would be an unexpected weight.
+            // Scope: text backbone only — the vision/audio towers share the
+            // `layers.N.self_attn.{k,v}_proj` naming, so without these guards the drop
+            // would amputate tower layers >= firstKVSharedLayer.
+            if firstKVSharedLayer > 0,
+                !key.contains("vision_tower"),
+                !key.contains("audio_tower"),
+                key.contains("self_attn.k_proj")
+                    || key.contains("self_attn.v_proj")
+                    || key.contains("self_attn.k_norm"),
+                let layerIdx = Self.decoderLayerIndex(in: key),
+                layerIdx >= firstKVSharedLayer
+            {
                 continue
             }
 
@@ -1486,6 +1505,13 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         }
 
         return sanitized
+    }
+
+    /// Extract `N` from a weight key shaped like `…layers.N.…`, else nil.
+    private static func decoderLayerIndex(in key: String) -> Int? {
+        guard let range = key.range(of: "layers.") else { return nil }
+        let digits = key[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
     }
 }
 
