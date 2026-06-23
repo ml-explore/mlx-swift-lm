@@ -71,7 +71,7 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
             // Skip vision/audio weights
             if k.hasPrefix("vision_tower") || k.hasPrefix("multi_modal_projector")
                 || k.hasPrefix("audio_tower") || k.hasPrefix("embed_audio")
-                || k.hasPrefix("embed_vision")
+                || k.hasPrefix("embed_vision") || k.hasPrefix("vision_embedder")
             {
                 continue
             }
