@@ -20,8 +20,10 @@
     ///   - `schema_tier{1..4}_steps.json` — per-step: mask hex, committed token id,
     ///     fast-forward token ids, isStop flags. One file per tier schema already
     ///     defined in `HardReserveStressTests.swift`.
-    ///   - `malformed_schema_errors.json` — 6 malformed JSON-Schema inputs with
-    ///     captured error case + first 120 chars of message.
+    ///
+    /// Malformed-schema error parity is NOT a golden: its inputs are a static
+    /// inline table in `MalformedSchemaErrorParityTests.swift` (the recorded
+    /// error fields were never asserted).
     ///
     /// Rollback (`rollback_scenario.json`) is intentionally NOT captured: rollback
     /// determinism (commit N, rollback N → identical mask) is a property of any
@@ -117,10 +119,6 @@
                 requiredTopLevelKeys: [
                     "tier", "modelId", "schema", "document", "vocabSize", "steps",
                 ]
-            ),
-            .init(
-                filename: "malformed_schema_errors.json",
-                requiredTopLevelKeys: ["modelId", "errors"]
             ),
         ]
     }
