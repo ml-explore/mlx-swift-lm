@@ -24,7 +24,7 @@
     /// into either a `toolCallDelta` (real tool) or `textDelta` (synthetic
     /// final-answer tool).
     @Suite(.serialized, .timeLimit(.minutes(5)))
-    struct ToolCallingIntegrationTests {
+    struct FoundationModelsToolCallingTests {
 
         @Test("Setup: release GPU state from prior suites")
         func clearGPUBeforeToolCalling() async {
