@@ -120,7 +120,8 @@ public struct LFM2BidirectionalConfiguration: Decodable, Sendable {
         convLCache = try c.decodeIfPresent(Int.self, forKey: .convLCache) ?? 3
         blockFFDim =
             try c.decodeIfPresent(Int.self, forKey: .blockFFDim)
-            ?? c.decode(Int.self, forKey: .intermediateSize)
+            ?? c.decodeIfPresent(Int.self, forKey: .intermediateSize)
+            ?? hiddenSize
         blockMultipleOf = try c.decodeIfPresent(Int.self, forKey: .blockMultipleOf) ?? 256
         blockFFNDimMultiplier =
             try c.decodeIfPresent(Float.self, forKey: .blockFFNDimMultiplier) ?? 1.0
@@ -278,7 +279,17 @@ private final class LFM2BiDecoderLayer: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        let r = isAttention ? attn!(operatorNorm(x), mask: mask) : conv!(operatorNorm(x))
+        let normalized = operatorNorm(x)
+        // Exactly one of `attn`/`conv` is set in `init` (per `isAttention`); bind
+        // explicitly so the invariant is visible rather than force-unwrapped.
+        let r: MLXArray
+        if let attn {
+            r = attn(normalized, mask: mask)
+        } else if let conv {
+            r = conv(normalized)
+        } else {
+            preconditionFailure("LFM2BiDecoderLayer must have either attention or conv")
+        }
         let h = x + r
         return h + feedForward(ffnNorm(h))
     }
@@ -386,7 +397,11 @@ public final class LFM2BidirectionalModel: Module, EmbeddingModel {
             // keeping query expansion and the document skiplist filter are the
             // retrieval layer's job. Callers pool `.none` + normalize (per-token L2),
             // then apply their own token masks before MaxSim.
-            return EmbeddingModelOutput(hiddenStates: dense!(lhs), pooledOutput: nil)
+            // `dense` is non-nil exactly when `head == .colbert` (set in `init`).
+            guard let dense else {
+                preconditionFailure("ColBERT head requires a dense projection layer")
+            }
+            return EmbeddingModelOutput(hiddenStates: dense(lhs), pooledOutput: nil)
         }
     }
 
