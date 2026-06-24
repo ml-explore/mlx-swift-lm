@@ -265,52 +265,43 @@
             /// weights itself via the model factory.
             public let weightsLocation: @Sendable (String) -> URL
 
-            /// Gets the cached model container for the specified model, loading it if necessary.
+            /// Loads the model container for the specified model, returning a cached
+            /// instance when one exists.
             ///
-            /// First call downloads the model and loads weights. Subsequent calls
-            /// return the cached instance immediately. Concurrent callers share the
-            /// same loading task, preventing duplicate loads.
+            /// The first call downloads the model and loads it into memory; subsequent
+            /// calls return the cached container immediately. Concurrent callers for
+            /// the same model share a single loading task, so a model is never loaded
+            /// twice.
             ///
-            /// Internal: returns the lower-level `ModelContainer`, which is not part of
-            /// the adapter's public surface. Consumers that want to download/load a model
-            /// ahead of use should call the public ``preload()`` (weights) or trigger
-            /// `session.prewarm()` (weights + shaders) on an `MLXLanguageModel` instance.
+            /// Returns the lower-level `ModelContainer`, which is not part of the
+            /// adapter's public surface. Consumers load a model ahead of use through
+            /// the public ``preload()`` or `session.prewarm()`.
+            ///
+            /// - Parameter suppressDownloadingState: When `true`, an in-flight load of
+            ///   a model already present on disk is kept out of the `.downloading`
+            ///   availability signal. This is an availability-state-machine detail: a
+            ///   load that triggers a genuine fetch for a model not yet on disk still
+            ///   reports `.downloading` regardless of this flag. Defaults to `false`,
+            ///   the behavior for a normal consumer-driven load.
             static func loadContainer(
                 modelID: String,
                 from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader
-            ) async throws -> ModelContainer {
-                try await cache.load(
-                    modelID: modelID,
-                    loader: containerLoader(
-                        modelID: modelID, from: downloader, using: tokenizerLoader)
-                )
-            }
-
-            /// Same as ``loadContainer(modelID:from:using:)`` but lets ``warmUp()``
-            /// suppress the spurious `.downloading` availability flip when the model is
-            /// already present on disk. Internal: `suppressDownloadingState` is an
-            /// availability-state-machine detail, not a public concept — `loadContainer`
-            /// always reports `.downloading` while a load is in flight.
-            /// See `ModelCache.load`.
-            static func loadContainerForWarmup(
-                modelID: String,
-                from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
-                suppressDownloadingState: Bool
+                suppressDownloadingState: Bool = false
             ) async throws -> ModelContainer {
                 try await cache.load(
                     modelID: modelID,
                     suppressDownloadingState: suppressDownloadingState,
-                    loader: containerLoader(
+                    loader: makeContainerLoader(
                         modelID: modelID, from: downloader, using: tokenizerLoader)
                 )
             }
 
-            /// Builds the cache loader closure shared by `loadContainer` and
-            /// `loadContainerForWarmup`: sets the MLX buffer-reuse pool limit, loads
-            /// the container via the model factory, and reports download progress.
-            private static func containerLoader(
+            /// Builds the `@Sendable` loader closure that
+            /// ``loadContainer(modelID:from:using:suppressDownloadingState:)`` hands to
+            /// the cache: sets the MLX buffer-reuse pool limit, loads the container via
+            /// the model factory, and reports download progress.
+            private static func makeContainerLoader(
                 modelID: String,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader
@@ -477,19 +468,20 @@
                     locatedBy: weightsLocation)
             }
 
-            /// Downloads and loads the model weights into memory without running
-            /// inference.
+            /// Downloads the model and loads its weights into memory.
             ///
-            /// Call this early (e.g. when a view appears) to amortize the
-            /// download/weight-load portion of cold-start latency before the first
-            /// generation request. Unlike ``warmUp()``, `preload()` is **weights-only**:
-            /// it does not run a forward pass, so it skips Metal shader (kernel) JIT
-            /// compilation and performs no GPU synchronization. That keeps it the fast,
-            /// fully caller-owned, awaitable path; the heavier shader warmup that
-            /// touches process-global Metal lives in ``warmUp()`` (driven by
-            /// `session.prewarm()`).
+            /// This is a weights-only load: it runs no forward pass, compiles no Metal
+            /// shaders, and performs no GPU work, so the first generation request after
+            /// `preload()` still pays the one-time Metal shader JIT cost. The call is
+            /// awaitable and fully caller-owned — you decide when it runs and handle
+            /// any error it throws.
             ///
-            /// Safe to call multiple times -- subsequent calls return immediately from cache.
+            /// Call it early, for example when a view appears, to move the
+            /// download-and-load portion of cold-start latency off the first
+            /// generation request.
+            ///
+            /// Safe to call multiple times; once the model is loaded, subsequent calls
+            /// return immediately from cache.
             public func preload() async throws {
                 _ = try await Self.loadContainer(
                     modelID: modelID,
@@ -498,28 +490,27 @@
                 )
             }
 
-            /// Loads the model weights **and** compiles Metal shaders, so the first
+            /// Loads the model weights and compiles Metal shaders, so the first
             /// `respond()` afterward pays no (or materially reduced) cold-start
             /// shader-JIT cost.
             ///
-            /// Unlike ``preload()`` (weights only), this runs a minimal throwaway
-            /// forward pass. Metal kernels JIT-compile lazily on the first
-            /// *synchronous* readback (`.item()` inside the generate loop) — scheduling
-            /// work with `asyncEval` alone does not compile them — so a forward pass is
-            /// the only way to force compilation ahead of a real request.
+            /// Metal kernels JIT-compile lazily on the first *synchronous* readback
+            /// (`.item()` inside the generate loop) — scheduling work with `asyncEval`
+            /// alone does not compile them — so this runs a minimal throwaway forward
+            /// pass to force compilation ahead of a real request.
             ///
             /// The forward pass and its single `Stream.gpu.synchronize()` run inside
             /// `container.perform { }`, the same `SerialAccessContainer` lock the
-            /// `respond` path holds for its entire generation. A warmup therefore
-            /// cannot race a concurrent `respond` on the process-global `Stream.gpu`.
-            /// The 1-token generate ends naturally and is consumed to
-            /// completion — never cancelled mid-flight — honoring the Metal teardown
-            /// invariant (`docs/solutions/002`, `004`).
+            /// `respond` path holds for its entire generation, so a warmup cannot race
+            /// a concurrent `respond` on the process-global `Stream.gpu`. The 1-token
+            /// generate ends naturally and is consumed to completion — never cancelled
+            /// mid-flight — honoring the Metal teardown invariant (`docs/solutions/002`,
+            /// `004`).
             ///
-            /// Internal by design: it touches process-global Metal and
-            /// is driven fire-and-forget by ``Executor/prewarm(model:transcript:)``. The
-            /// public warmup entry point is `session.prewarm()`. Safe to call multiple
-            /// times and concurrently; subsequent calls reuse the cached container.
+            /// Internal by design: it touches process-global Metal and is driven
+            /// fire-and-forget by ``Executor/prewarm(model:transcript:)``, reached
+            /// publicly through `session.prewarm()`. Safe to call multiple times and
+            /// concurrently; subsequent calls reuse the cached container.
             func warmUp() async throws {
                 // Distinguish a warmup of an already-present model (suppress the
                 // spurious `.available → .downloading → .available` flip) from a
@@ -531,7 +522,7 @@
                 // (reordering would let a partial download with only `config.json`
                 // present falsely report `.available`).
                 let alreadyOnDisk = modelExistsOnDisk()
-                let container = try await Self.loadContainerForWarmup(
+                let container = try await Self.loadContainer(
                     modelID: modelID,
                     from: downloader,
                     using: tokenizerLoader,
