@@ -32,7 +32,7 @@ public enum Gemma {
             return x + y
         }
         // IEEE 754 half-precision maximum finite value
-        let bound: Float = 65504.0  // Float16 maximum finite value
+        let bound: Float = .greatestFiniteMagnitude
         let xFloat32 = x.asType(.float32)
         let yFloat32 = y.asType(.float32)
         let result = xFloat32 + yFloat32

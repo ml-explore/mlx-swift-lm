@@ -583,7 +583,7 @@ class Gemma3nDecoderLayer: Module {
         var finalMask = mask
         if isSliding, case .array(let maskArray) = mask {
             let effectiveSeqLen = max(cachePosition?.dim(0) ?? 0, slidingWindow)
-            let minDtype = MLXArray(-Float.greatestFiniteMagnitude, dtype: maskArray.dtype)
+            let minDtype = MLXArray.maskFill(for: maskArray.dtype)
 
             let slidingWindowMask = tril(
                 MLXArray.ones(maskArray.shape, dtype: .bool),
