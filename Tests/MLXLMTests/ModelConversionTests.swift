@@ -378,6 +378,22 @@ final class ModelConversionTests: XCTestCase {
         XCTAssertEqual(weightMap["a.weight"], "model-00002-of-00002.safetensors")
     }
 
+    func testSaveModelConversionWeightsWritesModelMetadata() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let weightsURL = try saveModelConversionWeights(
+            [("model.weight", MLXArray.ones([2, 2], dtype: .float32))],
+            to: directory,
+            maxShardSize: 1024,
+            metadata: ["mlx_swift_lm.test.scaling": "v1"]
+        )[0]
+
+        let (_, metadata) = try loadArraysAndMetadata(url: weightsURL)
+        XCTAssertEqual(metadata["format"], "mlx")
+        XCTAssertEqual(metadata["mlx_swift_lm.test.scaling"], "v1")
+    }
+
     func testUpdateConfigWritesQuantizationAndQuantizationConfig() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -17,6 +17,14 @@ public protocol BaseLanguageModel: Module {
     func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
 }
 
+/// Optional metadata a model wants written into converted safetensors.
+///
+/// Model-specific metadata lets future loaders distinguish transformed MLX-native
+/// checkpoints from original upstream checkpoints without relying only on tensor shapes.
+public protocol ModelConversionMetadataProvider {
+    var modelConversionMetadata: [String: String] { get }
+}
+
 extension BaseLanguageModel {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights

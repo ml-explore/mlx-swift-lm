@@ -219,7 +219,8 @@ public func convert(
     let weightsURLs = try saveModelConversionWeights(
         model.parameters().flattened(),
         to: outputDirectory,
-        maxShardSize: options.maxShardSize)
+        maxShardSize: options.maxShardSize,
+        metadata: modelConversionSafetensorsMetadata(for: model))
 
     progressHandler(.init(stage: .updatingConfiguration))
     try updateModelConfigWithQuantization(
@@ -785,7 +786,8 @@ package func makeModelConversionShards(
 package func saveModelConversionWeights(
     _ weights: [(String, MLXArray)],
     to outputDirectory: URL,
-    maxShardSize: Int64
+    maxShardSize: Int64,
+    metadata: [String: String] = [:]
 ) throws -> [URL] {
     let shards = try makeModelConversionShards(weights, maxShardSize: maxShardSize)
     let totalShards = shards.count
@@ -801,7 +803,7 @@ package func saveModelConversionWeights(
         let url = outputDirectory.appendingPathComponent(filename)
         let arrays = Dictionary(uniqueKeysWithValues: shard)
         eval(Array(arrays.values))
-        try save(arrays: arrays, metadata: ["format": "mlx"], url: url)
+        try save(arrays: arrays, metadata: modelConversionSafetensorsMetadata(metadata), url: url)
 
         for (key, _) in shard {
             weightMap[key] = filename
@@ -811,6 +813,19 @@ package func saveModelConversionWeights(
 
     try saveModelConversionIndex(weightMap: weightMap, totalSize: totalSize, to: outputDirectory)
     return weightsURLs
+}
+
+package func modelConversionSafetensorsMetadata(for model: BaseLanguageModel) -> [String: String] {
+    if let provider = model as? ModelConversionMetadataProvider {
+        return modelConversionSafetensorsMetadata(provider.modelConversionMetadata)
+    }
+    return modelConversionSafetensorsMetadata([:])
+}
+
+package func modelConversionSafetensorsMetadata(_ metadata: [String: String]) -> [String: String] {
+    var result = metadata
+    result["format"] = "mlx"
+    return result
 }
 
 package func saveModelConversionIndex(

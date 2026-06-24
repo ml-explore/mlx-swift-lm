@@ -118,6 +118,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Is 9.9 greater or 9.11?"
     )
 
+    static public let falconH1R7B = ModelConfiguration(
+        id: "tiiuae/Falcon-H1R-7B",
+        defaultPrompt: "If the product of two numbers is 360 and their GCD is 6, what is their LCM?"
+    )
+
     static public let phi4bit = ModelConfiguration(
         id: "mlx-community/phi-2-hf-4bit-mlx",
         // https://www.promptingguide.ai/models/phi-2
@@ -388,6 +393,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         [
             codeLlama13b4bit,
             deepSeekR1_7B_4bit,
+            falconH1R7B,
             gemma2bQuantized,
             gemma_2_2b_it_4bit,
             gemma_2_9b_it_4bit,
