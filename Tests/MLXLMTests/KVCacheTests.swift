@@ -260,6 +260,24 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(lifecycle.finalizeCallCount == 1)
 }
 
+@Test func testCacheListReportsBoundedChildMaxSize() throws {
+    #expect(CacheList(KVCacheSimple(), RotatingKVCache(maxSize: 32)).maxSize == 32)
+    #expect(
+        CacheList(KVCacheSimple(), CacheList(KVCacheSimple(), RotatingKVCache(maxSize: 16)))
+            .maxSize == 16)
+    #expect(CacheList(KVCacheSimple(), KVCacheSimple()).maxSize == nil)
+}
+
+@Test func testCachesReportStaticPrefixReuseSupport() throws {
+    #expect(KVCacheSimple().supportsStaticPrefixReuse)
+    #expect(QuantizedKVCache().supportsStaticPrefixReuse)
+    #expect(!RotatingKVCache(maxSize: 32).supportsStaticPrefixReuse)
+    #expect(ChunkedKVCache().supportsStaticPrefixReuse)
+    #expect(!ChunkedKVCache(chunkSize: 32).supportsStaticPrefixReuse)
+    #expect(CacheList(KVCacheSimple(), QuantizedKVCache()).supportsStaticPrefixReuse)
+    #expect(!CacheList(KVCacheSimple(), ChunkedKVCache(chunkSize: 32)).supportsStaticPrefixReuse)
+}
+
 @Test func testWithPreparedCacheScopesSequenceMetadata() throws {
     let cache = ArraysCache(size: 2)
 

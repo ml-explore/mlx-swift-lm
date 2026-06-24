@@ -18,6 +18,13 @@ public protocol Tokenizer: Sendable {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int]
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int]
 }
 
 extension Tokenizer {
@@ -51,15 +58,31 @@ extension Tokenizer {
     ) throws -> [Int] {
         try applyChatTemplate(messages: messages, tools: tools, additionalContext: nil)
     }
+
+    public func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int] {
+        guard addGenerationPrompt else {
+            throw TokenizerError.unsupportedChatTemplateOptions
+        }
+        return try applyChatTemplate(
+            messages: messages, tools: tools, additionalContext: additionalContext)
+    }
 }
 
 public enum TokenizerError: LocalizedError {
     case missingChatTemplate
+    case unsupportedChatTemplateOptions
 
     public var errorDescription: String? {
         switch self {
         case .missingChatTemplate:
             "This tokenizer does not have a chat template."
+        case .unsupportedChatTemplateOptions:
+            "This tokenizer does not support the requested chat template options."
         }
     }
 }

@@ -113,9 +113,25 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
                         tools: [[String: any Sendable]]?,
                         additionalContext: [String: any Sendable]?
                     ) throws -> [Int] {
+                        try applyChatTemplate(
+                            messages: messages,
+                            tools: tools,
+                            additionalContext: additionalContext,
+                            addGenerationPrompt: true)
+                    }
+
+                    func applyChatTemplate(
+                        messages: [[String: any Sendable]],
+                        tools: [[String: any Sendable]]?,
+                        additionalContext: [String: any Sendable]?,
+                        addGenerationPrompt: Bool
+                    ) throws -> [Int] {
                         do {
                             return try upstream.applyChatTemplate(
-                                messages: messages, tools: tools, additionalContext: additionalContext)
+                                messages: messages,
+                                addGenerationPrompt: addGenerationPrompt,
+                                tools: tools,
+                                additionalContext: additionalContext)
                         } catch Tokenizers.TokenizerError.missingChatTemplate {
                             throw MLXLMCommon.TokenizerError.missingChatTemplate
                         }

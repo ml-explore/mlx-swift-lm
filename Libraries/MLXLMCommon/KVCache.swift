@@ -53,6 +53,9 @@ public protocol KVCache: Evaluatable {
     /// get the maximum size (if any)
     var maxSize: Int? { get }
 
+    /// Whether this cache preserves its initial prefix for safe static prefix reuse.
+    var supportsStaticPrefixReuse: Bool { get }
+
     /// update the cache with new keys and values and return all keys/values
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
 
@@ -99,6 +102,10 @@ public protocol KVCache: Evaluatable {
 extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
+    }
+
+    public var supportsStaticPrefixReuse: Bool {
+        false
     }
 
     public func prepare(lengths: [Int]?) {}
@@ -173,6 +180,7 @@ public protocol QuantizedKVCacheProtocol: KVCache {
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
     public var maxSize: Int? { nil }
+    open var supportsStaticPrefixReuse: Bool { false }
 
     public func innerState() -> [MLXArray] { [] }
 
@@ -373,6 +381,8 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     internal var keys: MLXArray?
     internal var values: MLXArray?
     public var step = 256
+
+    public override var supportsStaticPrefixReuse: Bool { true }
 
     public override init() {
         super.init()
@@ -826,6 +836,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     public private(set) var bits: Int
     public let mode: QuantizationMode
 
+    public override var supportsStaticPrefixReuse: Bool { true }
+
     public init(groupSize: Int = 64, bits: Int = 8, mode: QuantizationMode = .affine) {
         self.groupSize = groupSize
         self.bits = bits
@@ -1111,6 +1123,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
 public class ChunkedKVCache: KVCacheSimple {
     private var chunkSize: Int?
     private var startPosition: Int = 0
+
+    public override var supportsStaticPrefixReuse: Bool { chunkSize == nil }
 
     public init(chunkSize: Int? = nil) {
         self.chunkSize = chunkSize
@@ -1425,6 +1439,14 @@ public class CacheList: BaseKVCache {
 
     public override func innerState() -> [MLXArray] {
         caches.flatMap { $0.innerState() }
+    }
+
+    public override var maxSize: Int? {
+        caches.compactMap(\.maxSize).min()
+    }
+
+    public override var supportsStaticPrefixReuse: Bool {
+        caches.allSatisfy(\.supportsStaticPrefixReuse)
     }
 
     public subscript(index: Int) -> KVCache {

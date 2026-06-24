@@ -118,6 +118,19 @@ public struct SpeculativeDecodingConfig: Sendable {
     }
 }
 
+/// Protocol for processors that can render a reusable static-only prompt prefix.
+///
+/// Do not conform a processor to this protocol unless ``preparePrefix`` produces
+/// a complete semantic prefix boundary for later full prompt renders.
+/// Generic ``UserInputProcessor`` implementations are not assumed to have that
+/// property.
+public protocol PrefixUserInputProcessor: UserInputProcessor {
+    func preparePrefix(
+        input: UserInput,
+        fullInput: LMInput
+    ) async throws -> LMInput?
+}
+
 /// Simplified API for multi-turn conversations with LLMs and VLMs.
 ///
 /// For example:
@@ -144,21 +157,85 @@ public struct SpeculativeDecodingConfig: Sendable {
 ///   model operations.
 public final class ChatSession {
 
-    enum Cache {
+    private enum Cache {
         case empty
-        case kvcache([KVCache], draftKVCache: [KVCache]?)
+        case kvcache([KVCache], draftKVCache: [KVCache]?, prompt: Prompt.State)
         case history([Chat.Message])
     }
 
+    /// Tool schemas used by a chat session.
+    public struct ToolConfiguration: Sendable {
+        /// Tool schemas rendered into the model prompt.
+        public var prompt: [ToolSpec]?
+        /// Tool schemas used for parsing generated tool calls.
+        public var parser: [ToolSpec]?
+
+        public init(prompt: [ToolSpec]? = nil, parser: [ToolSpec]? = nil) {
+            self.prompt = prompt
+            self.parser = parser
+        }
+
+        public init(_ tools: [ToolSpec]?) {
+            self.init(prompt: tools, parser: tools)
+        }
+    }
+
     private let model: ModelContainer
-    public var instructions: String?
+    /// System instructions rendered into the session prompt.
+    public var instructions: String? {
+        didSet {
+            promptConfigurationRevision += 1
+        }
+    }
     private let cache: SerialAccessContainer<Cache>
     private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
-    public var additionalContext: [String: any Sendable]?
-    public var tools: [ToolSpec]?
+    public var additionalContext: [String: any Sendable]? {
+        didSet {
+            promptConfigurationRevision += 1
+        }
+    }
+    /// Tool schemas for prompt rendering and tool-call parsing.
+    public var toolConfiguration: ToolConfiguration {
+        didSet {
+            if !Self.toolSpecsEqual(oldValue.prompt, toolConfiguration.prompt) {
+                promptConfigurationRevision += 1
+            }
+        }
+    }
+    /// Tool schemas used both for prompt rendering and tool-call parsing.
+    ///
+    /// This property preserves the original ``ChatSession`` behavior for callers
+    /// that use a single tool schema list. Assigning it updates
+    /// ``toolConfiguration`` for both prompt rendering and parsing.
+    public var tools: [ToolSpec]? {
+        get { toolConfiguration.prompt }
+        set {
+            toolConfiguration = .init(newValue)
+        }
+    }
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
+    private var promptConfigurationRevision = 0
+
+    private static func toolSpecsEqual(_ lhs: [ToolSpec]?, _ rhs: [ToolSpec]?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case (let lhs?, let rhs?):
+            guard
+                let lhsData = try? JSONSerialization.data(
+                    withJSONObject: lhs, options: [.sortedKeys]),
+                let rhsData = try? JSONSerialization.data(
+                    withJSONObject: rhs, options: [.sortedKeys])
+            else {
+                return false
+            }
+            return lhsData == rhsData
+        default:
+            return false
+        }
+    }
 
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
@@ -190,7 +267,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -223,7 +300,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -260,7 +337,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -297,7 +374,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -310,13 +387,13 @@ public final class ChatSession {
     /// across multiple sessions to avoid re-prefilling the same tokens each time.
     ///
     /// > Important: If the cache was built from a session that already included system
-    /// > instructions, do not pass the same `instructions` here — they would be
-    /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
-    /// > KV state, producing incoherent output.
+    /// > instructions or prompt-rendered tools, do not pass the same values here; they
+    /// > would be re-tokenized on each call to ``respond(to:role:images:videos:audios:)``
+    /// > without matching KV state, producing incoherent output.
     ///
     /// - Parameters:
     ///   - model: the ``ModelContainer``
-    ///   - instructions: optional system instructions for the session — leave `nil` if the
+    ///   - instructions: optional system instructions for the session; leave `nil` if the
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
@@ -339,11 +416,11 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, prompt: .restored))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -356,13 +433,13 @@ public final class ChatSession {
     /// across multiple sessions to avoid re-prefilling the same tokens each time.
     ///
     /// > Important: If the cache was built from a session that already included system
-    /// > instructions, do not pass the same `instructions` here — they would be
-    /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
-    /// > KV state, producing incoherent output.
+    /// > instructions or prompt-rendered tools, do not pass the same values here; they
+    /// > would be re-tokenized on each call to ``respond(to:role:images:videos:audios:)``
+    /// > without matching KV state, producing incoherent output.
     ///
     /// - Parameters:
     ///   - model: the ``ModelContext``
-    ///   - instructions: optional system instructions for the session — leave `nil` if the
+    ///   - instructions: optional system instructions for the session; leave `nil` if the
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
@@ -385,11 +462,11 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, prompt: .restored))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
-        self.tools = tools
+        self.toolConfiguration = .init(tools)
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
@@ -539,6 +616,187 @@ public final class ChatSession {
         }
     }
 
+    /// Groups prompt rendering, exact-prefix validation, and prompt-cache state transitions.
+    ///
+    /// The canonical prompt is rendered each turn. When the processor and cache support
+    /// safe prefix reuse, an exact already-cached static prefix is sliced before model
+    /// prefill.
+    private enum Prompt {
+        enum State: Equatable, Sendable {
+            case pending
+            case applied(staticPrefix: [Int], promptConfigurationRevision: Int)
+            case restored
+        }
+
+        struct Configuration: Sendable {
+            var instructions: String?
+            var processing: UserInput.Processing
+            var toolConfiguration: ToolConfiguration
+            var additionalContext: [String: any Sendable]?
+            var revision: Int
+            var allowsPrefixReuse: Bool
+        }
+
+        struct PreparedInput {
+            var input: LMInput
+            var state: State
+        }
+
+        static func fullMessages(
+            turnMessages: [Chat.Message],
+            instructions: String?
+        ) -> [Chat.Message] {
+            guard let instructions else {
+                return turnMessages
+            }
+
+            return [.system(instructions)] + turnMessages
+        }
+
+        static func staticPrefixTokens(
+            staticInput: LMInput,
+            fullInput: LMInput
+        ) -> [Int]? {
+            guard staticInput.text.tokens.ndim == 1,
+                fullInput.text.tokens.ndim == 1,
+                staticInput.text.mask == nil,
+                fullInput.text.mask == nil
+            else {
+                return nil
+            }
+
+            let staticTokens = staticInput.text.tokens.asArray(Int.self)
+            guard !staticTokens.isEmpty else {
+                return nil
+            }
+
+            let fullTokens = fullInput.text.tokens.asArray(Int.self)
+            guard fullTokens.starts(with: staticTokens) else {
+                return nil
+            }
+
+            return staticTokens
+        }
+
+        static func suffixInput(fullInput: LMInput, dropping prefixTokens: [Int]) -> LMInput? {
+            guard fullInput.text.tokens.ndim == 1, fullInput.text.mask == nil else {
+                return nil
+            }
+
+            let fullTokens = fullInput.text.tokens.asArray(Int.self)
+            guard fullTokens.starts(with: prefixTokens) else {
+                return nil
+            }
+
+            return LMInput(
+                text: .init(tokens: fullInput.text.tokens[prefixTokens.count...]),
+                image: fullInput.image,
+                video: fullInput.video,
+                audio: fullInput.audio)
+        }
+
+        static func prepareInput(
+            processor: any UserInputProcessor,
+            turnMessages: [Chat.Message],
+            kvCache: [KVCache],
+            promptState: State,
+            configuration: Configuration
+        ) async throws -> PreparedInput {
+            switch promptState {
+            case .restored:
+                let userInput = UserInput(
+                    chat: fullMessages(
+                        turnMessages: turnMessages,
+                        instructions: configuration.instructions),
+                    processing: configuration.processing,
+                    tools: configuration.toolConfiguration.prompt,
+                    additionalContext: configuration.additionalContext)
+                return PreparedInput(
+                    input: try await processor.prepare(input: userInput),
+                    state: promptState)
+
+            case .applied(_, let storedRevision) where storedRevision != configuration.revision:
+                throw ChatSessionError.promptCacheMismatch
+
+            case .pending, .applied:
+                if configuration.instructions == nil
+                    && configuration.toolConfiguration.prompt == nil
+                {
+                    let userInput = UserInput(
+                        chat: turnMessages,
+                        processing: configuration.processing,
+                        tools: nil,
+                        additionalContext: configuration.additionalContext)
+                    let preparedState =
+                        if promptState == .pending {
+                            State.applied(
+                                staticPrefix: [],
+                                promptConfigurationRevision: configuration.revision)
+                        } else {
+                            promptState
+                        }
+                    return PreparedInput(
+                        input: try await processor.prepare(input: userInput),
+                        state: preparedState)
+                }
+
+                let fullUserInput = UserInput(
+                    chat: fullMessages(
+                        turnMessages: turnMessages,
+                        instructions: configuration.instructions),
+                    processing: configuration.processing,
+                    tools: configuration.toolConfiguration.prompt,
+                    additionalContext: configuration.additionalContext)
+                let fullInput = try await processor.prepare(input: fullUserInput)
+                let prefixProcessor = processor as? any PrefixUserInputProcessor
+                let canReuseStaticPrefix =
+                    configuration.allowsPrefixReuse
+                    && prefixProcessor != nil
+                    && !kvCache.isEmpty
+                    && kvCache.allSatisfy(\.supportsStaticPrefixReuse)
+
+                switch promptState {
+                case .pending:
+                    let staticPrefix: [Int]?
+                    if canReuseStaticPrefix {
+                        let staticInput: LMInput?
+                        if let prefixProcessor {
+                            staticInput = try? await prefixProcessor.preparePrefix(
+                                input: fullUserInput,
+                                fullInput: fullInput)
+                        } else {
+                            staticInput = nil
+                        }
+                        staticPrefix = staticInput.flatMap {
+                            staticPrefixTokens(staticInput: $0, fullInput: fullInput)
+                        }
+                    } else {
+                        staticPrefix = nil
+                    }
+                    return PreparedInput(
+                        input: fullInput,
+                        state: .applied(
+                            staticPrefix: staticPrefix ?? [],
+                            promptConfigurationRevision: configuration.revision))
+
+                case .applied(let staticPrefix, _):
+                    guard canReuseStaticPrefix, !staticPrefix.isEmpty else {
+                        return PreparedInput(input: fullInput, state: promptState)
+                    }
+                    guard
+                        let suffixInput = suffixInput(fullInput: fullInput, dropping: staticPrefix)
+                    else {
+                        throw ChatSessionError.promptCacheMismatch
+                    }
+                    return PreparedInput(input: suffixInput, state: promptState)
+
+                case .restored:
+                    preconditionFailure("handled above")
+                }
+            }
+        }
+    }
+
     /// Produces a streaming response to a prompt by transforming the
     /// raw `Generation` values.
     ///
@@ -573,13 +831,25 @@ public final class ChatSession {
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
+        let model = self.model
+        let instructions = self.instructions
+        let processing = self.processing
+        let toolConfiguration = self.toolConfiguration
+        let toolDispatch = self.toolDispatch
+        let additionalContext = self.additionalContext
+        let promptInputConfiguration = Prompt.Configuration(
+            instructions: instructions,
+            processing: processing,
+            toolConfiguration: toolConfiguration,
+            additionalContext: additionalContext,
+            revision: self.promptConfigurationRevision,
+            allowsPrefixReuse: generateParameters.processor() == nil)
+        let cache = self.cache
+        let loadedDraftModel = self.loadedDraftModel
+        let generateParameters = self.generateParameters
+        let speculativeDecoding = self.speculativeDecoding
 
-        let task = Task {
-            [
-                model,
-                instructions, processing, tools, toolDispatch,
-                additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
-            ] in
+        let task = Task { @Sendable in
             do {
                 try await cache.update { cache in
 
@@ -589,9 +859,6 @@ public final class ChatSession {
                     let modelConfiguration = await model.configuration
 
                     var messages: [Chat.Message] = []
-                    if let instructions {
-                        messages.append(.system(instructions))
-                    }
 
                     // prepare the cache, if needed.  note:
                     // this is using the LanguageModel (not Sendable) outside
@@ -612,19 +879,23 @@ public final class ChatSession {
 
                     var kvCache: [KVCache]
                     var draftKVCache: [KVCache]?
+                    var promptState: Prompt.State
                     switch cache {
                     case .empty:
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        promptState = .pending
+                        cache = .kvcache(kvCache, draftKVCache: nil, prompt: promptState)
 
-                    case .kvcache(let array, let storedDraftCache):
+                    case .kvcache(let array, let storedDraftCache, let storedPromptState):
                         kvCache = array
                         draftKVCache = storedDraftCache
+                        promptState = storedPromptState
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        promptState = .pending
+                        cache = .kvcache(kvCache, draftKVCache: nil, prompt: promptState)
                         messages.append(contentsOf: history)
                     }
 
@@ -633,12 +904,17 @@ public final class ChatSession {
 
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
-                        let userInput = UserInput(
-                            chat: messages,
-                            processing: processing,
-                            tools: tools, additionalContext: additionalContext)
-                        let input = try await processor.prepare(input: userInput)
+                        let turnMessages = messages
                         messages.removeAll()
+
+                        let preparedPrompt = try await Prompt.prepareInput(
+                            processor: processor,
+                            turnMessages: turnMessages,
+                            kvCache: kvCache,
+                            promptState: promptState,
+                            configuration: promptInputConfiguration)
+                        let input = preparedPrompt.input
+                        let preparedPromptState = preparedPrompt.state
 
                         // Select the token iterator based on speculative decoding configuration.
                         let (genStream, genTask): (AsyncStream<Generation>, Task<Void, Never>)
@@ -654,7 +930,7 @@ public final class ChatSession {
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
                                 iterator: iterator,
-                                tools: tools
+                                tools: toolConfiguration.parser
                             )
                         }
 
@@ -723,7 +999,10 @@ public final class ChatSession {
                                     if draftKVCache == nil {
                                         draftKVCache = draftModel.newCache(
                                             parameters: generateParameters)
-                                        cache = .kvcache(kvCache, draftKVCache: draftKVCache)
+                                        cache = .kvcache(
+                                            kvCache,
+                                            draftKVCache: draftKVCache,
+                                            prompt: promptState)
                                     }
                                     let draftCache = draftKVCache!
 
@@ -742,13 +1021,19 @@ public final class ChatSession {
                                         modelConfiguration: modelConfiguration,
                                         tokenizer: tokenizer,
                                         iterator: iterator,
-                                        tools: tools
+                                        tools: toolConfiguration.parser
                                     )
                                 }
                             }
                         } else {
                             // Standard path with no speculative decoding.
                             (genStream, genTask) = try defaultGeneration()
+                        }
+
+                        if preparedPromptState != promptState {
+                            promptState = preparedPromptState
+                            cache = .kvcache(
+                                kvCache, draftKVCache: draftKVCache, prompt: promptState)
                         }
 
                         var pendingToolCalls: [ToolCall] = []
@@ -842,7 +1127,7 @@ public final class ChatSession {
     {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 return try await body(cache)
             default:
                 return try await body(nil)
@@ -861,7 +1146,7 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 try savePromptCache(url: url, cache: cache)
             default:
                 throw ChatSessionError.noCacheAvailable
@@ -874,8 +1159,15 @@ public final class ChatSession {
 public enum ChatSessionError: LocalizedError {
     /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
     case noCacheAvailable
+    /// The stored prompt prefix no longer matches the rendered prompt.
+    case promptCacheMismatch
 
     public var errorDescription: String? {
-        "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+        switch self {
+        case .noCacheAvailable:
+            "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+        case .promptCacheMismatch:
+            "The cached prompt prefix no longer matches the rendered prompt. Call clear() after changing instructions, tools, or additionalContext."
+        }
     }
 }
