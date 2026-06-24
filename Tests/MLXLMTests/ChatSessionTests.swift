@@ -6,6 +6,7 @@ import MLXLLM
 import MLXNN
 import MLXOptimizers
 import XCTest
+import os
 
 @testable import MLXLMCommon
 
@@ -17,6 +18,143 @@ public class ChatSessionTests: XCTestCase {
         var content: String
     }
 
+    private struct RecordedTemplate: Equatable, Sendable {
+        var messages: [RecordedMessage]
+        var toolCount: Int?
+    }
+
+    private final class PreparedTokenRecorder: Sendable {
+        private let values = OSAllocatedUnfairLock(initialState: [[Int]]())
+        private let shapes = OSAllocatedUnfairLock(initialState: [[Int]]())
+
+        func append(_ value: [Int], shape: [Int]) {
+            values.withLock {
+                $0.append(value)
+            }
+            shapes.withLock {
+                $0.append(shape)
+            }
+        }
+
+        var snapshot: [[Int]] {
+            values.withLock { $0 }
+        }
+
+        var shapeSnapshot: [[Int]] {
+            shapes.withLock { $0 }
+        }
+    }
+
+    private final class RecordingLanguageModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let recorder: PreparedTokenRecorder
+        let kvHeads: [Int]
+        let kvHeadDim: Int
+        let nextToken: Int
+
+        init(
+            recorder: PreparedTokenRecorder,
+            kvHeadCount: Int = 1,
+            kvHeadDim: Int = 1,
+            nextToken: Int = 0
+        ) {
+            self.recorder = recorder
+            self.kvHeads = Array(repeating: 1, count: kvHeadCount)
+            self.kvHeadDim = kvHeadDim
+            self.nextToken = nextToken
+            super.init()
+        }
+
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+            -> PrepareResult
+        {
+            recorder.append(
+                input.text.tokens.asArray(Int.self),
+                shape: input.text.tokens.shape)
+            let tokenCount = input.text.tokens.size
+            update(cache: cache, tokenCount: tokenCount)
+            return .logits(.init(logits: logits(tokenCount: tokenCount), state: nil))
+        }
+
+        func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+            let tokenCount = max(1, inputs.asArray(Int.self).count)
+            if let cache {
+                update(cache: cache, tokenCount: tokenCount)
+            }
+            return logits(tokenCount: tokenCount)
+        }
+
+        private func update(cache: [KVCache], tokenCount: Int) {
+            for (index, layerCache) in cache.enumerated() {
+                let heads = kvHeads[min(index, kvHeads.count - 1)]
+                let keys = MLXArray.zeros([1, heads, tokenCount, kvHeadDim])
+                let values = MLXArray.zeros([1, heads, tokenCount, kvHeadDim])
+                if let quantizedCache = layerCache as? QuantizedKVCacheProtocol {
+                    _ = quantizedCache.updateQuantized(keys: keys, values: values)
+                } else {
+                    _ = layerCache.update(keys: keys, values: values)
+                }
+            }
+        }
+
+        private func logits(tokenCount: Int) -> MLXArray {
+            let row = (0 ..< 8).map { $0 == nextToken ? Float(1_000) : Float(-1_000) }
+            return MLXArray(Array(repeating: row, count: tokenCount).flatMap { $0 })
+                .reshaped(1, tokenCount, 8)
+        }
+    }
+
+    private final class SequenceLanguageModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let recorder: PreparedTokenRecorder
+        let kvHeads = [1]
+        let tokens: [Int]
+        private let index = OSAllocatedUnfairLock(initialState: 0)
+
+        init(recorder: PreparedTokenRecorder, tokens: [Int]) {
+            self.recorder = recorder
+            self.tokens = tokens
+            super.init()
+        }
+
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+            -> PrepareResult
+        {
+            recorder.append(
+                input.text.tokens.asArray(Int.self),
+                shape: input.text.tokens.shape)
+            update(cache: cache, tokenCount: input.text.tokens.size)
+            return .logits(.init(logits: logits(tokenCount: input.text.tokens.size), state: nil))
+        }
+
+        func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+            let tokenCount = max(1, inputs.asArray(Int.self).count)
+            if let cache {
+                update(cache: cache, tokenCount: tokenCount)
+            }
+            return logits(tokenCount: tokenCount)
+        }
+
+        private func update(cache: [KVCache], tokenCount: Int) {
+            for layerCache in cache {
+                let keys = MLXArray.zeros([1, 1, tokenCount, 1])
+                let values = MLXArray.zeros([1, 1, tokenCount, 1])
+                _ = layerCache.update(keys: keys, values: values)
+            }
+        }
+
+        private func logits(tokenCount: Int) -> MLXArray {
+            let tokens = self.tokens
+            let token = index.withLock { index in
+                let token = tokens[min(index, tokens.count - 1)]
+                index += 1
+                return token
+            }
+            let vocabularySize = (tokens.max() ?? token) + 1
+            let row = (0 ..< vocabularySize).map { $0 == token ? Float(1_000) : Float(-1_000) }
+            return MLXArray(Array(repeating: row, count: tokenCount).flatMap { $0 })
+                .reshaped(1, tokenCount, vocabularySize)
+        }
+    }
+
     private struct RecordingMessageGenerator: MessageGenerator {
         let continuation: AsyncStream<[RecordedMessage]>.Continuation
 
@@ -24,6 +162,412 @@ public class ChatSessionTests: XCTestCase {
             continuation.yield(messages.map { .init(role: $0.role, content: $0.content) })
 
             return DefaultMessageGenerator().generate(messages: messages)
+        }
+    }
+
+    private struct RecordingTokenizer: Tokenizer {
+        let continuation: AsyncStream<RecordedTemplate>.Continuation
+        let base = TestTokenizer()
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            base.encode(text: text, addSpecialTokens: addSpecialTokens)
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            base.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            base.convertTokenToId(token)
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            base.convertIdToToken(id)
+        }
+
+        var bosToken: String? { base.bosToken }
+        var eosToken: String? { base.eosToken }
+        var unknownToken: String? { base.unknownToken }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            let recordedMessages = messages.map { message in
+                RecordedMessage(
+                    role: Chat.Message.Role(rawValue: message["role"] as? String ?? "")!,
+                    content: message["content"] as? String ?? "")
+            }
+            continuation.yield(.init(messages: recordedMessages, toolCount: tools?.count))
+            return base.encode(text: "")
+        }
+    }
+
+    private struct LedgerTokenizer: Tokenizer {
+        let unsafeDynamicTemplate: Bool
+        var staticOnlyAssistantHeader = false
+        var eosTokenId: Int? = nil
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            []
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map(String.init).joined(separator: " ")
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            if let eosToken, token == eosToken {
+                return eosTokenId
+            }
+            return nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            String(id)
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { eosTokenId == nil ? nil : "<eos>" }
+        var unknownToken: String? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            try applyChatTemplate(
+                messages: messages,
+                tools: tools,
+                additionalContext: additionalContext,
+                addGenerationPrompt: true)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?,
+            addGenerationPrompt: Bool
+        ) throws -> [Int] {
+            let dynamicTokens: [Int] = messages.flatMap { message -> [Int] in
+                let role = message["role"] as? String
+                let content = message["content"] as? String
+                if role == Chat.Message.Role.assistant.rawValue,
+                    content?.isEmpty == true,
+                    let eosTokenId
+                {
+                    return [eosTokenId]
+                }
+
+                switch content {
+                case "first":
+                    return [101]
+                case "second":
+                    return [102]
+                case "tool result":
+                    return [103]
+                case "First continuation":
+                    return [104]
+                case "Second continuation":
+                    return [105]
+                case "0":
+                    return [0]
+                case "7":
+                    return [7]
+                case "7 7":
+                    return [7, 7]
+                default:
+                    return []
+                }
+            }
+
+            let hasSystem = messages.contains { $0["role"] as? String == "system" }
+            if hasSystem || tools != nil {
+                let systemContent =
+                    messages.first { $0["role"] as? String == "system" }?[
+                        "content"] as? String
+                let staticTokens = systemContent == "Changed prefix." ? [21, 22] : [11, 12]
+                return staticTokens + dynamicTokens
+                    + (addGenerationPrompt && staticOnlyAssistantHeader ? [200] : [])
+            }
+
+            return (unsafeDynamicTemplate ? [99] : []) + dynamicTokens
+        }
+    }
+
+    private struct ToolCallLedgerTokenizer: Tokenizer {
+        private let prose = "I'll inspect the file.\n"
+        private let toolCall =
+            "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_call>"
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            switch text {
+            case prose:
+                return [201]
+            case toolCall:
+                return [202]
+            case prose + toolCall:
+                return [201, 202]
+            case "first":
+                return [101]
+            case "second":
+                return [102]
+            case "tool result":
+                return [103]
+            default:
+                return []
+            }
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map {
+                skipSpecialTokens && $0 == 202 ? "" : convertIdToToken($0) ?? ""
+            }.joined()
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            switch id {
+            case 201:
+                return prose
+            case 202:
+                return toolCall
+            default:
+                return nil
+            }
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { nil }
+        var unknownToken: String? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            var tokens = tools == nil ? [] : [11, 12]
+            for message in messages {
+                switch message["role"] as? String {
+                case Chat.Message.Role.user.rawValue:
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                case Chat.Message.Role.assistant.rawValue:
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                case Chat.Message.Role.tool.rawValue:
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                default:
+                    break
+                }
+            }
+            return tokens
+        }
+    }
+
+    private struct UserHeaderPrefixTokenizer: Tokenizer {
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            switch text {
+            case "first": [101]
+            case "second": [102]
+            case "0": [0]
+            case "7": [7]
+            default: []
+            }
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map(String.init).joined(separator: " ")
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            String(id)
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { nil }
+        var unknownToken: String? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            try applyChatTemplate(
+                messages: messages,
+                tools: tools,
+                additionalContext: additionalContext,
+                addGenerationPrompt: true)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?,
+            addGenerationPrompt: Bool
+        ) throws -> [Int] {
+            let dynamicTokens = messages.flatMap { message -> [Int] in
+                switch message["content"] as? String {
+                case "first": [101]
+                case "second": [102]
+                default: []
+                }
+            }
+            let hasStaticPrompt =
+                messages.contains { $0["role"] as? String == "system" }
+                || tools != nil
+            let staticTokens = hasStaticPrompt ? [11, 12, 50] : []
+            return staticTokens + dynamicTokens + (addGenerationPrompt ? [200] : [])
+        }
+    }
+
+    private struct LiteralQwenStyleTokenizer: Tokenizer {
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            switch text {
+            case "first": [101]
+            case "second": [102]
+            case "0": [0]
+            case "7": [7]
+            default: []
+            }
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map(String.init).joined(separator: " ")
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            String(id)
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { nil }
+        var unknownToken: String? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            try applyChatTemplate(
+                messages: messages,
+                tools: tools,
+                additionalContext: additionalContext,
+                addGenerationPrompt: true)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?,
+            addGenerationPrompt: Bool
+        ) throws -> [Int] {
+            var tokens: [Int] = []
+            if messages.contains(where: { $0["role"] as? String == "system" }) || tools != nil {
+                tokens += [151_644, 9_125]
+                if tools != nil {
+                    tokens += [27_091, 25_791]
+                }
+                tokens += [151_645]
+            }
+            for message in messages {
+                switch message["role"] as? String {
+                case "user":
+                    tokens += [151_644, 872]
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                    tokens += [151_645]
+                case "assistant":
+                    tokens += [151_644, 77_091]
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                default:
+                    break
+                }
+            }
+            if addGenerationPrompt {
+                tokens += [151_644, 77091]
+            }
+            return tokens
+        }
+    }
+
+    private struct LedgerInputProcessor: UserInputProcessor {
+        let tokenizer: Tokenizer
+        let configuration: ModelConfiguration
+        let messageGenerator: MessageGenerator
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = messageGenerator.generate(from: input)
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+
+            return LMInput(tokens: MLXArray(promptTokens))
+        }
+    }
+
+    private struct TwoDimensionalInputProcessor: UserInputProcessor {
+        let configuration = ModelConfiguration(id: "test")
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = DefaultMessageGenerator().generate(from: input)
+            let dynamicTokens: [Int] = messages.flatMap { message -> [Int] in
+                switch message["content"] as? String {
+                case "first":
+                    return [101]
+                case "second":
+                    return [102]
+                default:
+                    return []
+                }
+            }
+            let hasSystem = messages.contains { $0["role"] as? String == "system" }
+            let tokens = (hasSystem || input.tools != nil ? [11, 12] : []) + dynamicTokens
+            return LMInput(tokens: MLXArray(tokens).reshaped(1, tokens.count))
+        }
+    }
+
+    private struct FullHistoryRejectingProcessor: UserInputProcessor {
+        struct FullHistoryError: Error {}
+
+        let configuration = ModelConfiguration(id: "test")
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let recorder: PreparedTokenRecorder
+        var throwsCancellationOnFullHistory = false
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = DefaultMessageGenerator().generate(from: input)
+            if messages.count > 2 {
+                if throwsCancellationOnFullHistory {
+                    throw CancellationError()
+                }
+                throw FullHistoryError()
+            }
+
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: input.tools,
+                additionalContext: input.additionalContext)
+            recorder.append(promptTokens, shape: [promptTokens.count])
+            return LMInput(tokens: MLXArray(promptTokens))
         }
     }
 
@@ -70,6 +614,89 @@ public class ChatSessionTests: XCTestCase {
 
     private func model(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
         Self.makeModel(processor: processor)
+    }
+
+    private func recordingModel(
+        tokenizer: Tokenizer,
+        recorder: PreparedTokenRecorder,
+        kvHeadCount: Int = 1,
+        kvHeadDim: Int = 1,
+        nextToken: Int = 0
+    ) -> ModelContext {
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        return recordingModel(
+            processor: processor,
+            tokenizer: tokenizer,
+            recorder: recorder,
+            kvHeadCount: kvHeadCount,
+            kvHeadDim: kvHeadDim,
+            nextToken: nextToken)
+    }
+
+    private func recordingModel(
+        processor: any UserInputProcessor,
+        tokenizer: Tokenizer,
+        recorder: PreparedTokenRecorder,
+        kvHeadCount: Int = 1,
+        kvHeadDim: Int = 1,
+        nextToken: Int = 0
+    ) -> ModelContext {
+        return .init(
+            configuration: ModelConfiguration(id: "test"),
+            model: RecordingLanguageModel(
+                recorder: recorder,
+                kvHeadCount: kvHeadCount,
+                kvHeadDim: kvHeadDim,
+                nextToken: nextToken),
+            processor: processor,
+            tokenizer: tokenizer)
+    }
+
+    private var lookupTools: [ToolSpec] {
+        [
+            [
+                "type": "function",
+                "function": [
+                    "name": "lookup",
+                    "description": "Look up a value",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+    }
+
+    private func ledgerSession(
+        recorder: PreparedTokenRecorder,
+        unsafeDynamicTemplate: Bool = false,
+        staticOnlyAssistantHeader: Bool = false,
+        maxKVSize: Int? = nil,
+        repetitionPenalty: Float? = nil
+    ) -> ChatSession {
+        let tokenizer = LedgerTokenizer(
+            unsafeDynamicTemplate: unsafeDynamicTemplate,
+            staticOnlyAssistantHeader: staticOnlyAssistantHeader)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        return ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(
+                maxTokens: 1,
+                maxKVSize: maxKVSize,
+                repetitionPenalty: repetitionPenalty),
+            tools: lookupTools)
     }
 
     private let generationParameters = GenerateParameters(maxTokens: 50)
@@ -170,6 +797,901 @@ public class ChatSessionTests: XCTestCase {
             $0 + history.count + $1 + 1
         }
         XCTAssertLessThan(actualPreparedMessageCount, replayedHistoryPreparedMessageCount)
+    }
+
+    func testStaticInstructionsAndPromptToolsUseExactCachedPrefix() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+        _ = try await session.respond(to: [.tool("tool result")])
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+                [103],
+            ])
+    }
+
+    func testGenericProcessorReusesExactTokenLedger() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ChatSession(
+            recordingModel(
+                tokenizer: LedgerTokenizer(unsafeDynamicTemplate: false),
+                recorder: recorder),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1, temperature: 0),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testPlainTextSessionUsesExactTranscriptLedger() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            generateParameters: GenerateParameters(maxTokens: 1, temperature: 0))
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [101],
+                [102],
+            ])
+    }
+
+    func testMultiTokenAssistantTranscriptUsesExactLedger() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+        session.generateParameters.maxTokens = 2
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testExactLedgerFallsBackWhenGenerationPromptIsNotTranscriptPrefix() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(
+            unsafeDynamicTemplate: false,
+            staticOnlyAssistantHeader: true)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1, temperature: 0),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101, 200],
+                [11, 12, 102, 200],
+            ])
+    }
+
+    func testExactLedgerRejectsPrefixEndingWithUserTurnHeader() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = UserHeaderPrefixTokenizer()
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 50, 101, 200],
+                [11, 12, 50, 102, 200],
+            ])
+    }
+
+    func testExactLedgerDoesNotInferPrefixForEmptyUserTurnHeader() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = UserHeaderPrefixTokenizer()
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 50, 200],
+                [11, 12, 50, 102, 200],
+            ])
+    }
+
+    func testLiteralQwenStyleToolPrefixCanReusePromptTools() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LiteralQwenStyleTokenizer()
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [
+                    151_644, 9_125, 27_091, 25_791, 151_645, 151_644, 872, 101,
+                    151_645, 151_644, 77_091,
+                ],
+                [151_644, 872, 102, 151_645, 151_644, 77_091],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForBoundedKVCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder, maxKVSize: 2)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForDynamicKVQuantization() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                kvHeadDim: 32,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(
+                maxTokens: 2,
+                kvBits: 4,
+                quantizedKVStart: 0),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForRepetitionPenalty() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder, repetitionPenalty: 1.1)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForPresencePenalty() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+        session.generateParameters.presencePenalty = 0.5
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForFrequencyPenalty() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+        session.generateParameters.frequencyPenalty = 0.5
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testFullHistoryRenderFailureFallsBackToIncrementalPrompt() async throws {
+        let recorder = PreparedTokenRecorder()
+        let processor = FullHistoryRejectingProcessor(recorder: recorder)
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: PreparedTokenRecorder(),
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testFullHistoryRenderCancellationPropagates() async throws {
+        let recorder = PreparedTokenRecorder()
+        let processor = FullHistoryRejectingProcessor(
+            recorder: recorder,
+            throwsCancellationOnFullHistory: true)
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: PreparedTokenRecorder(),
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101]])
+        }
+    }
+
+    func testStreamCancellationInvalidatesExactLedger() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 20),
+            tools: lookupTools)
+
+        for try await _ in session.streamResponse(to: "first") {
+            break
+        }
+        _ = try await session.respond(to: "second")
+        await session.synchronize()
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testHistorySessionReusesExactLedgerAfterInitialHydration() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            history: [
+                .system("Historical system prompt"),
+                .user("Old question"),
+                .assistant("Old answer"),
+            ],
+            generateParameters: GenerateParameters(maxTokens: 1))
+
+        _ = try await session.respond(to: "First continuation")
+        _ = try await session.respond(to: "Second continuation")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 104],
+                [105],
+            ])
+    }
+
+    func testEOSTerminatedGenerationKeepsLedgerAlignedWithCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false, eosTokenId: 7)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 5),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testHistorySessionInstructionChangeThrowsAfterHydration() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "Initial prefix.",
+            history: [.user("first"), .assistant("7")],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "second")
+        session.instructions = "Changed prefix."
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101, 7, 102]])
+        }
+    }
+
+    func testHistorySessionPromptToolChangeThrowsAfterHydration() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "Initial prefix.",
+            history: [.user("first"), .assistant("7")],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "second")
+        session.tools = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "changed_lookup",
+                    "description": "Changed prompt-rendered tool",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101, 7, 102]])
+        }
+    }
+
+    func testHistorySessionAdditionalContextChangeThrowsAfterHydration() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "Initial prefix.",
+            history: [.user("first"), .assistant("7")],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "second")
+        session.additionalContext = ["chat_template_kwargs": ["enable_thinking": false]]
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101, 7, 102]])
+        }
+    }
+
+    func testToolCallLedgerUsesRawGeneratedTextNotDisplayChunks() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = ToolCallLedgerTokenizer()
+        let configuration = ModelConfiguration(id: "test", toolCallFormat: .json)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: configuration,
+            messageGenerator: DefaultMessageGenerator())
+        let context = ModelContext(
+            configuration: configuration,
+            model: SequenceLanguageModel(recorder: recorder, tokens: [201, 202]),
+            processor: processor,
+            tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: 2),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testParsedToolCallAndToolResultContinuationUsesExactLedger() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = ToolCallLedgerTokenizer()
+        let configuration = ModelConfiguration(id: "test", toolCallFormat: .json)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: configuration,
+            messageGenerator: DefaultMessageGenerator())
+        let context = ModelContext(
+            configuration: configuration,
+            model: SequenceLanguageModel(
+                recorder: recorder,
+                tokens: [201, 202, 201, 201, 201]),
+            processor: processor,
+            tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: 2),
+            tools: lookupTools
+        ) { toolCall in
+            XCTAssertEqual(toolCall.function.name, "lookup")
+            return "tool result"
+        }
+
+        _ = try await session.respond(to: "first")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [103],
+            ])
+    }
+
+    func testExactLedgerReuseDisabledForSpeculativeDecoding() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let draft = ModelContainer(
+            context: recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: PreparedTokenRecorder()))
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: recorder),
+            instructions: "You are concise.",
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: draft,
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fallbackToDefault)),
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testExactLedgerReuseSkipsTwoDimensionalTokens() async throws {
+        let recorder = PreparedTokenRecorder()
+        let processor = TwoDimensionalInputProcessor()
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: TestTokenizer(),
+                recorder: recorder),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+        XCTAssertEqual(recorder.shapeSnapshot, [[1, 3], [1, 3]])
+    }
+
+    func testExactLedgerReuseUsesRenderedTranscriptSuffix() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder, unsafeDynamicTemplate: true)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testParserOnlyToolConfigurationChangeDoesNotInvalidatePromptCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        session.toolConfiguration.parser = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "new_parser_only_tool",
+                    "description": "Used only for parsing",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        _ = try await session.respond(to: "second")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+            ])
+    }
+
+    func testPromptConfigurationChangeThrowsInsteadOfCorruptingCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        session.instructions = "Changed prefix."
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101]])
+        }
+    }
+
+    func testPromptToolChangeThrowsInsteadOfCorruptingCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        session.tools = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "changed_lookup",
+                    "description": "Changed prompt-rendered tool",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101]])
+        }
+    }
+
+    func testAdditionalContextChangeThrowsInsteadOfCorruptingCache() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        session.additionalContext = ["chat_template_kwargs": ["enable_thinking": false]]
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101]])
+        }
+    }
+
+    func testPromptConfigurationChangeThrowsAfterCachedPrompt() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(
+            recorder: recorder,
+            staticOnlyAssistantHeader: true)
+
+        _ = try await session.respond(to: "first")
+        session.instructions = "Changed prefix."
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101, 200]])
+        }
+    }
+
+    func testRestoredCacheRendersConfiguredInstructionsAndPromptTools() async throws {
+        let (recordedTemplates, continuation) = AsyncStream<RecordedTemplate>.makeStream()
+        let tokenizer = RecordingTokenizer(continuation: continuation)
+        let recorder = PreparedTokenRecorder()
+        let restoredCache = KVCacheSimple()
+        let keys = MLXArray.zeros([1, 1, 1, 1])
+        let values = MLXArray.zeros([1, 1, 1, 1])
+        _ = restoredCache.update(keys: keys, values: values)
+        let session = ChatSession(
+            recordingModel(tokenizer: tokenizer, recorder: recorder),
+            instructions: "Restored instructions.",
+            cache: [restoredCache],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        continuation.finish()
+
+        var calls: [RecordedTemplate] = []
+        for await call in recordedTemplates {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.map { $0.messages.map(\.role) }, [[.system, .user]])
+        XCTAssertEqual(calls.map(\.toolCount), [1])
+    }
+
+    func testClearRebuildsStaticInstructionsAndPromptTools() async throws {
+        let (recordedTemplates, continuation) = AsyncStream<RecordedTemplate>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: RecordingTokenizer(continuation: continuation),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "lookup",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        let session = ChatSession(
+            model(processor: processor),
+            instructions: "Static prefix.",
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: tools)
+
+        _ = try await session.respond(to: "first")
+        await session.clear()
+        _ = try await session.respond(to: "after clear")
+        continuation.finish()
+
+        var calls: [RecordedTemplate] = []
+        for await call in recordedTemplates {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(
+            calls.map { $0.messages.map(\.role) },
+            [
+                [.system, .user],
+                [.system, .user],
+            ])
+        XCTAssertEqual(calls.map(\.toolCount), [1, 1])
+    }
+
+    func testClearErasesExactLedgerReuse() async throws {
+        let recorder = PreparedTokenRecorder()
+        let session = ledgerSession(recorder: recorder)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+        await session.clear()
+        _ = try await session.respond(to: "first")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101],
+                [102],
+                [11, 12, 101],
+            ])
+    }
+
+    func testParserOnlyToolsAreNotRenderedIntoPrompt() async throws {
+        let (recordedTemplates, continuation) = AsyncStream<RecordedTemplate>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: RecordingTokenizer(continuation: continuation),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "lookup",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ] as ToolSpec
+        ]
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 1))
+        session.toolConfiguration = .init(prompt: nil, parser: tools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+        continuation.finish()
+
+        var calls: [RecordedTemplate] = []
+        for await call in recordedTemplates {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(
+            calls.map { $0.messages.map(\.role) },
+            [
+                [.user],
+                [.user],
+            ])
+        XCTAssertEqual(calls.map(\.toolCount), [nil, nil])
     }
 
     func testChatSessionAsyncInterrupt() async throws {
