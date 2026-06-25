@@ -69,6 +69,43 @@ import Testing
                 let after = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
                 #expect(after == nil, "evictAll() must clear the cached lastError")
             }
+
+            @Test("a load evicted mid-flight does not re-populate the cache on completion")
+            func evictedInFlightLoadDoesNotRepopulate() async throws {
+                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+                let id = "org/superseded-\(UUID().uuidString)"
+                let gate = LoadGate()
+                let model = MLXLanguageModel(
+                    modelID: id,
+                    capabilities: LanguageModelCapabilities(capabilities: []),
+                    from: BlockingDownloader(gate: gate),
+                    using: EvictStubTokenizerLoader(),
+                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)") }
+                )
+
+                // Park a genuine (non-warmup) load in flight.
+                let loadTask = Task { try? await model.preload() }
+                await gate.waitUntilStarted()
+
+                // In-flight load is registered and reported.
+                let downloadingDuring = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+                #expect(downloadingDuring, "a parked load should report as downloading")
+
+                // Evict while the load is suspended — removes loadingTasks[id].
+                await MLXLanguageModel.evictAll()
+
+                let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+                #expect(!downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
+
+                // Let the parked load fail. The catch-path guard must NOT re-add lastError
+                // for the now-superseded task.
+                await gate.release()
+                _ = await loadTask.value
+
+                let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+                #expect(lastError == nil, "a superseded load must not re-populate cache state")
+            }
         }
     }
 
