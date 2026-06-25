@@ -90,14 +90,7 @@ jobs:
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
           xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS'
 
-      # TODO(docs): temporarily disabled. MLXFoundationModels is gated on the
-      # FoundationModels v2 SDK (canImport(FoundationModels, _version: 2)), so its
-      # DocC catalog references symbols that don't exist on the SDK this runner
-      # builds against and `generate-documentation --warnings-as-errors` fails.
-      # Re-enable once doc generation builds against the FoundationModels SDK
-      # (or verify-docs.sh skips the FM target when v2 is unavailable).
       - name: Verify documentation
-        if: false
         run: scripts/verify-docs.sh
 
       - name: Run Tests (Xcode, macOS)
