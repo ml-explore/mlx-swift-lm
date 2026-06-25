@@ -6,8 +6,8 @@
 // GrammarCompiler is the path that binds a schema to a specific
 // tokenizer so a matcher can be built from it.
 
-import MLXCXGrammar
 import Foundation
+import MLXCXGrammar
 import Testing
 
 @Suite

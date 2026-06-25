@@ -6,8 +6,8 @@
 // distinct XG_ERR_* status and populate xg_last_error_message so Swift
 // can surface actionable diagnostics.
 
-import MLXCXGrammar
 import Foundation
+import MLXCXGrammar
 import Testing
 
 @Suite
