@@ -190,9 +190,9 @@
                 return constraint
             }
 
-            /// Evicts all cached state: model containers, tokenizers, and constraint templates.
-            /// Callers should synchronize the GPU stream before invoking to ensure
-            /// pending operations using these resources have completed.
+            /// Evicts all cached state: model containers, tokenizers, and constraint
+            /// templates. No GPU-stream synchronization is required — in-flight callers
+            /// retain their own `ModelContainer` and free it via ARC on completion.
             func evictAll() {
                 containers.removeAll()
                 loadingTasks.removeAll()
@@ -364,10 +364,15 @@
                 await cache.hasCachedXGTokenizer(modelID: modelID)
             }
 
-            /// Evicts all cached models, tokenizers, and constraint templates.
-            /// Frees GPU memory held by model weights. Subsequent requests will
-            /// reload models from disk cache.
-            static func evictAllModels() async {
+            /// Evicts every cached model, tokenizer, and constraint template, freeing
+            /// the GPU memory held by model weights. Subsequent requests reload from the
+            /// on-disk cache.
+            ///
+            /// Safe to call during in-flight `respond()`/`warmUp()` work: each holds its
+            /// own strong reference to the `ModelContainer` and synchronizes the GPU on
+            /// exit, so dropping the cache's reference cannot free weights out from under
+            /// a live kernel — the weights free via ARC once that work returns.
+            public static func evictAll() async {
                 await cache.evictAll()
             }
 
