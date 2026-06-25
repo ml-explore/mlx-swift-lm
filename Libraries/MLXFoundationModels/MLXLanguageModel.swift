@@ -1152,10 +1152,11 @@
                                 // Use the caller's budget when set, otherwise the
                                 // Executor's default.
                                 let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-                                let closingBias = ClosingTokenBias.compute(
-                                    tokenizer: context.tokenizer,
-                                    eosTokenId: context.tokenizer.eosTokenId
+                                let bias = await MLXLanguageModel.makeTokenizerBias(
+                                    modelID: modelID,
+                                    tokenizer: context.tokenizer
                                 )
+                                let closingBias = bias.closing
                                 let structuralReserve = CompletionReserve.estimate(
                                     schemaJSON: toolCallingEnvelopeJSON,
                                     tokenizer: context.tokenizer
@@ -1164,10 +1165,8 @@
                                     structuralReserve * 3, maxTokens / 4)
                                 let hardReserve = structuralReserve * 8
 
-                                let (whitespaceBias, whitespaceTokenIDs) =
-                                    WhitespaceTokenBias.compute(
-                                        tokenizer: context.tokenizer
-                                    )
+                                let whitespaceBias = bias.whitespace
+                                let whitespaceTokenIDs = bias.whitespaceTokenIDs
 
                                 // PHASE 1 (think-then-call): reason unconstrained until
                                 // `</think>`, retaining the token IDs to prefill into the
@@ -1302,10 +1301,11 @@
                                 // budget is set. Without a budget, the grammar mask
                                 // and model's natural EOS tendency control termination.
                                 let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-                                let closingBias = ClosingTokenBias.compute(
-                                    tokenizer: context.tokenizer,
-                                    eosTokenId: context.tokenizer.eosTokenId
+                                let bias = await MLXLanguageModel.makeTokenizerBias(
+                                    modelID: modelID,
+                                    tokenizer: context.tokenizer
                                 )
+                                let closingBias = bias.closing
                                 let structuralReserve = CompletionReserve.estimate(
                                     schemaJSON: schemaJSON,
                                     tokenizer: context.tokenizer
@@ -1324,10 +1324,8 @@
                                 // cost more tokens than the compact minimal JSON string.
                                 let hardReserve = structuralReserve * 8
 
-                                let (whitespaceBias, whitespaceTokenIDs) =
-                                    WhitespaceTokenBias.compute(
-                                        tokenizer: context.tokenizer
-                                    )
+                                let whitespaceBias = bias.whitespace
+                                let whitespaceTokenIDs = bias.whitespaceTokenIDs
 
                                 // GuidedGenerationLoop.run's emit closure is synchronous (for
                                 // performance -- it runs inside the tight MLX generation loop).
