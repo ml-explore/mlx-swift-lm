@@ -1269,8 +1269,7 @@
                                         hardReserve: hardReserve,
                                         closingBias: closingBias,
                                         whitespaceBias: whitespaceBias,
-                                        whitespaceTokenIDs: whitespaceTokenIDs,
-                                        additionalStopTokens: resolved.extraEOSTokens
+                                        whitespaceTokenIDs: whitespaceTokenIDs
                                     ) { text in
                                         outputBuffer += text
                                         return !Task.isCancelled
@@ -1392,8 +1391,7 @@
                                         hardReserve: hardReserve,
                                         closingBias: closingBias,
                                         whitespaceBias: whitespaceBias,
-                                        whitespaceTokenIDs: whitespaceTokenIDs,
-                                        additionalStopTokens: resolved.extraEOSTokens
+                                        whitespaceTokenIDs: whitespaceTokenIDs
                                     ) { text in
                                         textContinuation.yield(text)
                                         return !Task.isCancelled
@@ -1437,7 +1435,6 @@
                                     requestedMaxTokens: requestedMaxTokens,
                                     requestedTemperature: request.generationOptions.temperature,
                                     samplingMode: requestedSamplingMode,
-                                    additionalStopTokens: resolved.extraEOSTokens,
                                     responseEntryID: entryID,
                                     reasoningEntryID: reasoningEntryID,
                                     context: context,
@@ -1472,7 +1469,6 @@
                     requestedMaxTokens: Int?,
                     requestedTemperature: Double?,
                     samplingMode: MLXSamplingMode?,
-                    additionalStopTokens: Set<String>,
                     entryID: String,
                     context: ModelContext,
                     channel: LanguageModelExecutorGenerationChannel
@@ -1488,8 +1484,7 @@
                     for await generation in try generate(
                         input: input,
                         parameters: params,
-                        context: context,
-                        additionalStopTokens: additionalStopTokens
+                        context: context
                     ) {
                         try Task.checkCancellation()
                         switch generation {
@@ -1533,7 +1528,6 @@
                     requestedMaxTokens: Int?,
                     requestedTemperature: Double?,
                     samplingMode: MLXSamplingMode?,
-                    additionalStopTokens: Set<String>,
                     responseEntryID: String,
                     reasoningEntryID: String,
                     context: ModelContext,
@@ -1547,7 +1541,6 @@
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: requestedTemperature,
                             samplingMode: samplingMode,
-                            additionalStopTokens: additionalStopTokens,
                             responseEntryID: responseEntryID,
                             reasoningEntryID: reasoningEntryID,
                             context: context,
@@ -1558,7 +1551,6 @@
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: requestedTemperature,
                             samplingMode: samplingMode,
-                            additionalStopTokens: additionalStopTokens,
                             entryID: responseEntryID,
                             context: context,
                             channel: channel)
@@ -1580,7 +1572,6 @@
                     requestedMaxTokens: Int?,
                     requestedTemperature: Double?,
                     samplingMode: MLXSamplingMode?,
-                    additionalStopTokens: Set<String>,
                     responseEntryID: String,
                     reasoningEntryID: String,
                     context: ModelContext,
@@ -1599,8 +1590,7 @@
                     var completionInfo: GenerateCompletionInfo?
 
                     for await generation in try generateTokens(
-                        input: input, parameters: params, context: context,
-                        additionalStopTokens: additionalStopTokens
+                        input: input, parameters: params, context: context
                     ) {
                         try Task.checkCancellation()
                         switch generation {
