@@ -178,6 +178,14 @@
                 return xgTok
             }
 
+            /// Whether an `GrammarTokenizer` is already cached for the given model.
+            /// Used by `MLXLanguageModel.hasCachedXGTokenizer` so tests can assert
+            /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
+            /// that a later guided respond happens to succeed.
+            func hasCachedXGTokenizer(modelID: String) -> Bool {
+                xgTokenizers[modelID] != nil
+            }
+
             /// Gets or creates the cached tokenizer-derived logit biases for a model.
             func makeTokenizerBias(
                 modelID: String,
@@ -462,6 +470,13 @@
                     hostTokenizer: hostTokenizer,
                     fastForward: fastForward
                 )
+            }
+
+            /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
+            /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
+            /// `warmUp()` pre-created the tokenizer.
+            static func hasCachedXGTokenizer(modelID: String) async -> Bool {
+                await cache.hasCachedXGTokenizer(modelID: modelID)
             }
 
             /// Evicts every cached model, tokenizer, and constraint template, freeing
