@@ -49,10 +49,71 @@ import Testing
                     tok.idLookupCount > afterA,
                     "a new modelID must trigger a fresh vocab scan")
             }
+
+            @Test("evictAll() forces a recompute on the next call")
+            func evictAllClearsBias() async {
+                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+                let tok = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
+                let id = "org/bias-evictall-\(UUID().uuidString)"
+
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                let afterFirst = tok.idLookupCount
+
+                await MLXLanguageModel.evictAll()
+
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                #expect(
+                    tok.idLookupCount > afterFirst,
+                    "evictAll() must drop the cached bias so the next call rescans")
+            }
+
+            @Test("evict() drops only this model's cached bias")
+            func evictIsPerModel() async {
+                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+                let tok = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
+                let id = "org/bias-evict-\(UUID().uuidString)"
+                let model = MLXLanguageModel(
+                    modelID: id,
+                    capabilities: LanguageModelCapabilities(capabilities: []),
+                    from: EvictBiasStubDownloader(),
+                    using: EvictBiasStubTokenizerLoader(),
+                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path") }
+                )
+
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                let afterFirst = tok.idLookupCount
+
+                await model.evict()
+
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                #expect(
+                    tok.idLookupCount > afterFirst,
+                    "evict() must drop this model's cached bias so the next call rescans")
+            }
         }
     }
 
     // MARK: - Fixtures
+
+    /// Minimal no-op transport stubs so an `MLXLanguageModel` can be constructed purely to
+    /// exercise the instance `evict()` path. They are never driven to a real load here.
+    private final class EvictBiasStubDownloader: Downloader, @unchecked Sendable {
+        func download(
+            id: String,
+            revision: String?,
+            matching patterns: [String],
+            useLatest: Bool,
+            progressHandler: @Sendable @escaping (Progress) -> Void
+        ) async throws -> URL { URL(fileURLWithPath: "/no/such/path") }
+    }
+
+    private final class EvictBiasStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+        func load(from directory: URL) async throws -> any Tokenizer {
+            CountingTokenizer(tokens: [])
+        }
+    }
 
     /// Tokenizer with a fixed vocab that counts `convertIdToToken` calls, so a test can
     /// assert whether a bias computation re-scanned the vocab (cache miss) or not (hit).

@@ -257,6 +257,7 @@
                 suppressedLoadIDs.removeAll()
                 xgTokenizers.removeAll()
                 constraintTemplates.removeAll()
+                tokenizerBiases.removeAll()
                 lastErrors.removeAll()
             }
 
@@ -277,6 +278,7 @@
                 constraintTemplates = constraintTemplates.filter {
                     !$0.key.hasPrefix("\(modelID):")
                 }
+                tokenizerBiases.removeValue(forKey: modelID)
                 lastErrors.removeValue(forKey: modelID)
             }
         }
