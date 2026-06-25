@@ -34,8 +34,16 @@
         /// Prevents race conditions when multiple concurrent requests try to load the model.
         /// Supports caching multiple models by their identifiers.
         private actor ModelCache {
+            /// Class wrapper around `Task` so actor-reentrancy supersession guards can
+            /// use `===` identity comparison. `Task` is a value type; a wrapper lets us
+            /// detect whether `evictAll()` replaced a loading entry mid-flight.
+            private final class LoadTask {
+                let task: Task<ModelContainer, Error>
+                init(_ task: Task<ModelContainer, Error>) { self.task = task }
+            }
+
             private var containers: [String: ModelContainer] = [:]
-            private var loadingTasks: [String: Task<ModelContainer, Error>] = [:]
+            private var loadingTasks: [String: LoadTask] = [:]
             /// In-flight loads tagged as a warmup of an already-present model, which
             /// must NOT surface as `.downloading` (there is no user-facing download).
             /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
@@ -66,7 +74,7 @@
                     return cached
                 }
 
-                if let existingTask = loadingTasks[modelID] {
+                if let existingLoadTask = loadingTasks[modelID] {
                     // Coalesced onto an in-flight load: the first caller's
                     // classification (downloading vs. suppressed) stands — we do not
                     // re-tag. This collision is benign because the suppress decision is
@@ -74,13 +82,13 @@
                     // a not-yet-present model both classify as downloading, so they
                     // agree; when the model IS present, `availability` resolves to
                     // `.available` regardless of the in-flight load.
-                    return try await existingTask.value
+                    return try await existingLoadTask.task.value
                 }
 
-                let task = Task<ModelContainer, Error> {
+                let loadTask = LoadTask(Task<ModelContainer, Error> {
                     try await loader()
-                }
-                loadingTasks[modelID] = task
+                })
+                loadingTasks[modelID] = loadTask
                 // Tag a warmup-of-an-already-present model out of the `.downloading`
                 // signal (computed by the caller as warmup AND modelExistsOnDisk()).
                 if suppressDownloadingState {
@@ -88,16 +96,26 @@
                 }
 
                 do {
-                    let loaded = try await task.value
+                    let loaded = try await loadTask.task.value
+                    // Supersession guard: `evict()`/`evictAll()` may have removed this
+                    // load while it was suspended (actor reentrancy). If we are no longer
+                    // the registered task, hand the awaiter its container but do NOT
+                    // re-populate the cache — ARC frees the weights when the awaiter
+                    // releases it.
+                    guard loadingTasks[modelID] === loadTask else { return loaded }
                     containers[modelID] = loaded
                     loadingTasks[modelID] = nil
                     suppressedLoadIDs.remove(modelID)
                     lastErrors[modelID] = nil
                     return loaded
                 } catch {
-                    loadingTasks[modelID] = nil
-                    suppressedLoadIDs.remove(modelID)
-                    lastErrors[modelID] = error
+                    // Same guard on the failure path: a superseded load must not re-add a
+                    // stale lastErrors entry for a model nobody holds.
+                    if loadingTasks[modelID] === loadTask {
+                        loadingTasks[modelID] = nil
+                        suppressedLoadIDs.remove(modelID)
+                        lastErrors[modelID] = error
+                    }
                     throw error
                 }
             }
