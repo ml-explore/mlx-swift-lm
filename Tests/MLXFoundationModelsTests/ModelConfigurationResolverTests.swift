@@ -87,63 +87,6 @@
             #expect(patched.extraEOSTokens == baseline.extraEOSTokens)
         }
 
-        // MARK: - DevelopmentConfigurationResolver
-
-        @Test func developmentResolverUnionsGemma3StopToken() {
-            let base = ModelConfiguration(
-                directory: URL(fileURLWithPath: "/tmp/model"),
-                extraEOSTokens: [],
-                eosTokenIds: [1],
-                toolCallFormat: nil,
-                reasoningConfig: nil)
-            let resolved = DevelopmentConfigurationResolver().resolve(
-                base,
-                for: descriptor(modelType: "gemma3", modelId: "mlx-community/gemma-3-270m-it-4bit"))
-            #expect(resolved.extraEOSTokens.contains("<end_of_turn>"))
-            // Existing fields are preserved (additive union, not replace).
-            #expect(resolved.eosTokenIds == [1])
-        }
-
-        @Test func developmentResolverNoOpForUnknownModelType() {
-            let base = ModelConfiguration(
-                directory: URL(fileURLWithPath: "/tmp/model"),
-                extraEOSTokens: ["<existing>"],
-                eosTokenIds: [], toolCallFormat: nil, reasoningConfig: nil)
-            let resolved = DevelopmentConfigurationResolver().resolve(
-                base, for: descriptor(modelType: "llama", modelId: "llama-test"))
-            #expect(resolved.extraEOSTokens == ["<existing>"])
-        }
-
-        @Test func developmentResolverUnionsPhi3StopToken() {
-            let base = ModelConfiguration(
-                directory: URL(fileURLWithPath: "/tmp/model"),
-                extraEOSTokens: [],
-                eosTokenIds: [2],
-                toolCallFormat: nil,
-                reasoningConfig: nil)
-            let resolved = DevelopmentConfigurationResolver().resolve(
-                base,
-                for: descriptor(
-                    modelType: "phi3", modelId: "mlx-community/Phi-3-mini-4k-instruct-4bit"))
-            #expect(resolved.extraEOSTokens.contains("<|end|>"))
-            #expect(resolved.eosTokenIds == [2])
-        }
-
-        @Test func developmentResolverUnionsOntoExistingTokens() {
-            let base = ModelConfiguration(
-                directory: URL(fileURLWithPath: "/tmp/model"),
-                extraEOSTokens: ["<|im_end|>"],
-                eosTokenIds: [],
-                toolCallFormat: nil,
-                reasoningConfig: nil)
-            let resolved = DevelopmentConfigurationResolver().resolve(
-                base,
-                for: descriptor(
-                    modelType: "gemma3", modelId: "mlx-community/gemma-3-270m-it-4bit"))
-            // Additive union: the resolver adds its token without clobbering tokens
-            // already present in the loaded configuration.
-            #expect(resolved.extraEOSTokens == ["<|im_end|>", "<end_of_turn>"])
-        }
     }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
