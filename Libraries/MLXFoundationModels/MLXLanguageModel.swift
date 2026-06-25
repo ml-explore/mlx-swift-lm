@@ -304,21 +304,39 @@
             /// the same model share a single loading task, so a model is never loaded
             /// twice.
             ///
-            /// Returns the lower-level `ModelContainer`, which is not part of the
-            /// adapter's public surface. Consumers load a model ahead of use through
-            /// the public ``preload()`` or `session.prewarm()`.
+            /// This shares the same process-global cache that `respond()`, `preload()`,
+            /// and `session.prewarm()` use, so a container obtained here is the same
+            /// instance those paths use — letting a caller that works directly with the
+            /// lower-level `ModelContainer` (e.g. a custom executor or benchmark) reuse
+            /// the adapter's cache instead of loading a second copy of the weights.
+            public static func loadContainer(
+                modelID: String,
+                from downloader: any Downloader,
+                using tokenizerLoader: any TokenizerLoader
+            ) async throws -> ModelContainer {
+                try await loadContainer(
+                    modelID: modelID,
+                    from: downloader,
+                    using: tokenizerLoader,
+                    suppressDownloadingState: false
+                )
+            }
+
+            /// Internal variant of ``loadContainer(modelID:from:using:)`` that lets the
+            /// `warmUp()` path keep an in-flight load of an already-present model out of
+            /// the `.downloading` availability signal.
             ///
             /// - Parameter suppressDownloadingState: When `true`, an in-flight load of
             ///   a model already present on disk is kept out of the `.downloading`
-            ///   availability signal. This is an availability-state-machine detail: a
-            ///   load that triggers a genuine fetch for a model not yet on disk still
-            ///   reports `.downloading` regardless of this flag. Defaults to `false`,
-            ///   the behavior for a normal consumer-driven load.
+            ///   availability signal. This is an availability-state-machine detail (not
+            ///   a public concept), which is why it lives only on this internal entry
+            ///   point: a load that triggers a genuine fetch for a model not yet on disk
+            ///   still reports `.downloading` regardless of this flag.
             static func loadContainer(
                 modelID: String,
                 from downloader: any Downloader,
                 using tokenizerLoader: any TokenizerLoader,
-                suppressDownloadingState: Bool = false
+                suppressDownloadingState: Bool
             ) async throws -> ModelContainer {
                 try await cache.load(
                     modelID: modelID,
