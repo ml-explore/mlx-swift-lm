@@ -351,6 +351,12 @@ public struct Qwen3MoEConfiguration: Codable, Sendable {
     }
 }
 
+extension Qwen3MoEConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen3MoEConfiguration.rope_scaling")
+    }
+}
+
 // MARK: - LoRA
 
 extension Qwen3MoEModel: LoRAModel {

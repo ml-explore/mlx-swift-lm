@@ -668,6 +668,12 @@ public struct Qwen3NextConfiguration: Codable, Sendable {
     }
 }
 
+extension Qwen3NextConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen3NextConfiguration.rope_scaling")
+    }
+}
+
 // MARK: - LoRA
 
 extension Qwen3NextModel: LoRAModel {

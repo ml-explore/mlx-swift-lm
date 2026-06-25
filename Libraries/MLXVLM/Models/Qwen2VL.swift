@@ -871,6 +871,14 @@ public struct Qwen2VLConfiguration: Codable, Sendable {
     }
 }
 
+extension Qwen2VLConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateMROPESection(
+            textConfiguration.ropeScaling,
+            context: "Qwen2VLConfiguration.text_config.rope_scaling")
+    }
+}
+
 /// Configuration for ``Qwen2VLProcessor``
 public struct Qwen2VLProcessorConfiguration: Codable, Sendable {
 

@@ -1356,6 +1356,14 @@ public struct Qwen25VLConfiguration: Codable, Sendable {
     }
 }
 
+extension Qwen25VLConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateMROPESection(
+            textConfiguration.ropeScaling,
+            context: "Qwen25VLConfiguration.text_config.rope_scaling")
+    }
+}
+
 /// Configuration for ``Qwen25VLProcessor``
 public struct Qwen25VLProcessorConfiguration: Codable, Sendable {
     public struct Size: Codable, Sendable {
