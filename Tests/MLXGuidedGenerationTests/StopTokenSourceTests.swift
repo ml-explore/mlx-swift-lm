@@ -9,8 +9,8 @@ import Testing
 /// sources its stop-token set entirely from the `ModelConfiguration` it is
 /// handed — `extraEOSTokens` (string → id via the tokenizer) and `eosTokenIds`
 /// (inserted directly) — plus the tokenizer's primary EOS. These lock the
-/// behavior we must preserve while removing the per-call `additionalStopTokens`
-/// threading: the configuration is the single place stop tokens are carried.
+/// behavior preserved when the per-call stop-token threading was removed:
+/// the configuration is the single place stop tokens are carried.
 @Suite
 struct StopTokenSourceTests {
 
@@ -46,7 +46,7 @@ struct StopTokenSourceTests {
         let stop = GuidedGenerationLoop.buildStopTokenIDs(
             tokenizer: tokenizer, configuration: config)
 
-        #expect(stop.contains(1))  // "<end_of_turn>" → index 1
+        #expect(stop == [1])  // only the configured extra token; ids 0 ("a") and 2 ("b") excluded
     }
 
     @Test("eosTokenIds in the configuration are included directly")
@@ -70,7 +70,7 @@ struct StopTokenSourceTests {
         let stop = GuidedGenerationLoop.buildStopTokenIDs(
             tokenizer: tokenizer, configuration: config)
 
-        #expect(stop.contains(1))  // tokenizer.eosTokenId
+        #expect(stop == [1])  // empty config ⇒ tokenizer EOS is the only stop id
     }
 
     @Test("all three configuration-borne sources union together")
