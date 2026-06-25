@@ -10,6 +10,7 @@ private struct FixedTokenizer: Tokenizer {
     var encodedTokens: [Int] = [11, 12, 13]
     var decodedText: String = "User: describe"
     var tokenIds: [String: Int] = [:]
+    var returnsUnknownTokenIdForMissingTokens = false
     var bosToken: String?
     var eosToken: String?
     var unknownToken: String?
@@ -23,7 +24,13 @@ private struct FixedTokenizer: Tokenizer {
     }
 
     func convertTokenToId(_ token: String) -> Int? {
-        tokenIds[token]
+        if let tokenId = tokenIds[token] {
+            return tokenId
+        }
+        guard returnsUnknownTokenIdForMissingTokens, let unknownToken else {
+            return nil
+        }
+        return tokenIds[unknownToken]
     }
 
     func convertIdToToken(_ id: Int) -> String? {
@@ -206,9 +213,16 @@ final class VLMProcessorTests: XCTestCase {
         let mappedProcessor = SmolVLMProcessor(
             config, tokenizer: FixedTokenizer(tokenIds: ["<image>": 777]))
         let fallbackProcessor = SmolVLMProcessor(config, tokenizer: FixedTokenizer())
+        let unknownFallbackProcessor = SmolVLMProcessor(
+            config,
+            tokenizer: FixedTokenizer(
+                tokenIds: ["<unk>": 102],
+                returnsUnknownTokenIdForMissingTokens: true,
+                unknownToken: "<unk>"))
 
         XCTAssertEqual(mappedProcessor.imageTokenId, 777)
         XCTAssertEqual(fallbackProcessor.imageTokenId, 49190)
+        XCTAssertEqual(unknownFallbackProcessor.imageTokenId, 49190)
     }
 
     func testSmolVLMProcessorClampsConfiguredVideoFramesToAtLeastOne() {
@@ -234,5 +248,24 @@ final class VLMProcessorTests: XCTestCase {
             MediaProcessing.sampledFrameCount(
                 fps: 30, duration: duration, maxFrames: 0, availableFrames: 10),
             1)
+        XCTAssertEqual(
+            MediaProcessing.sampledFrameCount(
+                fps: 30, duration: duration, maxFrames: 3, availableFrames: 0),
+            0)
+    }
+
+    func testMediaProcessingRejectsEmptyInMemoryVideoFrames() async {
+        do {
+            _ = try await MediaProcessing.asProcessedSequence(
+                .frames([]),
+                targetFPS: { _ in 30 },
+                maxFrames: 3)
+            XCTFail("Expected empty video frames to throw")
+        } catch {
+            guard case VLMError.processing(let message) = error else {
+                return XCTFail("Expected VLMError.processing, got \(error)")
+            }
+            XCTAssertTrue(message.contains("at least one frame"))
+        }
     }
 }

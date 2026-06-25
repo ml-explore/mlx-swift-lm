@@ -151,7 +151,11 @@ public struct SmolVLMProcessor: UserInputProcessor {
     let imageToken = "<image>"
     let fakeImageToken = "<fake_token_around_image>"
     let globalImageToken = "<global-img>"
-    var imageTokenId: Int { tokenizer.convertTokenToId(imageToken) ?? fallbackImageTokenId }
+    var imageTokenId: Int {
+        Self.resolvedImageTokenId(
+            tokenizer: tokenizer, imageToken: imageToken, fallbackImageTokenId: fallbackImageTokenId
+        )
+    }
 
     var maxProcessingImageSize: CGFloat { CGFloat(config.size.longestEdge) }  // 2048
     var fixedImageSize: CGFloat { CGFloat(config.maxImageSize.longestEdge) }  // 384 for big models, 512 for small models (200-500M)
@@ -168,6 +172,17 @@ public struct SmolVLMProcessor: UserInputProcessor {
     ) {
         self.config = config
         self.tokenizer = tokenizer
+    }
+
+    static func resolvedImageTokenId(
+        tokenizer: any Tokenizer, imageToken: String, fallbackImageTokenId: Int
+    ) -> Int {
+        guard let tokenId = tokenizer.convertTokenToId(imageToken),
+            tokenId != tokenizer.unknownTokenId
+        else {
+            return fallbackImageTokenId
+        }
+        return tokenId
     }
 
     func getVideoPromptString(

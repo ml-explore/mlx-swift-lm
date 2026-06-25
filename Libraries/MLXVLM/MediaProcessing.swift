@@ -386,6 +386,10 @@ public enum MediaProcessing {
     static func sampledFrameCount(
         fps: Double, duration: CMTime, maxFrames: Int, availableFrames: Int? = nil
     ) -> Int {
+        if availableFrames == 0 {
+            return 0
+        }
+
         let estimatedFrames = Int(round(fps * duration.seconds))
         var desiredFrames = min(estimatedFrames, maxFrames)
         if let availableFrames {
@@ -476,7 +480,9 @@ public enum MediaProcessing {
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
 
-        precondition(videoFrames.isEmpty == false)
+        guard videoFrames.isEmpty == false else {
+            throw VLMError.processing("Video frame input must contain at least one frame.")
+        }
 
         let startTime = videoFrames.first?.timeStamp ?? .zero
         let endTime = videoFrames.last?.timeStamp ?? .zero
