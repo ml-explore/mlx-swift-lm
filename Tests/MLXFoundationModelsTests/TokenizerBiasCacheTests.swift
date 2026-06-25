@@ -72,25 +72,71 @@ import Testing
             func evictIsPerModel() async {
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-                let tok = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
-                let id = "org/bias-evict-\(UUID().uuidString)"
+                // Model A — the one we will evict.
+                let tokA = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
+                let idA = "org/bias-evict-\(UUID().uuidString)"
                 let model = MLXLanguageModel(
-                    modelID: id,
+                    modelID: idA,
                     capabilities: LanguageModelCapabilities(capabilities: []),
                     from: EvictBiasStubDownloader(),
                     using: EvictBiasStubTokenizerLoader(),
                     locatedBy: { _ in URL(fileURLWithPath: "/no/such/path") }
                 )
 
-                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
-                let afterFirst = tok.idLookupCount
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idA, tokenizer: tokA)
+                let afterFirstA = tokA.idLookupCount
+
+                // Model B — a bystander whose bias must survive model A's eviction.
+                let tokB = CountingTokenizer(tokens: ["x", "y", "}", "\n"])
+                let idB = "org/bias-evict-b-\(UUID().uuidString)"
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idB, tokenizer: tokB)
+                let afterFirstB = tokB.idLookupCount
 
                 await model.evict()
 
-                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                // A's bias must be gone — next call rescans.
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idA, tokenizer: tokA)
                 #expect(
-                    tok.idLookupCount > afterFirst,
+                    tokA.idLookupCount > afterFirstA,
                     "evict() must drop this model's cached bias so the next call rescans")
+
+                // B's bias must still be cached — its counter must not rise.
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idB, tokenizer: tokB)
+                #expect(
+                    tokB.idLookupCount == afterFirstB,
+                    "evict() must not disturb a different model's cached bias")
+            }
+
+            @Test("evict() leaves a second model's cached bias intact")
+            func evictDoesNotDisturbOtherModels() async {
+                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+                // Prime two independent models with separate CountingTokenizer instances
+                // so each model's rescan counter is tracked independently.
+                let tokEvicted = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
+                let idEvicted = "org/bias-survivor-evict-\(UUID().uuidString)"
+                let model = MLXLanguageModel(
+                    modelID: idEvicted,
+                    capabilities: LanguageModelCapabilities(capabilities: []),
+                    from: EvictBiasStubDownloader(),
+                    using: EvictBiasStubTokenizerLoader(),
+                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path") }
+                )
+
+                let tokSurvivor = CountingTokenizer(tokens: ["x", "y", "}", "\n"])
+                let idSurvivor = "org/bias-survivor-keep-\(UUID().uuidString)"
+
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idEvicted, tokenizer: tokEvicted)
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idSurvivor, tokenizer: tokSurvivor)
+                let afterPrime = tokSurvivor.idLookupCount
+
+                await model.evict()
+
+                // The survivor's cache entry must be intact — no rescan.
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idSurvivor, tokenizer: tokSurvivor)
+                #expect(
+                    tokSurvivor.idLookupCount == afterPrime,
+                    "evict() of an unrelated model must not invalidate the survivor's cached bias")
             }
         }
     }
