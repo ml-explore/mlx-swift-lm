@@ -256,9 +256,10 @@
                 return constraint
             }
 
-            /// Evicts all cached state: model containers, tokenizers, and constraint
-            /// templates. No GPU-stream synchronization is required — in-flight callers
-            /// retain their own `ModelContainer` and free it via ARC on completion.
+            /// Evicts all cached state: model containers, tokenizers, constraint
+            /// templates, and per-model tokenizer biases. No GPU-stream synchronization
+            /// is required — in-flight callers retain their own `ModelContainer` and
+            /// free it via ARC on completion.
             func evictAll() {
                 containers.removeAll()
                 loadingTasks.removeAll()
@@ -270,8 +271,9 @@
             }
 
             /// Evicts a single model's state across every per-model cache: its container,
-            /// xgrammar tokenizer, all compiled constraint templates, last load error,
-            /// the suppressed-download tag, and any in-flight load registration.
+            /// xgrammar tokenizer, all compiled constraint templates, tokenizer bias,
+            /// last load error, the suppressed-download tag, and any in-flight load
+            /// registration.
             /// Best-effort cancels an in-flight load (the load path is not
             /// cancellation-aware today, so this is a no-op safety net); the
             /// load-completion guard in `load()` is what prevents a superseded load
@@ -479,9 +481,9 @@
                 await cache.hasCachedXGTokenizer(modelID: modelID)
             }
 
-            /// Evicts every cached model, tokenizer, and constraint template, freeing
-            /// the GPU memory held by model weights. Subsequent requests reload from the
-            /// on-disk cache.
+            /// Evicts every cached model, tokenizer, constraint template, and per-model
+            /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
+            /// requests reload from the on-disk cache.
             ///
             /// Safe to call during in-flight `respond()`/`warmUp()` work: each holds its
             /// own strong reference to the `ModelContainer` and synchronizes the GPU on
