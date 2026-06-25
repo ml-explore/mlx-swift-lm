@@ -70,6 +70,46 @@ import Testing
                 #expect(after == nil, "evictAll() must clear the cached lastError")
             }
 
+            @Test("evict() clears only this model's state, leaving other models cached")
+            func evictIsPerModel() async throws {
+                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+                func failedLoad(_ id: String) async -> MLXLanguageModel {
+                    let gate = LoadGate()
+                    let model = MLXLanguageModel(
+                        modelID: id,
+                        capabilities: LanguageModelCapabilities(capabilities: []),
+                        from: BlockingDownloader(gate: gate),
+                        using: EvictStubTokenizerLoader(),
+                        locatedBy: { _ in URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                        }
+                    )
+                    let task = Task { try? await model.preload() }
+                    await gate.waitUntilStarted()
+                    await gate.release()
+                    _ = await task.value
+                    return model
+                }
+
+                let idA = "org/per-model-a-\(UUID().uuidString)"
+                let idB = "org/per-model-b-\(UUID().uuidString)"
+                let modelA = await failedLoad(idA)
+                _ = await failedLoad(idB)
+
+                // Both models have a cached lastError.
+                #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) != nil)
+                #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil)
+
+                await modelA.evict()
+
+                #expect(
+                    await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) == nil,
+                    "evict() must clear this model's cached state")
+                #expect(
+                    await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil,
+                    "evict() must NOT clear other models' cached state")
+            }
+
             @Test("a load evicted mid-flight does not re-populate the cache on completion")
             func evictedInFlightLoadDoesNotRepopulate() async throws {
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -96,7 +136,8 @@ import Testing
                 await MLXLanguageModel.evictAll()
 
                 let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
-                #expect(!downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
+                #expect(
+                    !downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
 
                 // Let the parked load fail. The catch-path guard must NOT re-add lastError
                 // for the now-superseded task.
@@ -111,8 +152,7 @@ import Testing
 
     // MARK: - Shared fixtures
     //
-    // Hoisted to file scope so the eviction tests above (and Tasks 2-3's tests, which
-    // land in the same `CacheEviction` suite in this file) share one definition. Kept
+    // Hoisted to file scope so the eviction tests above share one definition. Kept
     // file-`private` so they don't collide with AvailabilityTests.swift's own stubs.
 
     /// Coordinates the in-flight window: the downloader signals when a load has entered

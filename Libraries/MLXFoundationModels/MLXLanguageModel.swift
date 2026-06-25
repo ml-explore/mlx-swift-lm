@@ -85,9 +85,10 @@
                     return try await existingLoadTask.task.value
                 }
 
-                let loadTask = LoadTask(Task<ModelContainer, Error> {
-                    try await loader()
-                })
+                let loadTask = LoadTask(
+                    Task<ModelContainer, Error> {
+                        try await loader()
+                    })
                 loadingTasks[modelID] = loadTask
                 // Tag a warmup-of-an-already-present model out of the `.downloading`
                 // signal (computed by the caller as warmup AND modelExistsOnDisk()).
@@ -218,6 +219,26 @@
                 xgTokenizers.removeAll()
                 constraintTemplates.removeAll()
                 lastErrors.removeAll()
+            }
+
+            /// Evicts a single model's state across every per-model cache: its container,
+            /// xgrammar tokenizer, all compiled constraint templates, last load error,
+            /// the suppressed-download tag, and any in-flight load registration.
+            /// Best-effort cancels an in-flight load (the load path is not
+            /// cancellation-aware today, so this is a no-op safety net); the
+            /// load-completion guard in `load()` is what prevents a superseded load
+            /// from re-populating after removal.
+            func remove(modelID: String) {
+                // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
+                loadingTasks[modelID]?.task.cancel()
+                loadingTasks.removeValue(forKey: modelID)
+                suppressedLoadIDs.remove(modelID)
+                containers.removeValue(forKey: modelID)
+                xgTokenizers.removeValue(forKey: modelID)
+                constraintTemplates = constraintTemplates.filter {
+                    !$0.key.hasPrefix("\(modelID):")
+                }
+                lastErrors.removeValue(forKey: modelID)
             }
         }
 
@@ -392,6 +413,18 @@
             /// a live kernel — the weights free via ARC once that work returns.
             public static func evictAll() async {
                 await cache.evictAll()
+            }
+
+            /// Drops this model from the shared cache, freeing the GPU memory held by its
+            /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
+            /// (reusing the on-disk snapshot if the model was previously downloaded).
+            ///
+            /// Safe to call during an in-flight `respond()`: that call retains its own
+            /// `ModelContainer` and finishes normally; the weights free via ARC once it
+            /// returns. Evicting a model whose load is still in flight removes it cleanly
+            /// — the in-flight load completes but does not re-populate the cache.
+            public func evict() async {
+                await Self.cache.remove(modelID: modelID)
             }
 
             /// Whether the shared cache has a *genuine download* in flight for the
