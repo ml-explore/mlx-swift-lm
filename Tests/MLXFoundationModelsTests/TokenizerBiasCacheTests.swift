@@ -126,14 +126,17 @@ import Testing
                 let tokSurvivor = CountingTokenizer(tokens: ["x", "y", "}", "\n"])
                 let idSurvivor = "org/bias-survivor-keep-\(UUID().uuidString)"
 
-                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idEvicted, tokenizer: tokEvicted)
-                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idSurvivor, tokenizer: tokSurvivor)
+                _ = await MLXLanguageModel.makeTokenizerBias(
+                    modelID: idEvicted, tokenizer: tokEvicted)
+                _ = await MLXLanguageModel.makeTokenizerBias(
+                    modelID: idSurvivor, tokenizer: tokSurvivor)
                 let afterPrime = tokSurvivor.idLookupCount
 
                 await model.evict()
 
                 // The survivor's cache entry must be intact — no rescan.
-                _ = await MLXLanguageModel.makeTokenizerBias(modelID: idSurvivor, tokenizer: tokSurvivor)
+                _ = await MLXLanguageModel.makeTokenizerBias(
+                    modelID: idSurvivor, tokenizer: tokSurvivor)
                 #expect(
                     tokSurvivor.idLookupCount == afterPrime,
                     "evict() of an unrelated model must not invalidate the survivor's cached bias")
