@@ -327,7 +327,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func releaseAllGPUMemory() async {
         Stream.gpu.synchronize()
-        await MLXLanguageModel.evictAllModels()
+        await MLXLanguageModel.evictAll()
         Stream.gpu.synchronize()
         GPU.clearCache()
     }
