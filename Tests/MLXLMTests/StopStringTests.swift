@@ -77,6 +77,28 @@ final class StopStringTests: XCTestCase {
         XCTAssertTrue(fifth.stopped)
     }
 
+    func testTokenLoopStopsOnStopStringAcrossDecodedTokenChunks() {
+        let tokenizer = DeterministicStopStringTokenizer(decoding: [
+            1: "hel",
+            2: "lo<",
+            3: "stop",
+            4: ">hidden",
+            5: "tail",
+        ])
+        let result = runStopStringLoop(
+            tokens: [1, 2, 3, 4, 5],
+            tokenizer: tokenizer,
+            stopStrings: ["<stop>"]
+        )
+
+        XCTAssertEqual(result.chunks, ["hel", "lo"])
+        XCTAssertEqual(result.consumedTokens, 4)
+        guard case .stop = result.stopReason else {
+            XCTFail("expected stop reason, got \(result.stopReason)")
+            return
+        }
+    }
+
     func testStopStringFilterFlushesBufferedSuffixWhenNoStopArrives() {
         var filter = StopStringFilter(stopStrings: ["<stop>"])
 
@@ -125,5 +147,68 @@ final class StopStringTests: XCTestCase {
     ) {
         XCTAssertTrue(configuration.extraEOSTokens.contains(token), file: file, line: line)
         XCTAssertTrue(configuration.stopStrings.contains(token), file: file, line: line)
+    }
+}
+
+private func runStopStringLoop(
+    tokens: [Int],
+    tokenizer: Tokenizer,
+    stopStrings: Set<String>
+) -> (chunks: [String], consumedTokens: Int, stopReason: GenerateStopReason) {
+    var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+    var filter = StopStringFilter(stopStrings: stopStrings)
+    var chunks: [String] = []
+    var consumedTokens = 0
+
+    for token in tokens {
+        consumedTokens += 1
+        detokenizer.append(token: token)
+        guard let chunk = detokenizer.next() else {
+            continue
+        }
+        let result = filter.process(chunk)
+        if let text = result.text {
+            chunks.append(text)
+        }
+        if result.stopped {
+            return (chunks, consumedTokens, .stop)
+        }
+    }
+
+    if let text = filter.finish() {
+        chunks.append(text)
+    }
+    return (chunks, consumedTokens, .length)
+}
+
+private struct DeterministicStopStringTokenizer: Tokenizer {
+    let decoding: [Int: String]
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        []
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        tokenIds.map { decoding[$0] ?? "" }.joined()
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        nil
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        decoding[id]
+    }
+
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        []
     }
 }
