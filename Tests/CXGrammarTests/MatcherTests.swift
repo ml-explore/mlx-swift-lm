@@ -2,8 +2,8 @@
 //
 // Direct C-API tests for the CXGrammar shim's GrammarMatcher path.
 
-import MLXCXGrammar
 import Foundation
+import MLXCXGrammar
 import Testing
 
 @Suite
