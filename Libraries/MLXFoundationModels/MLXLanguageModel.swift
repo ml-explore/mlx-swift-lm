@@ -28,6 +28,26 @@
             case structuralTag
         }
 
+        // MARK: - Tokenizer Bias Cache Entry
+
+        /// Tokenizer-derived logit biases, cached per model. Both arrays are pure
+        /// functions of the tokenizer, so they are identical for a model's lifetime.
+        /// `@unchecked Sendable`: every field is `let` and read-only after construction
+        /// (the arrays are only *added* to logits in `GuidedGenerationLoop`, never
+        /// mutated), and the entry is shared across actors via `ModelCache` — the same
+        /// pattern as `GrammarTokenizer`/`GrammarConstraint` in `XGrammarBridge.swift`.
+        final class TokenizerBias: @unchecked Sendable {
+            let closing: MLXArray
+            let whitespace: MLXArray
+            let whitespaceTokenIDs: Set<Int>
+
+            init(closing: MLXArray, whitespace: MLXArray, whitespaceTokenIDs: Set<Int>) {
+                self.closing = closing
+                self.whitespace = whitespace
+                self.whitespaceTokenIDs = whitespaceTokenIDs
+            }
+        }
+
         // MARK: - Model Cache Actor
 
         /// Thread-safe model cache using Swift actor isolation.
@@ -52,6 +72,9 @@
             /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
             /// Clone from template instead of recompiling the grammar each request.
             private var constraintTemplates: [String: GrammarConstraint] = [:]
+            /// Cached per-model logit biases (closing + whitespace). Pure functions of
+            /// the tokenizer, so computed once per model and reused across requests.
+            private var tokenizerBiases: [String: TokenizerBias] = [:]
             /// Most recent load error per model. Cleared on a subsequent successful
             /// load. Surfaced through `MLXLanguageModel.availability` so callers can
             /// distinguish "never tried" from "tried and failed".
@@ -153,6 +176,30 @@
                 )
                 xgTokenizers[modelID] = xgTok
                 return xgTok
+            }
+
+            /// Gets or creates the cached tokenizer-derived logit biases for a model.
+            func makeTokenizerBias(
+                modelID: String,
+                tokenizer: any Tokenizer
+            ) -> TokenizerBias {
+                if let cached = tokenizerBiases[modelID] {
+                    return cached
+                }
+                let closing = ClosingTokenBias.compute(
+                    tokenizer: tokenizer,
+                    eosTokenId: tokenizer.eosTokenId
+                )
+                let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
+                    tokenizer: tokenizer
+                )
+                let bias = TokenizerBias(
+                    closing: closing,
+                    whitespace: whitespace,
+                    whitespaceTokenIDs: whitespaceTokenIDs
+                )
+                tokenizerBiases[modelID] = bias
+                return bias
             }
 
             /// Gets a fresh constraint by cloning a cached template, or compiles and caches one first.
@@ -385,6 +432,15 @@
                 tokenizer: any Tokenizer
             ) async throws -> GrammarTokenizer {
                 try await cache.makeXGTokenizer(modelID: modelID, tokenizer: tokenizer)
+            }
+
+            /// Gets the cached per-model tokenizer-derived logit biases (closing +
+            /// whitespace), computing them on first use.
+            static func makeTokenizerBias(
+                modelID: String,
+                tokenizer: any Tokenizer
+            ) async -> TokenizerBias {
+                await cache.makeTokenizerBias(modelID: modelID, tokenizer: tokenizer)
             }
 
             /// Gets a constraint by cloning a cached compiled template (or compiling one first).
