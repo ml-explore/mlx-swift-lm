@@ -711,7 +711,7 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     ///   - inputs: token ids, shape `[batch, sequence]`
     ///   - cache: optional per-layer cache
     ///   - logitsToKeep: number of trailing positions for which to compute logits.
-    ///     `nil` falls back to ``FalconH1Configuration/numLogitsToKeep``. A non-positive
+    ///     `nil` falls back to the `num_logits_to_keep` configuration value. A non-positive
     ///     value keeps all positions (useful for perplexity / training evaluation).
     public func callAsFunction(
         _ inputs: MLXArray,
