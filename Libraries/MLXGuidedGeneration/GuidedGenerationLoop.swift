@@ -531,8 +531,6 @@ public enum GuidedGenerationLoop {
         }
     }
 
-    // MARK: - Internal (visible for testing)
-
     /// Convert a packed bitmask (1 bit per token) to an MLXArray of floats.
     /// Allowed tokens get 0.0, disallowed tokens get -inf.
     ///
