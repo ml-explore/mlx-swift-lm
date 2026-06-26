@@ -100,6 +100,32 @@
             #expect(cMedianChars > 0, "Constrained should produce characters")
         }
 
+        /// Before/after instrument for the grammar-mask relocation (Approach B).
+        /// Prints constrained per-character latency per model. Run once on the
+        /// pre-B commit (baseline) and once after B, then diff the `[RELOCATE]`
+        /// lines. `run()`'s signature is unchanged by B, so the same harness
+        /// measures both states. Largest win expected on the small/large-vocab
+        /// model (gemma-3-270m, 256K vocab).
+        @Test(arguments: ["mlx-community/gemma-3-270m-it-4bit", TestFixtures.defaultModelID])
+        func relocateBeforeAfter(modelID: String) async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let container = try await loadTestModelContainer(id: modelID)
+            try await warmup(container: container)
+
+            var runs: [RunResult] = []
+            for _ in 0 ..< Self.iterations {
+                runs.append(try await measureConstrained(container: container, modelID: modelID))
+            }
+            let medianSeconds = median(runs.map(\.seconds))
+            let medianChars = median(runs.map { Double($0.characterCount) })
+            let perCharMs = medianSeconds / max(medianChars, 1.0) * 1000.0
+
+            print(
+                "[RELOCATE] model=\(modelID) perChar=\(fmt(perCharMs)) ms "
+                    + "wall=\(fmt(medianSeconds)) s chars=\(Int(medianChars))")
+            #expect(medianChars > 0, "benchmark must produce output")
+        }
+
         // MARK: - Fast-Forward Effectiveness
 
         @Test
@@ -417,11 +443,12 @@
         /// Run a single constrained generation (bounded object schema) and measure it.
         @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
         private func measureConstrained(
-            container: ModelContainer
+            container: ModelContainer,
+            modelID: String = TestFixtures.defaultModelID
         ) async throws -> RunResult {
             try await container.perform { context in
                 let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
-                    modelID: TestFixtures.defaultModelID,
+                    modelID: modelID,
                     tokenizer: context.tokenizer
                 )
                 let constraint = try GrammarConstraint(
