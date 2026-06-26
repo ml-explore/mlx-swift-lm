@@ -201,7 +201,7 @@ let package = Package(
                 .define("xgrammar", to: "mlx_xgrammar"),
                 .define("picojson", to: "mlx_picojson"),
                 // xgrammar throws -- exceptions must stay enabled.
-                .unsafeFlags(["-std=c++17", "-fexceptions"]),
+                .unsafeFlags(["-fexceptions"]),
                 // Vendored upstream xgrammar/picojson is compiled as-is and is
                 // not warning-clean under Xcode's default warning set (e.g.
                 // -Wshorten-64-to-32). Suppress all warnings for this target so
@@ -295,7 +295,8 @@ let package = Package(
             // the Fixtures tree is excluded from the build graph.
             exclude: ["Fixtures"]
         ),
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )
 
 if Context.environment["MLX_SWIFT_BUILD_DOC"] == "1"
