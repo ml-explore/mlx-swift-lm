@@ -149,8 +149,14 @@ public enum GuidedGenerationLoop {
         let startInstant = clock.now
         var accumulatedText = ""
 
-        // Pre-compute the first mask (no overlap possible for the first iteration)
+        // Logit dimension is constant across the generation; capture once so the
+        // grammar-mask array can be built outside applyMaskAndSample.
+        let logitDim = logits.shape[logits.ndim - 1]
+
+        // Pre-compute the first mask + its sample array (no overlap possible for
+        // the first iteration). Subsequent arrays are built in the overlap window.
         var mask = try constraint.computeMask()
+        var maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
 
         while tokenCount < maxTokens {
             // Cooperative cancellation: exit promptly when the enclosing Task
@@ -235,18 +241,11 @@ public enum GuidedGenerationLoop {
                     activeBias = activeBias.map { $0 + wsBias } ?? wsBias
                 }
             }
-            let token: UInt32 = mask.mask.withUnsafeBufferPointer { buffer in
-                let ptr: UnsafePointer<UInt32>? =
-                    mask.needsApply
-                    ? UnsafeRawPointer(buffer.baseAddress!).assumingMemoryBound(to: UInt32.self)
-                    : nil
-                return applyMaskAndSample(
-                    logits: logits,
-                    sampleMask: ptr,
-                    vocabSize: vocabSize,
-                    closingBias: activeBias
-                )
-            }
+            let token = applyMaskAndSample(
+                logits: logits,
+                maskArray: maskArray,
+                closingBias: activeBias
+            )
             let tokenId = Int(token)
 
             // Track the sampled token for whitespace run detection.
@@ -375,8 +374,10 @@ public enum GuidedGenerationLoop {
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)
 
-                // Overlap: compute next mask on CPU while GPU runs
+                // Overlap: compute the next mask AND build its sample array on the
+                // CPU while the GPU runs the forward pass.
                 mask = try constraint.computeMask()
+                maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
 
                 // Wait for GPU to finish (may already be done)
                 eval(logits)
@@ -400,8 +401,10 @@ public enum GuidedGenerationLoop {
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)
 
-                // Overlap: compute next mask on CPU while GPU runs
+                // Overlap: compute the next mask AND build its sample array on the
+                // CPU while the GPU runs the forward pass.
                 mask = try constraint.computeMask()
+                maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
 
                 // Wait for GPU to finish (may already be done)
                 eval(logits)
