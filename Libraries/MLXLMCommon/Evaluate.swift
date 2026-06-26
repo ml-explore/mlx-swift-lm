@@ -1483,7 +1483,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
-            stopStrings: context.configuration.stopStrings,
+            stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )
@@ -1541,7 +1541,7 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
-            stopStrings: modelConfiguration.stopStrings,
+            stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
             tools: tools
         )
@@ -1681,7 +1681,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
-            stopStrings: context.configuration.stopStrings,
+            stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )

@@ -102,7 +102,15 @@ public struct ModelConfiguration: Sendable {
     public var extraEOSTokens: Set<String>
 
     /// Text sequences that stop decoded generation when encountered.
-    public var stopStrings: Set<String>
+    ///
+    /// If this is `nil`, decoded stop strings fall back to ``extraEOSTokens``.
+    /// Set this explicitly, including to an empty set, to override that fallback.
+    public var stopStrings: Set<String>?
+
+    /// Text sequences to use for decoded stop-string matching.
+    public var effectiveStopStrings: Set<String> {
+        stopStrings ?? extraEOSTokens
+    }
 
     /// EOS token IDs loaded from config.json/generation_config.json
     public var eosTokenIds: Set<Int> = []
@@ -115,7 +123,7 @@ public struct ModelConfiguration: Sendable {
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
-        stopStrings: Set<String> = [],
+        stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil
     ) {
@@ -133,7 +141,7 @@ public struct ModelConfiguration: Sendable {
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
-        stopStrings: Set<String> = [],
+        stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil
     ) {

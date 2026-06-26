@@ -38,11 +38,10 @@ final class StopStringTests: XCTestCase {
         XCTAssertEqual(config.stopStrings, ["<turn|>", "<fallback>"])
     }
 
-    func testModelConfigurationResolutionPreservesStopStrings() {
+    func testModelConfigurationResolutionFallsBackToExtraEOSTokens() {
         let config = ModelConfiguration(
             id: "org/model",
             extraEOSTokens: ["<extra>"],
-            stopStrings: ["<stop>"],
             eosTokenIds: [7]
         )
 
@@ -51,9 +50,45 @@ final class StopStringTests: XCTestCase {
             tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
         )
 
+        XCTAssertNil(config.stopStrings)
+        XCTAssertEqual(config.effectiveStopStrings, ["<extra>"])
         XCTAssertEqual(resolved.extraEOSTokens, ["<extra>"])
-        XCTAssertEqual(resolved.stopStrings, ["<stop>"])
+        XCTAssertEqual(resolved.stopStrings, ["<extra>"])
         XCTAssertEqual(resolved.eosTokenIds, [7])
+    }
+
+    func testModelConfigurationResolutionPreservesExplicitStopStrings() {
+        let config = ModelConfiguration(
+            id: "org/model",
+            extraEOSTokens: ["<extra>"],
+            stopStrings: ["<stop>"]
+        )
+
+        let resolved = config.resolved(
+            modelDirectory: URL(filePath: "/tmp/model"),
+            tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
+        )
+
+        XCTAssertEqual(config.stopStrings, Set(["<stop>"]))
+        XCTAssertEqual(config.effectiveStopStrings, ["<stop>"])
+        XCTAssertEqual(resolved.stopStrings, ["<stop>"])
+    }
+
+    func testModelConfigurationResolutionPreservesExplicitEmptyStopStrings() {
+        let config = ModelConfiguration(
+            id: "org/model",
+            extraEOSTokens: ["<extra>"],
+            stopStrings: []
+        )
+
+        let resolved = config.resolved(
+            modelDirectory: URL(filePath: "/tmp/model"),
+            tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
+        )
+
+        XCTAssertEqual(config.stopStrings, Set<String>())
+        XCTAssertEqual(config.effectiveStopStrings, [])
+        XCTAssertEqual(resolved.stopStrings, [])
     }
 
     func testStopStringSplitAcrossChunksStopsAndIsNotEmitted() {
@@ -133,7 +168,7 @@ final class StopStringTests: XCTestCase {
         assertStops(LLMRegistry.llama3_2_3B_4bit, "<|eot_id|>")
 
         assertStops(VLMRegistry.gemma3_4B_qat_4bit, "<end_of_turn>")
-        assertStops(VLMRegistry.gemma4_E2B_it_4bit, "<end_of_turn>")
+        assertStops(VLMRegistry.gemma4_E2B_it_4bit, "<turn|>")
         assertStops(VLMRegistry.qwen2VL2BInstruct4Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3VL4BInstruct8Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3_5_27B_4bit, "<|im_end|>")
@@ -146,7 +181,8 @@ final class StopStringTests: XCTestCase {
         line: UInt = #line
     ) {
         XCTAssertTrue(configuration.extraEOSTokens.contains(token), file: file, line: line)
-        XCTAssertTrue(configuration.stopStrings.contains(token), file: file, line: line)
+        XCTAssertTrue(configuration.effectiveStopStrings.contains(token), file: file, line: line)
+        XCTAssertNil(configuration.stopStrings, file: file, line: line)
     }
 }
 

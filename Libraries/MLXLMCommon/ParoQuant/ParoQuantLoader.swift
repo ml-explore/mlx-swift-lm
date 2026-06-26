@@ -396,7 +396,7 @@ public func loadParoQuantModel<T: LanguageModel>(
     }
 
     var config = ModelConfiguration(
-        directory: directory, stopStrings: genConfig?.stopStrings ?? [],
+        directory: directory, stopStrings: genConfig?.stopStrings,
         toolCallFormat: toolCallFormat)
     config.eosTokenIds = eosTokenIds
 

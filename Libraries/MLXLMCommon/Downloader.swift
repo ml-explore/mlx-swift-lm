@@ -82,7 +82,7 @@ public struct ResolvedModelConfiguration: Sendable {
         name: String,
         defaultPrompt: String,
         extraEOSTokens: Set<String>,
-        stopStrings: Set<String> = [],
+        stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int>,
         toolCallFormat: ToolCallFormat?
     ) {
@@ -91,7 +91,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.name = name
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
-        self.stopStrings = stopStrings
+        self.stopStrings = stopStrings ?? extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
     }
