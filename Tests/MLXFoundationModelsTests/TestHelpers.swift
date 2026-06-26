@@ -15,8 +15,10 @@
 import CoreGraphics
 import Foundation
 import FoundationModels
+import ImageIO
 import MLX
 import MLXLMCommon
+import UniformTypeIdentifiers
 
 @testable import MLXFoundationModels
 
@@ -250,4 +252,24 @@ func makeSolidCGImage(width: Int = 2, height: Int = 2) -> CGImage {
     context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1.0))
     context.fill(CGRect(x: 0, y: 0, width: width, height: height))
     return context.makeImage()!
+}
+
+/// Writes a solid-color image to a temporary PNG file and returns its URL, for
+/// exercising URL-backed image attachments (a `Transcript.ImageAttachment`
+/// built from a URL retains it as `originalURL`). The caller owns the file.
+func makeSolidImageFileURL(width: Int = 2, height: Int = 2) throws -> URL {
+    let image = makeSolidCGImage(width: width, height: height)
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("vision-test-\(UUID().uuidString).png")
+    guard
+        let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil)
+    else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    return url
 }

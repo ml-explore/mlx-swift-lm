@@ -262,6 +262,117 @@ import Testing
             #expect(messages[0].images.count == 1)
         }
 
+        @Test
+        func testInstructionsImageAttachmentBecomesSystemMessageImage() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let attachment = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+                label: "reference")
+            let instructions = Transcript.Instructions(
+                segments: [
+                    .text(Transcript.TextSegment(content: "Use this reference:")),
+                    .attachment(attachment),
+                ],
+                toolDefinitions: []
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.instructions(instructions)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].role == .system)
+            #expect(messages[0].content == "Use this reference:")
+            #expect(messages[0].images.count == 1)
+        }
+
+        @Test
+        func testUrlBackedImageAttachmentYieldsDecodedCIImage() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let url = try makeSolidImageFileURL()
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let attachment = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(imageURL: url)),
+                label: "photo")
+            let prompt = Transcript.Prompt(
+                segments: [.attachment(attachment)],
+                responseFormat: nil
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].images.count == 1)
+            // The SDK eagerly decodes a URL-backed attachment at construction, so
+            // the converter hands over the in-memory CIImage rather than the URL —
+            // passing the URL would force a redundant, failure-prone re-decode.
+            guard let image = messages[0].images.first else {
+                Issue.record("Expected one image input")
+                return
+            }
+            guard case .ciImage = image else {
+                Issue.record("URL-backed attachment should yield .ciImage, not .url")
+                return
+            }
+        }
+
+        @Test
+        func testMultipleImageAttachmentsPreserveCountAndOrder() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            // Two distinguishable images (different dimensions) so order is checkable.
+            let first = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage(width: 2, height: 2))),
+                label: "first")
+            let second = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage(width: 4, height: 4))),
+                label: "second")
+            let prompt = Transcript.Prompt(
+                segments: [
+                    .text(Transcript.TextSegment(content: "Compare these")),
+                    .attachment(first),
+                    .attachment(second),
+                ],
+                responseFormat: nil
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].images.count == 2)
+            // Segment order is preserved: the 2x2 image precedes the 4x4 image.
+            let widths = messages[0].images.compactMap { image -> CGFloat? in
+                guard case .ciImage(let ciImage) = image else { return nil }
+                return ciImage.extent.width
+            }
+            #expect(widths == [2, 4])
+        }
+
+        @Test
+        func testImageBeforeTextStillConcatenatesText() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            // Attachment position must not perturb text concatenation.
+            let attachment = Transcript.AttachmentSegment(
+                content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+                label: "photo")
+            let prompt = Transcript.Prompt(
+                segments: [
+                    .attachment(attachment),
+                    .text(Transcript.TextSegment(content: "line one")),
+                    .text(Transcript.TextSegment(content: "line two")),
+                ],
+                responseFormat: nil
+            )
+
+            let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+
+            #expect(messages.count == 1)
+            #expect(messages[0].content == "line one\nline two")
+            #expect(messages[0].images.count == 1)
+        }
+
     }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
