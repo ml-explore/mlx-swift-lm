@@ -29,13 +29,12 @@ struct ConcurrentMaskTests {
         var maskWords = [UInt32](repeating: 0, count: 256 / 32)
         maskWords[123 / 32] |= (1 << (123 % 32))
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...], maskArray: maskArray)
 
         #expect(result == 123, "Should select token 123 -- the only allowed token")
     }
@@ -48,10 +47,7 @@ struct ConcurrentMaskTests {
         let logits = MLXArray(floats)
 
         let result = GuidedGenerationLoop.applyMaskAndSample(
-            logits: logits[.newAxis, .newAxis, 0...],
-            sampleMask: nil,
-            vocabSize: 256
-        )
+            logits: logits[.newAxis, .newAxis, 0...], maskArray: nil)
 
         #expect(result == 42, "Should select argmax token when no mask applied")
     }
@@ -71,13 +67,12 @@ struct ConcurrentMaskTests {
         maskWords[49 / 32] |= (1 << (49 % 32))
         maskWords[50 / 32] |= (1 << (50 % 32))
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...], maskArray: maskArray)
 
         #expect(result == 49, "Should select token 49 -- highest logit among allowed tokens")
     }

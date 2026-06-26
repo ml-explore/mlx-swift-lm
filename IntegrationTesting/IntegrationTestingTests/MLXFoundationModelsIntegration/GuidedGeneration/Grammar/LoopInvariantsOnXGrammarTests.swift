@@ -97,15 +97,14 @@
                         Issue.record("empty xgrammar mask buffer")
                         return UInt32.max
                     }
-                    return base.withMemoryRebound(to: UInt32.self, capacity: buffer.count) {
-                        rebound in
-                        GuidedGenerationLoop.applyMaskAndSample(
-                            logits: uniformLogits[.newAxis, .newAxis, 0...],
-                            sampleMask: rebound,
-                            vocabSize: vocabSize,
-                            closingBias: nil
-                        )
+                    let maskArray = base.withMemoryRebound(
+                        to: UInt32.self, capacity: buffer.count
+                    ) { rebound in
+                        GuidedGenerationLoop.bitmaskToMLXArray(
+                            rebound, maskBitCount: vocabSize, totalCount: vocabSize)
                     }
+                    return GuidedGenerationLoop.applyMaskAndSample(
+                        logits: uniformLogits[.newAxis, .newAxis, 0...], maskArray: maskArray)
                 }
                 #expect(sampledToken != UInt32.max, "applyMaskAndSample failed to produce a token")
 

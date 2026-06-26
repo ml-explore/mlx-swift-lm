@@ -515,21 +515,6 @@ public enum GuidedGenerationLoop {
         return sampled.item(UInt32.self)
     }
 
-    /// Pointer-based overload retained for transition; builds the mask array
-    /// from the packed bitmask and delegates to the prebuilt-mask overload.
-    static func applyMaskAndSample(
-        logits rawLogits: MLXArray,
-        sampleMask: UnsafePointer<UInt32>?,
-        vocabSize: Int,
-        closingBias: MLXArray? = nil
-    ) -> UInt32 {
-        let logitDim = rawLogits.shape[rawLogits.ndim - 1]
-        let maskArray = sampleMask.map {
-            bitmaskToMLXArray($0, maskBitCount: vocabSize, totalCount: logitDim)
-        }
-        return applyMaskAndSample(logits: rawLogits, maskArray: maskArray, closingBias: closingBias)
-    }
-
     /// Build the additive grammar-mask array for a freshly computed `MaskResult`,
     /// or nil when the grammar needs no mask applied (unconditional FF splice).
     ///
