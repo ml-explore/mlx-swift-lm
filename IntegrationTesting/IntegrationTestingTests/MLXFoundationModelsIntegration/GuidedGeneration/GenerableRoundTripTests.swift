@@ -278,7 +278,8 @@
             prompt: String,
             modelID: String = TestFixtures.defaultModelID,
             container: ModelContainer,
-            maxTokens: Int = 512
+            maxTokens: Int = 512,
+            kvBits: Int? = nil
         ) async throws -> String {
             try await container.perform { context in
                 let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
@@ -322,6 +323,7 @@
                     constraint: constraint,
                     maxTokens: maxTokens,
                     vocabSize: Int(xgTokenizer.vocabSize),
+                    kvBits: kvBits,
                     completionReserve: completionReserve,
                     hardReserve: hardReserve,
                     closingBias: closingBias,
@@ -571,6 +573,39 @@
                         "(\(label)) Section \(si) item \(ii) should have 'detail' string")
                 }
             }
+        }
+
+        @Test("Quantized KV cache (kvBits=8) still produces valid structured JSON")
+        func quantizedKVCacheProducesValidJSON() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
+
+            let schema = """
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "age": { "type": "integer" }
+                    },
+                    "required": ["name", "age"],
+                    "additionalProperties": false
+                }
+                """
+
+            let raw = try await generateWithSchema(
+                schema,
+                prompt: "Describe a person named Bob who is 42 years old. Respond as JSON.",
+                container: container,
+                kvBits: 8
+            )
+
+            let trimmed = try assertValidJSON(raw, label: "(quantized KV cache)")
+            let data = Data(trimmed.utf8)
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let dict = try #require(obj, "Should decode as dictionary")
+            #expect(dict["name"] != nil, "Should have 'name' key")
+            #expect(dict["age"] != nil, "Should have 'age' key")
+            #expect(dict["name"] is String, "'name' should be a string")
         }
 
         @Test("String enum schema constrains output to allowed values")
