@@ -28,14 +28,14 @@ struct ForcedCompletionSamplingTests {
         biasFloats[34] = 100.0
         let closingBias = MLXArray(biasFloats)
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256,
-                closingBias: closingBias
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...],
+            maskArray: maskArray,
+            closingBias: closingBias)
         #expect(result == 34)  // " wins due to bias despite lower model logit
     }
 
@@ -59,14 +59,14 @@ struct ForcedCompletionSamplingTests {
         biasFloats[34] = 100.0
         let closingBias = MLXArray(biasFloats)
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256,
-                closingBias: closingBias
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...],
+            maskArray: maskArray,
+            closingBias: closingBias)
         #expect(result == 65)  // 'A' wins -- highest logit among allowed tokens
     }
 
@@ -89,14 +89,14 @@ struct ForcedCompletionSamplingTests {
         biasFloats[32] = -200.0
         let whitespaceBias = MLXArray(biasFloats)
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256,
-                closingBias: whitespaceBias
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...],
+            maskArray: maskArray,
+            closingBias: whitespaceBias)
         #expect(result == 65)  // 'A' wins -- whitespace bias suppressed space
     }
 
@@ -123,14 +123,14 @@ struct ForcedCompletionSamplingTests {
         biasFloats[9] = -200.0
         let whitespaceBias = MLXArray(biasFloats)
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256,
-                closingBias: whitespaceBias
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...],
+            maskArray: maskArray,
+            closingBias: whitespaceBias)
         // Space has logit 10 + bias -200 = -190; tab has 5 + -200 = -195.
         // All other tokens are -inf (masked out). Space wins as least-negative.
         #expect(result == 32)
@@ -149,14 +149,14 @@ struct ForcedCompletionSamplingTests {
         maskWords[65 / 32] |= (1 << (65 % 32))
         maskWords[34 / 32] |= (1 << (34 % 32))
 
-        let result = maskWords.withUnsafeBufferPointer { ptr in
-            GuidedGenerationLoop.applyMaskAndSample(
-                logits: logits[.newAxis, .newAxis, 0...],
-                sampleMask: ptr.baseAddress,
-                vocabSize: 256,
-                closingBias: nil
-            )
+        let maskArray = maskWords.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
         }
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...],
+            maskArray: maskArray,
+            closingBias: nil)
         #expect(result == 65)  // 'A' wins -- no bias applied
     }
 }
