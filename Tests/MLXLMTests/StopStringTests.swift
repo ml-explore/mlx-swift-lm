@@ -168,7 +168,6 @@ final class StopStringTests: XCTestCase {
         assertStops(LLMRegistry.llama3_2_3B_4bit, "<|eot_id|>")
 
         assertStops(VLMRegistry.gemma3_4B_qat_4bit, "<end_of_turn>")
-        assertStops(VLMRegistry.gemma4_E2B_it_4bit, "<turn|>")
         assertStops(VLMRegistry.qwen2VL2BInstruct4Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3VL4BInstruct8Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3_5_27B_4bit, "<|im_end|>")

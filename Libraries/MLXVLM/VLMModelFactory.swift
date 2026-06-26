@@ -218,25 +218,25 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma4_E2B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<end_of_turn>"]
     )
 
     static public let gemma4_E4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<end_of_turn>"]
     )
 
     static public let gemma4_31B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-31b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<end_of_turn>"]
     )
 
     static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-26b-a4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<end_of_turn>"]
     )
 
     static public let smolvlm = ModelConfiguration(
