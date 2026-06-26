@@ -21,7 +21,8 @@ import Testing
 ///    the forward pass.
 ///  - `sample`: `applyMaskAndSample` with vs without a mask. Both include the
 ///    argmax + `item()` device sync; the delta is the mask's marginal
-///    sample-time cost (build + dense add). Only the build portion moves.
+///    sample-time cost. The build is now hoisted into the loop's overlap
+///    window, so this delta excludes it (dense add only).
 ///
 /// Opt-in (prints timings, asserts nothing):
 ///   GUIDED_GEN_BENCH=1 xcodebuild test -scheme mlx-swift-lm-Package \
@@ -137,7 +138,7 @@ struct MaskBuildBenchmark {
         let warmup = 20
         let iters = 200
 
-        print("[MASKBENCH] === applyMaskAndSample per-call (build + add + argmax/item) ===")
+        print("[MASKBENCH] === applyMaskAndSample per-call (add + argmax/item; mask prebuilt) ===")
         print("[MASKBENCH] vocab | withMask_us | nilMask_us | delta_us")
         for vocab in Self.vocabSizes {
             let logits = MLXArray([Float](repeating: 0, count: vocab))[.newAxis, .newAxis, 0...]
