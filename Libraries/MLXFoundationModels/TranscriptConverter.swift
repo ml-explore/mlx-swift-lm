@@ -24,12 +24,18 @@
                 entries.compactMap { entry -> Chat.Message? in
                     switch entry {
                     case .instructions(let instructions):
-                        // System message for model instructions
-                        guard let text = extractText(from: instructions.segments) else {
-                            logger.warning("Skipping instructions entry with no text content")
+                        // System message for model instructions. Labeled image
+                        // attachments ride along as message images, mirroring the
+                        // prompt path, so the `.vision` gate sees them and they are
+                        // not silently dropped.
+                        let text = extractText(from: instructions.segments)
+                        let images = extractImages(from: instructions.segments)
+                        guard text != nil || !images.isEmpty else {
+                            logger.warning(
+                                "Skipping instructions entry with no text or image content")
                             return nil
                         }
-                        return Chat.Message.system(text)
+                        return Chat.Message.system(text ?? "", images: images)
 
                     case .prompt(let prompt):
                         // User message for prompts. Labeled image attachments
@@ -92,12 +98,10 @@
                 return combined.isEmpty ? nil : combined
             }
 
-            /// Extracts image inputs from labeled image attachment segments.
+            /// Extracts image inputs from image attachment segments.
             ///
-            /// Only the public `.attachment` segment carrying `.image(_)` is
-            /// handled. When the attachment exposes a file URL we pass it through
-            /// as `UserInput.Image.url` to defer decoding; otherwise we hand over
-            /// the decoded `CIImage`. All other segment kinds are ignored.
+            /// Each image attachment is handed over as its already-decoded
+            /// `CIImage`. Segments that carry no image produce no input.
             ///
             /// - Parameter segments: Array of transcript segments
             /// - Returns: The image inputs found, in segment order
@@ -109,9 +113,6 @@
                         case .image(let imageAttachment) = attachment.content
                     else {
                         return nil
-                    }
-                    if let url = imageAttachment.url {
-                        return .url(url)
                     }
                     return .ciImage(imageAttachment.ciImage)
                 }
