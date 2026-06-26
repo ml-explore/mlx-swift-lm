@@ -522,7 +522,23 @@ public enum GuidedGenerationLoop {
         return sampled.item(UInt32.self)
     }
 
-    // MARK: - Private
+    /// Build the additive grammar-mask array for a freshly computed `MaskResult`,
+    /// or nil when the grammar needs no mask applied (unconditional FF splice).
+    ///
+    /// Hoisted out of `applyMaskAndSample` so the loop can build it in the
+    /// CPU/GPU overlap window (alongside `computeMask`) instead of on the
+    /// critical path at sample time. `logitDim` is the model's logit dimension
+    /// (constant across the generation); `vocabSize` is the grammar bitmask's
+    /// valid-bit count.
+    static func buildMaskArray(for mask: MaskResult, vocabSize: Int, logitDim: Int) -> MLXArray? {
+        guard mask.needsApply else { return nil }
+        return mask.mask.withUnsafeBufferPointer { buffer in
+            let ptr = UnsafeRawPointer(buffer.baseAddress!).assumingMemoryBound(to: UInt32.self)
+            return bitmaskToMLXArray(ptr, maskBitCount: vocabSize, totalCount: logitDim)
+        }
+    }
+
+    // MARK: - Internal (visible for testing)
 
     /// Convert a packed bitmask (1 bit per token) to an MLXArray of floats.
     /// Allowed tokens get 0.0, disallowed tokens get -inf.
@@ -532,7 +548,10 @@ public enum GuidedGenerationLoop {
     /// has more tokens than the model has logits (e.g. added special tokens
     /// beyond the embedding dimension), we only read `min(maskBitCount, totalCount)`
     /// bits. Positions beyond the mask are left at -inf.
-    private static func bitmaskToMLXArray(
+    ///
+    /// Internal (not private) so the mask-build microbenchmark can time it in
+    /// isolation.
+    static func bitmaskToMLXArray(
         _ maskPtr: UnsafePointer<UInt32>,
         maskBitCount: Int,
         totalCount: Int
