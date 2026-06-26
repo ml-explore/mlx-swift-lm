@@ -35,4 +35,35 @@ struct MaskRelocationTests {
             mask: [Int32](repeating: 0, count: 1), isTerminated: false, needsApply: false)
         #expect(GuidedGenerationLoop.buildMaskArray(for: mask, vocabSize: 8, logitDim: 8) == nil)
     }
+
+    @Test
+    func applyMaskAndSampleWithPrecomputedMaskSelectsAllowedToken() {
+        // Token 65 has the highest raw logit but is masked out; only 123 allowed.
+        var floats = [Float](repeating: 0.0, count: 256)
+        floats[123] = 10.0
+        floats[65] = 20.0
+        let logits = MLXArray(floats)
+
+        var words = [UInt32](repeating: 0, count: 256 / 32)
+        words[123 / 32] |= (UInt32(1) << (123 % 32))
+        let maskArray = words.withUnsafeBufferPointer {
+            GuidedGenerationLoop.bitmaskToMLXArray(
+                $0.baseAddress!, maskBitCount: 256, totalCount: 256)
+        }
+
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...], maskArray: maskArray)
+        #expect(result == 123)
+    }
+
+    @Test
+    func applyMaskAndSampleWithNilMaskIsArgmax() {
+        var floats = [Float](repeating: 0.0, count: 256)
+        floats[42] = 100.0
+        let logits = MLXArray(floats)
+
+        let result = GuidedGenerationLoop.applyMaskAndSample(
+            logits: logits[.newAxis, .newAxis, 0...], maskArray: nil)
+        #expect(result == 42)
+    }
 }

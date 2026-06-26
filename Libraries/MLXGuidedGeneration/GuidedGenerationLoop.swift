@@ -464,36 +464,29 @@ public enum GuidedGenerationLoop {
         return stopTokenIDs
     }
 
-    /// Apply a pre-computed grammar mask to logits and sample via argmax.
+    /// Apply a *prebuilt* grammar mask and optional bias to logits, then argmax.
     ///
-    /// Separated from mask computation to allow overlapping the mask with
-    /// the GPU forward pass. The mask is computed on the CPU while the
-    /// previous forward pass runs on the GPU.
+    /// The mask is built once per token in the eval loop's overlap window (see
+    /// `buildMaskArray`) and passed in here, so this runs no `bitmaskToMLXArray`
+    /// work on the sampling critical path.
     ///
     /// - Parameters:
-    ///   - logits: Raw model output logits (shape: [batch, seq, vocab])
-    ///   - sampleMask: Packed bitmask from `GrammarConstraint.computeMask()`
-    ///     (rebound to `UnsafePointer<UInt32>` from the `[Int32]` buffer
-    ///     the matcher fills), or nil when the mask needs no application
-    ///     (all tokens forced by grammar).
-    ///   - vocabSize: Number of valid bits in the grammar bitmask. May differ
-    ///     from the model's logit dimension.
+    ///   - logits: Raw model output logits (shape: [batch, seq, vocab]).
+    ///   - maskArray: Prebuilt additive grammar mask (length == logit dim;
+    ///     0.0 allowed, -inf disallowed), or nil when the grammar forces all
+    ///     tokens (no mask to apply).
     ///   - closingBias: Optional logit bias favoring closing tokens. Applied
     ///     after the grammar mask so masked-out tokens remain at -inf.
     /// - Returns: The sampled token ID.
     static func applyMaskAndSample(
         logits rawLogits: MLXArray,
-        sampleMask: UnsafePointer<UInt32>?,
-        vocabSize: Int,
+        maskArray: MLXArray?,
         closingBias: MLXArray? = nil
     ) -> UInt32 {
         // Extract last-position logits: [batch, seq, vocab] -> [vocab]
         var logits = rawLogits[0..., -1, 0...]
 
-        if let maskPtr = sampleMask {
-            let logitDim = logits.shape[logits.ndim - 1]
-            let maskArray = bitmaskToMLXArray(
-                maskPtr, maskBitCount: vocabSize, totalCount: logitDim)
+        if let maskArray {
             logits = logits + maskArray
         }
 
@@ -514,12 +507,24 @@ public enum GuidedGenerationLoop {
             }
         }
 
-        // Grammar-constrained generation samples greedily by construction. A
-        // non-greedy `GenerationOptions.samplingMode` has no application point
-        // here (this path never builds `GenerateParameters`); it is intentionally
-        // a no-op on the guided/tool envelope. See SamplingModeMapper.
+        // Grammar-constrained generation samples greedily by construction.
         let sampled = argMax(logits, axis: -1)
         return sampled.item(UInt32.self)
+    }
+
+    /// Pointer-based overload retained for transition; builds the mask array
+    /// from the packed bitmask and delegates to the prebuilt-mask overload.
+    static func applyMaskAndSample(
+        logits rawLogits: MLXArray,
+        sampleMask: UnsafePointer<UInt32>?,
+        vocabSize: Int,
+        closingBias: MLXArray? = nil
+    ) -> UInt32 {
+        let logitDim = rawLogits.shape[rawLogits.ndim - 1]
+        let maskArray = sampleMask.map {
+            bitmaskToMLXArray($0, maskBitCount: vocabSize, totalCount: logitDim)
+        }
+        return applyMaskAndSample(logits: rawLogits, maskArray: maskArray, closingBias: closingBias)
     }
 
     /// Build the additive grammar-mask array for a freshly computed `MaskResult`,
