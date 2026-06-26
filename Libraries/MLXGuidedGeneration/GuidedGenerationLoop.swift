@@ -53,6 +53,14 @@ public enum GuidedGenerationLoop {
     ///   - vocabSize: Number of tokens in the grammar's vocabulary. May differ
     ///     from the model's logit dimension (e.g. added special tokens beyond
     ///     the embedding size). Used to correctly interpret the grammar bitmask.
+    ///   - kvBits: Bit width for KV-cache quantization, or nil to disable. When
+    ///     set, the KV cache is quantized after each forward pass to reduce
+    ///     memory use, mirroring the unconstrained `TokenIterator`. nil is a
+    ///     no-op, so models that don't quantize are unaffected.
+    ///   - kvGroupSize: Group size for KV-cache quantization (default 64, matching
+    ///     `GenerateParameters`). Only used when `kvBits` is non-nil.
+    ///   - quantizedKVStart: Token offset at which quantization begins (default 0).
+    ///     Only used when `kvBits` is non-nil.
     ///   - closingBias: Pre-computed logit bias array favoring closing tokens
     ///     (from `ClosingTokenBias.compute`). Nil disables forced completion.
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
@@ -73,6 +81,9 @@ public enum GuidedGenerationLoop {
         constraint: GrammarConstraint,
         maxTokens: Int,
         vocabSize: Int,
+        kvBits: Int? = nil,
+        kvGroupSize: Int = 64,
+        quantizedKVStart: Int = 0,
         completionReserve: Int = 64,
         hardReserve: Int = 0,
         closingBias: MLXArray? = nil,
@@ -82,7 +93,7 @@ public enum GuidedGenerationLoop {
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
-        let cache = model.newCache(parameters: nil)
+        var cache = model.newCache(parameters: nil)
         var modelState: LMOutput.State?
 
         // Build EOS token set
@@ -355,6 +366,12 @@ public enum GuidedGenerationLoop {
                     }
                 }
 
+                // Quantize the KV cache after the forward pass(es), matching the
+                // unconstrained TokenIterator. No-op unless `kvBits` is set.
+                maybeQuantizeKVCache(
+                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+                    quantizedKVStart: quantizedKVStart)
+
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)
 
@@ -373,6 +390,12 @@ public enum GuidedGenerationLoop {
                 )
                 modelState = result.state
                 logits = result.logits
+
+                // Quantize the KV cache after the forward pass, matching the
+                // unconstrained TokenIterator. No-op unless `kvBits` is set.
+                maybeQuantizeKVCache(
+                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+                    quantizedKVStart: quantizedKVStart)
 
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)
