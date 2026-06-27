@@ -265,7 +265,7 @@ let package = Package(
                 // the tests inject a stub downloader — no network, no real weights.
                 "MLXLLM",
                 // Registers the VLM trampoline factory so gemma4 resolves at
-                // load time (spec §5.2). The MLXFoundationModels product target
+                // load time. The MLXFoundationModels product target
                 // deliberately does NOT depend on MLXVLM; runtime trampoline
                 // discovery is by design and unchanged.
                 "MLXVLM",
