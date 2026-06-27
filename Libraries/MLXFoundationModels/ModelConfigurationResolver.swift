@@ -17,12 +17,14 @@
         /// - Important: The returned value is consumed as a per-call local. It is
         ///   **never** written back to `context.configuration`, `Executor.Configuration`,
         ///   or any cache, so two instances with the same id but different resolvers
-        ///   cannot cross-contaminate through the shared container. The adapter reads
-        ///   only behavioral fields (`reasoningConfig`, `extraEOSTokens`, `eosTokenIds`,
-        ///   `toolCallFormat`) from the resolved value; identity (`id` /
-        ///   `tokenizerSource` / `modelDirectory`) is always taken from
-        ///   `context.configuration`, read at load time before resolution. Mutating
-        ///   identity fields in a resolver is therefore inert.
+        ///   cannot cross-contaminate through the shared container. The adapter consumes
+        ///   only `reasoningConfig` from the resolved value. Stop tokens come from the
+        ///   loaded `ModelConfiguration` (`extraEOSTokens` / `eosTokenIds`), and
+        ///   tool-call format and identity (`id` / `tokenizerSource` / `modelDirectory`)
+        ///   are likewise taken from `context.configuration` (read at load time before
+        ///   resolution) — so patching `extraEOSTokens`, `eosTokenIds`, `toolCallFormat`,
+        ///   or any identity field in a resolver is inert. Carry extra stop tokens in the
+        ///   model configuration itself, not via a resolver.
         ///
         /// Composition follows the same `any Protocol`-injected-at-init convention as
         /// ``Downloader`` / ``TokenizerLoader`` in `MLXLMCommon`, with a trivial default

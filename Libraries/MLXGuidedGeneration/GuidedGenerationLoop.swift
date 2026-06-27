@@ -78,7 +78,6 @@ public enum GuidedGenerationLoop {
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
-        additionalStopTokens: Set<String> = [],
         diagnosticLog: Bool = false,
         emit: (String) -> Bool
     ) throws -> Int {
@@ -89,8 +88,7 @@ public enum GuidedGenerationLoop {
         // Build EOS token set
         let stopTokenIDs = Self.buildStopTokenIDs(
             tokenizer: context.tokenizer,
-            configuration: context.configuration,
-            additionalStopTokens: additionalStopTokens
+            configuration: context.configuration
         )
 
         // Prefill prompt and get first set of logits
@@ -412,8 +410,8 @@ public enum GuidedGenerationLoop {
 
     /// Build the set of token ids that terminate generation.
     ///
-    /// Pulls from four sources (all required for chat-tuned models to stop
-    /// correctly):
+    /// Pulls from three sources, all carried by the `ModelConfiguration` and
+    /// tokenizer (all required for chat-tuned models to stop correctly):
     ///
     /// 1. `configuration.eosTokenIds` — loaded from `config.json` /
     ///    `generation_config.json` at model-load time. Chat models like
@@ -424,21 +422,18 @@ public enum GuidedGenerationLoop {
     /// 2. `tokenizer.eosTokenId` — the tokenizer's single primary EOS.
     /// 3. `configuration.extraEOSTokens` — hardcoded-by-token-string
     ///    additions from registry entries (e.g. `["<end_of_turn>"]` on
-    ///    some Gemma variants in `LLMModelFactory`).
-    /// 4. `additionalStopTokens` — per-call stop tokens supplied by the
-    ///    caller. Added without mutating the cached `ModelConfiguration` so
-    ///    two callers sharing a model id but passing different stop tokens do
-    ///    not cross-contaminate.
+    ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
+    ///    stop tokens add them here (via the model configuration), not as a
+    ///    per-call argument.
     static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
-        configuration: ModelConfiguration,
-        additionalStopTokens: Set<String> = []
+        configuration: ModelConfiguration
     ) -> Set<Int> {
         var stopTokenIDs = Set(configuration.eosTokenIds)
         if let eos = tokenizer.eosTokenId {
             stopTokenIDs.insert(eos)
         }
-        for token in configuration.extraEOSTokens.union(additionalStopTokens) {
+        for token in configuration.extraEOSTokens {
             if let id = tokenizer.convertTokenToId(token) {
                 stopTokenIDs.insert(id)
             }
