@@ -45,10 +45,11 @@ a given model identifier comes from the closure you supply at init:
 
 ```swift
 public init(
-    modelID: String,
-    from downloader: any Downloader,
-    using tokenizerLoader: any TokenizerLoader,
-    locatedBy weightsLocation: @Sendable @escaping (String) -> URL
+    configuration: ModelConfiguration,
+    capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
+    configurationResolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
+    weightsLocation: @Sendable @escaping (String) -> URL,
+    load: @escaping ContainerLoader
 )
 ```
 
@@ -73,15 +74,18 @@ For a private CDN, custom on-disk layout, or shared cache:
 
 ```swift
 let model = MLXLanguageModel(
-    modelID: "internal/MyModel-v3",
-    capabilities: LanguageModelCapabilities(
-        capabilities: [.guidedGeneration, .toolCalling]),
-    from: corpDownloader,
-    using: corpTokenizerLoader,
-    locatedBy: { id in
+    configuration: ModelConfiguration(id: "internal/MyModel-v3"),
+    capabilities: [.guidedGeneration, .toolCalling],
+    weightsLocation: { id in
         URL(fileURLWithPath: "/Volumes/SharedCache/models/\(id)")
-    }
-)
+    },
+    load: { configuration, progressHandler in
+        try await loadModelContainer(
+            from: corpDownloader,
+            using: corpTokenizerLoader,
+            configuration: configuration,
+            progressHandler: progressHandler)
+    })
 ```
 
 ## Disk-space pre-flight
