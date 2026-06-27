@@ -16,7 +16,7 @@ import Testing
     @Suite("MLXLanguageModel initialization")
     struct MLXLanguageModelInitTests {
 
-        @Test("stores modelID on construction")
+        @Test("modelID returns configuration.name")
         func identifier() async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
