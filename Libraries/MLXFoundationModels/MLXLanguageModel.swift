@@ -339,99 +339,59 @@
             /// Without caching, model loading takes 2-30 seconds per request.
             private static let cache = ModelCache()
 
-            /// The model identifier to load.
-            public let modelID: String
+            /// The configuration identifying and parameterizing the model to load.
+            public let configuration: ModelConfiguration
 
-            /// Downloader used to fetch model snapshots when the cache misses.
-            public let downloader: any Downloader
-
-            /// Tokenizer loader used by `loadModelContainer` to materialize the tokenizer.
-            public let tokenizerLoader: any TokenizerLoader
-
-            /// Resolves a model identifier to the on-disk weights URL. Currently
-            /// stored on the struct for future use by load paths that bypass the
-            /// downloader; the standard cache miss path uses
-            /// `loadModelContainer(from:using:configuration:)` which discovers
-            /// weights itself via the model factory.
+            /// Resolves a model identifier to its on-disk weights directory. Used by
+            /// the availability checks (`modelExistsOnDisk()`, `freeDiskSpaceBytes`),
+            /// not by the load path. Injected so this module needs no HuggingFace
+            /// path-resolution dependency.
             public let weightsLocation: @Sendable (String) -> URL
 
-            /// Loads the model container for the specified model, returning a cached
-            /// instance when one exists.
-            ///
-            /// The first call downloads the model and loads it into memory; subsequent
-            /// calls return the cached container immediately. Concurrent callers for
-            /// the same model share a single loading task, so a model is never loaded
-            /// twice.
-            ///
-            /// This shares the same process-global cache that `respond()`, `preload()`,
-            /// and `session.prewarm()` use, so a container obtained here is the same
-            /// instance those paths use — letting a caller that works directly with the
-            /// lower-level `ModelContainer` (e.g. a custom executor or benchmark) reuse
-            /// the adapter's cache instead of loading a second copy of the weights.
-            public static func loadContainer(
-                modelID: String,
-                from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader
-            ) async throws -> ModelContainer {
-                try await loadContainer(
-                    modelID: modelID,
-                    from: downloader,
-                    using: tokenizerLoader,
-                    suppressDownloadingState: false
-                )
+            /// Loads the model container for a configuration, forwarding download
+            /// progress. Injected so this module carries no HuggingFace or
+            /// swift-transformers dependency; the HuggingFace wiring lives in callers.
+            public typealias ContainerLoader =
+                @Sendable (
+                    _ configuration: ModelConfiguration,
+                    _ progressHandler: @Sendable @escaping (Progress) -> Void
+                ) async throws -> ModelContainer
+
+            let load: ContainerLoader
+
+            /// Stable identity for the model cache, executor configuration, tokenizer
+            /// caches, availability, and progress reporting. Derived from the
+            /// configuration so it is the single place identity is defined.
+            public var modelID: String { configuration.name }
+
+            /// Loads the model container for this model, returning a cached instance
+            /// when one exists. Shares the process-global cache that `respond()`,
+            /// `preload()`, and `session.prewarm()` use, so a caller working directly
+            /// with the lower-level `ModelContainer` reuses the adapter's cache.
+            public func loadContainer() async throws -> ModelContainer {
+                try await loadContainer(suppressDownloadingState: false)
             }
 
-            /// Internal variant of ``loadContainer(modelID:from:using:)`` that lets the
-            /// `warmUp()` path keep an in-flight load of an already-present model out of
-            /// the `.downloading` availability signal.
-            ///
-            /// - Parameter suppressDownloadingState: When `true`, an in-flight load of
-            ///   a model already present on disk is kept out of the `.downloading`
-            ///   availability signal. This is an availability-state-machine detail (not
-            ///   a public concept), which is why it lives only on this internal entry
-            ///   point: a load that triggers a genuine fetch for a model not yet on disk
-            ///   still reports `.downloading` regardless of this flag.
-            static func loadContainer(
-                modelID: String,
-                from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader,
-                suppressDownloadingState: Bool
-            ) async throws -> ModelContainer {
-                try await cache.load(
+            /// Internal variant that keeps an in-flight load of an already-present
+            /// model out of the `.downloading` availability signal.
+            func loadContainer(suppressDownloadingState: Bool) async throws -> ModelContainer {
+                try await Self.cache.load(
                     modelID: modelID,
                     suppressDownloadingState: suppressDownloadingState,
-                    loader: makeContainerLoader(
-                        modelID: modelID, from: downloader, using: tokenizerLoader)
-                )
+                    loader: makeContainerLoader())
             }
 
-            /// Builds the `@Sendable` loader closure that
-            /// ``loadContainer(modelID:from:using:suppressDownloadingState:)`` hands to
-            /// the cache: sets the MLX buffer-reuse pool limit, loads the container via
-            /// the model factory, and reports download progress.
-            private static func makeContainerLoader(
-                modelID: String,
-                from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader
-            ) -> @Sendable () async throws -> ModelContainer {
-                {
-                    // MLX buffer-reuse pool. Higher = less allocator thrash (fewer
-                    // Metal malloc/free round-trips through IOGPU) at the cost of
-                    // slightly higher resident GPU memory. 256MB comfortably holds
-                    // activations and KV cache for a 3B-parameter model without
-                    // forcing pool evictions mid-forward-pass. Well under iOS's
-                    // per-app jetsam ceiling on current-generation devices.
-                    //
-                    // NOTE: this is a process-global setting called on every model
-                    // load. Should move to once-per-process init and/or a
-                    // configurable surface so consumers can tune for their own footprint.
+            private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
+                let configuration = self.configuration
+                let load = self.load
+                return {
+                    // MLX buffer-reuse pool. Higher = less allocator thrash at the cost
+                    // of slightly higher resident GPU memory. 256MB comfortably holds
+                    // activations and KV cache for a 3B model without forcing pool
+                    // evictions mid-forward-pass.
                     MLX.Memory.cacheLimit = 256 * 1024 * 1024
-                    let container = try await loadModelContainer(
-                        from: downloader,
-                        using: tokenizerLoader,
-                        configuration: .init(id: modelID)
-                    ) { progress in
-                        MLXDownloadProgress.report(progress: progress, modelID: modelID)
+                    let container = try await load(configuration) { progress in
+                        MLXDownloadProgress.report(progress: progress, modelID: configuration.name)
                     }
                     MLXDownloadProgress.reportCompleted()
                     return container
@@ -526,7 +486,7 @@
             /// calling via the synthetic-final-answer envelope, and reasoning
             /// (chain-of-thought) routing on the unconstrained generation path.
             ///
-            /// Capabilities are declared explicitly by the caller at ``init(modelID:capabilities:configurationResolver:from:using:locatedBy:)``
+            /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:weightsLocation:load:)``
             /// and stored verbatim. The caller includes
             /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
             /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -540,8 +500,8 @@
             public let capabilities: LanguageModelCapabilities
 
             /// The configuration resolver that patches a per-call ``ModelConfiguration``
-            /// for this instance. Defaults to ``DefaultConfigurationResolver`` via the
-            /// convenience init.
+            /// for this instance. Defaults to ``DefaultConfigurationResolver`` when not
+            /// supplied at init.
             public let configurationResolver: any ModelConfigurationResolver
 
             /// Configuration the framework uses to create and cache executors.
@@ -551,55 +511,33 @@
 
             // MARK: - Initialization
 
-            /// Creates an MLXLanguageModel instance with explicitly declared
-            /// capabilities and a configuration resolver.
-            ///
-            /// Model loading is deferred until first inference or preload.
+            /// Creates an MLXLanguageModel from a configuration, deferring model
+            /// loading until first inference or `preload()`.
             ///
             /// - Parameters:
-            ///   - modelID: The model identifier (e.g., "mlx-community/Qwen3-4B-4bit").
+            ///   - configuration: Identifies and parameterizes the model (e.g.
+            ///     `LLMRegistry.gemma3_1B_qat_4bit` or `ModelConfiguration(id:)`).
             ///   - capabilities: The capabilities this model supports
-            ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`). Declared
-            ///     verbatim; the adapter does not infer or expand the set.
-            ///   - configurationResolver: The ``ModelConfigurationResolver`` that
-            ///     patches a per-call ``ModelConfiguration`` (reasoning config, extra
-            ///     stop tokens) for this instance.
-            ///   - downloader: The ``Downloader`` used to fetch model snapshots.
-            ///   - tokenizerLoader: The ``TokenizerLoader`` used to materialize the tokenizer.
-            ///   - weightsLocation: Resolves a model identifier to the on-disk weights URL.
+            ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`, `.vision`).
+            ///     Stored verbatim; the adapter never infers or expands the set.
+            ///   - configurationResolver: Patches a per-call ``ModelConfiguration``
+            ///     (reasoning config, extra stop tokens) for this instance.
+            ///   - weightsLocation: Resolves a model identifier to its on-disk weights
+            ///     directory, for the availability checks.
+            ///   - load: Loads the model container for a configuration.
             public init(
-                modelID: String,
-                capabilities: LanguageModelCapabilities,
-                configurationResolver: any ModelConfigurationResolver,
-                from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader,
-                locatedBy weightsLocation: @Sendable @escaping (String) -> URL
+                configuration: ModelConfiguration,
+                capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
+                configurationResolver: any ModelConfigurationResolver =
+                    DefaultConfigurationResolver(),
+                weightsLocation: @Sendable @escaping (String) -> URL,
+                load: @escaping ContainerLoader
             ) {
-                self.modelID = modelID
-                self.capabilities = capabilities
+                self.configuration = configuration
+                self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
                 self.configurationResolver = configurationResolver
-                self.downloader = downloader
-                self.tokenizerLoader = tokenizerLoader
                 self.weightsLocation = weightsLocation
-            }
-
-            /// Convenience init that defaults the configuration resolver to
-            /// ``DefaultConfigurationResolver`` — the zero-config path where the
-            /// factory-inferred ``ModelConfiguration`` drives all per-model behavior.
-            public init(
-                modelID: String,
-                capabilities: LanguageModelCapabilities,
-                from downloader: any Downloader,
-                using tokenizerLoader: any TokenizerLoader,
-                locatedBy weightsLocation: @Sendable @escaping (String) -> URL
-            ) {
-                self.init(
-                    modelID: modelID,
-                    capabilities: capabilities,
-                    configurationResolver: DefaultConfigurationResolver(),
-                    from: downloader,
-                    using: tokenizerLoader,
-                    locatedBy: weightsLocation)
+                self.load = load
             }
 
             /// Downloads the model and loads its weights into memory.
@@ -617,11 +555,7 @@
             /// Safe to call multiple times; once the model is loaded, subsequent calls
             /// return immediately from cache.
             public func preload() async throws {
-                _ = try await Self.loadContainer(
-                    modelID: modelID,
-                    from: downloader,
-                    using: tokenizerLoader
-                )
+                _ = try await loadContainer()
             }
 
             /// Loads the model weights and compiles Metal shaders, so the first
@@ -656,12 +590,7 @@
                 // (reordering would let a partial download with only `config.json`
                 // present falsely report `.available`).
                 let alreadyOnDisk = modelExistsOnDisk()
-                let container = try await Self.loadContainer(
-                    modelID: modelID,
-                    from: downloader,
-                    using: tokenizerLoader,
-                    suppressDownloadingState: alreadyOnDisk
-                )
+                let container = try await loadContainer(suppressDownloadingState: alreadyOnDisk)
 
                 // Pre-create the model-keyed GrammarTokenizer so a guided / tool-calling
                 // consumer skips the expensive vocab-extraction step on first
@@ -905,11 +834,7 @@
                             ))
                     }
 
-                    let container = try await MLXLanguageModel.loadContainer(
-                        modelID: model.modelID,
-                        from: model.downloader,
-                        using: model.tokenizerLoader
-                    )
+                    let container = try await model.loadContainer()
 
                     // Encode schema to JSON if present
                     let schemaJSON: String?

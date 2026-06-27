@@ -32,12 +32,15 @@ import Testing
                 guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
                 let model = MLXLanguageModel(
-                    modelID: "org/repo",
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: StubAvailabilityDownloader(),
-                    using: StubAvailabilityTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/definitely/not/a/real/path") }
-                )
+                    configuration: ModelConfiguration(id: "org/repo"),
+                    capabilities: [],
+                    weightsLocation: { _ in URL(fileURLWithPath: "/definitely/not/a/real/path") },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: StubAvailabilityDownloader(),
+                            using: StubAvailabilityTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 let availability = await model.availability
                 if case .unavailable(.modelNotDownloaded) = availability {
@@ -73,12 +76,16 @@ import Testing
                 defer { try? FileManager.default.removeItem(at: dir) }
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
-                    modelID: "org/warmup-present-\(UUID().uuidString)",
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: BlockingDownloader(gate: gate),
-                    using: StubAvailabilityTokenizerLoader(),
-                    locatedBy: { _ in dir }
-                )
+                    configuration: ModelConfiguration(
+                        id: "org/warmup-present-\(UUID().uuidString)"),
+                    capabilities: [],
+                    weightsLocation: { _ in dir },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate),
+                            using: StubAvailabilityTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 let warmTask = Task { try? await model.warmUp() }
                 await gate.waitUntilStarted()
@@ -104,12 +111,16 @@ import Testing
                 defer { try? FileManager.default.removeItem(at: dir) }
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
-                    modelID: "org/genuine-present-\(UUID().uuidString)",
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: BlockingDownloader(gate: gate),
-                    using: StubAvailabilityTokenizerLoader(),
-                    locatedBy: { _ in dir }
-                )
+                    configuration: ModelConfiguration(
+                        id: "org/genuine-present-\(UUID().uuidString)"),
+                    capabilities: [],
+                    weightsLocation: { _ in dir },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate),
+                            using: StubAvailabilityTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 // preload() is NOT a warmup, so its in-flight load is not suppressed —
                 // proving the suppression is what differs (and that the real
@@ -139,12 +150,15 @@ import Testing
                     fileURLWithPath: "/definitely/not/a/real/path/\(UUID().uuidString)")
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
-                    modelID: "org/warmup-absent-\(UUID().uuidString)",
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: BlockingDownloader(gate: gate),
-                    using: StubAvailabilityTokenizerLoader(),
-                    locatedBy: { _ in missing }
-                )
+                    configuration: ModelConfiguration(id: "org/warmup-absent-\(UUID().uuidString)"),
+                    capabilities: [],
+                    weightsLocation: { _ in missing },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate),
+                            using: StubAvailabilityTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 let warmTask = Task { try? await model.warmUp() }
                 await gate.waitUntilStarted()

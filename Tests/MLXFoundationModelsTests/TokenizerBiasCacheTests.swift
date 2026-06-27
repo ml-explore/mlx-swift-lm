@@ -76,12 +76,14 @@ import Testing
                 let tokA = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
                 let idA = "org/bias-evict-\(UUID().uuidString)"
                 let model = MLXLanguageModel(
-                    modelID: idA,
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: EvictBiasStubDownloader(),
-                    using: EvictBiasStubTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path") }
-                )
+                    configuration: ModelConfiguration(id: idA),
+                    capabilities: [],
+                    weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: EvictBiasStubDownloader(), using: EvictBiasStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 _ = await MLXLanguageModel.makeTokenizerBias(modelID: idA, tokenizer: tokA)
                 let afterFirstA = tokA.idLookupCount
@@ -116,12 +118,14 @@ import Testing
                 let tokEvicted = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
                 let idEvicted = "org/bias-survivor-evict-\(UUID().uuidString)"
                 let model = MLXLanguageModel(
-                    modelID: idEvicted,
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: EvictBiasStubDownloader(),
-                    using: EvictBiasStubTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path") }
-                )
+                    configuration: ModelConfiguration(id: idEvicted),
+                    capabilities: [],
+                    weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: EvictBiasStubDownloader(), using: EvictBiasStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 let tokSurvivor = CountingTokenizer(tokens: ["x", "y", "}", "\n"])
                 let idSurvivor = "org/bias-survivor-keep-\(UUID().uuidString)"

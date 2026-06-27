@@ -21,22 +21,24 @@
             capabilities: [LanguageModelCapabilities.Capability],
             resolver: (any ModelConfigurationResolver)? = nil
         ) -> MLXLanguageModel {
-            let caps = LanguageModelCapabilities(capabilities: capabilities)
+            let load: MLXLanguageModel.ContainerLoader = { configuration, progress in
+                try await loadModelContainer(
+                    from: CapabilitiesStubDownloader(), using: CapabilitiesStubTokenizerLoader(),
+                    configuration: configuration, progressHandler: progress)
+            }
             if let resolver {
                 return MLXLanguageModel(
-                    modelID: id,
-                    capabilities: caps,
+                    configuration: ModelConfiguration(id: id),
+                    capabilities: capabilities,
                     configurationResolver: resolver,
-                    from: CapabilitiesStubDownloader(),
-                    using: CapabilitiesStubTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/tmp") })
+                    weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+                    load: load)
             }
             return MLXLanguageModel(
-                modelID: id,
-                capabilities: caps,
-                from: CapabilitiesStubDownloader(),
-                using: CapabilitiesStubTokenizerLoader(),
-                locatedBy: { _ in URL(fileURLWithPath: "/tmp") })
+                configuration: ModelConfiguration(id: id),
+                capabilities: capabilities,
+                weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+                load: load)
         }
 
         @Test("Declaring [.reasoning, .toolCalling] reports exactly those, regardless of repo id")
@@ -80,6 +82,18 @@
             }
             let m = model(id: "any", capabilities: [], resolver: CustomResolver())
             #expect(m.configurationResolver is CustomResolver)
+        }
+
+        @Test("configuration.name is the model identity; capabilities default to .guidedGeneration")
+        func configurationDrivesIdentityAndDefaultCapabilities() {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let m = MLXLanguageModel(
+                configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
+                weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+                load: stubLoad())
+            #expect(m.modelID == "mlx-community/Qwen3-4B-4bit")
+            #expect(m.capabilities.contains(.guidedGeneration))
+            #expect(!m.capabilities.contains(.reasoning))
         }
     }
 

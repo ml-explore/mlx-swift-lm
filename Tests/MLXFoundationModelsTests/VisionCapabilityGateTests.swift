@@ -23,7 +23,7 @@ import Testing
 
             let model = makeStubModel(
                 "vision/not-declared",
-                capabilities: LanguageModelCapabilities(capabilities: []))
+                capabilities: [])
             let executor = try makeMLXExecutor(for: model)
 
             let attachment = Transcript.AttachmentSegment(
@@ -63,7 +63,7 @@ import Testing
 
             let model = makeStubModel(
                 "vision/not-declared",
-                capabilities: LanguageModelCapabilities(capabilities: []))
+                capabilities: [])
             let executor = try makeMLXExecutor(for: model)
 
             let attachment = Transcript.AttachmentSegment(
