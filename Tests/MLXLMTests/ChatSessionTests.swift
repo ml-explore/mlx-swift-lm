@@ -155,6 +155,203 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    private final class GoldenLogitRecorder: Sendable {
+        private let values = OSAllocatedUnfairLock(initialState: [[Float]]())
+
+        func append(_ value: MLXArray) {
+            let value = value.asArray(Float.self)
+            values.withLock {
+                $0.append(value)
+            }
+        }
+
+        var snapshot: [[Float]] {
+            values.withLock { $0 }
+        }
+    }
+
+    private final class GoldenKVCache: BaseKVCache {
+        private(set) var tokenHistory: [Int] = []
+
+        override var supportsStaticPrefixReuse: Bool { true }
+
+        func append(tokens: [Int]) {
+            tokenHistory.append(contentsOf: tokens)
+            offset = tokenHistory.count
+        }
+
+        override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+            offset += keys.dim(2)
+            return (keys, values)
+        }
+
+        override func copy() -> any KVCache {
+            let new = GoldenKVCache()
+            new.tokenHistory = tokenHistory
+            new.offset = offset
+            return new
+        }
+    }
+
+    private final class GoldenLogitLanguageModel: Module, LanguageModel {
+        let vocabularySize = 128
+        let recorder: GoldenLogitRecorder?
+
+        init(recorder: GoldenLogitRecorder? = nil) {
+            self.recorder = recorder
+            super.init()
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            [GoldenKVCache()]
+        }
+
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+            -> PrepareResult
+        {
+            let tokens = input.text.tokens.asArray(Int.self)
+            let state = append(tokens: tokens, to: cache)
+            let logits = logits(for: state, tokenCount: max(1, tokens.count))
+            recorder?.append(logits[0, -1, 0...])
+            return .logits(.init(logits: logits, state: nil))
+        }
+
+        func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+            -> LMOutput
+        {
+            let tokens = input.tokens.asArray(Int.self)
+            let state = append(tokens: tokens, to: cache ?? [])
+            return .init(logits: logits(for: state, tokenCount: max(1, tokens.count)))
+        }
+
+        private func append(tokens: [Int], to cache: [KVCache]) -> [Int] {
+            if let cache = cache.first as? GoldenKVCache {
+                cache.append(tokens: tokens)
+                return cache.tokenHistory
+            }
+            return tokens
+        }
+
+        private func logits(for tokens: [Int], tokenCount: Int) -> MLXArray {
+            var hash = 17
+            for token in tokens {
+                hash = (hash &* 31 &+ token &+ 1) % 1_000_003
+            }
+            let target = 10 + (abs(hash) % (vocabularySize - 10))
+            let row = (0 ..< vocabularySize).map { index -> Float in
+                index == target ? 1_000 : Float(-abs(index - target))
+            }
+            return MLXArray(Array(repeating: row, count: tokenCount).flatMap { $0 })
+                .reshaped(1, tokenCount, vocabularySize)
+        }
+    }
+
+    private struct GoldenTokenizer: Tokenizer {
+        let eosTokenId = 2
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            var tokens: [Int] = []
+            var index = text.startIndex
+            while index < text.endIndex {
+                if text[index...].hasPrefix("<eos>") {
+                    tokens.append(eosTokenId)
+                    index = text.index(index, offsetBy: 5)
+                    continue
+                }
+                if text[index...].hasPrefix("<g") {
+                    var cursor = text.index(index, offsetBy: 2)
+                    var digits = ""
+                    while cursor < text.endIndex, text[cursor].isNumber {
+                        digits.append(text[cursor])
+                        cursor = text.index(after: cursor)
+                    }
+                    if cursor < text.endIndex, text[cursor] == ">", let token = Int(digits) {
+                        tokens.append(token)
+                        index = text.index(after: cursor)
+                        continue
+                    }
+                }
+                let scalarValue = Int(String(text[index]).unicodeScalars.first?.value ?? 0)
+                tokens.append(20 + (scalarValue % 90))
+                index = text.index(after: index)
+            }
+            return tokens
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map { "<g\($0)>" }.joined()
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            token == "<eos>" ? 2 : nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            "<g\(id)>"
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { "<eos>" }
+        var unknownToken: String? { nil }
+        var unknownTokenId: Int? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            var tokens = [3]
+            if tools != nil {
+                tokens += [4, 5]
+            }
+            for message in messages {
+                switch message["role"] as? String {
+                case Chat.Message.Role.system.rawValue:
+                    tokens.append(11)
+                case Chat.Message.Role.user.rawValue:
+                    tokens.append(12)
+                case Chat.Message.Role.assistant.rawValue:
+                    tokens.append(17)
+                    tokens += encode(
+                        text: message["content"] as? String ?? "",
+                        addSpecialTokens: false)
+                    continue
+                case Chat.Message.Role.tool.rawValue:
+                    tokens.append(14)
+                default:
+                    tokens.append(15)
+                }
+                tokens += encode(text: message["content"] as? String ?? "", addSpecialTokens: false)
+                tokens.append(16)
+            }
+            tokens.append(17)
+            return tokens
+        }
+    }
+
+    private struct GoldenInputProcessor: UserInputProcessor {
+        let tokenizer = GoldenTokenizer()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = DefaultMessageGenerator().generate(from: input)
+            let tokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+            return LMInput(tokens: MLXArray(tokens))
+        }
+    }
+
+    private struct SeededGenerator: RandomNumberGenerator {
+        var state: UInt64
+
+        mutating func next() -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var value = state
+            value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
+            value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+            return value ^ (value >> 31)
+        }
+    }
+
     private struct RecordingMessageGenerator: MessageGenerator {
         let continuation: AsyncStream<[RecordedMessage]>.Continuation
 
@@ -524,6 +721,31 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    private struct MultimodalLedgerInputProcessor: UserInputProcessor {
+        let tokenizer: Tokenizer
+        let configuration: ModelConfiguration
+        let messageGenerator: MessageGenerator
+        let recorder: PreparedTokenRecorder
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = messageGenerator.generate(from: input)
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+            recorder.append(promptTokens, shape: [promptTokens.count])
+
+            let image =
+                if input.images.isEmpty {
+                    nil as LMInput.ProcessedImage?
+                } else {
+                    LMInput.ProcessedImage(pixels: MLXArray.zeros([1, 1, 3]))
+                }
+
+            return LMInput(
+                text: .init(tokens: MLXArray(promptTokens)),
+                image: image)
+        }
+    }
+
     private struct TwoDimensionalInputProcessor: UserInputProcessor {
         let configuration = ModelConfiguration(id: "test")
 
@@ -699,6 +921,52 @@ public class ChatSessionTests: XCTestCase {
             tools: lookupTools)
     }
 
+    private func goldenFullRenderLogits(
+        conversation: [Chat.Message],
+        instructions: String,
+        tools: [ToolSpec]
+    ) throws -> [Float] {
+        let processor = GoldenInputProcessor()
+        let model = GoldenLogitLanguageModel()
+        let input = try processor.prepare(
+            input: UserInput(
+                chat: [.system(instructions)] + conversation,
+                tools: tools))
+        let result = try model.prepare(
+            input,
+            cache: model.newCache(parameters: nil),
+            windowSize: nil)
+        guard case .logits(let output) = result else {
+            XCTFail("Expected logits from golden model")
+            return []
+        }
+        return output.logits[0, -1, 0...].asArray(Float.self)
+    }
+
+    private func randomGoldenMessage(using rng: inout SeededGenerator) -> Chat.Message {
+        let corpus = [
+            "",
+            " ",
+            "\n\t  ",
+            "hello",
+            "こんにちは",
+            "emoji 👩‍💻",
+            "<eos>",
+            "<|endoftext|>",
+            "<s>[INST] not a real special token [/INST]",
+            "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}</tool_call>",
+            "{\"tool_call_id\":\"abc\",\"output\":\"ok\"}",
+            " leading and trailing whitespace ",
+            "line\nbreak",
+        ]
+        let roles: [Chat.Message.Role] = [.user, .user, .tool, .assistant]
+        let role = roles[Int.random(in: 0 ..< roles.count, using: &rng)]
+        let first = corpus[Int.random(in: 0 ..< corpus.count, using: &rng)]
+        let second = corpus[Int.random(in: 0 ..< corpus.count, using: &rng)]
+        let content = Bool.random(using: &rng) ? first : first + second
+        return Chat.Message(role: role, content: content)
+    }
+
     private let generationParameters = GenerateParameters(maxTokens: 50)
 
     private let targetLength = 1
@@ -861,6 +1129,100 @@ public class ChatSessionTests: XCTestCase {
                 [101],
                 [102],
             ])
+    }
+
+    func testMultimodalTurnSkipsLedgerValidationBeforePrepare() async throws {
+        let modelRecorder = PreparedTokenRecorder()
+        let processorRecorder = PreparedTokenRecorder()
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let processor = MultimodalLedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator(),
+            recorder: processorRecorder)
+        let session = ChatSession(
+            recordingModel(
+                processor: processor,
+                tokenizer: tokenizer,
+                recorder: modelRecorder,
+                nextToken: 7),
+            instructions: "You are concise.",
+            generateParameters: GenerateParameters(maxTokens: 1, temperature: 0),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(
+            to: "second",
+            images: [.array(MLXArray.zeros([1, 1, 3]))],
+            videos: [],
+            audios: [])
+
+        XCTAssertEqual(
+            processorRecorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+        XCTAssertEqual(
+            modelRecorder.snapshot,
+            [
+                [11, 12, 101],
+                [11, 12, 102],
+            ])
+    }
+
+    func testGoldenLogitsMatchFullRenderAcrossRandomCachedTranscripts() async throws {
+        let instructions = "System prompt with Unicode 🧪 and <eos> marker."
+        var rng = SeededGenerator(state: 0xC0FFEE)
+
+        for transcriptIndex in 0 ..< 40 {
+            let processor = GoldenInputProcessor()
+            let recorder = GoldenLogitRecorder()
+            let sessionModel = GoldenLogitLanguageModel(recorder: recorder)
+            let context = ModelContext(
+                configuration: ModelConfiguration(id: "golden"),
+                model: sessionModel,
+                processor: processor,
+                tokenizer: processor.tokenizer)
+            let session = ChatSession(
+                context,
+                instructions: instructions,
+                generateParameters: GenerateParameters(maxTokens: 1, temperature: 0),
+                tools: lookupTools)
+            var conversation: [Chat.Message] = []
+            let turnCount = Int.random(in: 3 ... 7, using: &rng)
+
+            for turnIndex in 0 ..< turnCount {
+                let message = randomGoldenMessage(using: &rng)
+                conversation.append(message)
+
+                let expected = try goldenFullRenderLogits(
+                    conversation: conversation,
+                    instructions: instructions,
+                    tools: lookupTools)
+                let previousPrepareCount = recorder.snapshot.count
+                _ = try await session.respond(to: [message])
+
+                let logits = recorder.snapshot
+                XCTAssertEqual(
+                    logits.count,
+                    previousPrepareCount + 1,
+                    "transcript \(transcriptIndex), turn \(turnIndex)")
+                let actual = try XCTUnwrap(
+                    logits.last,
+                    "transcript \(transcriptIndex), turn \(turnIndex)")
+                XCTAssertEqual(
+                    actual,
+                    expected,
+                    "transcript \(transcriptIndex), turn \(turnIndex), message \(message)")
+
+                let generatedToken = actual.indices.max { actual[$0] < actual[$1] }!
+                let assistantText = processor.tokenizer.decode(
+                    tokenIds: [generatedToken],
+                    skipSpecialTokens: false)
+                conversation.append(.assistant(assistantText))
+            }
+        }
     }
 
     func testMultiTokenAssistantTranscriptUsesExactLedger() async throws {

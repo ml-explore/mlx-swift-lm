@@ -688,6 +688,12 @@ public final class ChatSession {
             return [.system(instructions)] + turnMessages
         }
 
+        static func containsMedia(_ messages: [Chat.Message]) -> Bool {
+            messages.contains {
+                !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty
+            }
+        }
+
         static func suffixInput(fullInput: LMInput, dropping prefixTokens: [Int]) -> LMInput? {
             guard fullInput.text.tokens.ndim == 1, fullInput.text.mask == nil else {
                 return nil
@@ -728,6 +734,9 @@ public final class ChatSession {
                 })
             else {
                 return .unavailable
+            }
+            guard !containsMedia(turnMessages) else {
+                return .invalid
             }
 
             let fullUserInput = UserInput(
