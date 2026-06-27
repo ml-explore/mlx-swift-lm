@@ -786,7 +786,7 @@ public final class ChatSession {
                     additionalContext: configuration.additionalContext)
                 return PreparedInput(
                     input: try await processor.prepare(input: userInput),
-                    state: promptState)
+                    state: .applied(promptConfigurationRevision: configuration.revision))
 
             case .applied(let storedRevision) where storedRevision != configuration.revision:
                 throw ChatSessionError.promptCacheMismatch
@@ -1160,10 +1160,7 @@ public final class ChatSession {
                             }
 
                             ledger.append(contentsOf: turnMessages)
-                            let hasAssistantTurn =
-                                !contentTokens.isEmpty
-                                || (generationTrace.stopReason == .stop
-                                    && !generationTrace.committedTokens.isEmpty)
+                            let hasAssistantTurn = !generationTrace.committedTokens.isEmpty
                             if hasAssistantTurn {
                                 ledger.appendAssistant(assistantOutput)
                             }

@@ -586,7 +586,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
-        self.returnsReusableCache = parameters.usesDynamicKVQuantization
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -621,7 +621,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
-        self.returnsReusableCache = parameters.usesDynamicKVQuantization
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -837,7 +837,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
-        self.returnsReusableCaches = parameters.usesDynamicKVQuantization
+        self.returnsReusableCaches = !parameters.usesDynamicKVQuantization
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
@@ -1859,16 +1859,16 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     let handler = SendableBox(handler)
 
     // Launch a Task to perform iteration asynchronously.
-        let task = Task {
-            let performIteration = {
-                var iterator = iterator.consume()
-                var handler = handler.consume()
-                _ = runGenerateLoop(
-                    promptTokenCount: promptTokenCount,
-                    modelConfiguration: modelConfiguration,
-                    tokenizer: tokenizer,
-                    iterator: &iterator,
-                    includeStopToken: includeStopToken,
+    let task = Task {
+        let performIteration = {
+            var iterator = iterator.consume()
+            var handler = handler.consume()
+            _ = runGenerateLoop(
+                promptTokenCount: promptTokenCount,
+                modelConfiguration: modelConfiguration,
+                tokenizer: tokenizer,
+                iterator: &iterator,
+                includeStopToken: includeStopToken,
                 collectTrace: false,
                 handler: &handler,
                 continuation: continuation)

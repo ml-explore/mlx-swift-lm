@@ -344,10 +344,10 @@ public class ChatSessionTests: XCTestCase {
         var state: UInt64
 
         mutating func next() -> UInt64 {
-            state &+= 0x9E3779B97F4A7C15
+            state &+= 0x9E37_79B9_7F4A_7C15
             var value = state
-            value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
-            value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+            value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
             return value ^ (value >> 31)
         }
     }
@@ -1952,6 +1952,34 @@ public class ChatSessionTests: XCTestCase {
 
         XCTAssertEqual(calls.map { $0.messages.map(\.role) }, [[.system, .user]])
         XCTAssertEqual(calls.map(\.toolCount), [1])
+    }
+
+    func testRestoredCachePromptConfigurationChangeThrowsAfterFirstGeneration() async throws {
+        let recorder = PreparedTokenRecorder()
+        let restoredCache = KVCacheSimple()
+        let keys = MLXArray.zeros([1, 1, 1, 1])
+        let values = MLXArray.zeros([1, 1, 1, 1])
+        _ = restoredCache.update(keys: keys, values: values)
+        let tokenizer = LedgerTokenizer(unsafeDynamicTemplate: false)
+        let session = ChatSession(
+            recordingModel(
+                tokenizer: tokenizer,
+                recorder: recorder,
+                nextToken: 7),
+            instructions: "Initial prefix.",
+            cache: [restoredCache],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "first")
+        session.instructions = "Changed prefix."
+
+        do {
+            _ = try await session.respond(to: "second")
+            XCTFail("Expected promptCacheMismatch")
+        } catch ChatSessionError.promptCacheMismatch {
+            XCTAssertEqual(recorder.snapshot, [[11, 12, 101]])
+        }
     }
 
     func testClearRebuildsStaticInstructionsAndPromptTools() async throws {

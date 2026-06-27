@@ -124,7 +124,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
-        self.returnsReusableCache = parameters.usesDynamicKVQuantization
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
