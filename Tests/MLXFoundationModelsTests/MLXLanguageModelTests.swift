@@ -21,11 +21,14 @@ import Testing
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
             let model = MLXLanguageModel(
-                modelID: "mlx-community/Qwen3-4B-4bit",
-                capabilities: LanguageModelCapabilities(capabilities: [.reasoning]),
-                from: StubDownloader(),
-                using: StubTokenizerLoader(),
-                locatedBy: { _ in URL(fileURLWithPath: "/tmp") }
+                configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
+                capabilities: [.reasoning],
+                weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+                load: { configuration, progress in
+                    try await loadModelContainer(
+                        from: StubDownloader(), using: StubTokenizerLoader(),
+                        configuration: configuration, progressHandler: progress)
+                }
             )
             #expect(model.modelID == "mlx-community/Qwen3-4B-4bit")
         }

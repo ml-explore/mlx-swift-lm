@@ -48,12 +48,16 @@ import Testing
                 let id = "org/evictall-\(UUID().uuidString)"
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
-                    modelID: id,
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: BlockingDownloader(gate: gate),
-                    using: EvictStubTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)") }
-                )
+                    configuration: ModelConfiguration(id: id),
+                    capabilities: [],
+                    weightsLocation: { _ in
+                        URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                    },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 // Drive a load that parks, then fails — populating lastErrors[id].
                 let loadTask = Task { try? await model.preload() }
@@ -77,13 +81,17 @@ import Testing
                 func failedLoad(_ id: String) async -> MLXLanguageModel {
                     let gate = LoadGate()
                     let model = MLXLanguageModel(
-                        modelID: id,
-                        capabilities: LanguageModelCapabilities(capabilities: []),
-                        from: BlockingDownloader(gate: gate),
-                        using: EvictStubTokenizerLoader(),
-                        locatedBy: { _ in URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
-                        }
-                    )
+                        configuration: ModelConfiguration(id: id),
+                        capabilities: [],
+                        weightsLocation: { _ in
+                            URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                        },
+                        load: { configuration, progress in
+                            try await loadModelContainer(
+                                from: BlockingDownloader(gate: gate),
+                                using: EvictStubTokenizerLoader(),
+                                configuration: configuration, progressHandler: progress)
+                        })
                     let task = Task { try? await model.preload() }
                     await gate.waitUntilStarted()
                     await gate.release()
@@ -117,12 +125,16 @@ import Testing
                 let id = "org/superseded-\(UUID().uuidString)"
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
-                    modelID: id,
-                    capabilities: LanguageModelCapabilities(capabilities: []),
-                    from: BlockingDownloader(gate: gate),
-                    using: EvictStubTokenizerLoader(),
-                    locatedBy: { _ in URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)") }
-                )
+                    configuration: ModelConfiguration(id: id),
+                    capabilities: [],
+                    weightsLocation: { _ in
+                        URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                    },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
                 // Park a genuine (non-warmup) load in flight.
                 let loadTask = Task { try? await model.preload() }

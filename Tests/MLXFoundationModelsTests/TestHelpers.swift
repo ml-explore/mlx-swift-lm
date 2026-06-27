@@ -62,6 +62,17 @@ import UniformTypeIdentifiers
 
     // MARK: - Model Construction (no download)
 
+    /// A `ContainerLoader` backed by the stub downloader/tokenizer: no network, no
+    /// real weights. For construction / capability / gate tests.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func stubLoad() -> MLXLanguageModel.ContainerLoader {
+        { configuration, progress in
+            try await loadModelContainer(
+                from: StubDownloader(), using: StubTokenizerLoader(),
+                configuration: configuration, progressHandler: progress)
+        }
+    }
+
     /// Constructs an `MLXLanguageModel` wired to stub download / tokenizer infra,
     /// for tests that exercise construction, stored capabilities, or gate-rejection
     /// paths WITHOUT loading a real model. Tests that need a real model live in the
@@ -69,22 +80,13 @@ import UniformTypeIdentifiers
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func makeStubModel(
         _ id: String,
-        capabilities: LanguageModelCapabilities? = nil
+        capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration, .toolCalling]
     ) -> MLXLanguageModel {
-        let resolved =
-            capabilities
-            ?? {
-                var set: [LanguageModelCapabilities.Capability] = []
-                set += [.guidedGeneration, .toolCalling]
-                return LanguageModelCapabilities(capabilities: set)
-            }()
-        return MLXLanguageModel(
-            modelID: id,
-            capabilities: resolved,
-            from: StubDownloader(),
-            using: StubTokenizerLoader(),
-            locatedBy: { _ in URL(fileURLWithPath: "/tmp") }
-        )
+        MLXLanguageModel(
+            configuration: ModelConfiguration(id: id),
+            capabilities: capabilities,
+            weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+            load: stubLoad())
     }
 
     // MARK: - Executor Helpers (download-free machinery)

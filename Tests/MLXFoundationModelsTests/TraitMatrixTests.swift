@@ -46,9 +46,9 @@ struct TraitMatrixTests {
             // passes, never inferring from the model id.
             let reasoning = makeStubModel(
                 "mlx-community/Qwen3-4B-4bit",
-                capabilities: LanguageModelCapabilities(capabilities: [
+                capabilities: [
                     .reasoning, .guidedGeneration, .toolCalling,
-                ])
+                ]
             ).capabilities
             #expect(reasoning.contains(.reasoning))
             #expect(reasoning.contains(.guidedGeneration))
@@ -56,9 +56,9 @@ struct TraitMatrixTests {
 
             let nonReasoning = makeStubModel(
                 TestFixtures.gemmaModelID,
-                capabilities: LanguageModelCapabilities(capabilities: [
+                capabilities: [
                     .guidedGeneration, .toolCalling,
-                ])
+                ]
             ).capabilities
             #expect(!nonReasoning.contains(.reasoning))
             #expect(nonReasoning.contains(.guidedGeneration))
