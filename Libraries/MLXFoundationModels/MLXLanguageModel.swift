@@ -357,7 +357,7 @@
                     _ progressHandler: @Sendable @escaping (Progress) -> Void
                 ) async throws -> ModelContainer
 
-            let load: ContainerLoader
+            private let load: ContainerLoader
 
             /// Stable identity for the model cache, executor configuration, tokenizer
             /// caches, availability, and progress reporting. Derived from the
@@ -500,8 +500,8 @@
             public let capabilities: LanguageModelCapabilities
 
             /// The configuration resolver that patches a per-call ``ModelConfiguration``
-            /// for this instance. Defaults to ``DefaultConfigurationResolver`` when not
-            /// supplied at init.
+            /// for this instance. Defaults to ``DefaultConfigurationResolver`` when
+            /// omitted.
             public let configurationResolver: any ModelConfigurationResolver
 
             /// Configuration the framework uses to create and cache executors.
