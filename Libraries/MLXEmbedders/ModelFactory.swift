@@ -13,13 +13,24 @@ private func create<C: Decodable, M>(
     }
 }
 
+private func createBertCompatibleModel(configuration data: Data) throws -> any EmbeddingModel {
+    let configuration = try JSONDecoder.json5().decode(BertConfiguration.self, from: data)
+    if configuration.isSequenceClassification {
+        if configuration.modelType == "bert" {
+            return BertSequenceClassificationRerankerModel(configuration)
+        }
+        return BertRerankerModel(configuration)
+    }
+    return BertModel(configuration)
+}
+
 /// Registry of model type, e.g 'bert', to functions that can instantiate the model from configuration.
 public enum EmbedderTypeRegistry {
 
     public static let shared: ModelTypeRegistry<EmbeddingModel> = .init(creators: [
-        "bert": create(BertConfiguration.self) { BertModel($0) },
-        "roberta": create(BertConfiguration.self) { BertModel($0) },
-        "xlm-roberta": create(BertConfiguration.self) { BertModel($0) },
+        "bert": createBertCompatibleModel,
+        "roberta": createBertCompatibleModel,
+        "xlm-roberta": createBertCompatibleModel,
         "distilbert": create(BertConfiguration.self) { BertModel($0) },
 
         "nomic_bert": create(NomicBertConfiguration.self) { NomicBertModel($0, pooler: false) },
@@ -69,6 +80,8 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let snowflake_lg = ModelConfiguration(id: "Snowflake/snowflake-arctic-embed-l")
     /// BGE-M3 - Multi-lingual, Multi-functional, Multi-granularity.
     public static let bge_m3 = ModelConfiguration(id: "BAAI/bge-m3")
+    /// BGE Reranker v2 M3 - multilingual encoder reranker.
+    public static let bge_reranker_v2_m3 = ModelConfiguration(id: "BAAI/bge-reranker-v2-m3")
     /// Mixedbread AI Large v1.
     public static let mixedbread_large = ModelConfiguration(
         id: "mixedbread-ai/mxbai-embed-large-v1")
@@ -110,6 +123,7 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
             bge_large,
             snowflake_lg,
             bge_m3,
+            bge_reranker_v2_m3,
             mixedbread_large,
             qwen3_embedding,
             lfm2_embedding_350m,
