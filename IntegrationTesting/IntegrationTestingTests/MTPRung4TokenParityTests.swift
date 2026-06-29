@@ -180,6 +180,7 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
         lastToken: lastToken,
         lastHidden: lastHidden,
         sharedKV: sharedKV,
+        positionDeltas: nil,
         queryOffset: queryOffset,
         blockSize: blockSize,
         sampler: ArgMaxSampler()

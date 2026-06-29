@@ -8,10 +8,12 @@ import Testing
 
 // MARK: - Synthetic mocks for iterator plumbing
 
+private let preservedStateKey = LMOutput.Key<Int>("tests.mtp.preservedState")
+
 /// Records `draftBlock(...)` invocations and returns a fixed token pattern
 /// so the iterator's draft/verify/accept flow can be exercised without a
 /// real drafter.
-private final class MockDrafter: Module, MTPDrafterModel {
+private final class MockDrafter: Module, StatefulMTPDrafterModel {
     private(set) var draftBlockCallCount = 0
     var draftedTokenValue: Int32
     /// Per-call record of what the iterator handed `draftBlock`: the
@@ -20,10 +22,16 @@ private final class MockDrafter: Module, MTPDrafterModel {
     /// tokens that come out of it.
     private(set) var receivedSharedKVSpans: [[String: Int]] = []
     private(set) var receivedQueryOffsets: [Int] = []
+    private(set) var receivedPositionDeltaValues: [Int?] = []
+    private(set) var receivedCacheOffsets: [Int?] = []
 
     init(draftedTokenValue: Int32 = 7) {
         self.draftedTokenValue = draftedTokenValue
         super.init()
+    }
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [CountingKVCache()])
     }
 
     func draftBlock(
@@ -31,13 +39,42 @@ private final class MockDrafter: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        var state = makeState(parameters: nil)
+        return draftBlock(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            positionDeltas: positionDeltas,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            state: &state,
+            sampler: sampler)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
         draftBlockCallCount += 1
         receivedSharedKVSpans.append(sharedKV.mapValues { $0.0.dim(-2) })
         receivedQueryOffsets.append(queryOffset)
+        receivedPositionDeltaValues.append(positionDeltas?.item(Int.self))
+        let mutableCache = state.cache.first as? MutableOffsetKVCache
+        receivedCacheOffsets.append(mutableCache?.offset)
+        mutableCache?.offset += blockSize - 1
         let batch = lastToken.dim(0)
         let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
         return MLXArray(vals, [batch, blockSize - 1])
@@ -55,9 +92,15 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     /// If `true`, omit the MTP state keys from the returned `LMOutput` so the
     /// iterator's passthrough fallback is exercised.
     var omitDrafterState: Bool = false
+    var emitEmptySharedKVState: Bool = false
+    var maxEmittedSharedKVSpan: Int?
+    var returnPreservedStateWhenOmittingDrafterState: Bool = false
+    var prepareLogitsStateValue: Int?
+    var emittedPositionDelta: Int?
 
     private(set) var callCount: Int = 0
     private(set) var lastIncomingEmitFlag: Bool? = nil
+    private(set) var incomingPreservedStateValues: [Int?] = []
     /// Sequence-axis span of each emitted sharedKV snapshot, in emit order.
     /// Tests assert this against the mock cache offset to pin the mock's
     /// span fidelity (see the emit block below).
@@ -69,9 +112,15 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     }
 
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        if let prepareLogitsStateValue {
+            var state = LMOutput.State()
+            state[preservedStateKey] = prepareLogitsStateValue
+            let logits = makeLogits(positions: input.text.tokens.dim(-1))
+            return .logits(LMOutput(logits: logits, state: state))
+        }
         // Return `.tokens(...)`; the iterator's `prepare` will follow up with
         // a one-position forward call that primes drafter state.
-        .tokens(input.text)
+        return .tokens(input.text)
     }
 
     /// Returns deterministic one-hot logits at each position so a `softmax/
@@ -86,12 +135,13 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     ) -> LMOutput {
         callCount += 1
         lastIncomingEmitFlag = state?[mtpEmitFlagKey]
+        incomingPreservedStateValues.append(state?[preservedStateKey])
 
         let positions = input.tokens.dim(-1)
         let logits = makeLogits(positions: positions)
 
         // Update the mock cache to reflect that `positions` tokens were seen.
-        if let cache, let first = cache.first as? CountingKVCache {
+        if let cache, let first = cache.first as? MutableOffsetKVCache {
             first.offset += positions
         }
 
@@ -103,20 +153,35 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
             // current chunk. Span-accurate sharedKV emission is what lets a
             // test distinguish a trimmed snapshot from a stale one — with a
             // fixed-span mock those are indistinguishable.
-            let kvSpan = (cache?.first as? CountingKVCache)?.offset ?? positions
+            let kvOffset = (cache?.first as? MutableOffsetKVCache)?.offset ?? positions
+            let kvSpan = maxEmittedSharedKVSpan.map { Swift.min(kvOffset, $0) } ?? kvOffset
             emittedSharedKVSpans.append(kvSpan)
             var out = LMOutput.State()
+            out[preservedStateKey] = state?[preservedStateKey]
             out[mtpLastHiddenStatesKey] = MLXArray.zeros([1, positions, 4])
-            out[mtpSharedKVStatesKey] = [
-                "full_attention": (
-                    MLXArray.zeros([1, 1, kvSpan, 4]),
-                    MLXArray.zeros([1, 1, kvSpan, 4])
-                ),
-                "sliding_attention": (
-                    MLXArray.zeros([1, 1, kvSpan, 4]),
-                    MLXArray.zeros([1, 1, kvSpan, 4])
-                ),
-            ]
+            if emitEmptySharedKVState {
+                out[mtpSharedKVStatesKey] = [:]
+            } else {
+                out[mtpSharedKVStatesKey] = [
+                    "full_attention": (
+                        MLXArray.zeros([1, 1, kvSpan, 4]),
+                        MLXArray.zeros([1, 1, kvSpan, 4])
+                    ),
+                    "sliding_attention": (
+                        MLXArray.zeros([1, 1, kvSpan, 4]),
+                        MLXArray.zeros([1, 1, kvSpan, 4])
+                    ),
+                ]
+            }
+            out[mtpSharedKVOffsetsKey] = ["full_attention": kvOffset]
+            if let emittedPositionDelta {
+                out[mtpPositionDeltasKey] = MLXArray(emittedPositionDelta)
+            }
+            return LMOutput(logits: logits, state: out)
+        }
+        if returnPreservedStateWhenOmittingDrafterState {
+            var out = LMOutput.State()
+            out[preservedStateKey] = state?[preservedStateKey]
             return LMOutput(logits: logits, state: out)
         }
         return LMOutput(logits: logits)
@@ -144,7 +209,11 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
 /// Minimal `KVCache` that satisfies the protocol's trimmable interface; the
 /// mock model adjusts `offset` directly. Inherits the default
 /// `ropeOffset = .scalar(offset)` from the `KVCache` protocol extension.
-private final class CountingKVCache: KVCache {
+private protocol MutableOffsetKVCache: KVCache, AnyObject {
+    var offset: Int { get set }
+}
+
+private class CountingKVCache: MutableOffsetKVCache {
     var offset: Int = 0
     var maxSize: Int? { nil }
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -176,6 +245,19 @@ private final class CountingKVCache: KVCache {
         return c
     }
     func innerState() -> [MLXArray] { [] }
+}
+
+private final class NonTrimmableCountingKVCache: CountingKVCache {
+    override var isTrimmable: Bool { false }
+
+    @discardableResult
+    override func trim(_ n: Int) -> Int { 0 }
+
+    override func copy() -> any KVCache {
+        let c = NonTrimmableCountingKVCache()
+        c.offset = offset
+        return c
+    }
 }
 
 // MARK: - Smallest-unit-of-work smoke test
@@ -244,6 +326,32 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     #expect(main.lastIncomingEmitFlag == true)
 }
 
+@Test
+func testMTPIteratorForwardsPositionDeltasToDrafter() throws {
+    let mainLogitTokens: [Int32] = [
+        0, 0, 7,
+        7, 7, 7, 9,
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    main.emittedPositionDelta = 11
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: main,
+        drafter: drafter,
+        mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 8),
+        blockSize: 4
+    )
+
+    _ = iter.next()
+    _ = iter.next()
+
+    #expect(drafter.receivedPositionDeltaValues == [11])
+}
+
 // MARK: - Passthrough fallback when state is absent
 
 @Test
@@ -283,6 +391,35 @@ func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
     #expect(tokens[3] == nil)
     // Drafter was never invoked for an actual round.
     #expect(drafter.draftBlockCallCount == 0)
+}
+
+@Test
+func testMTPIteratorEmptySharedKVFallsBackToPassthrough() throws {
+    // Qwen35 can still return the sharedKV state key when the underlying
+    // full-attention cache no longer exposes regular K/V, e.g. after cache
+    // quantization. An empty dictionary must be treated as missing drafter
+    // state, otherwise the iterator drafts with no usable K/V anchor.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5
+        // passthrough tokens after empty sharedKV is detected
+        11, 12,
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    main.emitEmptySharedKVState = true
+    let drafter = MockDrafter()
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 3), blockSize: 4
+    )
+
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 11)
+    #expect(iter.next() == 12)
+    #expect(iter.next() == nil)
+    #expect(drafter.draftBlockCallCount == 0)
+    #expect(iter.passthroughReason == "main model did not emit drafter state")
 }
 
 // MARK: - Pending buffer drain order
@@ -497,16 +634,198 @@ func testMTPSharedKVSpanTrimmedAfterPartialAcceptance() throws {
             "full_attention": 3, "sliding_attention": 3,
         ])
     #expect(drafter.receivedQueryOffsets.first == 3)
+    #expect(drafter.receivedCacheOffsets.first == 0)
     // Round 2 is the regression surface: the round-1 verify emission
     // spanned 7; after the rewind trims the 2 rejected rows the drafter
     // must see span 5 == cache offset == queryOffset.
     #expect(drafter.receivedQueryOffsets.last == 5)
+    #expect(
+        drafter.receivedCacheOffsets.last == 1,
+        "drafter cache should keep only the one accepted round-1 draft step")
     #expect(
         drafter.receivedSharedKVSpans.last == [
             "full_attention": 5, "sliding_attention": 5,
         ],
         "drafter received spans \(drafter.receivedSharedKVSpans.last ?? [:]) — expected 5 (= cache offset). Span 7 means the emitted snapshot crossed the cache rewind untrimmed."
     )
+}
+
+@Test
+func testMTPQueryOffsetUsesAbsoluteOffsetWhenSharedKVSpanIsCapped() throws {
+    // RotatingKVCache caps the K/V tensor's sequence axis once maxKVSize is
+    // reached, but the drafter RoPE position must continue from the absolute
+    // cache offset. The target publishes that absolute offset separately.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 0, 0, 0, 5,  // prefill follow-up picks bonus 5
+        5, 9,  // one-token draft round: accept draft, emit correction 9
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    main.maxEmittedSharedKVSpan = 4
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3, 4, 5, 6]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 4), blockSize: 2
+    )
+
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 5)
+
+    #expect(main.emittedSharedKVSpans.starts(with: [4, 4]))
+    #expect(drafter.draftBlockCallCount == 1)
+    #expect(drafter.receivedSharedKVSpans == [["full_attention": 4, "sliding_attention": 4]])
+    #expect(drafter.receivedQueryOffsets == [6])
+}
+
+@Test
+func testMTPUntrimmableCacheVerifiesOnCopyAndCommitsAcceptedPrefix() throws {
+    // Hybrid Qwen-style models include Mamba caches that cannot be rewound.
+    // The iterator must verify speculative tokens on a copied cache, then
+    // replay only the committed prefix into the canonical cache.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5
+        5, 7, 0, 0,  // round-1 verify: accept draft_1, reject at draft_2
+        0, 0, 0, 0,  // round-2 verify placeholders
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let cache = NonTrimmableCountingKVCache()
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: main,
+        drafter: drafter,
+        mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 12),
+        blockSize: 4
+    )
+
+    let t0 = iter.next()
+    let t1 = iter.next()
+    let t2 = iter.next()
+    #expect(t0 == 5)
+    #expect(t1 == 5)
+    #expect(t2 == 7)
+    #expect(cache.offset == 5)
+
+    _ = iter.next()
+
+    #expect(main.emittedSharedKVSpans.starts(with: [3, 7, 5, 9]))
+    #expect(drafter.draftBlockCallCount == 2)
+    #expect(drafter.receivedQueryOffsets == [3, 5])
+    #expect(drafter.receivedCacheOffsets == [0, 1])
+    #expect(
+        drafter.receivedSharedKVSpans.last == [
+            "full_attention": 5, "sliding_attention": 5,
+        ])
+}
+
+@Test
+func testMTPUntrimmableCacheAllAcceptedAdoptsVerifyCacheWithoutReplay() throws {
+    // When every proposed draft is accepted, the copied verify cache already
+    // represents the committed sequence. The iterator should adopt it
+    // directly instead of replaying the same prefix into the canonical cache.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5
+        5, 5, 5, 9,  // round-1 verify: accept all three drafts, emit bonus 9
+        0, 0, 0, 0,  // round-2 verify placeholders
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: main,
+        drafter: drafter,
+        mainCache: [NonTrimmableCountingKVCache()],
+        parameters: GenerateParameters(maxTokens: 12),
+        blockSize: 4
+    )
+
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 9)
+
+    #expect(main.callCount == 2)
+
+    // Starting the next round proves the verified cache was adopted: the
+    // query offset advances from prompt span 3 to committed span 7.
+    _ = iter.next()
+
+    #expect(main.emittedSharedKVSpans.starts(with: [3, 7, 11]))
+    #expect(drafter.draftBlockCallCount == 2)
+    #expect(drafter.receivedQueryOffsets == [3, 7])
+    #expect(drafter.receivedCacheOffsets == [0, 3])
+}
+
+@Test
+func testMTPCarriesMainStateThroughPrimeVerifyAndCommit() throws {
+    // Qwen VLM stores multimodal RoPE bookkeeping in LMOutput.State. The MTP
+    // iterator must keep that state while adding mtpEmitFlagKey.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prepare logits; sample first bonus 5
+        5,  // prime follow-up; sample next bonus 5
+        5, 7, 0, 0,  // verify accepts one draft then emits correction 7
+        0, 0,  // non-trimmable commit replay consumes accepted prefix
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    main.prepareLogitsStateValue = 42
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let cache = NonTrimmableCountingKVCache()
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: main,
+        drafter: drafter,
+        mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 6),
+        blockSize: 4
+    )
+
+    _ = iter.next()
+    _ = iter.next()
+    _ = iter.next()
+
+    #expect(main.incomingPreservedStateValues == [42, 42, 42])
+}
+
+@Test
+func testMTPPassthroughCarriesMainStateAfterFallback() throws {
+    // Qwen VLM still needs its RoPE bookkeeping state after MTP falls back to
+    // plain autoregressive generation.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prepare logits; sample first bonus 5
+        6,  // prime follow-up; sample next bonus 6
+        7,  // passthrough after missing MTP state
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    main.prepareLogitsStateValue = 42
+    main.omitDrafterState = true
+    main.returnPreservedStateWhenOmittingDrafterState = true
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let cache = CountingKVCache()
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: main,
+        drafter: drafter,
+        mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 3),
+        blockSize: 4
+    )
+
+    #expect(iter.next() == 5)
+    #expect(iter.next() == 6)
+    #expect(iter.next() == 7)
+    #expect(drafter.draftBlockCallCount == 0)
+    #expect(main.incomingPreservedStateValues == [42, 42])
 }
 
 // MARK: - trimSharedKVState contract
@@ -527,6 +846,10 @@ private func makeSharedKVState(span: Int) -> LMOutput.State {
         "full_attention": (arange([1, 1, span, 4]), arange([1, 1, span, 4])),
         "sliding_attention": (arange([1, 2, span, 2]), arange([1, 2, span, 2])),
     ]
+    state[mtpSharedKVOffsetsKey] = [
+        "full_attention": span,
+        "sliding_attention": span,
+    ]
     return state
 }
 
@@ -537,6 +860,7 @@ func testTrimSharedKVStateZeroTokensIsNoOp() throws {
 
     let kv = try #require(state?[mtpSharedKVStatesKey])
     let original = try #require(makeSharedKVState(span: 6)[mtpSharedKVStatesKey])
+    let offsets = try #require(state?[mtpSharedKVOffsetsKey])
     #expect(Set(kv.keys) == Set(original.keys))
     for (layerType, pair) in kv {
         let origPair = try #require(original[layerType])
@@ -544,6 +868,7 @@ func testTrimSharedKVStateZeroTokensIsNoOp() throws {
         #expect(allClose(pair.0, origPair.0, rtol: 0, atol: 0).item(Bool.self))
         #expect(allClose(pair.1, origPair.1, rtol: 0, atol: 0).item(Bool.self))
     }
+    #expect(offsets == ["full_attention": 6, "sliding_attention": 6])
 }
 
 @Test
@@ -553,6 +878,7 @@ func testTrimSharedKVStateTrimsTrailingRowsPreservingPrefix() throws {
 
     let kv = try #require(state?[mtpSharedKVStatesKey])
     let original = try #require(makeSharedKVState(span: 6)[mtpSharedKVStatesKey])
+    let offsets = try #require(state?[mtpSharedKVOffsetsKey])
     #expect(Set(kv.keys) == Set(original.keys))
     for (layerType, pair) in kv {
         let origPair = try #require(original[layerType])
@@ -568,6 +894,7 @@ func testTrimSharedKVStateTrimsTrailingRowsPreservingPrefix() throws {
             allClose(pair.1, origPair.1[.ellipsis, ..<4, 0...], rtol: 0, atol: 0)
                 .item(Bool.self))
     }
+    #expect(offsets == ["full_attention": 4, "sliding_attention": 4])
 
     // The hidden entry rides along untouched — it needs no analogous trim
     // (the accepted-index slice selects by position) and the helper must

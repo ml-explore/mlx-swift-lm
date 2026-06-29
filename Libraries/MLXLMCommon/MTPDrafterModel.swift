@@ -14,20 +14,23 @@ import MLXNN
 /// MTP drafters do **not** conform to `LanguageModel` — their I/O contract is
 /// different: a drafter consumes the target's last hidden state and per
 /// layer-type shared K/V, produces a block of K-1 candidate tokens in a
-/// single call, and holds no transient round-state between calls. The
-/// `MTPSpeculativeTokenIterator` extracts the shared K/V from the target's
-/// `LMOutput.state` and threads it to the drafter as a method argument.
+/// single call, and does not store transient round-state on the model object.
+/// The `MTPSpeculativeTokenIterator` extracts the shared K/V from the
+/// target's `LMOutput.state` and threads it to the drafter as a method
+/// argument.
 ///
 /// Conforming types are expected to be stateless with respect to the target
 /// model: every per-round input — including the target itself — flows through
 /// `draftBlock(...)` as a method parameter. This makes drafter instances safe
-/// to share across iterators without per-iterator mutable state.
+/// to share across iterators without per-iterator mutable state on the model
+/// instance. Drafters that need their own per-stream state additionally
+/// conform to ``StatefulMTPDrafterModel``.
 public protocol MTPDrafterModel: BaseLanguageModel {
     /// K-step drafting from a constant position.
     ///
     /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
-    /// drafter holds no transient round-state between calls — every per-round
-    /// input is threaded as a method argument.
+    /// drafter holds no transient round-state on the model instance — every
+    /// per-round input is threaded as a method argument.
     ///
     /// - Parameters:
     ///   - target: The main language model this drafter is speculating for.
@@ -39,6 +42,9 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///   - sharedKV: Dict keyed by `layer_type` (`"full_attention"` /
     ///     `"sliding_attention"`) mapping to `(keys, values)` `MLXArray`s for
     ///     the last layer of that layer-type in the target.
+    ///   - positionDeltas: Optional target-emitted position delta state for
+    ///     multimodal RoPE models whose continuation positions are not
+    ///     derivable from cache length alone.
     ///   - queryOffset: Constant absolute position for the round (the
     ///     position the bonus token sits at in the target's KV cache).
     ///     Passed as a Swift `Int` rather than an `MLXArray` to avoid the
@@ -53,8 +59,47 @@ public protocol MTPDrafterModel: BaseLanguageModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray
+}
+
+/// Per-stream state for MTP drafters that need their own transient storage.
+///
+/// The state is intentionally separate from ``LMOutput/State``: `LMOutput`
+/// belongs to the target model's step output, while this value is owned by the
+/// MTP iterator and passed only to the drafter.
+public struct MTPDrafterState {
+    public var cache: [KVCache]
+
+    public init(cache: [KVCache]) {
+        self.cache = cache
+    }
+}
+
+/// Optional capability for MTP drafters that maintain per-stream state.
+///
+/// This keeps the base ``MTPDrafterModel`` surface minimal for stateless
+/// drafters such as Gemma 4 assistants while giving Qwen-style MTP predictors
+/// an iterator-owned state that can carry and trim their private KV cache. The
+/// state must not be stored on the model instance because drafter models can be
+/// shared across concurrent generation streams.
+public protocol StatefulMTPDrafterModel: MTPDrafterModel {
+    /// Create per-stream state owned and trimmed by the iterator.
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState
+
+    /// Stateful variant of ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``.
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray
 }
@@ -124,6 +169,18 @@ public let mtpLastHiddenStatesKey =
 /// it to the drafter as `sharedKV`.
 public let mtpSharedKVStatesKey =
     LMOutput.Key<[String: (MLXArray, MLXArray)]>("mtp.sharedKVStates")
+
+/// Target writes the absolute cache offset for each emitted shared-K/V
+/// layer-type here. The K/V tensors themselves may have a capped sequence
+/// axis when backed by a rotating cache, so their shape is not always the
+/// absolute RoPE/query position.
+public let mtpSharedKVOffsetsKey =
+    LMOutput.Key<[String: Int]>("mtp.sharedKVOffsets")
+
+/// Target writes optional position delta state here for MTP drafters that
+/// need to reproduce target-specific RoPE continuation positions.
+public let mtpPositionDeltasKey =
+    LMOutput.Key<MLXArray>("mtp.positionDeltas")
 
 /// The MTP iterator sets this key on the ``LMOutput/State`` it passes into
 /// the main model on each call to opt the target into emitting
