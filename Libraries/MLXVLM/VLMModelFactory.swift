@@ -105,6 +105,7 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "gemma3n": create(Gemma3nConfiguration.self, Gemma3nAudioVLM.init),
     ])
 }
 
@@ -140,6 +141,8 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "Gemma3nProcessor": create(
+            Gemma3nConfiguration.self, Gemma3nAudioVLMProcessor.init),
     ])
 }
 
@@ -268,8 +271,15 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let gemma3n_E4B_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-3n-E4B-it-4bit",
+        defaultPrompt: "Describe what you hear",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
+            gemma3n_E4B_4bit,
             paligemma3bMix448_8bit,
             qwen2VL2BInstruct4Bit,
             qwen2_5VL3BInstruct4Bit,
