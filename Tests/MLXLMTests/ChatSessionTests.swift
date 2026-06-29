@@ -494,17 +494,17 @@ public class ChatSessionTests: XCTestCase {
     }
 
     private struct ToolCallLedgerTokenizer: Tokenizer {
-        private let prose = "I'll inspect the file.\n"
-        private let toolCall =
-            "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_call>"
+        static let prose = "I'll inspect the file.\n"
+        static let toolCall =
+            "<tool_call>{\"id\":\"call_lookup\",\"name\":\"lookup\",\"arguments\":{}}</tool_call>"
 
         func encode(text: String, addSpecialTokens: Bool) -> [Int] {
             switch text {
-            case prose:
+            case Self.prose:
                 return [201]
-            case toolCall:
+            case Self.toolCall:
                 return [202]
-            case prose + toolCall:
+            case Self.prose + Self.toolCall:
                 return [201, 202]
             case "first":
                 return [101]
@@ -530,9 +530,9 @@ public class ChatSessionTests: XCTestCase {
         func convertIdToToken(_ id: Int) -> String? {
             switch id {
             case 201:
-                return prose
+                return Self.prose
             case 202:
-                return toolCall
+                return Self.toolCall
             default:
                 return nil
             }
@@ -555,10 +555,28 @@ public class ChatSessionTests: XCTestCase {
                         text: message["content"] as? String ?? "",
                         addSpecialTokens: false)
                 case Chat.Message.Role.assistant.rawValue:
-                    tokens += encode(
-                        text: message["content"] as? String ?? "",
-                        addSpecialTokens: false)
+                    let content = message["content"] as? String ?? ""
+                    if content == Self.prose + Self.toolCall {
+                        tokens += [201]
+                    } else {
+                        tokens += encode(text: content, addSpecialTokens: false)
+                    }
+                    if let toolCalls = message["tool_calls"] as? [[String: any Sendable]] {
+                        tokens += toolCalls.map { toolCall in
+                            let function = toolCall["function"] as? [String: any Sendable]
+                            if toolCall["id"] as? String == "call_lookup",
+                                function?["name"] as? String == "lookup"
+                            {
+                                return 202
+                            }
+                            return 999
+                        }
+                    }
                 case Chat.Message.Role.tool.rawValue:
+                    guard message["tool_call_id"] as? String == "call_lookup" else {
+                        tokens += [999]
+                        continue
+                    }
                     tokens += encode(
                         text: message["content"] as? String ?? "",
                         addSpecialTokens: false)
@@ -1745,6 +1763,45 @@ public class ChatSessionTests: XCTestCase {
             [
                 [11, 12, 101],
                 [103],
+            ])
+    }
+
+    func testHistoryLedgerPreservesStructuredToolMetadata() async throws {
+        let recorder = PreparedTokenRecorder()
+        let tokenizer = ToolCallLedgerTokenizer()
+        let configuration = ModelConfiguration(id: "test", toolCallFormat: .json)
+        let processor = LedgerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: configuration,
+            messageGenerator: DefaultMessageGenerator())
+        let toolCall = ToolCall(
+            function: .init(name: "lookup", arguments: [:]),
+            id: "call_lookup")
+        let context = ModelContext(
+            configuration: configuration,
+            model: SequenceLanguageModel(recorder: recorder, tokens: [201, 201]),
+            processor: processor,
+            tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            history: [
+                .user("first"),
+                .assistant(
+                    ToolCallLedgerTokenizer.prose + ToolCallLedgerTokenizer.toolCall,
+                    toolCalls: [toolCall]),
+                .tool("tool result", id: "call_lookup"),
+            ],
+            generateParameters: GenerateParameters(maxTokens: 1),
+            tools: lookupTools)
+
+        _ = try await session.respond(to: "second")
+        _ = try await session.respond(to: "first")
+
+        XCTAssertEqual(
+            recorder.snapshot,
+            [
+                [11, 12, 101, 201, 202, 103, 102],
+                [101],
             ])
     }
 

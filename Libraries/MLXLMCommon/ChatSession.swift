@@ -148,18 +148,20 @@ public final class ChatSession {
         struct Message: Sendable {
             var role: Chat.Message.Role
             var content: String
+            var tool: Chat.Message.Tool?
 
-            init(role: Chat.Message.Role, content: String) {
+            init(role: Chat.Message.Role, content: String, tool: Chat.Message.Tool? = nil) {
                 self.role = role
                 self.content = content
+                self.tool = tool
             }
 
             init(_ message: Chat.Message) {
-                self.init(role: message.role, content: message.content)
+                self.init(role: message.role, content: message.content, tool: message.tool)
             }
 
             var chatMessage: Chat.Message {
-                .init(role: role, content: content)
+                .init(role: role, content: content, tool: tool)
             }
         }
 
@@ -176,8 +178,12 @@ public final class ChatSession {
             transcript.append(contentsOf: messages.map(Message.init))
         }
 
-        mutating func appendAssistant(_ content: String) {
-            transcript.append(.init(role: .assistant, content: content))
+        mutating func appendAssistant(_ content: String, toolCalls: [ToolCall]) {
+            transcript.append(
+                .init(
+                    role: .assistant,
+                    content: content,
+                    tool: toolCalls.isEmpty ? nil : .calls(toolCalls)))
         }
     }
 
@@ -1113,14 +1119,22 @@ public final class ChatSession {
                                 ledger: ledger)
                         }
 
+                        var generatedToolCalls: [ToolCall] = []
                         var pendingToolCalls: [ToolCall] = []
 
                         for await item in genStream {
                             // collect tool calls for dispatch; if no
                             // toolDispatch the caller handles them via
                             // the transform (streamDetails path)
-                            if let toolCall = item.toolCall, toolDispatch != nil {
-                                pendingToolCalls.append(toolCall)
+                            if let toolCall = item.toolCall {
+                                generatedToolCalls.append(toolCall)
+                                if toolDispatch != nil {
+                                    pendingToolCalls.append(toolCall)
+                                } else if let value = transform(item) {
+                                    if case .terminated = continuation.yield(value) {
+                                        break
+                                    }
+                                }
                             } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
                                     break
@@ -1162,7 +1176,8 @@ public final class ChatSession {
                             ledger.append(contentsOf: turnMessages)
                             let hasAssistantTurn = !generationTrace.committedTokens.isEmpty
                             if hasAssistantTurn {
-                                ledger.appendAssistant(assistantOutput)
+                                ledger.appendAssistant(
+                                    assistantOutput, toolCalls: generatedToolCalls)
                             }
                             var committedLedgerTokens = ledger.tokens
                             committedLedgerTokens.reserveCapacity(committedLedgerTokenCount)
