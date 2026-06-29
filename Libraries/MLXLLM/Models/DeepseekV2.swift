@@ -17,7 +17,9 @@ public struct DeepseekV2Configuration: Codable, Sendable {
     var nRoutedExperts: Int?
     var routedScalingFactor: Float = 1.0
     var kvLoraRank: Int = 512
-    var qLoraRank: Int = 1536
+    // Optional: DeepSeek-V2-Lite sets `q_lora_rank: null` (direct q_proj, no
+    // low-rank q compression); full DeepSeek-V2 sets it to 1536. nil ⇒ q_proj.
+    var qLoraRank: Int?
     var qkRopeHeadDim: Int = 64
     var vHeadDim: Int = 128
     var qkNopeHeadDim: Int = 128
@@ -77,7 +79,7 @@ public struct DeepseekV2Configuration: Codable, Sendable {
         self.routedScalingFactor =
             try c.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.0
         self.kvLoraRank = try c.decodeIfPresent(Int.self, forKey: .kvLoraRank) ?? 512
-        self.qLoraRank = try c.decodeIfPresent(Int.self, forKey: .qLoraRank) ?? 1536
+        self.qLoraRank = try c.decodeIfPresent(Int.self, forKey: .qLoraRank)
         self.qkRopeHeadDim = try c.decodeIfPresent(Int.self, forKey: .qkRopeHeadDim) ?? 64
         self.vHeadDim = try c.decodeIfPresent(Int.self, forKey: .vHeadDim) ?? 128
         self.qkNopeHeadDim = try c.decodeIfPresent(Int.self, forKey: .qkNopeHeadDim) ?? 128
@@ -121,7 +123,7 @@ class DeepseekV2Attention: Module {
     init(config: DeepseekV2Configuration) {
         self.config = config
         self.numHeads = config.numAttentionHeads
-        self.qLoraRank = config.qLoraRank == 0 ? nil : config.qLoraRank
+        self.qLoraRank = (config.qLoraRank ?? 0) > 0 ? config.qLoraRank : nil
         self.qkRopeHeadDim = config.qkRopeHeadDim
         self.kvLoraRank = config.kvLoraRank
         self.vHeadDim = config.vHeadDim

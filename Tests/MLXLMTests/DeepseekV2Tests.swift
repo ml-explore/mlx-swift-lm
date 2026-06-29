@@ -31,7 +31,7 @@ final class DeepseekV2Tests: XCTestCase {
                 "routed_scaling_factor": 1.0,
                 "first_k_dense_replace": 1,
                 "moe_layer_freq": 1,
-                "q_lora_rank": 0,
+                "q_lora_rank": null,
                 "kv_lora_rank": 4,
                 "qk_rope_head_dim": 2,
                 "qk_nope_head_dim": 2,
@@ -77,6 +77,18 @@ final class DeepseekV2Tests: XCTestCase {
         XCTAssertEqual(
             chosen, [2, 3], "group-limited-greedy must confine top-k to the winning group")
         XCTAssertEqual(scores.reshaped(-1).asArray(Float.self).count, 2)
+    }
+
+    func testNullQLoraRankDecodesToNil() throws {
+        // DeepSeek-V2-Lite sets q_lora_rank: null → direct q_proj (no q LoRA).
+        // Regression: a null must NOT fall back to the 1536 default (that would
+        // build the q_a/q_b path and fail to load the checkpoint's q_proj).
+        XCTAssertNil(try makeConfig().qLoraRank)
+
+        let withRank = try JSONDecoder().decode(
+            DeepseekV2Configuration.self,
+            from: Data(#"{"hidden_size":8,"q_lora_rank":1536}"#.utf8))
+        XCTAssertEqual(withRank.qLoraRank, 1536)
     }
 
     func testSanitizeStacksPerExpertWeightsIntoSwitchMLP() throws {
