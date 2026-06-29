@@ -126,18 +126,18 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
 ///
 /// This is created using a ``EmbedderModelFactory`` and often used
 /// inside a ``EmbedderModelContainer``.
-public struct EmbedderModelContext {
+public struct EmbedderModelContext: Sendable {
     public var configuration: ModelConfiguration
-    public var model: any EmbeddingModel
+    public var model: any EmbeddingModel & Sendable
     public var tokenizer: any Tokenizer
     public let pooling: Pooling
 
     public init(
-        configuration: ModelConfiguration, model: any EmbeddingModel,
+        configuration: ModelConfiguration, model: some EmbeddingModel,
         tokenizer: any Tokenizer, pooling: Pooling
     ) {
         self.configuration = configuration
-        self.model = model
+        self.model = MaterializedModule(model)
         self.tokenizer = tokenizer
         self.pooling = pooling
     }
