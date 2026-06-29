@@ -25,6 +25,7 @@ public enum LLMTypeRegistry {
     /// Shared instance with default model types.
     public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
         "mistral": create(LlamaConfiguration.self, LlamaModel.init),
+        "mixtral": create(MixtralConfiguration.self, MixtralModel.init),
         "llama": create(LlamaConfiguration.self, LlamaModel.init),
         "phi": create(PhiConfiguration.self, PhiModel.init),
         "phi3": create(Phi3Configuration.self, Phi3Model.init),
