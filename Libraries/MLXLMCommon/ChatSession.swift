@@ -658,7 +658,26 @@ public final class ChatSession {
                             )
                         }
 
-                        if let speculativeDecoding {
+                        if let diffusionModel = model as? any BlockDiffusionLanguageModel {
+                            guard speculativeDecoding == nil else {
+                                throw GenerateError.unsupportedSpeculativeDecoding(
+                                    String(describing: type(of: model)))
+                            }
+
+                            let iterator = try BlockDiffusionTokenIterator(
+                                input: input,
+                                model: diffusionModel,
+                                cache: kvCache,
+                                parameters: generateParameters)
+
+                            (genStream, genTask) = MLXLMCommon.generateTask(
+                                promptTokenCount: input.text.tokens.size,
+                                modelConfiguration: modelConfiguration,
+                                tokenizer: tokenizer,
+                                iterator: iterator,
+                                tools: tools
+                            )
+                        } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryPolicy = speculativeDecoding.memoryPolicy,
                                 let draftModelBytes =
@@ -695,6 +714,10 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
+                                guard !draftModel.capabilities.contains(.blockDiffusion) else {
+                                    throw GenerateError.unsupportedSpeculativeDecoding(
+                                        String(describing: type(of: draftModel)))
+                                }
 
                                 let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
                                     mainModel: model,

@@ -146,6 +146,36 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(quantized.metaState == ["256", "7", "128", "4"])
 }
 
+@Test func testRotatingKVCacheStatePreservesRingStorageAfterWrap() {
+    let cache = RotatingKVCache(maxSize: 3)
+
+    for value in 0 ..< 5 {
+        let keys = MLXArray([Float(value)]).reshaped([1, 1, 1, 1])
+        let values = MLXArray([Float(value + 10)]).reshaped([1, 1, 1, 1])
+        _ = cache.update(keys: keys, values: values)
+    }
+
+    let state = cache.state
+    #expect(state.count == 2)
+    #expect(state[0].flattened().asArray(Float.self) == [3, 4, 2])
+    #expect(state[1].flattened().asArray(Float.self) == [13, 14, 12])
+}
+
+@Test func testRotatingKVCacheTemporalStatePreservesLogicalOrderAfterWrap() {
+    let cache = RotatingKVCache(maxSize: 3)
+
+    for value in 0 ..< 5 {
+        let keys = MLXArray([Float(value)]).reshaped([1, 1, 1, 1])
+        let values = MLXArray([Float(value + 10)]).reshaped([1, 1, 1, 1])
+        _ = cache.update(keys: keys, values: values)
+    }
+
+    let state = cache.temporalState
+    #expect(state.count == 2)
+    #expect(state[0].flattened().asArray(Float.self) == [2, 3, 4])
+    #expect(state[1].flattened().asArray(Float.self) == [12, 13, 14])
+}
+
 // MARK: - ArraysCache sparse slot round-trip
 
 @Test func testArraysCacheSparseSlots() throws {

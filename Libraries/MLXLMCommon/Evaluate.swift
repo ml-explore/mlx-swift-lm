@@ -107,6 +107,21 @@ public struct GenerateParameters: Sendable {
     /// number of tokens to consider for frequency penalty
     public var frequencyContextSize: Int
 
+    /// Block-diffusion sampler used inside each denoising canvas.
+    public var diffusionSampler: DiffusionSampler
+
+    /// Confidence threshold used by ``DiffusionSampler/confidenceThreshold``.
+    public var diffusionThreshold: Float
+
+    /// Force diffusion generation to denoise full model-size canvases.
+    public var diffusionFullCanvas: Bool
+
+    /// Optional lower bound for denoised canvas length.
+    public var diffusionMinCanvasLength: Int?
+
+    /// Optional upper bound for denoised canvas length.
+    public var diffusionMaxCanvasLength: Int?
+
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -124,7 +139,12 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512
+        prefillStepSize: Int = 512,
+        diffusionSampler: DiffusionSampler = .entropyBound,
+        diffusionThreshold: Float = 0.9,
+        diffusionFullCanvas: Bool = false,
+        diffusionMinCanvasLength: Int? = nil,
+        diffusionMaxCanvasLength: Int? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -143,6 +163,11 @@ public struct GenerateParameters: Sendable {
         self.frequencyPenalty = frequencyPenalty
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
+        self.diffusionSampler = diffusionSampler
+        self.diffusionThreshold = diffusionThreshold
+        self.diffusionFullCanvas = diffusionFullCanvas
+        self.diffusionMinCanvasLength = diffusionMinCanvasLength
+        self.diffusionMaxCanvasLength = diffusionMaxCanvasLength
     }
 
     public func sampler() -> LogitSampler {
@@ -199,6 +224,32 @@ public struct GenerateParameters: Sendable {
             presenceContext: presenceContext,
             frequencyContext: frequencyContext
         )
+    }
+}
+
+public enum DiffusionSampler: String, Sendable {
+    case entropyBound
+    case confidenceThreshold
+}
+
+/// Errors raised by generation helpers before starting an invalid decode mode.
+public enum GenerateError: LocalizedError {
+    case unsupportedAutoregressiveGeneration(String)
+    case unsupportedSpeculativeDecoding(String)
+    case unsupportedMultimodalGeneration(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedAutoregressiveGeneration(let modelName):
+            return
+                "\(modelName) is a block-diffusion model and cannot be decoded with autoregressive next-token generation."
+        case .unsupportedSpeculativeDecoding(let modelName):
+            return
+                "Speculative decoding is only supported for autoregressive language models; \(modelName) generates tokens with block diffusion."
+        case .unsupportedMultimodalGeneration(let modelName):
+            return
+                "\(modelName) is the shared DiffusionGemma language core. Use the VLM implementation for image, video, or audio inputs."
+        }
     }
 }
 
@@ -505,11 +556,16 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var promptPrefillTime: TimeInterval { get }
     var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
     mutating func discardGeneratedToken()
+
+    /// Finalize any deferred iterator state after the generation loop has decided
+    /// how many pulled tokens were actually emitted.
+    mutating func finalize(tokenCount: Int)
 }
 
 extension TokenIteratorProtocol {
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
     public mutating func discardGeneratedToken() {}
+    public mutating func finalize(tokenCount: Int) {}
 }
 
 /// Generator of tokens.
@@ -668,6 +724,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             asyncEval(y.tokens)
 
         case .logits(let result):
+            state = result.state
             y = .init(tokens: convertToToken(logits: result.logits))
             asyncEval(y.tokens)
 
@@ -805,6 +862,15 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         numDraftTokens: Int
     ) throws {
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
+        }
+        guard !draftModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: draftModel)))
+        }
+
         self.y = input.text
         self.draftY = input.text
         self.mainModel = mainModel
@@ -1399,6 +1465,19 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        let (stream, _) = generateTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            wiredMemoryTicket: wiredMemoryTicket,
+            tools: tools)
+        return stream
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
@@ -1466,6 +1545,13 @@ public func generate(
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<Generation> {
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
+    }
+
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -1571,6 +1657,20 @@ public func generateTokens(
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        let (stream, _) = generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            includeStopToken: includeStopToken,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+        return stream
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTokenTask(
@@ -1612,6 +1712,13 @@ public func generateTokens(
     numDraftTokens: Int = 2,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
+    }
+
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -1746,6 +1853,19 @@ public func generateTokensTask(
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        return generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            includeStopToken: includeStopToken,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     return generateTokenTask(
@@ -1778,7 +1898,7 @@ public func generateTokenTask(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
-    iterator: consuming TokenIterator,
+    iterator: consuming any TokenIteratorProtocol,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
@@ -1881,6 +2001,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
             }
 
+            iterator.finalize(tokenCount: tokenCount)
             handler.onGenerationEnd(emit: continuation.yield)
 
             let now = Date.timeIntervalSinceReferenceDate

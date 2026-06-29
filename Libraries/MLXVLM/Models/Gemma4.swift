@@ -6,7 +6,7 @@ import MLXNN
 
 // Based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/gemma4
 
-private enum Gemma4Error: LocalizedError {
+enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
     case multimodalTokenCountMismatch(kind: String, featureTokens: Int, promptTokens: Int)
 
@@ -58,7 +58,7 @@ private func gemma4DefaultVisionRopeParameters() -> [String: StringOrNumber] {
     ]
 }
 
-private func gemma4MaskedScatter(
+func gemma4MaskedScatter(
     inputTensor: MLXArray, mask: MLXArray, source: MLXArray
 ) -> MLXArray {
     let flattenedInput = inputTensor.flattened()
@@ -1862,16 +1862,16 @@ private final class Gemma4VisionTransformerModel: Module {
     }
 }
 
-private final class Gemma4VisionModel: Module {
+final class Gemma4VisionModel: Module {
     let config: Gemma4VisionConfiguration
     let patchSize: Int
     let defaultOutputLength: Int
     let poolingKernelSize: Int
     let maxPatches: Int
 
-    @ModuleInfo(key: "patch_embedder") var patchEmbedder: Gemma4VisionPatchEmbedder
-    @ModuleInfo(key: "encoder") var encoder: Gemma4VisionTransformerModel
-    @ModuleInfo(key: "pooler") var pooler: Gemma4VisionPooler
+    @ModuleInfo(key: "patch_embedder") private var patchEmbedder: Gemma4VisionPatchEmbedder
+    @ModuleInfo(key: "encoder") private var encoder: Gemma4VisionTransformerModel
+    @ModuleInfo(key: "pooler") private var pooler: Gemma4VisionPooler
     @ModuleInfo(key: "std_bias") var standardizationBias: MLXArray?
     @ModuleInfo(key: "std_scale") var standardizationScale: MLXArray?
 
@@ -1892,10 +1892,14 @@ private final class Gemma4VisionModel: Module {
         super.init()
     }
 
-    private func patchPositions(batch: Int, height: Int, width: Int) -> (MLXArray, Int) {
+    private func patchPositions(
+        batch: Int, height: Int, width: Int, outputLength: Int? = nil
+    ) -> (MLXArray, Int) {
         let patchesH = height / patchSize
         let patchesW = width / patchSize
         let realCount = patchesH * patchesW
+        let maxPatches =
+            (outputLength ?? defaultOutputLength) * poolingKernelSize * poolingKernelSize
         let paddedCount = max(maxPatches - realCount, 0)
 
         var values = [Int32]()
@@ -1918,7 +1922,7 @@ private final class Gemma4VisionModel: Module {
         return (MLXArray(values, [batch, count, 2]), realCount)
     }
 
-    func callAsFunction(_ pixelValues: MLXArray) -> MLXArray {
+    func callAsFunction(_ pixelValues: MLXArray, outputLength: Int? = nil) -> MLXArray {
         let pixels =
             if pixelValues.ndim == 3 {
                 expandedDimensions(pixelValues, axis: 0)
@@ -1928,7 +1932,10 @@ private final class Gemma4VisionModel: Module {
         let batch = pixels.dim(0)
         let height = pixels.dim(2)
         let width = pixels.dim(3)
-        let (patchPositions, realCount) = patchPositions(batch: batch, height: height, width: width)
+        let maxPatches =
+            (outputLength ?? defaultOutputLength) * poolingKernelSize * poolingKernelSize
+        let (patchPositions, realCount) = patchPositions(
+            batch: batch, height: height, width: width, outputLength: outputLength)
 
         let realPositions = patchPositions[0..., ..<realCount, 0...]
         var hiddenStates = patchEmbedder(pixels, patchPositions: realPositions)
@@ -1951,7 +1958,9 @@ private final class Gemma4VisionModel: Module {
         attentionMask = expandedDimensions(attentionMask, axis: 1)
 
         hiddenStates = encoder(hiddenStates, positions: patchPositions, mask: attentionMask)
-        hiddenStates = pooler(hiddenStates, patchPositions: patchPositions, validCount: realCount)
+        hiddenStates = pooler(
+            hiddenStates, patchPositions: patchPositions, validCount: realCount,
+            outputLength: outputLength)
 
         if let standardizationBias, let standardizationScale {
             hiddenStates = (hiddenStates - standardizationBias) * standardizationScale
@@ -1960,9 +1969,9 @@ private final class Gemma4VisionModel: Module {
     }
 }
 
-private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
-    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
-    @ModuleInfo(key: "embedding_pre_projection_norm") var embeddingPreProjectionNorm:
+final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
+    @ModuleInfo(key: "embedding_projection") private var embeddingProjection: Linear
+    @ModuleInfo(key: "embedding_pre_projection_norm") private var embeddingPreProjectionNorm:
         Gemma4RMSNormNoScale
 
     init(embeddingDim: Int, textHiddenSize: Int, eps: Float) {
