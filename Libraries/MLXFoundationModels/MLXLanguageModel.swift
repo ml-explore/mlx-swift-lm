@@ -303,23 +303,22 @@
         /// Example usage:
         /// ```swift
         /// import MLXFoundationModels
-        /// import MLXLMHFAPI      // HubClient (Downloader)
-        /// import MLXLMTokenizers // TokenizersLoader
+        /// import MLXHuggingFace
+        /// import MLXLMCommon
+        /// import Hub
+        /// import Tokenizers
         ///
-        /// let cache = HubCache.default
-        /// let repoID = Repo.ID(rawValue: "mlx-community/Qwen2.5-3B-Instruct-4bit")!
         /// let model = MLXLanguageModel(
-        ///     modelID: repoID.rawValue,
-        ///     capabilities: LanguageModelCapabilities(
-        ///         capabilities: [.guidedGeneration, .toolCalling]),
-        ///     from: HubClient.default,
-        ///     using: TokenizersLoader(),
-        ///     locatedBy: { id in
-        ///         guard let r = Repo.ID(rawValue: id) else { return URL(fileURLWithPath: "/") }
-        ///         return cache.snapshotPath(repo: r, kind: .model, revision: "main")
-        ///             ?? cache.repoDirectory(repo: r, kind: .model)
-        ///     }
-        /// )
+        ///     configuration: ModelConfiguration(id: "mlx-community/Qwen2.5-3B-Instruct-4bit"),
+        ///     capabilities: [.guidedGeneration, .toolCalling],
+        ///     weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
+        ///     load: { configuration, progressHandler in
+        ///         try await loadModelContainer(
+        ///             from: #hubDownloader(),
+        ///             using: #huggingFaceTokenizerLoader(),
+        ///             configuration: configuration,
+        ///             progressHandler: progressHandler)
+        ///     })
         /// let session = LanguageModelSession(model: model, tools: [], instructions: nil)
         /// let response = try await session.respond(to: "Hello!")
         /// print(response.content)
