@@ -62,12 +62,12 @@ public struct Gemma4AssistantConfiguration: Codable, Sendable {
 /// Mirrors mlx-vlm's
 /// `mlx_vlm/speculative/drafters/gemma4_assistant/masked_embedder.py`.
 ///
-/// **Phase A note:** the 26B-A4B-bf16 and 31B-bf16 reference checkpoints
-/// both ship `use_ordered_embeddings=false`, so this module's forward path
-/// is not exercised by any current verification fixture. The module is
-/// declared (and its weights would load correctly) but `callAsFunction` is
-/// a TODO — implementation lands when a checkpoint with the centroid path
-/// becomes available for verification.
+/// The E-series drafters (`gemma-4-E2B/E4B-it-assistant-bf16`) ship
+/// `use_ordered_embeddings=true` and route their logits through this head;
+/// the 26B-A4B/31B drafters ship `false` and use the tied `lm_head` matmul
+/// instead. The forward is pinned against an independent dense reference by
+/// `testMaskedEmbedderSelectedLogitsMatchDense` (no checkpoint required) and
+/// exercised end-to-end by the `TEST_E{2,4}B_PAIR`-gated integration tests.
 public final class Gemma4AssistantMaskedEmbedder: Module {
     @ModuleInfo(key: "centroids") public var centroids: Linear
     @ParameterInfo(key: "token_ordering") public var tokenOrdering: MLXArray
@@ -91,11 +91,39 @@ public final class Gemma4AssistantMaskedEmbedder: Module {
         super.init()
     }
 
+    /// Centroid-routed sparse logits. Port of mlx-vlm `MaskedEmbedder.__call__`
+    /// + `_selected_logits` (`masked_embedder.py`): score the `numCentroids`
+    /// clusters, expand the top-K, score only those tokens against the tied
+    /// embedding, and scatter back to full vocab with unselected positions
+    /// pushed below the selected minimum so they lose argmax/softmax.
     public func callAsFunction(_ hiddenStates: MLXArray, lmHeadWeight: MLXArray) -> MLXArray {
-        fatalError(
-            "Gemma4AssistantMaskedEmbedder forward not implemented yet — requires a "
-                + "use_ordered_embeddings=true checkpoint to verify; current fixtures "
-                + "use the tied-lm_head path.")
+        let b = hiddenStates.dim(0)
+        let l = hiddenStates.dim(1)
+        let n = topK * vocabSizePerCentroid
+
+        // Top-K clusters (unordered), mirroring argpartition(...)[..., -top_k:].
+        let centroidLogits = centroids(hiddenStates)  // [B, L, numCentroids]
+        let topkIdx = argPartition(centroidLogits, kth: -topK, axis: -1)[.ellipsis, (-topK)...]
+
+        // Each cluster owns a contiguous block of canonical token IDs.
+        let ordering = tokenOrdering.reshaped([numCentroids, vocabSizePerCentroid])
+        let selectedCanonical = ordering.take(topkIdx, axis: 0)  // [B, L, topK, vsc]
+
+        // Gather just those rows from the tied embedding and score them.
+        let selectedEmb =
+            lmHeadWeight
+            .take(selectedCanonical.reshaped([-1]), axis: 0)
+            .reshaped([b, l, n, hiddenSize])  // [B, L, N, H]
+        let selectedLogits = matmul(
+            hiddenStates.expandedDimensions(axis: -2),  // [B, L, 1, H]
+            selectedEmb.swappedAxes(-1, -2)  // [B, L, H, N]
+        ).squeezed(axis: -2)  // [B, L, N]
+
+        // Scatter to full vocab; mask_value kept on-device (no .item() sync).
+        let maskValue = selectedLogits.min() - 1
+        let out = broadcast(maskValue, to: [b, l, vocabSize]).asType(hiddenStates.dtype)
+        let scatterIdx = selectedCanonical.reshaped([b, l, n])
+        return putAlong(out, scatterIdx, values: selectedLogits, axis: -1)
     }
 }
 
