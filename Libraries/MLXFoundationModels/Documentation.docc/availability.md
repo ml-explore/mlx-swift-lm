@@ -53,21 +53,26 @@ public init(
 )
 ```
 
-For Hugging Face Hub-backed weights, `MLXHuggingFace` exports a free
-function you can pass directly:
+For Hugging Face Hub-backed weights, wire `MLXHuggingFace`'s hub downloader
+and tokenizer loader into the `load` closure:
 
 ```swift
 import MLXHuggingFace
+import MLXLMCommon
 import Hub
+import Tokenizers
 
 let model = MLXLanguageModel(
-    modelID: "mlx-community/Qwen3-4B-4bit",
-    capabilities: LanguageModelCapabilities(
-        capabilities: [.guidedGeneration, .toolCalling]),
-    from: #hubDownloader(),
-    using: #huggingFaceTokenizerLoader(),
-    locatedBy: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) }
-)
+    configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
+    capabilities: [.guidedGeneration, .toolCalling],
+    weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
+    load: { configuration, progressHandler in
+        try await loadModelContainer(
+            from: #hubDownloader(),
+            using: #huggingFaceTokenizerLoader(),
+            configuration: configuration,
+            progressHandler: progressHandler)
+    })
 ```
 
 For a private CDN, custom on-disk layout, or shared cache:
