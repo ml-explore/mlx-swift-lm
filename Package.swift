@@ -47,7 +47,7 @@ let package = Package(
         // to an effectively empty library (only MLXDownloadProgress survives):
         // the entire `MLXLanguageModel` / `MLXLanguageModel.Executor` surface
         // requires FoundationModels types that are not available on platforms
-        // older than iOS/macOS/visionOS 27.0. Consumers targeting older floors
+        // older than iOS/macOS/visionOS 27.0. Consumers targeting older OS versions
         // can still use this package for MLXLLM / MLXLMCommon / MLXEmbedders
         // etc. by turning the trait off.
         .trait(
