@@ -50,6 +50,10 @@ public enum GuidedGenerationLoop {
     ///   - completionReserve: Number of tokens before maxTokens at which closing
     ///     bias activates. When `tokenCount >= maxTokens - completionReserve`,
     ///     the bias nudges sampling toward JSON-closing tokens.
+    ///   - hardReserve: Number of tokens before maxTokens at which a *hard*
+    ///     closing zone activates: closing tokens are forced and all others
+    ///     suppressed (plus an EOS penalty), more aggressively than
+    ///     `completionReserve`'s soft nudge. Defaults to 0, which disables it.
     ///   - vocabSize: Number of tokens in the grammar's vocabulary. May differ
     ///     from the model's logit dimension (e.g. added special tokens beyond
     ///     the embedding size). Used to correctly interpret the grammar bitmask.
@@ -68,6 +72,8 @@ public enum GuidedGenerationLoop {
     ///     disables whitespace suppression.
     ///   - whitespaceTokenIDs: Set of token IDs classified as whitespace-only.
     ///     Used by the run tracker to detect consecutive whitespace runs.
+    ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
+    ///     logs after the run completes. Defaults to false.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
