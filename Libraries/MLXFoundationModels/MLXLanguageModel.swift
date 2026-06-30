@@ -1,4 +1,4 @@
-// Copyright © 2025 Apple Inc.
+// Copyright © 2026 Apple Inc.
 
 #if FoundationModelsIntegration
     // `_version: 2` gates on the FoundationModels *framework* major version, which
