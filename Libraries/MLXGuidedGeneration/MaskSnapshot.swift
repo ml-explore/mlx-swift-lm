@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Apple Inc.
+// Copyright © 2026 Apple Inc.
 
 /// Captures the state of a grammar mask at a single generation step
 /// for deterministic comparison between architectures.

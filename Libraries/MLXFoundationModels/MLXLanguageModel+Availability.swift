@@ -1,4 +1,4 @@
-// Copyright © 2025 Apple Inc.
+// Copyright © 2026 Apple Inc.
 
 #if FoundationModelsIntegration
     #if canImport(FoundationModels, _version: 2)
