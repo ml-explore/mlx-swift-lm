@@ -38,7 +38,7 @@ import Testing
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 "mlx-community/gemma-4-e2b-it-4bit",
-                capabilities: LanguageModelCapabilities(capabilities: [.vision]))
+                capabilities: [.vision])
             let session = LanguageModelSession(model: model, tools: [], instructions: nil)
             let redImage = VisionTestImages.solidColor(.red)
             let response = try await session.respond {

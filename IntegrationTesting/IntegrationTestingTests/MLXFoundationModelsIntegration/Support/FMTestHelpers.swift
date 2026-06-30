@@ -119,7 +119,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
 #if FoundationModelsIntegration
 
     /// Constructs an `MLXLanguageModel` using the test downloader / tokenizer loader
-    /// and a `HubApi.shared.localRepoLocation`-backed `locatedBy:` closure.
+    /// and a `HubApi.shared.localRepoLocation`-backed `weightsLocation:` closure.
     ///
     /// Capabilities default to `[.guidedGeneration, .toolCalling]` (the common
     /// case for tests that do not exercise reasoning). Pass an explicit set for
@@ -127,34 +127,28 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func makeTestModel(
         _ id: String,
-        capabilities: LanguageModelCapabilities? = nil,
+        capabilities: [LanguageModelCapabilities.Capability]? = nil,
         resolver: (any ModelConfigurationResolver)? = nil
     ) -> MLXLanguageModel {
         let resolved = capabilities ?? defaultTestCapabilities()
         if let resolver {
             return MLXLanguageModel(
-                modelID: id,
+                configuration: ModelConfiguration(id: id),
                 capabilities: resolved,
                 configurationResolver: resolver,
-                from: TestHubDownloader(),
-                using: TestHuggingFaceTokenizerLoader(),
-                locatedBy: testWeightsLocation(modelID:)
-            )
+                weightsLocation: testWeightsLocation(modelID:),
+                load: testLoad())
         }
         return MLXLanguageModel(
-            modelID: id,
+            configuration: ModelConfiguration(id: id),
             capabilities: resolved,
-            from: TestHubDownloader(),
-            using: TestHuggingFaceTokenizerLoader(),
-            locatedBy: testWeightsLocation(modelID:)
-        )
+            weightsLocation: testWeightsLocation(modelID:),
+            load: testLoad())
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func defaultTestCapabilities() -> LanguageModelCapabilities {
-        var capabilitySet: [LanguageModelCapabilities.Capability] = []
-        capabilitySet += [.guidedGeneration, .toolCalling]
-        return LanguageModelCapabilities(capabilities: capabilitySet)
+    private func defaultTestCapabilities() -> [LanguageModelCapabilities.Capability] {
+        [.guidedGeneration, .toolCalling]
     }
 
     /// Constructs an `MLXLanguageModel` for a reasoning-capable model id, declaring
@@ -165,12 +159,20 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
         _ id: String,
         resolver: (any ModelConfigurationResolver)? = nil
     ) -> MLXLanguageModel {
-        var capabilitySet: [LanguageModelCapabilities.Capability] = [.reasoning]
-        capabilitySet += [.guidedGeneration, .toolCalling]
-        return makeTestModel(
+        makeTestModel(
             id,
-            capabilities: LanguageModelCapabilities(capabilities: capabilitySet),
+            capabilities: [.reasoning, .guidedGeneration, .toolCalling],
             resolver: resolver)
+    }
+
+    /// A `ContainerLoader` backed by the swift-transformers test downloader/tokenizer.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func testLoad() -> MLXLanguageModel.ContainerLoader {
+        { configuration, progress in
+            try await loadModelContainer(
+                from: TestHubDownloader(), using: TestHuggingFaceTokenizerLoader(),
+                configuration: configuration, progressHandler: progress)
+        }
     }
 
     /// Loads a `ModelContainer` for the given model identifier using the test
@@ -194,11 +196,7 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
     /// (`-parallel-testing-enabled NO`, a single worker) to avoid it.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func loadTestModelContainer(id: String) async throws -> ModelContainer {
-        try await MLXLanguageModel.loadContainer(
-            modelID: id,
-            from: TestHubDownloader(),
-            using: TestHuggingFaceTokenizerLoader()
-        )
+        try await makeTestModel(id).loadContainer()
     }
 
     // MARK: - Weights Location

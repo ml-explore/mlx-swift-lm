@@ -40,7 +40,7 @@
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 Models.r1Distill,
-                capabilities: LanguageModelCapabilities(capabilities: []))
+                capabilities: [])
             let executor = try makeMLXExecutor(for: model)
             let request = makeExecutorRequest(
                 transcript: promptTranscript("Hello"),
@@ -58,7 +58,7 @@
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 Models.qwen3,
-                capabilities: LanguageModelCapabilities(capabilities: []))
+                capabilities: [])
             let executor = try makeMLXExecutor(for: model)
             let request = makeExecutorRequest(
                 transcript: promptTranscript("Reply with exactly the word OK."),
@@ -94,7 +94,7 @@
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 Models.r1Distill,
-                capabilities: LanguageModelCapabilities(capabilities: [.toolCalling]))
+                capabilities: [.toolCalling])
             let executor = try makeMLXExecutor(for: model)
             let weatherTool = Transcript.ToolDefinition(
                 name: "get_weather",
@@ -116,7 +116,7 @@
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 Models.r1Distill,
-                capabilities: LanguageModelCapabilities(capabilities: [.guidedGeneration]))
+                capabilities: [.guidedGeneration])
             let executor = try makeMLXExecutor(for: model)
             let request = makeExecutorRequest(
                 transcript: promptTranscript("Pick a number."),
