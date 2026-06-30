@@ -19,9 +19,9 @@ public struct ProcessedFrames {
 // per-process IOSurface limit of 16384, crashing the render pipeline.
 // Batch-processing never re-renders the same frame twice, so the cache buys nothing.
 #if compiler(>=6.2)  // proxy check for macOS 26 SDK, where CIContext is Sendable
-    private let context = CIContext(options: [.cacheIntermediates: false])
+private let context = CIContext(options: [.cacheIntermediates: false])
 #else
-    nonisolated(unsafe) private let context = CIContext(options: [.cacheIntermediates: false])
+nonisolated(unsafe) private let context = CIContext(options: [.cacheIntermediates: false])
 #endif
 
 /// Collection of methods for processing media (images, video, etc.).
