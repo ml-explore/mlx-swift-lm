@@ -1931,23 +1931,15 @@ public func quantizedScaledDotProductAttention(
         let kIndices = MLXArray(0 ..< kL)
         let causalMask = greaterEqual(
             expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray(Float.leastNormalMagnitude))
+        scores = MLX.where(causalMask, scores, MLXArray.maskFill(for: scores.dtype))
 
     case .array(let maskArray):
-        if maskArray.dtype == .bool {
-            scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
-        } else {
-            scores = scores + maskArray
-        }
+        scores = applyMask(maskArray, to: scores)
 
     case .arrays(let maskArrays):
         // Handle multiple mask arrays - just use the first one for simplicity
         if let maskArray = maskArrays.first {
-            if maskArray.dtype == .bool {
-                scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
-            } else {
-                scores = scores + maskArray
-            }
+            scores = applyMask(maskArray, to: scores)
         }
 
     case .none:
@@ -1969,6 +1961,22 @@ public func quantizedScaledDotProductAttention(
     }
 
     return output
+
+    // Apply a boolean/additive mask, broadcasting batched masks over the GQA
+    // head-group axis: per-sequence masks are `[B, 1, L, S]`, but with
+    // `nRepeats > 1` the scores are 5-D `[B, nKVHeads, nRepeats, L, S]`, so a
+    // 4-D mask needs an extra axis to line up `B` with the batch dimension.
+    func applyMask(_ maskArray: MLXArray, to scores: MLXArray) -> MLXArray {
+        var maskArray = maskArray
+        if nRepeats > 1 && maskArray.ndim == 4 {
+            maskArray = expandedDimensions(maskArray, axis: -3)
+        }
+        if maskArray.dtype == .bool {
+            return MLX.where(maskArray, scores, MLXArray.maskFill(for: scores.dtype))
+        } else {
+            return scores + maskArray
+        }
+    }
 }
 
 // MARK: - Dynamic Cache Quantization
