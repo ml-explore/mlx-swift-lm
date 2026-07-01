@@ -96,7 +96,13 @@ public final class Gemma4AssistantMaskedEmbedder: Module {
     /// clusters, expand the top-K, score only those tokens against the tied
     /// embedding, and scatter back to full vocab with unselected positions
     /// pushed below the selected minimum so they lose argmax/softmax.
-    public func callAsFunction(_ hiddenStates: MLXArray, lmHeadWeight: MLXArray) -> MLXArray {
+    /// `tiedEmbedding` is the drafter's tied token embedding *module*, not its
+    /// raw `.weight`: gathering through the module's forward returns dense
+    /// `[N, H]` rows for a plain `Embedding` and dequantized rows for a
+    /// `QuantizedEmbedding` (whose `.weight` is packed `[vocab, H·bits/32]` and
+    /// cannot be reshaped to `H`). Every mlx-community E-series drafter ships
+    /// quantized, so this must handle both.
+    public func callAsFunction(_ hiddenStates: MLXArray, tiedEmbedding: Embedding) -> MLXArray {
         let b = hiddenStates.dim(0)
         let l = hiddenStates.dim(1)
         let n = topK * vocabSizePerCentroid
@@ -109,10 +115,10 @@ public final class Gemma4AssistantMaskedEmbedder: Module {
         let ordering = tokenOrdering.reshaped([numCentroids, vocabSizePerCentroid])
         let selectedCanonical = ordering.take(topkIdx, axis: 0)  // [B, L, topK, vsc]
 
-        // Gather just those rows from the tied embedding and score them.
+        // Gather just those rows from the tied embedding and score them. The
+        // embedding forward dequantizes when the module is quantized.
         let selectedEmb =
-            lmHeadWeight
-            .take(selectedCanonical.reshaped([-1]), axis: 0)
+            tiedEmbedding(selectedCanonical.reshaped([-1]))
             .reshaped([b, l, n, hiddenSize])  // [B, L, N, H]
         let selectedLogits = matmul(
             hiddenStates.expandedDimensions(axis: -2),  // [B, L, 1, H]
@@ -311,7 +317,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
 
         let logits: MLXArray
         if let maskedEmbedding {
-            logits = maskedEmbedding(h, lmHeadWeight: model.embedTokens.weight)
+            logits = maskedEmbedding(h, tiedEmbedding: model.embedTokens)
         } else if config.tieWordEmbeddings {
             logits = model.embedTokens.asLinear(h)
         } else {
