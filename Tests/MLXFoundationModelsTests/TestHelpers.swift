@@ -24,103 +24,103 @@ import UniformTypeIdentifiers
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-    // MARK: - Stub Downloader / TokenizerLoader
-    //
-    // For tests that construct an `MLXLanguageModel` but never actually load one:
-    // capability assertions and construction paths. No network, no weights.
+// MARK: - Stub Downloader / TokenizerLoader
+//
+// For tests that construct an `MLXLanguageModel` but never actually load one:
+// capability assertions and construction paths. No network, no weights.
 
-    private struct StubDownloader: MLXLMCommon.Downloader, @unchecked Sendable {
-        func download(
-            id: String,
-            revision: String?,
-            matching patterns: [String],
-            useLatest: Bool,
-            progressHandler: @Sendable @escaping (Progress) -> Void
-        ) async throws -> URL {
-            URL(fileURLWithPath: "/tmp/\(id)")
-        }
+private struct StubDownloader: MLXLMCommon.Downloader, @unchecked Sendable {
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        URL(fileURLWithPath: "/tmp/\(id)")
     }
+}
 
-    private struct StubTokenizerLoader: MLXLMCommon.TokenizerLoader, @unchecked Sendable {
-        func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer { StubTokenizer() }
+private struct StubTokenizerLoader: MLXLMCommon.TokenizerLoader, @unchecked Sendable {
+    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer { StubTokenizer() }
+}
+
+private struct StubTokenizer: MLXLMCommon.Tokenizer {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [] }
+}
+
+// MARK: - Model Construction (no download)
+
+/// A `ContainerLoader` backed by the stub downloader/tokenizer: no network, no
+/// real weights. For construction / capability / gate tests.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func stubLoad() -> MLXLanguageModel.ContainerLoader {
+    { configuration, progress in
+        try await loadModelContainer(
+            from: StubDownloader(), using: StubTokenizerLoader(),
+            configuration: configuration, progressHandler: progress)
     }
+}
 
-    private struct StubTokenizer: MLXLMCommon.Tokenizer {
-        func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
-        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
-        func convertTokenToId(_ token: String) -> Int? { nil }
-        func convertIdToToken(_ id: Int) -> String? { nil }
-        var bosToken: String? { nil }
-        var eosToken: String? { nil }
-        var unknownToken: String? { nil }
-        func applyChatTemplate(
-            messages: [[String: any Sendable]],
-            tools: [[String: any Sendable]]?,
-            additionalContext: [String: any Sendable]?
-        ) throws -> [Int] { [] }
-    }
+/// Constructs an `MLXLanguageModel` wired to stub download / tokenizer infra,
+/// for tests that exercise construction, stored capabilities, or gate-rejection
+/// paths WITHOUT loading a real model. Tests that need a real model live in the
+/// IntegrationTesting xcodeproj (`FMTestHelpers.makeTestModel`).
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeStubModel(
+    _ id: String,
+    capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration, .toolCalling]
+) -> MLXLanguageModel {
+    MLXLanguageModel(
+        configuration: ModelConfiguration(id: id),
+        capabilities: capabilities,
+        weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+        load: stubLoad())
+}
 
-    // MARK: - Model Construction (no download)
+// MARK: - Executor Helpers (download-free machinery)
 
-    /// A `ContainerLoader` backed by the stub downloader/tokenizer: no network, no
-    /// real weights. For construction / capability / gate tests.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func stubLoad() -> MLXLanguageModel.ContainerLoader {
-        { configuration, progress in
-            try await loadModelContainer(
-                from: StubDownloader(), using: StubTokenizerLoader(),
-                configuration: configuration, progressHandler: progress)
-        }
-    }
+/// Creates an MLX executor for the given model. Construction only — no download.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
+    try MLXLanguageModel.Executor(
+        configuration: MLXLanguageModel.Executor.Configuration(
+            modelID: model.modelID)
+    )
+}
 
-    /// Constructs an `MLXLanguageModel` wired to stub download / tokenizer infra,
-    /// for tests that exercise construction, stored capabilities, or gate-rejection
-    /// paths WITHOUT loading a real model. Tests that need a real model live in the
-    /// IntegrationTesting xcodeproj (`FMTestHelpers.makeTestModel`).
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeStubModel(
-        _ id: String,
-        capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration, .toolCalling]
-    ) -> MLXLanguageModel {
-        MLXLanguageModel(
-            configuration: ModelConfiguration(id: id),
-            capabilities: capabilities,
-            weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
-            load: stubLoad())
-    }
-
-    // MARK: - Executor Helpers (download-free machinery)
-
-    /// Creates an MLX executor for the given model. Construction only — no download.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
-        try MLXLanguageModel.Executor(
-            configuration: MLXLanguageModel.Executor.Configuration(
-                modelID: model.modelID)
-        )
-    }
-
-    /// Creates a `LanguageModelExecutorGenerationRequest` with sensible defaults.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeExecutorRequest(
-        id: UUID = UUID(),
-        transcript: Transcript,
-        enabledTools: [Transcript.ToolDefinition] = [],
-        schema: GenerationSchema? = nil,
-        generationOptions: GenerationOptions = GenerationOptions(),
-        contextOptions: ContextOptions = ContextOptions(),
-        metadata: [String: any Sendable & Codable & Equatable] = [:]
-    ) -> LanguageModelExecutorGenerationRequest {
-        LanguageModelExecutorGenerationRequest(
-            id: id,
-            transcript: transcript,
-            enabledTools: enabledTools,
-            schema: schema,
-            generationOptions: generationOptions,
-            contextOptions: contextOptions,
-            metadata: metadata
-        )
-    }
+/// Creates a `LanguageModelExecutorGenerationRequest` with sensible defaults.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeExecutorRequest(
+    id: UUID = UUID(),
+    transcript: Transcript,
+    enabledTools: [Transcript.ToolDefinition] = [],
+    schema: GenerationSchema? = nil,
+    generationOptions: GenerationOptions = GenerationOptions(),
+    contextOptions: ContextOptions = ContextOptions(),
+    metadata: [String: any Sendable & Codable & Equatable] = [:]
+) -> LanguageModelExecutorGenerationRequest {
+    LanguageModelExecutorGenerationRequest(
+        id: id,
+        transcript: transcript,
+        enabledTools: enabledTools,
+        schema: schema,
+        generationOptions: generationOptions,
+        contextOptions: contextOptions,
+        metadata: metadata
+    )
+}
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
 

@@ -6,7 +6,7 @@ import MLXFoundationModels
 import Testing
 
 #if canImport(FoundationModels)
-    import FoundationModels
+import FoundationModels
 #endif
 
 /// Asymmetric, tier-aware compatibility probes.
@@ -79,9 +79,9 @@ struct PlatformCompatibilityProbes {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             lmAvailable = true
             #if canImport(FoundationModels, _version: 2)
-                // Touch the OS-27 surface to prove it is genuinely reachable here.
-                _ = LanguageModelCapabilities(capabilities: [])
-                _ = (any LanguageModel).self
+            // Touch the OS-27 surface to prove it is genuinely reachable here.
+            _ = LanguageModelCapabilities(capabilities: [])
+            _ = (any LanguageModel).self
             #endif
         }
         let expected = (DeviceTier.current == .full)
@@ -97,8 +97,8 @@ struct PlatformCompatibilityProbes {
         var typeReachable = false
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             #if canImport(FoundationModels, _version: 2)
-                _ = MLXLanguageModel.self
-                typeReachable = true
+            _ = MLXLanguageModel.self
+            typeReachable = true
             #endif
         }
         #expect(

@@ -10,12 +10,12 @@
 // function is unreferenced and `@available`-gated.
 
 #if FoundationModelsIntegration
-    import FoundationModels
-    @testable import MLXFoundationModels
+import FoundationModels
+@testable import MLXFoundationModels
 
-    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
-    func _testabilityProbe() {
-        // Internal static on the bridge-local Executor — only visible via @testable.
-        _ = MLXLanguageModel.Executor.samplingMode(from: nil)
-    }
+@available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+func _testabilityProbe() {
+    // Internal static on the bridge-local Executor — only visible via @testable.
+    _ = MLXLanguageModel.Executor.samplingMode(from: nil)
+}
 #endif

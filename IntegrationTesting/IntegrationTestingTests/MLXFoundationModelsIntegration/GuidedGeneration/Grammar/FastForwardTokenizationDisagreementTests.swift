@@ -97,105 +97,105 @@
 
 #if FoundationModelsIntegration
 
-    import Testing
-    import Foundation
-    import MLXLMCommon
-    @testable import MLXFoundationModels
-    @testable import MLXGuidedGeneration
+import Testing
+import Foundation
+import MLXLMCommon
+@testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
-    @Suite(.serialized)
-    struct FastForwardTokenizationDisagreementTests {
+@Suite(.serialized)
+struct FastForwardTokenizationDisagreementTests {
 
-        private enum MissingSeedError: Error {
-            /// Raised when Gemma's tokenizer has no id for the seed character.
-            /// Surfacing this as an error rather than just an `Issue.record`
-            /// lets the outer `perform` unwind cleanly instead of continuing
-            /// into a test-body that depends on the seed id being present.
-            case seedIdUnavailable
+    private enum MissingSeedError: Error {
+        /// Raised when Gemma's tokenizer has no id for the seed character.
+        /// Surfacing this as an error rather than just an `Issue.record`
+        /// lets the outer `perform` unwind cleanly instead of continuing
+        /// into a test-body that depends on the seed id being present.
+        case seedIdUnavailable
+    }
+
+    /// Sendable bundle of everything we need from Gemma's container so
+    /// the second `perform` (on Qwen) can build `GrammarTokenizer` and issue
+    /// the seed commit without capturing Gemma's non-Sendable
+    /// `ModelContext`. Every field is already Sendable: `[String]`,
+    /// the C enum, and `Int` primitives.
+    private struct GemmaSeeds: Sendable {
+        let vocab: [String]
+        let vocabType: VocabType
+        let eosTokenId: Int32
+        let seedTokenId: Int32
+    }
+
+    /// Payload string for the forced-byte EBNF grammar. First byte is
+    /// `p` — used as the seed token (encoded on Gemma). The remaining
+    /// 31 bytes become xgrammar's FF suffix after the seed commit. The
+    /// mixed case + digits shape defeats single-token BPE shortcuts on
+    /// both Gemma and Qwen, ensuring Qwen's re-encoding produces
+    /// multiple tokens for the boundary-safety trim to leave some
+    /// in-bounds for the accept loop.
+    private static let forcedPayload = "payLoadABC123payLoadDEF456payLoad"
+
+    @Test("mid-FF tokenization disagreement ticks the counter without crashing")
+    func testJumpForwardTokenizationDisagreementFallsBackCleanly() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let gemmaContainer = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
+        let qwenContainer = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
+
+        let seeds: GemmaSeeds = try await gemmaContainer.perform { gemmaContext in
+            let gemmaVocab = TokenizerVocabExtractor.extractForGrammar(
+                from: gemmaContext.tokenizer
+            )
+            let encoded = gemmaContext.tokenizer.encode(
+                text: String(Self.forcedPayload.prefix(1)),
+                addSpecialTokens: false
+            )
+            guard let firstId = encoded.first else {
+                Issue.record("Gemma tokenizer produced no id for seed byte `p`")
+                throw MissingSeedError.seedIdUnavailable
+            }
+            return GemmaSeeds(
+                vocab: gemmaVocab.vocab,
+                vocabType: gemmaVocab.vocabType,
+                eosTokenId: Int32(gemmaContext.tokenizer.eosTokenId ?? 0),
+                seedTokenId: Int32(firstId)
+            )
         }
 
-        /// Sendable bundle of everything we need from Gemma's container so
-        /// the second `perform` (on Qwen) can build `GrammarTokenizer` and issue
-        /// the seed commit without capturing Gemma's non-Sendable
-        /// `ModelContext`. Every field is already Sendable: `[String]`,
-        /// the C enum, and `Int` primitives.
-        private struct GemmaSeeds: Sendable {
-            let vocab: [String]
-            let vocabType: VocabType
-            let eosTokenId: Int32
-            let seedTokenId: Int32
-        }
+        try await qwenContainer.perform { qwenContext in
+            let xgTokenizer = try GrammarTokenizer(
+                vocab: seeds.vocab,
+                vocabType: seeds.vocabType,
+                eosTokenId: seeds.eosTokenId
+            )
 
-        /// Payload string for the forced-byte EBNF grammar. First byte is
-        /// `p` — used as the seed token (encoded on Gemma). The remaining
-        /// 31 bytes become xgrammar's FF suffix after the seed commit. The
-        /// mixed case + digits shape defeats single-token BPE shortcuts on
-        /// both Gemma and Qwen, ensuring Qwen's re-encoding produces
-        /// multiple tokens for the boundary-safety trim to leave some
-        /// in-bounds for the accept loop.
-        private static let forcedPayload = "payLoadABC123payLoadDEF456payLoad"
+            // Cross-wire: GrammarTokenizer is Gemma, hostTokenizer is Qwen.
+            // Qwen's re-encoding of the FF bytes will land on ids the
+            // Gemma-bound matcher does not have in its current mask.
+            let grammar = "root ::= \"\(Self.forcedPayload)\"\n"
+            let constraint = try GrammarConstraint(
+                tokenizer: xgTokenizer,
+                grammar: grammar,
+                fastForward: true,
+                hostTokenizer: qwenContext.tokenizer
+            )
 
-        @Test("mid-FF tokenization disagreement ticks the counter without crashing")
-        func testJumpForwardTokenizationDisagreementFallsBackCleanly() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            let gemmaContainer = try await loadTestModelContainer(id: TestFixtures.gemmaModelID)
-            let qwenContainer = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
+            #expect(
+                constraint.fastForwardDisagreementCount == 0,
+                "fresh constraint must report zero FF disagreements"
+            )
 
-            let seeds: GemmaSeeds = try await gemmaContainer.perform { gemmaContext in
-                let gemmaVocab = TokenizerVocabExtractor.extractForGrammar(
-                    from: gemmaContext.tokenizer
-                )
-                let encoded = gemmaContext.tokenizer.encode(
-                    text: String(Self.forcedPayload.prefix(1)),
-                    addSpecialTokens: false
-                )
-                guard let firstId = encoded.first else {
-                    Issue.record("Gemma tokenizer produced no id for seed byte `p`")
-                    throw MissingSeedError.seedIdUnavailable
-                }
-                return GemmaSeeds(
-                    vocab: gemmaVocab.vocab,
-                    vocabType: gemmaVocab.vocabType,
-                    eosTokenId: Int32(gemmaContext.tokenizer.eosTokenId ?? 0),
-                    seedTokenId: Int32(firstId)
-                )
-            }
+            // Commit the seed byte. xgrammar's FF pass then surfaces
+            // the remaining 31 bytes of the forced payload, which Qwen
+            // re-encodes into ids the Gemma-bound matcher rejects —
+            // the disagreement path we want to observe.
+            _ = try constraint.commitToken(seeds.seedTokenId)
 
-            try await qwenContainer.perform { qwenContext in
-                let xgTokenizer = try GrammarTokenizer(
-                    vocab: seeds.vocab,
-                    vocabType: seeds.vocabType,
-                    eosTokenId: seeds.eosTokenId
-                )
-
-                // Cross-wire: GrammarTokenizer is Gemma, hostTokenizer is Qwen.
-                // Qwen's re-encoding of the FF bytes will land on ids the
-                // Gemma-bound matcher does not have in its current mask.
-                let grammar = "root ::= \"\(Self.forcedPayload)\"\n"
-                let constraint = try GrammarConstraint(
-                    tokenizer: xgTokenizer,
-                    grammar: grammar,
-                    fastForward: true,
-                    hostTokenizer: qwenContext.tokenizer
-                )
-
-                #expect(
-                    constraint.fastForwardDisagreementCount == 0,
-                    "fresh constraint must report zero FF disagreements"
-                )
-
-                // Commit the seed byte. xgrammar's FF pass then surfaces
-                // the remaining 31 bytes of the forced payload, which Qwen
-                // re-encodes into ids the Gemma-bound matcher rejects —
-                // the disagreement path we want to observe.
-                _ = try constraint.commitToken(seeds.seedTokenId)
-
-                #expect(
-                    constraint.fastForwardDisagreementCount > 0,
-                    "cross-tokenizer FF must produce at least one rejection — counter stayed at \(constraint.fastForwardDisagreementCount)"
-                )
-            }
+            #expect(
+                constraint.fastForwardDisagreementCount > 0,
+                "cross-tokenizer FF must produce at least one rejection — counter stayed at \(constraint.fastForwardDisagreementCount)"
+            )
         }
     }
+}
 
 #endif

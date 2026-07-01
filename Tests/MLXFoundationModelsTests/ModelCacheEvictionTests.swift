@@ -10,42 +10,75 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-    // Single registration for both suites nested under `FoundationModelsCacheTests`
-    // (this file + AvailabilityTests.swift): register the real factory so
-    // loadModelContainer reaches the injected stub downloader instead of throwing
-    // .noModelFactoryAvailable before the in-flight gate can fire. This target links
-    // MLXLLM but references no MLXLLM symbol, so the linker can dead-strip its
-    // TrampolineModelFactory; ModelFactoryRegistry seeds itself purely via
-    // NSClassFromString("MLXLLM.TrampolineModelFactory"), which then resolves to nil —
-    // an empty registry. Registering explicitly (which also hard-references
-    // LLMModelFactory, defeating the dead-strip) guarantees the load path reaches the
-    // injected stub downloader.
-    let registerModelFactoryOnce: Void = {
-        ModelFactoryRegistry.shared.addTrampoline { LLMModelFactory.shared }
-    }()
+// Single registration for both suites nested under `FoundationModelsCacheTests`
+// (this file + AvailabilityTests.swift): register the real factory so
+// loadModelContainer reaches the injected stub downloader instead of throwing
+// .noModelFactoryAvailable before the in-flight gate can fire. This target links
+// MLXLLM but references no MLXLLM symbol, so the linker can dead-strip its
+// TrampolineModelFactory; ModelFactoryRegistry seeds itself purely via
+// NSClassFromString("MLXLLM.TrampolineModelFactory"), which then resolves to nil —
+// an empty registry. Registering explicitly (which also hard-references
+// LLMModelFactory, defeating the dead-strip) guarantees the load path reaches the
+// injected stub downloader.
+let registerModelFactoryOnce: Void = {
+    ModelFactoryRegistry.shared.addTrampoline { LLMModelFactory.shared }
+}()
 
-    // Serialized parent so the cache-touching suites below never run concurrently.
-    // `MLXLanguageModel` holds one process-global `static let cache`; `evictAll()` is
-    // key-agnostic, so an eviction in one suite would wipe the parked-load windows the
-    // sibling availability suite asserts against. `.serialized` on a single suite only
-    // orders that suite's own tests — it does NOT order two top-level suites against
-    // each other — so both cache-touching suites are nested under this one serialized
-    // parent. AvailabilityTests extends this same type from its own file.
-    @Suite(.serialized)
-    struct FoundationModelsCacheTests {}
+// Serialized parent so the cache-touching suites below never run concurrently.
+// `MLXLanguageModel` holds one process-global `static let cache`; `evictAll()` is
+// key-agnostic, so an eviction in one suite would wipe the parked-load windows the
+// sibling availability suite asserts against. `.serialized` on a single suite only
+// orders that suite's own tests — it does NOT order two top-level suites against
+// each other — so both cache-touching suites are nested under this one serialized
+// parent. AvailabilityTests extends this same type from its own file.
+@Suite(.serialized)
+struct FoundationModelsCacheTests {}
 
-    extension FoundationModelsCacheTests {
+extension FoundationModelsCacheTests {
 
-        @Suite("MLXLanguageModel cache eviction")
-        struct CacheEviction {
+    @Suite("MLXLanguageModel cache eviction")
+    struct CacheEviction {
 
-            init() { _ = registerModelFactoryOnce }
+        init() { _ = registerModelFactoryOnce }
 
-            @Test("evictAll() clears a failed load's cached lastError")
-            func evictAllClearsLastError() async throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        @Test("evictAll() clears a failed load's cached lastError")
+        func evictAllClearsLastError() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-                let id = "org/evictall-\(UUID().uuidString)"
+            let id = "org/evictall-\(UUID().uuidString)"
+            let gate = LoadGate()
+            let model = MLXLanguageModel(
+                configuration: ModelConfiguration(id: id),
+                capabilities: [],
+                weightsLocation: { _ in
+                    URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                },
+                load: { configuration, progress in
+                    try await loadModelContainer(
+                        from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                        configuration: configuration, progressHandler: progress)
+                })
+
+            // Drive a load that parks, then fails — populating lastErrors[id].
+            let loadTask = Task { try? await model.preload() }
+            await gate.waitUntilStarted()
+            await gate.release()
+            _ = await loadTask.value
+
+            let before = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+            #expect(before != nil, "a failed load should record a cached lastError")
+
+            await MLXLanguageModel.evictAll()
+
+            let after = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+            #expect(after == nil, "evictAll() must clear the cached lastError")
+        }
+
+        @Test("evict() clears only this model's state, leaving other models cached")
+        func evictIsPerModel() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            func failedLoad(_ id: String) async -> MLXLanguageModel {
                 let gate = LoadGate()
                 let model = MLXLanguageModel(
                     configuration: ModelConfiguration(id: id),
@@ -55,183 +88,150 @@ import Testing
                     },
                     load: { configuration, progress in
                         try await loadModelContainer(
-                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                            from: BlockingDownloader(gate: gate),
+                            using: EvictStubTokenizerLoader(),
                             configuration: configuration, progressHandler: progress)
                     })
-
-                // Drive a load that parks, then fails — populating lastErrors[id].
-                let loadTask = Task { try? await model.preload() }
+                let task = Task { try? await model.preload() }
                 await gate.waitUntilStarted()
                 await gate.release()
-                _ = await loadTask.value
-
-                let before = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-                #expect(before != nil, "a failed load should record a cached lastError")
-
-                await MLXLanguageModel.evictAll()
-
-                let after = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-                #expect(after == nil, "evictAll() must clear the cached lastError")
+                _ = await task.value
+                return model
             }
 
-            @Test("evict() clears only this model's state, leaving other models cached")
-            func evictIsPerModel() async throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            let idA = "org/per-model-a-\(UUID().uuidString)"
+            let idB = "org/per-model-b-\(UUID().uuidString)"
+            let modelA = await failedLoad(idA)
+            _ = await failedLoad(idB)
 
-                func failedLoad(_ id: String) async -> MLXLanguageModel {
-                    let gate = LoadGate()
-                    let model = MLXLanguageModel(
-                        configuration: ModelConfiguration(id: id),
-                        capabilities: [],
-                        weightsLocation: { _ in
-                            URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
-                        },
-                        load: { configuration, progress in
-                            try await loadModelContainer(
-                                from: BlockingDownloader(gate: gate),
-                                using: EvictStubTokenizerLoader(),
-                                configuration: configuration, progressHandler: progress)
-                        })
-                    let task = Task { try? await model.preload() }
-                    await gate.waitUntilStarted()
-                    await gate.release()
-                    _ = await task.value
-                    return model
-                }
+            // Both models have a cached lastError.
+            #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) != nil)
+            #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil)
 
-                let idA = "org/per-model-a-\(UUID().uuidString)"
-                let idB = "org/per-model-b-\(UUID().uuidString)"
-                let modelA = await failedLoad(idA)
-                _ = await failedLoad(idB)
+            await modelA.evict()
 
-                // Both models have a cached lastError.
-                #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) != nil)
-                #expect(await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil)
+            #expect(
+                await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) == nil,
+                "evict() must clear this model's cached state")
+            #expect(
+                await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil,
+                "evict() must NOT clear other models' cached state")
+        }
 
-                await modelA.evict()
+        @Test("a load evicted mid-flight does not re-populate the cache on completion")
+        func evictedInFlightLoadDoesNotRepopulate() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-                #expect(
-                    await MLXLanguageModel.lastLoadErrorInCache(modelID: idA) == nil,
-                    "evict() must clear this model's cached state")
-                #expect(
-                    await MLXLanguageModel.lastLoadErrorInCache(modelID: idB) != nil,
-                    "evict() must NOT clear other models' cached state")
-            }
+            let id = "org/superseded-\(UUID().uuidString)"
+            let gate = LoadGate()
+            let model = MLXLanguageModel(
+                configuration: ModelConfiguration(id: id),
+                capabilities: [],
+                weightsLocation: { _ in
+                    URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                },
+                load: { configuration, progress in
+                    try await loadModelContainer(
+                        from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                        configuration: configuration, progressHandler: progress)
+                })
 
-            @Test("a load evicted mid-flight does not re-populate the cache on completion")
-            func evictedInFlightLoadDoesNotRepopulate() async throws {
-                guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            // Park a genuine (non-warmup) load in flight.
+            let loadTask = Task { try? await model.preload() }
+            await gate.waitUntilStarted()
 
-                let id = "org/superseded-\(UUID().uuidString)"
-                let gate = LoadGate()
-                let model = MLXLanguageModel(
-                    configuration: ModelConfiguration(id: id),
-                    capabilities: [],
-                    weightsLocation: { _ in
-                        URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
-                    },
-                    load: { configuration, progress in
-                        try await loadModelContainer(
-                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                            configuration: configuration, progressHandler: progress)
-                    })
+            // In-flight load is registered and reported.
+            let downloadingDuring = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+            #expect(downloadingDuring, "a parked load should report as downloading")
 
-                // Park a genuine (non-warmup) load in flight.
-                let loadTask = Task { try? await model.preload() }
-                await gate.waitUntilStarted()
+            // Evict while the load is suspended — removes loadingTasks[id].
+            await MLXLanguageModel.evictAll()
 
-                // In-flight load is registered and reported.
-                let downloadingDuring = await MLXLanguageModel.isDownloadingInCache(modelID: id)
-                #expect(downloadingDuring, "a parked load should report as downloading")
+            let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+            #expect(
+                !downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
 
-                // Evict while the load is suspended — removes loadingTasks[id].
-                await MLXLanguageModel.evictAll()
+            // Let the parked load fail. The catch-path guard must NOT re-add lastError
+            // for the now-superseded task.
+            await gate.release()
+            _ = await loadTask.value
 
-                let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
-                #expect(
-                    !downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
-
-                // Let the parked load fail. The catch-path guard must NOT re-add lastError
-                // for the now-superseded task.
-                await gate.release()
-                _ = await loadTask.value
-
-                let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-                #expect(lastError == nil, "a superseded load must not re-populate cache state")
-            }
+            let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+            #expect(lastError == nil, "a superseded load must not re-populate cache state")
         }
     }
+}
 
-    // MARK: - Shared fixtures
-    //
-    // Hoisted to file scope so the eviction tests above share one definition. Kept
-    // file-`private` so they don't collide with AvailabilityTests.swift's own stubs.
+// MARK: - Shared fixtures
+//
+// Hoisted to file scope so the eviction tests above share one definition. Kept
+// file-`private` so they don't collide with AvailabilityTests.swift's own stubs.
 
-    /// Coordinates the in-flight window: the downloader signals when a load has entered
-    /// (so the load task is registered), then parks until the test releases it.
-    private actor LoadGate {
-        private var startedAlready = false
-        private var startedContinuation: CheckedContinuation<Void, Never>?
-        private var releasedAlready = false
-        private var releaseContinuation: CheckedContinuation<Void, Never>?
+/// Coordinates the in-flight window: the downloader signals when a load has entered
+/// (so the load task is registered), then parks until the test releases it.
+private actor LoadGate {
+    private var startedAlready = false
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var releasedAlready = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
 
-        func signalStarted() {
-            startedAlready = true
-            startedContinuation?.resume()
-            startedContinuation = nil
-        }
-        func waitUntilStarted() async {
-            if startedAlready { return }
-            await withCheckedContinuation { startedContinuation = $0 }
-        }
-        func waitForRelease() async {
-            if releasedAlready { return }
-            await withCheckedContinuation { releaseContinuation = $0 }
-        }
-        func release() {
-            releasedAlready = true
-            releaseContinuation?.resume()
-            releaseContinuation = nil
-        }
+    func signalStarted() {
+        startedAlready = true
+        startedContinuation?.resume()
+        startedContinuation = nil
     }
-
-    private struct BlockingDownloaderReleased: Error {}
-
-    /// A `Downloader` that parks inside `download` until the gate is released, so a load
-    /// stays deterministically in flight, then fails the load on release.
-    private final class BlockingDownloader: Downloader, @unchecked Sendable {
-        private let gate: LoadGate
-        init(gate: LoadGate) { self.gate = gate }
-        func download(
-            id: String,
-            revision: String?,
-            matching patterns: [String],
-            useLatest: Bool,
-            progressHandler: @Sendable @escaping (Progress) -> Void
-        ) async throws -> URL {
-            await gate.signalStarted()
-            await gate.waitForRelease()
-            throw BlockingDownloaderReleased()
-        }
+    func waitUntilStarted() async {
+        if startedAlready { return }
+        await withCheckedContinuation { startedContinuation = $0 }
     }
-
-    private final class EvictStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
-        func load(from directory: URL) async throws -> any Tokenizer { EvictStubTokenizer() }
+    func waitForRelease() async {
+        if releasedAlready { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
     }
-
-    private struct EvictStubTokenizer: Tokenizer {
-        func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
-        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
-        func convertTokenToId(_ token: String) -> Int? { nil }
-        func convertIdToToken(_ id: Int) -> String? { nil }
-        var bosToken: String? { nil }
-        var eosToken: String? { nil }
-        var unknownToken: String? { nil }
-        func applyChatTemplate(
-            messages: [[String: any Sendable]],
-            tools: [[String: any Sendable]]?,
-            additionalContext: [String: any Sendable]?
-        ) throws -> [Int] { [] }
+    func release() {
+        releasedAlready = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
+}
+
+private struct BlockingDownloaderReleased: Error {}
+
+/// A `Downloader` that parks inside `download` until the gate is released, so a load
+/// stays deterministically in flight, then fails the load on release.
+private final class BlockingDownloader: Downloader, @unchecked Sendable {
+    private let gate: LoadGate
+    init(gate: LoadGate) { self.gate = gate }
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        await gate.signalStarted()
+        await gate.waitForRelease()
+        throw BlockingDownloaderReleased()
+    }
+}
+
+private final class EvictStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+    func load(from directory: URL) async throws -> any Tokenizer { EvictStubTokenizer() }
+}
+
+private struct EvictStubTokenizer: Tokenizer {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [] }
+}
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

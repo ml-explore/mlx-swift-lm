@@ -16,11 +16,11 @@
 import Testing
 
 #if FoundationModelsIntegration
-    @testable import MLXFoundationModels
-    import FoundationModels
-    import MLXGuidedGeneration
+@testable import MLXFoundationModels
+import FoundationModels
+import MLXGuidedGeneration
 #else
-    @testable import MLXFoundationModels
+@testable import MLXFoundationModels
 #endif
 
 @Suite("Trait matrix: FoundationModelsIntegration")
@@ -29,50 +29,50 @@ struct TraitMatrixTests {
     // MARK: - FoundationModelsIntegration on (default)
 
     #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
-        @Test("FM on: MLXLanguageModel + guided-generation primitives compile")
-        func fmOnSurface() {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            _ = MLXLanguageModel.self
-            _ = MLXLanguageModel.Executor.self
-            _ = GuidedGenerationLoop.self
-            _ = GrammarConstraint.self
-            _ = MLXDownloadProgress.self
-        }
+    @Test("FM on: MLXLanguageModel + guided-generation primitives compile")
+    func fmOnSurface() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        _ = MLXLanguageModel.self
+        _ = MLXLanguageModel.Executor.self
+        _ = GuidedGenerationLoop.self
+        _ = GrammarConstraint.self
+        _ = MLXDownloadProgress.self
+    }
 
-        @Test("FM on: capabilities stored verbatim from init")
-        func capabilitiesStoredVerbatim() {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            // Capabilities are authoritative: the adapter stores what the caller
-            // passes, never inferring from the model id.
-            let reasoning = makeStubModel(
-                "mlx-community/Qwen3-4B-4bit",
-                capabilities: [
-                    .reasoning, .guidedGeneration, .toolCalling,
-                ]
-            ).capabilities
-            #expect(reasoning.contains(.reasoning))
-            #expect(reasoning.contains(.guidedGeneration))
-            #expect(reasoning.contains(.toolCalling))
+    @Test("FM on: capabilities stored verbatim from init")
+    func capabilitiesStoredVerbatim() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // Capabilities are authoritative: the adapter stores what the caller
+        // passes, never inferring from the model id.
+        let reasoning = makeStubModel(
+            "mlx-community/Qwen3-4B-4bit",
+            capabilities: [
+                .reasoning, .guidedGeneration, .toolCalling,
+            ]
+        ).capabilities
+        #expect(reasoning.contains(.reasoning))
+        #expect(reasoning.contains(.guidedGeneration))
+        #expect(reasoning.contains(.toolCalling))
 
-            let nonReasoning = makeStubModel(
-                TestFixtures.gemmaModelID,
-                capabilities: [
-                    .guidedGeneration, .toolCalling,
-                ]
-            ).capabilities
-            #expect(!nonReasoning.contains(.reasoning))
-            #expect(nonReasoning.contains(.guidedGeneration))
-        }
+        let nonReasoning = makeStubModel(
+            TestFixtures.gemmaModelID,
+            capabilities: [
+                .guidedGeneration, .toolCalling,
+            ]
+        ).capabilities
+        #expect(!nonReasoning.contains(.reasoning))
+        #expect(nonReasoning.contains(.guidedGeneration))
+    }
     #endif
 
     // MARK: - FoundationModelsIntegration off
 
     #if !FoundationModelsIntegration
-        @Test("FM off: MLXFoundationModels exposes only MLXDownloadProgress")
-        func fmOffSurface() {
-            _ = MLXDownloadProgress.self
-            // No MLXLanguageModel in this configuration; the fact that this file
-            // compiles without referencing it is the assertion.
-        }
+    @Test("FM off: MLXFoundationModels exposes only MLXDownloadProgress")
+    func fmOffSurface() {
+        _ = MLXDownloadProgress.self
+        // No MLXLanguageModel in this configuration; the fact that this file
+        // compiles without referencing it is the assertion.
+    }
     #endif
 }

@@ -36,75 +36,75 @@
 
 #if FoundationModelsIntegration
 
-    import Testing
-    import Foundation
-    import MLXLMCommon
-    @testable import MLXFoundationModels
-    @testable import MLXGuidedGeneration
+import Testing
+import Foundation
+import MLXLMCommon
+@testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
-    @Suite(.serialized)
-    struct MalformedSchemaErrorParityTests {
+@Suite(.serialized)
+struct MalformedSchemaErrorParityTests {
 
-        /// Malformed schema inputs that must each be rejected at grammar-compile
-        /// time as `GrammarError.invalidJSONSchema`.
-        private static let malformedSchemas: [(label: String, schema: String)] = [
-            ("not_json", "not a schema at all"),
-            ("empty_string", ""),
-            ("unknown_type", #"{"type":"flibbertigibbet"}"#),
-            ("enum_not_array", #"{"type":"string","enum":"not-an-array"}"#),
-            ("dangling_ref", ##"{"$ref":"#/$defs/does-not-exist"}"##),
-            ("top_level_array", "[]"),
-        ]
+    /// Malformed schema inputs that must each be rejected at grammar-compile
+    /// time as `GrammarError.invalidJSONSchema`.
+    private static let malformedSchemas: [(label: String, schema: String)] = [
+        ("not_json", "not a schema at all"),
+        ("empty_string", ""),
+        ("unknown_type", #"{"type":"flibbertigibbet"}"#),
+        ("enum_not_array", #"{"type":"string","enum":"not-an-array"}"#),
+        ("dangling_ref", ##"{"$ref":"#/$defs/does-not-exist"}"##),
+        ("top_level_array", "[]"),
+    ]
 
-        @Test("every malformed-schema input surfaces as GrammarError.invalidJSONSchema")
-        func testMalformedSchemaErrorsMatchGolden() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+    @Test("every malformed-schema input surfaces as GrammarError.invalidJSONSchema")
+    func testMalformedSchemaErrorsMatchGolden() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-            let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
-            try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
-                let tokenizer = try GrammarTokenizer(
-                    vocab: vocab.vocab,
-                    vocabType: vocab.vocabType,
-                    eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
-                )
+        let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
+        try await container.perform { context in
+            let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+            let tokenizer = try GrammarTokenizer(
+                vocab: vocab.vocab,
+                vocabType: vocab.vocabType,
+                eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
+            )
 
-                for (index, entry) in Self.malformedSchemas.enumerated() {
-                    // Each malformed schema must throw. Anything else — a
-                    // successful compile or a non-throwing error — is a
-                    // category collapse.
-                    do {
-                        _ = try GrammarConstraint(
-                            tokenizer: tokenizer,
-                            jsonSchema: entry.schema
-                        )
+            for (index, entry) in Self.malformedSchemas.enumerated() {
+                // Each malformed schema must throw. Anything else — a
+                // successful compile or a non-throwing error — is a
+                // category collapse.
+                do {
+                    _ = try GrammarConstraint(
+                        tokenizer: tokenizer,
+                        jsonSchema: entry.schema
+                    )
+                    Issue.record(
+                        "malformed schema #\(index) (\(entry.label)): GrammarConstraint compiled without throwing. Category collapse — xgrammar accepts what should be rejected."
+                    )
+                } catch let error as GrammarError {
+                    // Category-level parity: every malformed input must
+                    // surface as xgrammar's `.invalidJSONSchema`. Any other
+                    // case means the shim-level exception-to-status
+                    // mapping dropped the input into a different bucket.
+                    switch error {
+                    case .invalidJSONSchema:
+                        // OK — bad-JSON or bad-schema, both categories
+                        // legitimately collapse onto this single case
+                        // in the current discriminated-status design.
+                        break
+                    default:
                         Issue.record(
-                            "malformed schema #\(index) (\(entry.label)): GrammarConstraint compiled without throwing. Category collapse — xgrammar accepts what should be rejected."
-                        )
-                    } catch let error as GrammarError {
-                        // Category-level parity: every malformed input must
-                        // surface as xgrammar's `.invalidJSONSchema`. Any other
-                        // case means the shim-level exception-to-status
-                        // mapping dropped the input into a different bucket.
-                        switch error {
-                        case .invalidJSONSchema:
-                            // OK — bad-JSON or bad-schema, both categories
-                            // legitimately collapse onto this single case
-                            // in the current discriminated-status design.
-                            break
-                        default:
-                            Issue.record(
-                                "malformed schema #\(index) (\(entry.label)): expected GrammarError.invalidJSONSchema, got \(error). Category collapse."
-                            )
-                        }
-                    } catch {
-                        Issue.record(
-                            "malformed schema #\(index) (\(entry.label)): expected GrammarError, got \(type(of: error)) — \(error)"
+                            "malformed schema #\(index) (\(entry.label)): expected GrammarError.invalidJSONSchema, got \(error). Category collapse."
                         )
                     }
+                } catch {
+                    Issue.record(
+                        "malformed schema #\(index) (\(entry.label)): expected GrammarError, got \(type(of: error)) — \(error)"
+                    )
                 }
             }
         }
     }
+}
 
 #endif

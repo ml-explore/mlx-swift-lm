@@ -68,245 +68,245 @@
 
 #if FoundationModelsIntegration
 
-    import Testing
-    import Foundation
-    import MLXLMCommon
-    @testable import MLXFoundationModels
-    @testable import MLXGuidedGeneration
+import Testing
+import Foundation
+import MLXLMCommon
+@testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
-    @Suite(.serialized)
-    struct GoldenReplayTests {
+@Suite(.serialized)
+struct GoldenReplayTests {
 
-        @Test(
-            "tier1 (~11 steps, 3-property flat object) replays with functional parity against goldens"
+    @Test(
+        "tier1 (~11 steps, 3-property flat object) replays with functional parity against goldens"
+    )
+    func testTier1() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        try await replayTier(fixture: "schema_tier1_steps.json")
+    }
+
+    @Test(
+        "tier2 (~28 steps, nested optional object) replays with functional parity against goldens"
+    )
+    func testTier2() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        try await replayTier(fixture: "schema_tier2_steps.json")
+    }
+
+    @Test(
+        "tier3 (~54 steps, array of keyed groups) replays with functional parity against goldens"
+    )
+    func testTier3() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        try await replayTier(fixture: "schema_tier3_steps.json")
+    }
+
+    @Test(
+        "tier4 (~132 steps, multi-section travel doc) replays with functional parity against goldens"
+    )
+    func testTier4() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        try await replayTier(fixture: "schema_tier4_steps.json")
+    }
+
+    // MARK: - Replay
+
+    /// Load the named fixture, construct an GrammarConstraint against its
+    /// recorded schema on the live tokenizer, and walk the fixture's
+    /// steps asserting per-step functional parity. Each commit
+    /// implicitly verifies the token the recorded backend accepted at
+    /// this step is also in xgrammar's mask; the explicit checks cover
+    /// termination, fast-forward emission, and commit-stop lifecycle.
+    /// A passing run means xgrammar matched the recorded behavior on
+    /// every externally-observable property for the full document.
+    private func replayTier(fixture filename: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let fixture = try Self.loadFixture(named: filename)
+        // All four tier fixtures were recorded against gemma-3;
+        // the recorder embeds the modelId for portability across future
+        // multi-tokenizer fixtures. Verify before we load the wrong
+        // container and silently compare against mismatched vocab.
+        #expect(
+            fixture.modelId == TestFixtures.gemmaModelID,
+            "golden fixture \(filename) has modelId \(fixture.modelId); expected \(TestFixtures.gemmaModelID). This replay assumes gemma-3 for all four tiers."
         )
-        func testTier1() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            try await replayTier(fixture: "schema_tier1_steps.json")
-        }
+        let container = try await loadTestModelContainer(id: fixture.modelId)
 
-        @Test(
-            "tier2 (~28 steps, nested optional object) replays with functional parity against goldens"
-        )
-        func testTier2() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            try await replayTier(fixture: "schema_tier2_steps.json")
-        }
-
-        @Test(
-            "tier3 (~54 steps, array of keyed groups) replays with functional parity against goldens"
-        )
-        func testTier3() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            try await replayTier(fixture: "schema_tier3_steps.json")
-        }
-
-        @Test(
-            "tier4 (~132 steps, multi-section travel doc) replays with functional parity against goldens"
-        )
-        func testTier4() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            try await replayTier(fixture: "schema_tier4_steps.json")
-        }
-
-        // MARK: - Replay
-
-        /// Load the named fixture, construct an GrammarConstraint against its
-        /// recorded schema on the live tokenizer, and walk the fixture's
-        /// steps asserting per-step functional parity. Each commit
-        /// implicitly verifies the token the recorded backend accepted at
-        /// this step is also in xgrammar's mask; the explicit checks cover
-        /// termination, fast-forward emission, and commit-stop lifecycle.
-        /// A passing run means xgrammar matched the recorded behavior on
-        /// every externally-observable property for the full document.
-        private func replayTier(fixture filename: String) async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            let fixture = try Self.loadFixture(named: filename)
-            // All four tier fixtures were recorded against gemma-3;
-            // the recorder embeds the modelId for portability across future
-            // multi-tokenizer fixtures. Verify before we load the wrong
-            // container and silently compare against mismatched vocab.
-            #expect(
-                fixture.modelId == TestFixtures.gemmaModelID,
-                "golden fixture \(filename) has modelId \(fixture.modelId); expected \(TestFixtures.gemmaModelID). This replay assumes gemma-3 for all four tiers."
+        try await container.perform { context in
+            let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
+            let tokenizer = try GrammarTokenizer(
+                vocab: vocab.vocab,
+                vocabType: vocab.vocabType,
+                eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
             )
-            let container = try await loadTestModelContainer(id: fixture.modelId)
+            let constraint = try GrammarConstraint(
+                tokenizer: tokenizer,
+                jsonSchema: fixture.schema,
+                fastForward: true,
+                hostTokenizer: context.tokenizer
+            )
 
-            try await container.perform { context in
-                let vocab = TokenizerVocabExtractor.extractForGrammar(from: context.tokenizer)
-                let tokenizer = try GrammarTokenizer(
-                    vocab: vocab.vocab,
-                    vocabType: vocab.vocabType,
-                    eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
-                )
-                let constraint = try GrammarConstraint(
-                    tokenizer: tokenizer,
-                    jsonSchema: fixture.schema,
-                    fastForward: true,
-                    hostTokenizer: context.tokenizer
-                )
+            for step in fixture.steps {
+                let observed = try constraint.computeMask()
 
-                for step in fixture.steps {
-                    let observed = try constraint.computeMask()
+                if step.terminal {
+                    // Terminal step has no commit; the fixture's last
+                    // record captures the post-final-commit state and
+                    // ends. maskIsStop is NOT asserted here because
+                    // xgrammar's IsTerminated() only flips on an explicit
+                    // EOS commit. See the header note for the lifecycle
+                    // divergence.
+                    return
+                }
 
-                    if step.terminal {
-                        // Terminal step has no commit; the fixture's last
-                        // record captures the post-final-commit state and
-                        // ends. maskIsStop is NOT asserted here because
-                        // xgrammar's IsTerminated() only flips on an explicit
-                        // EOS commit. See the header note for the lifecycle
-                        // divergence.
-                        return
-                    }
+                // Termination parity on non-terminal steps: before each
+                // commit, the matcher's live/stopped lifecycle state
+                // must match the fixture. Divergence here would mean
+                // xgrammar prematurely stopped, or the recorded backend
+                // stopped on input xgrammar considers live — a real
+                // bug either side.
+                guard observed.isTerminated == step.maskIsStop else {
+                    Issue.record(
+                        "fixture \(filename) step \(step.stepIndex): maskIsStop divergence — expected \(step.maskIsStop), got \(observed.isTerminated)"
+                    )
+                    return
+                }
 
-                    // Termination parity on non-terminal steps: before each
-                    // commit, the matcher's live/stopped lifecycle state
-                    // must match the fixture. Divergence here would mean
-                    // xgrammar prematurely stopped, or the recorded backend
-                    // stopped on input xgrammar considers live — a real
-                    // bug either side.
-                    guard observed.isTerminated == step.maskIsStop else {
-                        Issue.record(
-                            "fixture \(filename) step \(step.stepIndex): maskIsStop divergence — expected \(step.maskIsStop), got \(observed.isTerminated)"
-                        )
-                        return
-                    }
+                // Non-terminal steps must offer at least one valid
+                // token. An empty mask on a live matcher is an
+                // xgrammar-side bug — surfacing it here gives a
+                // clearer diagnostic than the commit-failure throw
+                // that would follow.
+                guard observed.mask.contains(where: { $0 != 0 }) else {
+                    Issue.record(
+                        "fixture \(filename) step \(step.stepIndex): observed mask is empty on a non-terminal step"
+                    )
+                    return
+                }
 
-                    // Non-terminal steps must offer at least one valid
-                    // token. An empty mask on a live matcher is an
-                    // xgrammar-side bug — surfacing it here gives a
-                    // clearer diagnostic than the commit-failure throw
-                    // that would follow.
-                    guard observed.mask.contains(where: { $0 != 0 }) else {
-                        Issue.record(
-                            "fixture \(filename) step \(step.stepIndex): observed mask is empty on a non-terminal step"
-                        )
-                        return
-                    }
+                guard let committedId = step.committedTokenId else {
+                    Issue.record(
+                        "fixture \(filename) step \(step.stepIndex): non-terminal step must carry committedTokenId"
+                    )
+                    return
+                }
 
-                    guard let committedId = step.committedTokenId else {
-                        Issue.record(
-                            "fixture \(filename) step \(step.stepIndex): non-terminal step must carry committedTokenId"
-                        )
-                        return
-                    }
+                // Functional superset check: if xgrammar's mask
+                // rejected a token the recorded backend committed,
+                // commitToken throws GrammarError.invalidArgument and the
+                // test fails with a clear cause, not a silent drift.
+                let commit = try constraint.commitToken(Int32(committedId))
 
-                    // Functional superset check: if xgrammar's mask
-                    // rejected a token the recorded backend committed,
-                    // commitToken throws GrammarError.invalidArgument and the
-                    // test fails with a clear cause, not a silent drift.
-                    let commit = try constraint.commitToken(Int32(committedId))
+                // Fast-forward parity: byte-for-byte equality. The
+                // recorder already dropped the committed token
+                // itself, so commit.tokens maps 1:1 to the fixture's
+                // ffTokenIds. Agreement here pins the jump-forward
+                // plumbing and the tokenization-boundary logic that
+                // converts xgrammar's raw forced byte-suffix into a
+                // safe token prefix.
+                let observedFF = commit.tokens.map { Int($0) }
+                guard observedFF == step.ffTokenIds else {
+                    Issue.record(
+                        "fixture \(filename) step \(step.stepIndex): ffTokenIds divergence — expected \(step.ffTokenIds), got \(observedFF)"
+                    )
+                    return
+                }
 
-                    // Fast-forward parity: byte-for-byte equality. The
-                    // recorder already dropped the committed token
-                    // itself, so commit.tokens maps 1:1 to the fixture's
-                    // ffTokenIds. Agreement here pins the jump-forward
-                    // plumbing and the tokenization-boundary logic that
-                    // converts xgrammar's raw forced byte-suffix into a
-                    // safe token prefix.
-                    let observedFF = commit.tokens.map { Int($0) }
-                    guard observedFF == step.ffTokenIds else {
-                        Issue.record(
-                            "fixture \(filename) step \(step.stepIndex): ffTokenIds divergence — expected \(step.ffTokenIds), got \(observedFF)"
-                        )
-                        return
-                    }
-
-                    let expectedCommitIsStop = step.commitIsStop ?? false
-                    guard commit.isTerminated == expectedCommitIsStop else {
-                        Issue.record(
-                            "fixture \(filename) step \(step.stepIndex): commitIsStop divergence — expected \(expectedCommitIsStop), got \(commit.isTerminated)"
-                        )
-                        return
-                    }
+                let expectedCommitIsStop = step.commitIsStop ?? false
+                guard commit.isTerminated == expectedCommitIsStop else {
+                    Issue.record(
+                        "fixture \(filename) step \(step.stepIndex): commitIsStop divergence — expected \(expectedCommitIsStop), got \(commit.isTerminated)"
+                    )
+                    return
                 }
             }
-        }
-
-        // MARK: - Fixture loading
-
-        private struct Fixture {
-            let modelId: String
-            let schema: String
-            let document: String
-            let steps: [FixtureStep]
-        }
-
-        private struct FixtureStep {
-            let stepIndex: Int
-            let maskSha256: String
-            let maskAllowedCount: Int
-            let maskAllowedSample: [Int]
-            let maskIsStop: Bool
-            /// nil on the terminal step (the recorder writes
-            /// `"committedTokenId": null`).
-            let committedTokenId: Int?
-            let ffTokenIds: [Int]
-            /// nil on the terminal step.
-            let commitIsStop: Bool?
-            let terminal: Bool
-        }
-
-        private static func loadFixture(named filename: String) throws -> Fixture {
-            // Goldens are bundled as processed resources (see Package.swift
-            // `resources: [.process("Fixtures")]`). `#filePath` does not resolve on
-            // on-device runs — the test process lives in the iOS sandbox.
-            let base = (filename as NSString).deletingPathExtension
-            let ext = (filename as NSString).pathExtension
-            guard let url = fixturesBundle.url(forResource: base, withExtension: ext) else {
-                throw FixtureError.malformed("\(filename): missing from test bundle resources")
-            }
-            let data = try Data(contentsOf: url)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw FixtureError.malformed("\(filename): top-level not an object")
-            }
-            guard let modelId = json["modelId"] as? String,
-                let schema = json["schema"] as? String,
-                let document = json["document"] as? String,
-                let stepsRaw = json["steps"] as? [[String: Any]]
-            else {
-                throw FixtureError.malformed("\(filename): missing modelId/schema/document/steps")
-            }
-
-            var steps: [FixtureStep] = []
-            steps.reserveCapacity(stepsRaw.count)
-            for (i, raw) in stepsRaw.enumerated() {
-                guard let stepIndex = raw["stepIndex"] as? Int,
-                    let maskSha256 = raw["maskSha256"] as? String,
-                    let maskAllowedCount = raw["maskAllowedCount"] as? Int,
-                    let maskAllowedSample = raw["maskAllowedSample"] as? [Int],
-                    let maskIsStop = raw["maskIsStop"] as? Bool,
-                    let ffTokenIds = raw["ffTokenIds"] as? [Int]
-                else {
-                    throw FixtureError.malformed("\(filename): step \(i) missing required fields")
-                }
-                let terminal = (raw["terminal"] as? Bool) ?? false
-                // committedTokenId / commitIsStop arrive as NSNull on the
-                // terminal step; JSONSerialization surfaces NSNull, not
-                // absent key, so test `is NSNull` explicitly.
-                let committedTokenId: Int? = (raw["committedTokenId"] as? Int)
-                let commitIsStop: Bool? = (raw["commitIsStop"] as? Bool)
-
-                steps.append(
-                    FixtureStep(
-                        stepIndex: stepIndex,
-                        maskSha256: maskSha256,
-                        maskAllowedCount: maskAllowedCount,
-                        maskAllowedSample: maskAllowedSample,
-                        maskIsStop: maskIsStop,
-                        committedTokenId: committedTokenId,
-                        ffTokenIds: ffTokenIds,
-                        commitIsStop: commitIsStop,
-                        terminal: terminal
-                    ))
-            }
-
-            return Fixture(modelId: modelId, schema: schema, document: document, steps: steps)
-        }
-
-        private enum FixtureError: Error {
-            case malformed(String)
         }
     }
+
+    // MARK: - Fixture loading
+
+    private struct Fixture {
+        let modelId: String
+        let schema: String
+        let document: String
+        let steps: [FixtureStep]
+    }
+
+    private struct FixtureStep {
+        let stepIndex: Int
+        let maskSha256: String
+        let maskAllowedCount: Int
+        let maskAllowedSample: [Int]
+        let maskIsStop: Bool
+        /// nil on the terminal step (the recorder writes
+        /// `"committedTokenId": null`).
+        let committedTokenId: Int?
+        let ffTokenIds: [Int]
+        /// nil on the terminal step.
+        let commitIsStop: Bool?
+        let terminal: Bool
+    }
+
+    private static func loadFixture(named filename: String) throws -> Fixture {
+        // Goldens are bundled as processed resources (see Package.swift
+        // `resources: [.process("Fixtures")]`). `#filePath` does not resolve on
+        // on-device runs — the test process lives in the iOS sandbox.
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        guard let url = fixturesBundle.url(forResource: base, withExtension: ext) else {
+            throw FixtureError.malformed("\(filename): missing from test bundle resources")
+        }
+        let data = try Data(contentsOf: url)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FixtureError.malformed("\(filename): top-level not an object")
+        }
+        guard let modelId = json["modelId"] as? String,
+            let schema = json["schema"] as? String,
+            let document = json["document"] as? String,
+            let stepsRaw = json["steps"] as? [[String: Any]]
+        else {
+            throw FixtureError.malformed("\(filename): missing modelId/schema/document/steps")
+        }
+
+        var steps: [FixtureStep] = []
+        steps.reserveCapacity(stepsRaw.count)
+        for (i, raw) in stepsRaw.enumerated() {
+            guard let stepIndex = raw["stepIndex"] as? Int,
+                let maskSha256 = raw["maskSha256"] as? String,
+                let maskAllowedCount = raw["maskAllowedCount"] as? Int,
+                let maskAllowedSample = raw["maskAllowedSample"] as? [Int],
+                let maskIsStop = raw["maskIsStop"] as? Bool,
+                let ffTokenIds = raw["ffTokenIds"] as? [Int]
+            else {
+                throw FixtureError.malformed("\(filename): step \(i) missing required fields")
+            }
+            let terminal = (raw["terminal"] as? Bool) ?? false
+            // committedTokenId / commitIsStop arrive as NSNull on the
+            // terminal step; JSONSerialization surfaces NSNull, not
+            // absent key, so test `is NSNull` explicitly.
+            let committedTokenId: Int? = (raw["committedTokenId"] as? Int)
+            let commitIsStop: Bool? = (raw["commitIsStop"] as? Bool)
+
+            steps.append(
+                FixtureStep(
+                    stepIndex: stepIndex,
+                    maskSha256: maskSha256,
+                    maskAllowedCount: maskAllowedCount,
+                    maskAllowedSample: maskAllowedSample,
+                    maskIsStop: maskIsStop,
+                    committedTokenId: committedTokenId,
+                    ffTokenIds: ffTokenIds,
+                    commitIsStop: commitIsStop,
+                    terminal: terminal
+                ))
+        }
+
+        return Fixture(modelId: modelId, schema: schema, document: document, steps: steps)
+    }
+
+    private enum FixtureError: Error {
+        case malformed(String)
+    }
+}
 
 #endif

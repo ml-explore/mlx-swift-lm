@@ -118,217 +118,217 @@ struct TestHuggingFaceTokenizerLoader: MLXLMCommon.TokenizerLoader {
 
 #if FoundationModelsIntegration
 
-    /// Constructs an `MLXLanguageModel` using the test downloader / tokenizer loader
-    /// and a `HubApi.shared.localRepoLocation`-backed `weightsLocation:` closure.
-    ///
-    /// Capabilities default to `[.guidedGeneration, .toolCalling]` (the common
-    /// case for tests that do not exercise reasoning). Pass an explicit set for
-    /// reasoning models or any other shape: capabilities are authoritative.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeTestModel(
-        _ id: String,
-        capabilities: [LanguageModelCapabilities.Capability]? = nil,
-        resolver: (any ModelConfigurationResolver)? = nil
-    ) -> MLXLanguageModel {
-        let resolved = capabilities ?? defaultTestCapabilities()
-        if let resolver {
-            return MLXLanguageModel(
-                configuration: ModelConfiguration(id: id),
-                capabilities: resolved,
-                configurationResolver: resolver,
-                weightsLocation: testWeightsLocation(modelID:),
-                load: testLoad())
-        }
+/// Constructs an `MLXLanguageModel` using the test downloader / tokenizer loader
+/// and a `HubApi.shared.localRepoLocation`-backed `weightsLocation:` closure.
+///
+/// Capabilities default to `[.guidedGeneration, .toolCalling]` (the common
+/// case for tests that do not exercise reasoning). Pass an explicit set for
+/// reasoning models or any other shape: capabilities are authoritative.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeTestModel(
+    _ id: String,
+    capabilities: [LanguageModelCapabilities.Capability]? = nil,
+    resolver: (any ModelConfigurationResolver)? = nil
+) -> MLXLanguageModel {
+    let resolved = capabilities ?? defaultTestCapabilities()
+    if let resolver {
         return MLXLanguageModel(
             configuration: ModelConfiguration(id: id),
             capabilities: resolved,
+            configurationResolver: resolver,
             weightsLocation: testWeightsLocation(modelID:),
             load: testLoad())
     }
+    return MLXLanguageModel(
+        configuration: ModelConfiguration(id: id),
+        capabilities: resolved,
+        weightsLocation: testWeightsLocation(modelID:),
+        load: testLoad())
+}
 
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func defaultTestCapabilities() -> [LanguageModelCapabilities.Capability] {
-        [.guidedGeneration, .toolCalling]
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private func defaultTestCapabilities() -> [LanguageModelCapabilities.Capability] {
+    [.guidedGeneration, .toolCalling]
+}
+
+/// Constructs an `MLXLanguageModel` for a reasoning-capable model id, declaring
+/// `.reasoning` on top of the default capability set. Use for Qwen3 / R1-Distill
+/// tests where `.reasoning` is load-bearing.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeReasoningTestModel(
+    _ id: String,
+    resolver: (any ModelConfigurationResolver)? = nil
+) -> MLXLanguageModel {
+    makeTestModel(
+        id,
+        capabilities: [.reasoning, .guidedGeneration, .toolCalling],
+        resolver: resolver)
+}
+
+/// A `ContainerLoader` backed by the swift-transformers test downloader/tokenizer.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func testLoad() -> MLXLanguageModel.ContainerLoader {
+    { configuration, progress in
+        try await loadModelContainer(
+            from: TestHubDownloader(), using: TestHuggingFaceTokenizerLoader(),
+            configuration: configuration, progressHandler: progress)
     }
+}
 
-    /// Constructs an `MLXLanguageModel` for a reasoning-capable model id, declaring
-    /// `.reasoning` on top of the default capability set. Use for Qwen3 / R1-Distill
-    /// tests where `.reasoning` is load-bearing.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeReasoningTestModel(
-        _ id: String,
-        resolver: (any ModelConfigurationResolver)? = nil
-    ) -> MLXLanguageModel {
-        makeTestModel(
-            id,
-            capabilities: [.reasoning, .guidedGeneration, .toolCalling],
-            resolver: resolver)
-    }
+/// Loads a `ModelContainer` for the given model identifier using the test
+/// downloader/tokenizer pair.
+///
+/// On device (iOS 27), this MUST be invoked from a single xctest worker
+/// process. xcodebuild's default `-parallel-testing-enabled YES` splits test
+/// methods of one test target across N concurrent xctest processes. Each
+/// worker has its own `MLXLanguageModel.cache` (`ModelCache` actor) singleton,
+/// so cross-process dedup of `HubApi.shared.snapshot(...)` does not exist.
+/// Workers then race on the shared device cache at
+/// `/var/root/Documents/huggingface/models/<repo>/`, with multiple concurrent
+/// `Downloader.moveDownloadedFile` calls competing for the same
+/// `<file>.<etag>.incomplete` source. The losers surface as
+/// `NSCocoaErrorDomain Code=4 / NSPOSIXErrorDomain Code=2`
+/// ("'…incomplete' couldn't be moved to '<repoDir>'") inside `HubApi.snapshot`.
+///
+/// The within-snapshot loop is sequential (`HubApi.swift:618-645`) and
+/// `ModelCache.load` is correct, so the race is purely cross-process. Run the
+/// model-dependent tests with parallel testing disabled
+/// (`-parallel-testing-enabled NO`, a single worker) to avoid it.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func loadTestModelContainer(id: String) async throws -> ModelContainer {
+    try await makeTestModel(id).loadContainer()
+}
 
-    /// A `ContainerLoader` backed by the swift-transformers test downloader/tokenizer.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func testLoad() -> MLXLanguageModel.ContainerLoader {
-        { configuration, progress in
-            try await loadModelContainer(
-                from: TestHubDownloader(), using: TestHuggingFaceTokenizerLoader(),
-                configuration: configuration, progressHandler: progress)
-        }
-    }
+// MARK: - Weights Location
 
-    /// Loads a `ModelContainer` for the given model identifier using the test
-    /// downloader/tokenizer pair.
-    ///
-    /// On device (iOS 27), this MUST be invoked from a single xctest worker
-    /// process. xcodebuild's default `-parallel-testing-enabled YES` splits test
-    /// methods of one test target across N concurrent xctest processes. Each
-    /// worker has its own `MLXLanguageModel.cache` (`ModelCache` actor) singleton,
-    /// so cross-process dedup of `HubApi.shared.snapshot(...)` does not exist.
-    /// Workers then race on the shared device cache at
-    /// `/var/root/Documents/huggingface/models/<repo>/`, with multiple concurrent
-    /// `Downloader.moveDownloadedFile` calls competing for the same
-    /// `<file>.<etag>.incomplete` source. The losers surface as
-    /// `NSCocoaErrorDomain Code=4 / NSPOSIXErrorDomain Code=2`
-    /// ("'…incomplete' couldn't be moved to '<repoDir>'") inside `HubApi.snapshot`.
-    ///
-    /// The within-snapshot loop is sequential (`HubApi.swift:618-645`) and
-    /// `ModelCache.load` is correct, so the race is purely cross-process. Run the
-    /// model-dependent tests with parallel testing disabled
-    /// (`-parallel-testing-enabled NO`, a single worker) to avoid it.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func loadTestModelContainer(id: String) async throws -> ModelContainer {
-        try await makeTestModel(id).loadContainer()
-    }
+/// Resolves the on-disk weights directory for a HuggingFace repo. Delegates
+/// to `HubApi.shared.localRepoLocation(_:)` to match the cache layout used by
+/// `TestHubDownloader`'s `HubApi.shared.snapshot` — the two must agree so
+/// `MLXLanguageModel.modelExistsOnDisk()` can probe for `config.json`.
+func testWeightsLocation(modelID: String) -> URL {
+    HubApi.shared.localRepoLocation(HubApi.Repo(id: modelID))
+}
 
-    // MARK: - Weights Location
+// MARK: - Executor Helpers
 
-    /// Resolves the on-disk weights directory for a HuggingFace repo. Delegates
-    /// to `HubApi.shared.localRepoLocation(_:)` to match the cache layout used by
-    /// `TestHubDownloader`'s `HubApi.shared.snapshot` — the two must agree so
-    /// `MLXLanguageModel.modelExistsOnDisk()` can probe for `config.json`.
-    func testWeightsLocation(modelID: String) -> URL {
-        HubApi.shared.localRepoLocation(HubApi.Repo(id: modelID))
-    }
+/// Creates an MLX executor for the given model.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
+    try MLXLanguageModel.Executor(
+        configuration: MLXLanguageModel.Executor.Configuration(
+            modelID: model.modelID)
+    )
+}
 
-    // MARK: - Executor Helpers
+/// Creates a LanguageModelExecutorGenerationRequest with sensible defaults.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func makeExecutorRequest(
+    id: UUID = UUID(),
+    transcript: Transcript,
+    enabledTools: [Transcript.ToolDefinition] = [],
+    schema: GenerationSchema? = nil,
+    generationOptions: GenerationOptions = GenerationOptions(),
+    contextOptions: ContextOptions = ContextOptions(),
+    metadata: [String: any Sendable & Codable & Equatable] = [:]
+) -> LanguageModelExecutorGenerationRequest {
+    LanguageModelExecutorGenerationRequest(
+        id: id,
+        transcript: transcript,
+        enabledTools: enabledTools,
+        schema: schema,
+        generationOptions: generationOptions,
+        contextOptions: contextOptions,
+        metadata: metadata
+    )
+}
 
-    /// Creates an MLX executor for the given model.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeMLXExecutor(for model: MLXLanguageModel) throws -> MLXLanguageModel.Executor {
-        try MLXLanguageModel.Executor(
-            configuration: MLXLanguageModel.Executor.Configuration(
-                modelID: model.modelID)
-        )
-    }
+/// Bundles the framework channel + respond task into a single AsyncSequence.
+///
+/// Termination strategy: `LanguageModelExecutorGenerationChannel` has no
+/// public `finish()`. In production the framework closes the channel after
+/// respond returns; tests bypass the framework, so iterating the channel
+/// directly hangs forever. We relay events into an `AsyncThrowingStream`
+/// that we own. A producer task runs `respond()`, then cancels a collector
+/// task (which relays channel events into our stream). Our stream's
+/// continuation is finished once both tasks settle, so `for try await`
+/// terminates naturally. Early break from iteration cancels both tasks via
+/// `deinit`, so tests that stop reading mid-generation don't waste GPU
+/// compute on tokens nobody wants.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class TestResponseStream: AsyncSequence, @unchecked Sendable {
+    typealias Element = LanguageModelExecutorGenerationChannel.Event
+    typealias AsyncIterator = AsyncThrowingStream<Element, Error>.AsyncIterator
 
-    /// Creates a LanguageModelExecutorGenerationRequest with sensible defaults.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func makeExecutorRequest(
-        id: UUID = UUID(),
-        transcript: Transcript,
-        enabledTools: [Transcript.ToolDefinition] = [],
-        schema: GenerationSchema? = nil,
-        generationOptions: GenerationOptions = GenerationOptions(),
-        contextOptions: ContextOptions = ContextOptions(),
-        metadata: [String: any Sendable & Codable & Equatable] = [:]
-    ) -> LanguageModelExecutorGenerationRequest {
-        LanguageModelExecutorGenerationRequest(
-            id: id,
-            transcript: transcript,
-            enabledTools: enabledTools,
-            schema: schema,
-            generationOptions: generationOptions,
-            contextOptions: contextOptions,
-            metadata: metadata
-        )
-    }
+    private let stream: AsyncThrowingStream<Element, Error>
+    private let producerTask: Task<Void, Never>
+    private let collectorTask: Task<Void, Never>
 
-    /// Bundles the framework channel + respond task into a single AsyncSequence.
-    ///
-    /// Termination strategy: `LanguageModelExecutorGenerationChannel` has no
-    /// public `finish()`. In production the framework closes the channel after
-    /// respond returns; tests bypass the framework, so iterating the channel
-    /// directly hangs forever. We relay events into an `AsyncThrowingStream`
-    /// that we own. A producer task runs `respond()`, then cancels a collector
-    /// task (which relays channel events into our stream). Our stream's
-    /// continuation is finished once both tasks settle, so `for try await`
-    /// terminates naturally. Early break from iteration cancels both tasks via
-    /// `deinit`, so tests that stop reading mid-generation don't waste GPU
-    /// compute on tokens nobody wants.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    final class TestResponseStream: AsyncSequence, @unchecked Sendable {
-        typealias Element = LanguageModelExecutorGenerationChannel.Event
-        typealias AsyncIterator = AsyncThrowingStream<Element, Error>.AsyncIterator
-
-        private let stream: AsyncThrowingStream<Element, Error>
-        private let producerTask: Task<Void, Never>
-        private let collectorTask: Task<Void, Never>
-
-        init(
-            executor: MLXLanguageModel.Executor,
-            request: LanguageModelExecutorGenerationRequest,
-            model: MLXLanguageModel
-        ) {
-            let channel = LanguageModelExecutorGenerationChannel()
-            let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
-            self.stream = stream
-
-            // Collector: relay events from the framework channel into our stream.
-            let collector = Task<Void, Never> {
-                do {
-                    for try await event in channel {
-                        continuation.yield(event)
-                    }
-                } catch {
-                    // Including CancellationError; we don't depend on cancellation here.
-                }
-            }
-            self.collectorTask = collector
-
-            // Producer: run respond(), then finish our stream so the test's
-            // iteration terminates.
-            self.producerTask = Task<Void, Never> {
-                defer { collector.cancel() }
-                do {
-                    try await executor.respond(to: request, model: model, streamingInto: channel)
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
-
-        deinit {
-            producerTask.cancel()
-            collectorTask.cancel()
-        }
-
-        func makeAsyncIterator() -> AsyncIterator {
-            stream.makeAsyncIterator()
-        }
-    }
-
-    /// Starts executor.respond(...) on a background task and returns a wrapper that
-    /// iterates the generation channel. Errors from respond() surface when iteration ends.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func executeResponse(
-        _ executor: MLXLanguageModel.Executor,
+    init(
+        executor: MLXLanguageModel.Executor,
         request: LanguageModelExecutorGenerationRequest,
         model: MLXLanguageModel
-    ) async throws -> TestResponseStream {
-        TestResponseStream(executor: executor, request: request, model: model)
+    ) {
+        let channel = LanguageModelExecutorGenerationChannel()
+        let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
+        self.stream = stream
+
+        // Collector: relay events from the framework channel into our stream.
+        let collector = Task<Void, Never> {
+            do {
+                for try await event in channel {
+                    continuation.yield(event)
+                }
+            } catch {
+                // Including CancellationError; we don't depend on cancellation here.
+            }
+        }
+        self.collectorTask = collector
+
+        // Producer: run respond(), then finish our stream so the test's
+        // iteration terminates.
+        self.producerTask = Task<Void, Never> {
+            defer { collector.cancel() }
+            do {
+                try await executor.respond(to: request, model: model, streamingInto: channel)
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
     }
 
-    // MARK: - GPU Memory Management
-
-    /// Releases all GPU memory: synchronizes pending GPU work, evicts cached models,
-    /// then clears the Metal buffer pool.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func releaseAllGPUMemory() async {
-        Stream.gpu.synchronize()
-        await MLXLanguageModel.evictAll()
-        Stream.gpu.synchronize()
-        GPU.clearCache()
+    deinit {
+        producerTask.cancel()
+        collectorTask.cancel()
     }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        stream.makeAsyncIterator()
+    }
+}
+
+/// Starts executor.respond(...) on a background task and returns a wrapper that
+/// iterates the generation channel. Errors from respond() surface when iteration ends.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func executeResponse(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel
+) async throws -> TestResponseStream {
+    TestResponseStream(executor: executor, request: request, model: model)
+}
+
+// MARK: - GPU Memory Management
+
+/// Releases all GPU memory: synchronizes pending GPU work, evicts cached models,
+/// then clears the Metal buffer pool.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func releaseAllGPUMemory() async {
+    Stream.gpu.synchronize()
+    await MLXLanguageModel.evictAll()
+    Stream.gpu.synchronize()
+    GPU.clearCache()
+}
 
 #endif  // FoundationModelsIntegration
 

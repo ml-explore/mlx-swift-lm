@@ -23,91 +23,91 @@
 
 #if FoundationModelsIntegration
 
-    import Testing
-    import Foundation
-    import MLX
-    import MLXLMCommon
-    @testable import MLXFoundationModels
-    @testable import MLXGuidedGeneration
+import Testing
+import Foundation
+import MLX
+import MLXLMCommon
+@testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
-    @Suite(.serialized, .timeLimit(.minutes(2)))
-    struct EmitStopSignalTests {
+@Suite(.serialized, .timeLimit(.minutes(2)))
+struct EmitStopSignalTests {
 
-        @Test("GuidedGenerationLoop honors emit=false during fast-forward yielding")
-        func emitStopSignalHonoredDuringFastForward() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-            // Const-string schema: after `{` is sampled, the grammar forces
-            // the entire remaining body (`"k":"abcdefghij"}`) as FF. That
-            // guarantees the loop enters the FF yield path on its first
-            // iteration, which is the only path where the stop-signal bug
-            // manifests.
-            let schema = """
-                {
-                  "type": "object",
-                  "properties": { "k": { "const": "abcdefghij" } },
-                  "required": ["k"],
-                  "additionalProperties": false
-                }
-                """
-
-            let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
-
-            try await container.perform { context in
-                let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
-                    modelID: TestFixtures.defaultModelID,
-                    tokenizer: context.tokenizer
-                )
-                let constraint = try GrammarConstraint(
-                    tokenizer: xgTokenizer,
-                    jsonSchema: schema,
-                    fastForward: true,
-                    hostTokenizer: context.tokenizer
-                )
-
-                let messages: [[String: any Sendable]] = [
-                    ["role": "user", "content": "Emit the schema value."]
-                ]
-                let tokens = try context.tokenizer.applyChatTemplate(messages: messages)
-                let input = LMInput(tokens: MLXArray(tokens))
-
-                var callCount = 0
-                var callsAfterFalse = 0
-                var firstFalseAt: Int? = nil
-
-                // Return `true` on the first call so the loop enters at
-                // least one FF yield pass. Return `false` thereafter. Any
-                // call made after `firstFalseAt` is set violates the
-                // stop-signal contract.
-                let tokensGenerated = try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: constraint,
-                    maxTokens: 128,
-                    vocabSize: Int(xgTokenizer.vocabSize)
-                ) { _ in
-                    callCount += 1
-                    if firstFalseAt != nil {
-                        callsAfterFalse += 1
-                    }
-                    if callCount >= 2 {
-                        if firstFalseAt == nil { firstFalseAt = callCount }
-                        return false
-                    }
-                    return true
-                }
-
-                #expect(
-                    callsAfterFalse == 0,
-                    """
-                    emit() returned false on call #\(firstFalseAt ?? -1) but the \
-                    loop continued to call emit \(callsAfterFalse) more time(s). \
-                    The caller's stop signal must halt generation immediately, \
-                    including when it lands during fast-forward yielding. \
-                    tokensGenerated=\(tokensGenerated).
-                    """
-                )
+    @Test("GuidedGenerationLoop honors emit=false during fast-forward yielding")
+    func emitStopSignalHonoredDuringFastForward() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // Const-string schema: after `{` is sampled, the grammar forces
+        // the entire remaining body (`"k":"abcdefghij"}`) as FF. That
+        // guarantees the loop enters the FF yield path on its first
+        // iteration, which is the only path where the stop-signal bug
+        // manifests.
+        let schema = """
+            {
+              "type": "object",
+              "properties": { "k": { "const": "abcdefghij" } },
+              "required": ["k"],
+              "additionalProperties": false
             }
+            """
+
+        let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
+
+        try await container.perform { context in
+            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+                modelID: TestFixtures.defaultModelID,
+                tokenizer: context.tokenizer
+            )
+            let constraint = try GrammarConstraint(
+                tokenizer: xgTokenizer,
+                jsonSchema: schema,
+                fastForward: true,
+                hostTokenizer: context.tokenizer
+            )
+
+            let messages: [[String: any Sendable]] = [
+                ["role": "user", "content": "Emit the schema value."]
+            ]
+            let tokens = try context.tokenizer.applyChatTemplate(messages: messages)
+            let input = LMInput(tokens: MLXArray(tokens))
+
+            var callCount = 0
+            var callsAfterFalse = 0
+            var firstFalseAt: Int? = nil
+
+            // Return `true` on the first call so the loop enters at
+            // least one FF yield pass. Return `false` thereafter. Any
+            // call made after `firstFalseAt` is set violates the
+            // stop-signal contract.
+            let tokensGenerated = try GuidedGenerationLoop.run(
+                input: input,
+                context: context,
+                constraint: constraint,
+                maxTokens: 128,
+                vocabSize: Int(xgTokenizer.vocabSize)
+            ) { _ in
+                callCount += 1
+                if firstFalseAt != nil {
+                    callsAfterFalse += 1
+                }
+                if callCount >= 2 {
+                    if firstFalseAt == nil { firstFalseAt = callCount }
+                    return false
+                }
+                return true
+            }
+
+            #expect(
+                callsAfterFalse == 0,
+                """
+                emit() returned false on call #\(firstFalseAt ?? -1) but the \
+                loop continued to call emit \(callsAfterFalse) more time(s). \
+                The caller's stop signal must halt generation immediately, \
+                including when it lands during fast-forward yielding. \
+                tokensGenerated=\(tokensGenerated).
+                """
+            )
         }
     }
+}
 
 #endif
