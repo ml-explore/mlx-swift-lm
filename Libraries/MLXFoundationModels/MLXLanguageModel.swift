@@ -380,15 +380,24 @@
                     loader: makeContainerLoader())
             }
 
+            /// Sets the process-global MLX buffer-reuse pool limit a single time. A
+            /// `static let` initializer runs lazily and exactly once (thread-safe), so
+            /// repeated model loads don't re-stomp a consumer's own `Memory.cacheLimit`.
+            ///
+            /// Higher = less allocator thrash at the cost of slightly higher resident GPU
+            /// memory. 256MB comfortably holds activations and KV cache for a 3B model
+            /// without forcing pool evictions mid-forward-pass.
+            private static let configureGPUCacheOnce: Void = {
+                MLX.Memory.cacheLimit = 256 * 1024 * 1024
+            }()
+
             private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
                 let configuration = self.configuration
                 let load = self.load
                 return {
-                    // MLX buffer-reuse pool. Higher = less allocator thrash at the cost
-                    // of slightly higher resident GPU memory. 256MB comfortably holds
-                    // activations and KV cache for a 3B model without forcing pool
-                    // evictions mid-forward-pass.
-                    MLX.Memory.cacheLimit = 256 * 1024 * 1024
+                    // Configure the buffer pool once per process rather than on every
+                    // load, so a consumer's own `Memory.cacheLimit` survives our loads.
+                    _ = Self.configureGPUCacheOnce
                     let container = try await load(configuration) { progress in
                         MLXDownloadProgress.report(progress: progress, modelID: configuration.name)
                     }
