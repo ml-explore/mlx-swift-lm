@@ -78,4 +78,48 @@ public class GatedDeltaTests: XCTestCase {
         )
     }
 
+    /// A key head dim that is not a multiple of 32 must use every dim.
+    ///
+    /// The fused kernel distributes Dk over exactly 32 simd lanes
+    /// (`n_per_t = Dk / 32`, integer-truncating), so for Dk = 48 it covers only
+    /// dims 0..<32 and silently drops dims 32..<48. `gatedDeltaUpdate` guards
+    /// against this by routing any non-multiple-of-32 Dk to the ops fallback.
+    /// Proof: perturbing only the trailing `Dk % 32` dims of q/k must change the
+    /// output. Pre-guard the kernel ignores those dims (output unchanged); with
+    /// the guard the ops path uses them (output changes).
+    func testGatedDeltaNonMultipleOf32KeyDimUsesAllDims() throws {
+        let inputs = makeInputs(Dk: 48)
+
+        let (yBase, _) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v,
+            a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias
+        )
+
+        // Perturb only the trailing dims the truncating kernel would drop.
+        var qP = inputs.q
+        var kP = inputs.k
+        qP[0..., 0..., 0..., 32...] = qP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
+        kP[0..., 0..., 0..., 32...] = kP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
+
+        let (yPerturbed, _) = gatedDeltaUpdate(
+            q: qP, k: kP, v: inputs.v,
+            a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias
+        )
+
+        let diff = abs(yBase.asType(.float32) - yPerturbed.asType(.float32)).max()
+        eval(diff)
+        let maxDiff = diff.item(Float.self)
+
+        // Pre-guard: kernel drops dims 32..<48, so the perturbation is invisible
+        // (maxDiff ≈ 0). With the guard: ops fallback uses all dims, output moves.
+        XCTAssertGreaterThan(
+            maxDiff, 1e-3,
+            "Perturbing trailing Dk dims (32..<48) left GDN output unchanged "
+                + "(\(maxDiff) max abs) — Dk % 32 != 0 was routed to the truncating "
+                + "kernel instead of the ops fallback."
+        )
+    }
+
 }
