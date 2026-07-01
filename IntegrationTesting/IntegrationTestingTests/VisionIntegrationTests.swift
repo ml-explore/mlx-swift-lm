@@ -15,10 +15,13 @@ import Testing
     /// declared, proving the labeled-attachment path reaches the already
     /// multimodal MLX pipeline.
     ///
-    /// The input is a synthetic solid-red square built in-memory (no binary
-    /// fixture), and the test asserts the model names the color "red". This
-    /// keeps the adapter end-to-end coverage while removing the photographic
-    /// fixture.
+    /// The input is a synthetic solid-color square built in-memory (no binary
+    /// fixture); the test is parameterized over two colors and asserts the model
+    /// names the matching color as a whole word. Two colors give an implicit
+    /// negative control — a model that always answers "red" fails the blue case —
+    /// and word-level matching keeps "colored"/"coloured" from satisfying a color
+    /// name. This keeps the adapter end-to-end coverage while removing the
+    /// photographic fixture.
     ///
     /// Skipped unless `MLX_RUN_VLM_INTEGRATION=1`, so default CI never downloads
     /// multi-GB weights; run on Apple silicon on demand.
@@ -33,19 +36,37 @@ import Testing
         .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_VLM_INTEGRATION"] == "1"))
     struct VisionIntegrationTests {
 
-        @Test
-        func namesImageColor() async throws {
+        /// Colors exercised by ``namesImageColor(color:)``. `Sendable` with a plain
+        /// `String` raw value so it's a valid parameterized-test argument (`CIColor`
+        /// is not `Sendable`); `ciColor` feeds the image builder and `rawValue` is the
+        /// word the response must contain.
+        enum TestColor: String, CaseIterable, Sendable {
+            case red, blue
+
+            var ciColor: CIColor { self == .red ? .red : .blue }
+        }
+
+        @Test(arguments: TestColor.allCases)
+        func namesImageColor(color: TestColor) async throws {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
             let model = makeTestModel(
                 "mlx-community/gemma-4-e2b-it-4bit",
                 capabilities: [.vision])
             let session = LanguageModelSession(model: model, tools: [], instructions: nil)
-            let redImage = VisionTestImages.solidColor(.red)
+            let image = VisionTestImages.solidColor(color.ciColor)
             let response = try await session.respond {
                 "What color is this image? Reply with just the color name."
-                Attachment(redImage).label("color")
+                Attachment(image).label("color")
             }
-            #expect(response.content.lowercased().contains("red"))
+            // Whole-word match: split on non-letters so trailing punctuation ("red.")
+            // still counts, while "colored"/"coloured" cannot satisfy a color name.
+            let words = Set(
+                response.content.lowercased()
+                    .split(whereSeparator: { !$0.isLetter })
+                    .map(String.init))
+            #expect(
+                words.contains(color.rawValue),
+                "expected the model to name the color \(color.rawValue); got: \(response.content)")
         }
     }
 
