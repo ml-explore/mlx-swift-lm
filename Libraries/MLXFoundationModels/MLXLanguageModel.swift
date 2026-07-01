@@ -580,8 +580,8 @@
             /// `respond` path holds for its entire generation, so a warmup cannot race
             /// a concurrent `respond` on the process-global `Stream.gpu`. The 1-token
             /// generate ends naturally and is consumed to completion — never cancelled
-            /// mid-flight — honoring the Metal teardown invariant (`docs/solutions/002`,
-            /// `004`).
+            /// mid-flight — so a Metal command buffer is never cancelled after commit and
+            /// the stream is drained before teardown.
             ///
             /// Internal by design: it touches process-global Metal and is driven
             /// fire-and-forget by ``Executor/prewarm(model:transcript:)``, reached
