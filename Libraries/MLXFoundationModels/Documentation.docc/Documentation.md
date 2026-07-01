@@ -32,6 +32,10 @@ let session = LanguageModelSession(model: model)
 print(try await session.respond(to: "Explain MLX in one sentence."))
 ```
 
+## Learn More
+
+To learn more about the `LanguageModel` protocol this adapter conforms to, see *[Bring an LLM provider to the Foundation Models framework](https://www.youtube.com/watch?v=u06ZVpSl0J4)* from WWDC26.
+
 ## Requirements
 
 `MLXFoundationModels` builds against the public `FoundationModels`
