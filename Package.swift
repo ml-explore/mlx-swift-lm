@@ -169,17 +169,17 @@ let package = Package(
             path: "Libraries/MLXHuggingFace"
         ),
         // C++ bridge for xgrammar: vendored upstream C++17 source under
-        // Sources/CXGrammar/xgrammar/ compiled directly by SPM, plus our
+        // Libraries/MLXCXGrammar/xgrammar/ compiled directly by SPM, plus our
         // own shim.cc exposing the extern "C" API from xgrammar_c.h.
         //
         // Refresh the vendored tree with scripts/sync-xgrammar-source.sh.
-        // The pinned upstream sha lives in Sources/CXGrammar/xgrammar/VERSION
+        // The pinned upstream sha lives in Libraries/MLXCXGrammar/xgrammar/VERSION
         // and is mirrored in shim.cc's kXGrammarVersion.
         .target(
             name: "MLXCXGrammar",
-            path: "Sources/CXGrammar",
+            path: "Libraries/MLXCXGrammar",
             exclude: [
-                // Compiled via Sources/CXGrammar/grammar_functor_wrapper.cc to
+                // Compiled via Libraries/MLXCXGrammar/grammar_functor_wrapper.cc to
                 // provide out-of-class definitions for static const members that
                 // clang ODR-uses through variadic templates.
                 "xgrammar/cpp/grammar_functor.cc"

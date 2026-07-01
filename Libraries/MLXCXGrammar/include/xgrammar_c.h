@@ -22,7 +22,7 @@ extern "C" {
 
 /*
  * Returns a pointer to the pinned upstream xgrammar commit sha, matching
- * the contents of Sources/CXGrammar/xgrammar/VERSION. The returned pointer
+ * the contents of Libraries/MLXCXGrammar/xgrammar/VERSION. The returned pointer
  * has static storage and must not be freed.
  */
 const char *xg_version(void);

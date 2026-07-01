@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Refreshes Sources/CXGrammar/xgrammar/ from a pinned upstream xgrammar
+# Refreshes Libraries/MLXCXGrammar/xgrammar/ from a pinned upstream xgrammar
 # revision. Run manually when bumping the pinned sha; NOT invoked by
 # swift build. The produced source tree is committed to the repo.
 #
@@ -19,7 +19,7 @@
 #
 # The 3rdparty/dlpack/ submodule is auto-initialized if missing.
 #
-# After syncing, the pinned sha is written to Sources/CXGrammar/xgrammar/VERSION
+# After syncing, the pinned sha is written to Libraries/MLXCXGrammar/xgrammar/VERSION
 # so reviewers can see at a glance which upstream commit is vendored.
 
 set -euo pipefail
@@ -34,7 +34,7 @@ SOURCE_DIR="${2:-$HOME/src/xgrammar}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEST_ROOT="$REPO_ROOT/Sources/CXGrammar/xgrammar"
+DEST_ROOT="$REPO_ROOT/Libraries/MLXCXGrammar/xgrammar"
 
 if [[ ! -d "$SOURCE_DIR/.git" ]]; then
     echo "error: $SOURCE_DIR is not a git checkout." >&2
