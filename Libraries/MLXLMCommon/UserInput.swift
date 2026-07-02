@@ -180,6 +180,11 @@ public struct UserInput {
         // See also UserInput+Audio
     }
 
+    /// Representation of the audio format.
+    public enum AudioFormat: Sendable {
+        case linearPCM
+    }
+
     /// Representation of processing to apply to media.
     public struct Processing: Sendable {
         public var resize: CGSize?
@@ -209,8 +214,8 @@ public struct UserInput {
         /// Number of channels of audio.  If 1, convert to mono
         public var channels = 1
 
-        /// audio format
-        public var audioFormat: AudioFormatID = kAudioFormatLinearPCM
+        /// Audio format
+        public var audioFormat: AudioFormat = .linearPCM
 
         public init() {
         }
