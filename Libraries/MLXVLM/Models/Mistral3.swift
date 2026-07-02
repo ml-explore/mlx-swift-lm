@@ -743,7 +743,24 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
             imageSizes: imageSizes
         )
 
-        let logits = languageModel(inputIds, cache: cache, inputsEmbeds: embeddings)
+        var tokens = inputIds
+        if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
+        let prefillStepSize = windowSize ?? 512
+        let totalPositions = embeddings.dim(1)
+        var processed = 0
+        while totalPositions - processed > 1 {
+            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+            let range = processed ..< (processed + chunkLength)
+            _ = languageModel(
+                tokens[0..., range], cache: cache,
+                inputsEmbeds: embeddings[0..., range, 0...])
+            asyncEval(cache)
+            processed += chunkLength
+        }
+        eval(cache)
+        let logits = languageModel(
+            tokens[0..., processed...], cache: cache,
+            inputsEmbeds: embeddings[0..., processed..., 0...])
         return .logits(.init(logits: logits))
     }
 
@@ -890,12 +907,14 @@ public struct Mistral3MessageGenerator: MessageGenerator {
 
     public func generate(message: Chat.Message) -> Message {
         // For Mistral3 VLM, images come before text in the content
-        [
+        var dictionary: Message = [
             "role": message.role.rawValue,
             "content": message.images.map { _ in
                 ["type": "image"]
             } + [["type": "text", "text": message.content]],
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }
 

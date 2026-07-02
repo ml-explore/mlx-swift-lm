@@ -168,6 +168,29 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[3], 0.0, accuracy: 1e-6)
     }
 
+    func testPresencePenaltyDoesNotMutateLogitsViewSource() {
+        var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
+        processor.prompt(MLXArray([1, 3]))
+
+        let source = MLXArray([
+            0.0 as Float, 1.0 as Float, 2.0 as Float, 3.0 as Float,
+            10.0 as Float, 11.0 as Float, 12.0 as Float, 13.0 as Float,
+        ]).reshaped(1, 2, 4)
+        let logitsView = source[0..., 1, 0...]
+
+        let processed = processor.process(logits: logitsView)
+
+        zip(processed[0].asArray(Float.self), [10.0, 10.5, 12.0, 12.5]).forEach {
+            XCTAssertEqual($0, $1, accuracy: 1e-6)
+        }
+        zip(
+            source.asArray(Float.self),
+            [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0]
+        ).forEach {
+            XCTAssertEqual($0, $1, accuracy: 1e-6)
+        }
+    }
+
     func testFrequencyPenaltyContextPenalizesByTokenCount() {
         var processor = FrequencyPenaltyContext(frequencyPenalty: 0.5, frequencyContextSize: 5)
         processor.prompt(MLXArray([0, 0, 0, 1, 1]))
@@ -281,5 +304,55 @@ public class SampleTests: XCTestCase {
         let afterAppend = processor.process(logits: logits)
         let valuesAfter = afterAppend[0].asArray(Float.self)
         XCTAssertEqual(valuesAfter[2], 2.5, accuracy: 1e-6)
+    }
+
+    // MARK: - Seeded (reproducible) sampling
+
+    /// Flat 4-way distribution so sampling actually varies between draws (not
+    /// argmax-dominated); reproducibility under a fixed seed is then meaningful.
+    private func flatLogits() -> MLXArray {
+        log(MLXArray([0.25, 0.25, 0.25, 0.25] as [Float]))[.newAxis, .ellipsis]
+    }
+
+    private func drawTopP(seed: UInt64?, draws: Int) -> [Int] {
+        let sampler = TopPSampler(temperature: 1.0, seed: seed)
+        let logits = flatLogits()
+        return (0 ..< draws).map { _ in sampler.sample(logits: logits).item(Int.self) }
+    }
+
+    func testTopPSamplerSameSeedIsReproducible() {
+        XCTAssertEqual(drawTopP(seed: 42, draws: 24), drawTopP(seed: 42, draws: 24))
+    }
+
+    func testTopPSamplerDifferentSeedsDiverge() {
+        // Over 24 draws across 4 equiprobable tokens, identical sequences from
+        // distinct seeds would be ~(1/4)^24 — effectively impossible.
+        XCTAssertNotEqual(drawTopP(seed: 1, draws: 24), drawTopP(seed: 2, draws: 24))
+    }
+
+    func testCategoricalSamplerSameSeedIsReproducible() {
+        let logits = flatLogits()
+        func draw(seed: UInt64) -> [Int] {
+            let sampler = CategoricalSampler(temperature: 1.0, seed: seed)
+            return (0 ..< 24).map { _ in sampler.sample(logits: logits).item(Int.self) }
+        }
+        XCTAssertEqual(draw(seed: 7), draw(seed: 7))
+    }
+
+    func testGenerateParametersThreadsSeedToSampler() {
+        let logits = flatLogits()
+        func draw() -> [Int] {
+            let sampler = GenerateParameters(temperature: 1.0, topK: 4, seed: 99).sampler()
+            return (0 ..< 24).map { _ in sampler.sample(logits: logits).item(Int.self) }
+        }
+        // Two independently-built samplers carrying the same seed agree.
+        XCTAssertEqual(draw(), draw())
+    }
+
+    func testNilSeedPreservesUnseededSamplingPath() {
+        // nil seed must remain valid (entropy-seeded) and produce in-range tokens.
+        let tokens = drawTopP(seed: nil, draws: 8)
+        XCTAssertEqual(tokens.count, 8)
+        for t in tokens { XCTAssertTrue((0 ..< 4).contains(t)) }
     }
 }

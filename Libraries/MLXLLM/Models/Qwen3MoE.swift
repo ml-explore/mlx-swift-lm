@@ -143,7 +143,7 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
         }
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 
@@ -348,6 +348,12 @@ public struct Qwen3MoEConfiguration: Codable, Sendable {
         self.normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? false
         self.ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
+    }
+}
+
+extension Qwen3MoEConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen3MoEConfiguration.rope_scaling")
     }
 }
 

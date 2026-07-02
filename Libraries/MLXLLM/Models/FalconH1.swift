@@ -258,6 +258,7 @@ class FalconH1Attention: Module {
     let numKVHeads: Int
     let headDim: Int
     let scale: Float
+    let keyMultiplier: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
@@ -272,6 +273,7 @@ class FalconH1Attention: Module {
         self.numKVHeads = args.numKeyValueHeads
         self.headDim = args.headDim
         self.scale = pow(Float(headDim), -0.5)
+        self.keyMultiplier = args.keyMultiplier
 
         _qProj.wrappedValue = Linear(hiddenSize, numHeads * headDim, bias: args.attentionBias)
         _kProj.wrappedValue = Linear(hiddenSize, numKVHeads * headDim, bias: args.attentionBias)
@@ -291,11 +293,15 @@ class FalconH1Attention: Module {
             maxPositionEmbeddings: args.maxPositionEmbeddings)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+        cache: KVCache? = nil
+    ) -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x)
-        var keys = kProj(x)
+        var keys = kProj(x) * keyMultiplier
         var values = vProj(x)
 
         queries = queries.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
@@ -306,14 +312,11 @@ class FalconH1Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
-
-        var output = MLXFast.scaledDotProductAttention(
+        var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )
@@ -428,7 +431,15 @@ class FalconH1Mixer: Module {
         let paddedInput = concatenated([convState, convInput], axis: 1)
 
         if let cache = cache {
-            cache[0] = paddedInput[0..., (-(convKernelSize - 1))...]
+            let nKeep = convKernelSize - 1
+            if let lengths = cache.currentLengths {
+                let t = paddedInput.dim(1)
+                let ends = clip(lengths, min: 0, max: t - nKeep)
+                let positions = (ends[0..., .newAxis] + MLXArray(0 ..< nKeep))[.ellipsis, .newAxis]
+                cache[0] = contiguous(MLX.takeAlong(paddedInput, positions, axis: 1))
+            } else {
+                cache[0] = contiguous(paddedInput[0..., (-nKeep)..., 0...])
+            }
         }
 
         let convOutput = conv1d(paddedInput)
@@ -441,7 +452,8 @@ class FalconH1Mixer: Module {
         C: MLXArray,
         dt: MLXArray,
         state: MLXArray? = nil,
-        mask: MLXArray? = nil
+        mask: MLXArray? = nil,
+        lengths: MLXArray? = nil
     ) -> (MLXArray, MLXArray) {
         let (batchSize, seqLen, _) = (hiddenStates.dim(0), hiddenStates.dim(1), hiddenStates.dim(2))
 
@@ -459,7 +471,9 @@ class FalconH1Mixer: Module {
             dtBias: dtBias,
             state: state,
             timeStepLimit: timeStepLimit,
-            mask: mask
+            mask: mask,
+            lengths: lengths,
+            step: chunkSize
         )
 
         return (y.reshaped(batchSize, seqLen, intermediateSize), newState)
@@ -504,10 +518,13 @@ class FalconH1Mixer: Module {
             C: C,
             dt: dt,
             state: state,
-            mask: mask
+            mask: mask,
+            lengths: cache?.currentLengths
         )
         if let cache = cache {
             cache[1] = state
+            cache.advance(y.dim(1))
+            cache.offset += y.dim(1)
         }
 
         if let norm = norm {
@@ -577,7 +594,7 @@ class FalconH1DecoderLayer: Module {
     func callAsFunction(
         _ h: MLXArray,
         cache: CacheList?,
-        attnMask: MLXArray?,
+        attnMask: MLXFast.ScaledDotProductAttentionMaskMode,
         mambaMask: MLXArray?
     ) -> MLXArray {
         var residual = h
@@ -598,26 +615,6 @@ class FalconH1DecoderLayer: Module {
         h = feedForward(h)
         return residual + h
     }
-}
-
-// MARK: - Helper Functions
-
-private func createSSMMask(h: MLXArray, cache: ArraysCache?) -> MLXArray? {
-    if let cache = cache {
-        return cache.makeMask(N: h.dim(1))
-    }
-    return nil
-}
-
-private func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
-    let N = h.dim(1)
-    // If cache exists and can make masks, use it
-    // Otherwise for single token, no mask needed
-    // For multi-token, SDPA will handle causal mask internally when nil
-    if N == 1 {
-        return nil
-    }
-    return nil  // Will be handled by SDPA internally when nil
 }
 
 // MARK: - Model
@@ -656,8 +653,7 @@ public class FalconH1ModelInner: Module {
         let cache: [CacheList?] = cache ?? Array(repeating: nil, count: layers.count)
 
         let mambaMask = createSSMMask(h: h, cache: cache[0]?[0] as? MambaCache)
-        let attnMask: MLXArray? = createAttentionMask(
-            h: h, cache: cache[0]?[1] != nil ? [cache[0]![1]] : nil)
+        let attnMask = createAttentionMask(h: h, cache: cache[0]?[1])
 
         for (layer, c) in zip(layers, cache) {
             h = layer(
@@ -673,32 +669,86 @@ public class FalconH1ModelInner: Module {
 }
 
 public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
+    private static let scalingMetadataKey = "mlx_swift_lm.falcon_h1.scaling"
+    private static let scalingMetadataValue = "attention_qkv_runtime_key_v1"
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
     public let model: FalconH1ModelInner
     let configuration: FalconH1Configuration
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: FalconH1Configuration) {
         self.configuration = args
         self.vocabularySize = args.vocabSize
-        self.kvHeads = (0 ..< args.numKeyValueHeads).map { _ in args.numHiddenLayers }
+        self.kvHeads = (0 ..< args.numHiddenLayers).map { _ in args.numKeyValueHeads }
         self.model = FalconH1ModelInner(args)
 
-        _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
+        if !args.tieWordEmbeddings {
+            _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
+        }
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        callAsFunction(inputs, cache: cache, logitsToKeep: 0)
+    }
+
+    public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+        -> LMOutput
+    {
+        let logits = callAsFunction(
+            input.tokens,
+            cache: cache,
+            logitsToKeep: configuration.numLogitsToKeep)
+        return .init(logits: logits)
+    }
+
+    /// Compute logits for the input tokens.
+    ///
+    /// - Parameters:
+    ///   - inputs: token ids, shape `[batch, sequence]`
+    ///   - cache: optional per-layer cache
+    ///   - logitsToKeep: number of trailing positions for which to compute logits.
+    ///     `nil` falls back to the `num_logits_to_keep` configuration value. A non-positive
+    ///     value keeps all positions (useful for perplexity / training evaluation).
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        cache: [KVCache]? = nil,
+        logitsToKeep: Int?
+    ) -> MLXArray {
         let out = model(inputs, cache: cache as? [CacheList])
-        return lmHead(out)
+
+        let keep = logitsToKeep ?? configuration.numLogitsToKeep
+        let hidden: MLXArray
+        if keep > 0 {
+            let start = max(0, out.dim(1) - keep)
+            hidden = out[0..., start..., 0...]
+        } else {
+            hidden = out
+        }
+
+        if let lmHead {
+            return lmHead(hidden)
+        }
+        return model.embedTokens.asLinear(hidden)
+            * (configuration.lmHeadMultiplier / configuration.embeddingMultiplier)
     }
 
     public func makeCache() -> [CacheList] {
         return (0 ..< configuration.numHiddenLayers).map { _ in
             CacheList(MambaCache(), KVCacheSimple())
         }
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+        MLXArray]
+    {
+        if metadata[Self.scalingMetadataKey] == Self.scalingMetadataValue {
+            return weights
+        }
+        return sanitize(weights: weights)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -715,10 +765,15 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
                 param = param * args.embeddingMultiplier
             } else if name.hasSuffix("lm_head.weight") {
                 param = param * args.lmHeadMultiplier
-            } else if name.hasSuffix("q_proj.weight") || name.hasSuffix("k_proj.weight") {
+            } else if name.hasSuffix("q_proj.weight")
+                || name.hasSuffix("k_proj.weight")
+                || name.hasSuffix("v_proj.weight")
+            {
+                // The reference applies attention_in_multiplier to the hidden state before
+                // Q/K/V. Folding it into all three projection weights is equivalent.
+                // The key_multiplier is applied at runtime so that legacy MLX conversions
+                // that did not fold it into the weights are still reference-correct.
                 param = param * args.attentionInMultiplier
-            } else if name.hasSuffix("key_proj.weight") {
-                param = param * args.attentionInMultiplier * args.keyMultiplier
             } else if name.hasSuffix("o_proj.weight") {
                 param = param * args.attentionOutMultiplier
             } else if name.hasSuffix("out_proj.weight") {
@@ -742,7 +797,49 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        model.layers.map { _ in CacheList(MambaCache(), KVCacheSimple()) }
+        let attentionCache = makeAttentionCache(parameters: parameters)
+        return model.layers.map { _ in CacheList(MambaCache(), attentionCache.copy()) }
+    }
+
+    /// Build the attention cache for a single layer, honoring ``GenerateParameters``
+    /// memory controls while leaving the Mamba recurrent cache untouched.
+    private func makeAttentionCache(parameters: GenerateParameters?) -> any KVCache {
+        // Sliding-window attention: only the KV attention cache is bounded. The Mamba
+        // recurrent state retains its full history because it cannot be safely windowed.
+        if let maxKVSize = parameters?.maxKVSize {
+            return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+        }
+
+        // Quantized attention cache. We create it eagerly when quantization starts at
+        // token 0; otherwise a plain KVCacheSimple is allocated and the dynamic
+        // quantizer converts it once `quantizedKVStart` is reached.
+        if let (bits, groupSize) = resolveKVQuantizationParameters(parameters),
+            parameters?.quantizedKVStart == 0
+        {
+            return QuantizedKVCache(groupSize: groupSize, bits: bits)
+        }
+
+        return KVCacheSimple()
+    }
+
+    private func resolveKVQuantizationParameters(_ parameters: GenerateParameters?)
+        -> (bits: Int, groupSize: Int)?
+    {
+        if let scheme = parameters?.kvScheme, let resolved = resolveAffineScheme(scheme) {
+            return resolved
+        }
+        if let bits = parameters?.kvBits {
+            return (bits, parameters?.kvGroupSize ?? 64)
+        }
+        return nil
+    }
+}
+
+extension FalconH1Model: ModelConversionMetadataProvider {
+    public var modelConversionMetadata: [String: String] {
+        [
+            Self.scalingMetadataKey: Self.scalingMetadataValue
+        ]
     }
 }
 

@@ -591,7 +591,11 @@ private enum Vision {
             MLXArray,
             [MLXArray]?
         ) {
-            let e = embeddings(x)
+            // Cast to the patch-embedding weight dtype (bf16) before the encoder,
+            // matching mlx-vlm's `VisionModel.__call__`. `VisionEmbeddings` sums a
+            // float32 conv output with the bf16 position embedding, promoting to
+            // float32 — without this the encoder would run in float32, not bf16.
+            let e = embeddings(x).asType(embeddings.patchEmbedding.weight.dtype)
             let (encoded, hiddenStates) = encoder(
                 e,
                 outputHiddenStates: outputHiddenStates

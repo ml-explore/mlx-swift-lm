@@ -130,7 +130,7 @@ class MiniMaxSparseMoeBlock: Module {
         scores = scores.asType(x.dtype)
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 

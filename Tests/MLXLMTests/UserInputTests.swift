@@ -210,6 +210,51 @@ public class UserInputTests: XCTestCase {
         assertEqual(expected, messages)
     }
 
+    public func testCustomMessageGeneratorsPreserveToolMetadata() throws {
+        let toolCall = ToolCall(
+            function: .init(
+                name: "get_weather",
+                arguments: [
+                    "location": .string("Paris")
+                ]
+            ),
+            id: "call_custom_123"
+        )
+        let assistant = Chat.Message.assistant("Checking weather", toolCalls: [toolCall])
+        let toolResult = Chat.Message.tool(#"{"temperature":18}"#, id: "call_custom_123")
+
+        let generators: [(String, (Chat.Message) -> MLXLMCommon.Message)] = [
+            ("Qwen2VL", { Qwen2VLMessageGenerator().generate(message: $0) }),
+            ("Qwen3VL", { Qwen3VLMessageGenerator().generate(message: $0) }),
+            ("Gemma4", { Gemma4MessageGenerator().generate(message: $0) }),
+            ("FastVLM", { FastVLMMessageGenerator().generate(message: $0) }),
+            ("GlmOcr", { GlmOcrMessageGenerator().generate(message: $0) }),
+            ("Mistral3", { Mistral3MessageGenerator().generate(message: $0) }),
+        ]
+
+        for (name, generate) in generators {
+            let rawAssistant = generate(assistant)
+            XCTAssertEqual(rawAssistant["role"] as? String, "assistant", name)
+            XCTAssertNotNil(rawAssistant["content"], name)
+
+            let calls = try XCTUnwrap(
+                rawAssistant["tool_calls"] as? [[String: any Sendable]], name)
+            XCTAssertEqual(calls.count, 1, name)
+            XCTAssertEqual(calls[0]["id"] as? String, "call_custom_123", name)
+            XCTAssertEqual(calls[0]["type"] as? String, "function", name)
+
+            let function = try XCTUnwrap(calls[0]["function"] as? [String: any Sendable], name)
+            XCTAssertEqual(function["name"] as? String, "get_weather", name)
+            let arguments = try XCTUnwrap(function["arguments"] as? [String: any Sendable], name)
+            XCTAssertEqual(arguments["location"] as? String, "Paris", name)
+
+            let rawToolResult = generate(toolResult)
+            XCTAssertEqual(rawToolResult["role"] as? String, "tool", name)
+            XCTAssertNotNil(rawToolResult["content"], name)
+            XCTAssertEqual(rawToolResult["tool_call_id"] as? String, "call_custom_123", name)
+        }
+    }
+
     // MARK: - Qwen2 Message Generator Tests
 
     public func testQwen2ConversionImage() {
@@ -241,11 +286,11 @@ public class UserInputTests: XCTestCase {
                 "role": "user",
                 "content": [
                     [
-                        "type": "text",
-                        "text": "What is this?",
+                        "type": "image"
                     ],
                     [
-                        "type": "image"
+                        "type": "text",
+                        "text": "What is this?",
                     ],
                 ],
             ],

@@ -238,9 +238,9 @@ public enum ChatSessionTests {
         // If we got tool calls, feed back a tool result and verify the model responds
         if !toolCalls.isEmpty {
             let followUp = try await streamAndCollect(
-                session.streamResponse(
-                    to: "Foggy with a high in the low 60s, clearing later in the day",
-                    role: .tool, images: [], videos: []),
+                session.streamResponse(to: [
+                    .tool("Foggy with a high in the low 60s, clearing later in the day")
+                ]),
                 label: "Tool result")
             try check(
                 !followUp.isEmpty,
@@ -871,3 +871,176 @@ private let timeToolSchema: ToolSpec = [
 ]
 
 private let multiToolSchemas: [ToolSpec] = [weatherToolSchema, timeToolSchema]
+
+// MARK: - Hugging Face cache locations
+
+/// Returns the root directory for Hugging Face caches (`~/.cache/huggingface`).
+///
+/// `FileManager.homeDirectoryForCurrentUser` is unavailable on iOS, so this helper
+/// falls back to `NSHomeDirectory()`. On macOS that resolves to the real user home
+/// (matching the `huggingface_hub` Python client's default cache layout); on iOS it
+/// resolves to the app sandbox home, where these integration tests do not normally run
+/// but where the path is at least addressable for callers that pre-populate caches.
+public func hfCacheDir() -> URL {
+    URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        .appendingPathComponent(".cache/huggingface", isDirectory: true)
+}
+
+/// Returns the local snapshot directory for `modelId` inside the Hugging Face hub cache,
+/// following the `models--{owner}--{name}/snapshots/{rev}` layout written by `huggingface_hub`.
+/// When `revision` is `nil` (the default) picks the first entry under `snapshots/` — sufficient
+/// for the usual single-revision case.
+/// When `revision` is non-nil, returns that specific snapshot directory if it exists.
+/// Returns `nil` when the model (or the requested revision) is not present in the cache.
+public func hfSnapshotDir(modelId: String, revision: String? = nil) -> URL? {
+    let folderName = "models--" + modelId.replacingOccurrences(of: "/", with: "--")
+    let snapshots = hfCacheDir()
+        .appendingPathComponent("hub", isDirectory: true)
+        .appendingPathComponent(folderName, isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+    if let revision {
+        let pinned = snapshots.appendingPathComponent(revision, isDirectory: true)
+        var isDir: ObjCBool = false
+        guard
+            FileManager.default.fileExists(atPath: pinned.path, isDirectory: &isDir),
+            isDir.boolValue
+        else { return nil }
+        return pinned
+    }
+    guard
+        let entries = try? FileManager.default.contentsOfDirectory(
+            at: snapshots, includingPropertiesForKeys: nil)
+    else { return nil }
+    return entries.first
+}
+
+// MARK: - Dataset download
+
+public enum IntegrationTestDatasetError: LocalizedError {
+    case listingFailed(repo: String, statusCode: Int)
+    case downloadFailed(file: String, statusCode: Int)
+    case noFilesMatched(repo: String, patterns: [String])
+
+    public var errorDescription: String? {
+        switch self {
+        case .listingFailed(let repo, let statusCode):
+            return "Failed to list files for dataset '\(repo)' (HTTP \(statusCode))"
+        case .downloadFailed(let file, let statusCode):
+            return "Failed to download '\(file)' from dataset (HTTP \(statusCode))"
+        case .noFilesMatched(let repo, let patterns):
+            return "No files in dataset '\(repo)' matched patterns \(patterns)"
+        }
+    }
+}
+
+/// Download a public Hugging Face dataset snapshot to a per-revision local cache.
+///
+/// Lists files via `huggingface.co/api/datasets/{repo}/tree/{revision}`, then
+/// downloads each file matching `patterns` (or all files if `patterns` is empty)
+/// from `huggingface.co/datasets/{repo}/resolve/{revision}/{file}`. Files are
+/// written to `~/.cache/huggingface/integration-test-datasets/{repo}/{revision}/`.
+/// Already-cached files are reused without a second HTTP fetch.
+///
+/// Pattern syntax: simple shell-style glob with `*` matching any sequence
+/// (including `/`). Examples: `"masks/*.safetensors"`, `"*.json"`, `"foo/bar"`.
+///
+/// Returns the snapshot directory URL; callers build per-file paths by
+/// appending the file path (e.g. `snapshotDir.appendingPathComponent("masks/q1.safetensors")`).
+///
+/// Tests using this helper should catch thrown errors and skip via
+/// `Issue.record(...)` rather than propagate — network unavailability or HF
+/// outages should not surface as parity-test failures.
+public func downloadDataset(
+    repo: String,
+    revision: String,
+    matching patterns: [String] = []
+) async throws -> URL {
+    let cacheRoot = hfCacheDir()
+        .appendingPathComponent("integration-test-datasets", isDirectory: true)
+    let snapshotDir =
+        cacheRoot
+        .appendingPathComponent(repo, isDirectory: true)
+        .appendingPathComponent(revision, isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: snapshotDir, withIntermediateDirectories: true)
+
+    let host = URL(string: "https://huggingface.co")!
+    let treeBase = host.appendingPathComponent("api/datasets/\(repo)/tree/\(revision)")
+    var treeComponents = URLComponents(url: treeBase, resolvingAgainstBaseURL: false)!
+    treeComponents.queryItems = [URLQueryItem(name: "recursive", value: "true")]
+    let treeURL = treeComponents.url!
+    var request = URLRequest(url: treeURL)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    let (treeData, treeResp) = try await URLSession.shared.data(for: request)
+    let treeStatus = (treeResp as? HTTPURLResponse)?.statusCode ?? 0
+    guard treeStatus == 200 else {
+        throw IntegrationTestDatasetError.listingFailed(repo: repo, statusCode: treeStatus)
+    }
+
+    struct TreeEntry: Decodable {
+        let type: String
+        let path: String
+    }
+    let entries = try JSONDecoder().decode([TreeEntry].self, from: treeData)
+    let matched =
+        entries
+        .filter { $0.type == "file" }
+        .map(\.path)
+        .filter { path in
+            patterns.isEmpty
+                || patterns.contains { datasetPathMatches(path, glob: $0) }
+        }
+    guard !matched.isEmpty else {
+        throw IntegrationTestDatasetError.noFilesMatched(repo: repo, patterns: patterns)
+    }
+
+    for file in matched {
+        let dest = snapshotDir.appendingPathComponent(file)
+        if FileManager.default.fileExists(atPath: dest.path) { continue }
+        try FileManager.default.createDirectory(
+            at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fileURL = host.appendingPathComponent("datasets/\(repo)/resolve/\(revision)/\(file)")
+        let (tmp, resp) = try await URLSession.shared.download(from: fileURL)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw IntegrationTestDatasetError.downloadFailed(file: file, statusCode: status)
+        }
+        // Concurrent callers may have populated `dest` between the existence
+        // check above and this move. Accept the lost race instead of erroring.
+        do {
+            try FileManager.default.moveItem(at: tmp, to: dest)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            if !FileManager.default.fileExists(atPath: dest.path) {
+                throw error
+            }
+        }
+    }
+
+    return snapshotDir
+}
+
+private func datasetPathMatches(_ path: String, glob pattern: String) -> Bool {
+    let parts = pattern.split(separator: "*", omittingEmptySubsequences: false).map(String.init)
+    if parts.count == 1 { return path == pattern }
+    var cursor = path.startIndex
+    for (i, part) in parts.enumerated() {
+        if part.isEmpty {
+            if i == 0 || i == parts.count - 1 { continue }
+            continue
+        }
+        if i == 0 {
+            guard path[cursor...].hasPrefix(part) else { return false }
+            cursor = path.index(cursor, offsetBy: part.count)
+        } else if i == parts.count - 1 {
+            return path[cursor...].hasSuffix(part)
+        } else {
+            guard let r = path.range(of: part, range: cursor ..< path.endIndex) else {
+                return false
+            }
+            cursor = r.upperBound
+        }
+    }
+    return true
+}

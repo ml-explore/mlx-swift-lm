@@ -36,8 +36,11 @@ let package = Package(
             targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.4")),
+        // 602.0.0 floor: swift.org publishes signed prebuilt swift-syntax artifacts only for
+        // >= 602 tags on current toolchains; a 600.x/601.x resolution falls back to the full
+        // source compile of swift-syntax.
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "602.0.0" ..< "604.0.0"),
     ],
     targets: [
         .target(

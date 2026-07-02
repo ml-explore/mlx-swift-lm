@@ -1135,7 +1135,19 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: input.image?.pixels,
             mask: input.text.mask
         )
-        let result = languageModel(nil, cache: cache, inputEmbedding: embeddings)
+        let prefillStepSize = windowSize ?? 512
+        let totalPositions = embeddings.dim(1)
+        var processed = 0
+        while totalPositions - processed > 1 {
+            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+            let range = processed ..< (processed + chunkLength)
+            _ = languageModel(nil, cache: cache, inputEmbedding: embeddings[0..., range, 0...])
+            asyncEval(cache)
+            processed += chunkLength
+        }
+        eval(cache)
+        let result = languageModel(
+            nil, cache: cache, inputEmbedding: embeddings[0..., processed..., 0...])
         return .logits(result)
     }
 
@@ -1165,8 +1177,10 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
 /// - Image precedes text content
 /// - Empty system messages are removed - the chat template applies a default one in this case
 public struct FastVLMMessageGenerator: MessageGenerator {
+    public init() {}
+
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        [
+        var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": []
                 + message.images.map { _ in
@@ -1174,6 +1188,8 @@ public struct FastVLMMessageGenerator: MessageGenerator {
                 }
                 + [["type": "text", "text": message.content]],
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 
     public func generate(messages: [Chat.Message]) -> [MLXLMCommon.Message] {

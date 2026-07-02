@@ -11,7 +11,7 @@ import MLX
 ///
 /// Speculative decoding uses a small draft model to propose candidate tokens
 /// that the main model then verifies in a single forward pass, providing a
-/// ~2–3× generation speedup with no quality degradation.
+/// speedup with no quality degradation when both models fit comfortably in memory.
 ///
 /// Both models must share the same tokenizer vocabulary.
 ///
@@ -25,18 +25,99 @@ import MLX
 ///     speculativeDecoding: SpeculativeDecodingConfig(draftModel: draft, numDraftTokens: 5)
 /// )
 /// ```
+///
+/// To avoid loading a draft model that would exceed a memory policy, pass a
+/// byte estimate and a loader closure:
+///
+/// ```swift
+/// let session = ChatSession(
+///     main,
+///     speculativeDecoding: SpeculativeDecodingConfig(
+///         draftModelBytes: estimatedDraftBytes,
+///         memoryPolicy: .recommendedWorkingSet
+///     ) {
+///         try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+///     }
+/// )
+/// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
-    /// The lightweight model used to propose candidate tokens.
-    public let draftModel: ModelContainer
+    package enum DraftModelSource: Sendable {
+        case loaded(ModelContainer)
+        case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
+    }
+
+    package let draftModelSource: DraftModelSource
+
+    /// The lightweight model used to propose candidate tokens, when it was provided eagerly.
+    ///
+    /// Configurations initialized with a loader closure return `nil` because the
+    /// draft model is loaded asynchronously by ``ChatSession`` only when speculation
+    /// is admitted by the memory policy.
+    public var draftModel: ModelContainer? {
+        if case .loaded(let draftModel) = draftModelSource {
+            return draftModel
+        }
+        return nil
+    }
 
     /// Number of tokens proposed by the draft model per verification cycle.
     /// The default value of 5 offers a good balance between speed and accuracy.
     public let numDraftTokens: Int
 
-    public init(draftModel: ModelContainer, numDraftTokens: Int = 5) {
-        self.draftModel = draftModel
+    /// Optional memory policy used to decide whether auxiliary-model speculation should run.
+    /// Pass `.recommendedWorkingSet` to fall back to regular generation when
+    /// the combined main and draft model parameters exceed the recommended
+    /// working set.
+    public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
+
+    public init(
+        draftModel: ModelContainer,
+        numDraftTokens: Int = 5,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+    ) {
+        self.draftModelSource = .loaded(draftModel)
         self.numDraftTokens = numDraftTokens
+        self.memoryPolicy = memoryPolicy
+    }
+
+    /// Initialize speculative decoding with a draft model loader.
+    ///
+    /// When a memory policy is present, `draftModelBytes` lets `ChatSession`
+    /// decide whether to use speculative decoding before it loads the draft
+    /// model. This is the preferred initializer when the draft model may not fit
+    /// comfortably beside the main model.
+    ///
+    /// - Parameters:
+    ///   - draftModelBytes: estimated resident parameter bytes for the draft model
+    ///   - numDraftTokens: number of tokens proposed by the draft model per verification cycle
+    ///   - memoryPolicy: optional memory policy used before loading the draft model
+    ///   - loadDraftModel: closure that loads the draft model only if speculation is admitted
+    public init(
+        draftModelBytes: Int,
+        numDraftTokens: Int = 5,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        loadDraftModel: @escaping @Sendable () async throws -> ModelContainer
+    ) {
+        self.draftModelSource = .deferred(bytes: max(0, draftModelBytes), loadDraftModel)
+        self.numDraftTokens = numDraftTokens
+        self.memoryPolicy = memoryPolicy
+    }
+
+    package var estimatedDraftModelBytes: Int? {
+        guard case .deferred(let bytes, _) = draftModelSource else {
+            return nil
+        }
+        return bytes
+    }
+
+    package func loadDraftModel() async throws -> ModelContainer {
+        switch draftModelSource {
+        case .loaded(let draftModel):
+            draftModel
+        case .deferred(_, let load):
+            try await load()
+        }
     }
 }
 
@@ -75,6 +156,7 @@ public final class ChatSession {
     private let model: ModelContainer
     public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
+    private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
     public var additionalContext: [String: any Sendable]?
@@ -108,6 +190,7 @@ public final class ChatSession {
         self.model = model
         self.instructions = instructions
         self.cache = .init(.empty)
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -140,6 +223,7 @@ public final class ChatSession {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
         self.cache = .init(.empty)
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -176,6 +260,7 @@ public final class ChatSession {
         self.model = model
         self.instructions = instructions
         self.cache = .init(.history(history))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -212,6 +297,7 @@ public final class ChatSession {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
         self.cache = .init(.history(history))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -228,7 +314,7 @@ public final class ChatSession {
     ///
     /// > Important: If the cache was built from a session that already included system
     /// > instructions, do not pass the same `instructions` here — they would be
-    /// > re-tokenized on each call to ``respond(to:role:images:videos:)`` without matching
+    /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
     /// > KV state, producing incoherent output.
     ///
     /// - Parameters:
@@ -257,6 +343,7 @@ public final class ChatSession {
         self.model = model
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -273,7 +360,7 @@ public final class ChatSession {
     ///
     /// > Important: If the cache was built from a session that already included system
     /// > instructions, do not pass the same `instructions` here — they would be
-    /// > re-tokenized on each call to ``respond(to:role:images:videos:)`` without matching
+    /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
     /// > KV state, producing incoherent output.
     ///
     /// - Parameters:
@@ -302,6 +389,7 @@ public final class ChatSession {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -317,16 +405,18 @@ public final class ChatSession {
     ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
+    ///   - audios: list of audios (for use with VLMs)
     /// - Returns: the model's response
     public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
         images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video]
+        videos: consuming [UserInput.Video],
+        audios: consuming [UserInput.Audio]
     ) async throws -> String {
         var output = ""
         for try await chunk in streamResponse(
-            to: prompt, role: role, images: images, videos: videos
+            to: prompt, role: role, images: images, videos: videos, audios: audios
         ) {
             output += chunk
         }
@@ -340,19 +430,44 @@ public final class ChatSession {
     ///   - role: the message role (defaults to `.user`)
     ///   - image: optional image (for use with VLMs)
     ///   - video: optional video (for use with VLMs)
+    ///   - audio: optional audio (for use with VLMs)
     /// - Returns: the model's response
     public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        image: UserInput.Image? = nil,
-        video: UserInput.Video? = nil
+        image: consuming UserInput.Image? = nil,
+        video: consuming UserInput.Video? = nil,
+        audio: consuming UserInput.Audio? = nil
     ) async throws -> String {
         try await respond(
             to: prompt,
             role: role,
             images: image.map { [$0] } ?? [],
-            videos: video.map { [$0] } ?? []
+            videos: video.map { [$0] } ?? [],
+            audios: audio.map { [$0] } ?? []
         )
+    }
+
+    /// Produces a response after appending a batch of structured chat messages.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Important: Initializing a new session from history must prefill that
+    ///   history once. Reuse the same session with this method for subsequent
+    ///   tool or agent turns to avoid repeatedly pre-filling the accumulated
+    ///   transcript.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: the model's response
+    public func respond(
+        to messages: consuming [Chat.Message]
+    ) async throws -> String {
+        var output = ""
+        for try await chunk in streamResponse(to: messages) {
+            output += chunk
+        }
+        return output
     }
 
     /// Produces a streaming response to a prompt as Strings.
@@ -362,14 +477,31 @@ public final class ChatSession {
     ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
+    ///   - audios: list of audios (for use with VLMs)
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video]
+        images: consuming [UserInput.Image] = [],
+        videos: consuming [UserInput.Video] = [],
+        audios: consuming [UserInput.Audio] = []
     ) -> AsyncThrowingStream<String, Error> {
-        streamMap(to: prompt, role: role, images: images, videos: videos) {
+        streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
+            $0.chunk
+        }
+    }
+
+    /// Produces a streaming response after appending a batch of structured chat messages.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: a stream of string chunks from the model
+    public func streamResponse(
+        to messages: consuming [Chat.Message]
+    ) -> AsyncThrowingStream<String, Error> {
+        streamMap(messages: messages) {
             $0.chunk
         }
     }
@@ -381,14 +513,31 @@ public final class ChatSession {
     ///   - role: the message role (defaults to `.user`)
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
+    ///   - audios: list of audios (for use with VLMs)
     /// - Returns: a stream of `Generation` from the model
     public func streamDetails(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video]
+        images: consuming [UserInput.Image] = [],
+        videos: consuming [UserInput.Video] = [],
+        audios: consuming [UserInput.Audio] = [],
     ) -> AsyncThrowingStream<Generation, Error> {
-        streamMap(to: prompt, role: role, images: images, videos: videos) {
+        streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
+            $0
+        }
+    }
+
+    /// Produces a streaming response after appending a batch of structured chat messages as `Generation`.
+    ///
+    /// Use this to continue an existing session with non-user roles, such as one
+    /// or more tool results, while preserving the session's KV cache.
+    ///
+    /// - Parameter messages: chat messages to append before generation
+    /// - Returns: a stream of `Generation` from the model
+    public func streamDetails(
+        to messages: consuming [Chat.Message]
+    ) -> AsyncThrowingStream<Generation, Error> {
+        streamMap(messages: messages) {
             $0
         }
     }
@@ -400,27 +549,39 @@ public final class ChatSession {
     ///   - prompt: the user prompt
     ///   - images: list of images (for use with VLMs)
     ///   - videos: list of videos (for use with VLMs)
+    ///   - audios: list of audios (for use with VLMs)
     /// - Returns: a stream of transformed values from the model
     private func streamMap<R: Sendable>(
         to prompt: String,
         role: Chat.Message.Role,
-        images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video],
+        images: consuming [UserInput.Image] = [],
+        videos: consuming [UserInput.Video] = [],
+        audios: consuming [UserInput.Audio] = [],
+        transform: @Sendable @escaping (Generation) -> R?
+    ) -> AsyncThrowingStream<R, Error> {
+        streamMap(
+            messages: [
+                .init(role: role, content: prompt, images: images, videos: videos, audios: audios)
+            ],
+            transform: transform
+        )
+    }
+
+    private func streamMap<R: Sendable>(
+        messages: consuming [Chat.Message],
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
-        let message = SendableBox<Chat.Message>(
-            .init(role: role, content: prompt, images: images, videos: videos)
-        )
+        let inputMessages = SendableBox<[Chat.Message]>(messages)
 
         let task = Task {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, generateParameters, speculativeDecoding
+                additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
             ] in
             do {
                 try await cache.update { cache in
@@ -471,64 +632,126 @@ public final class ChatSession {
                     }
 
                     // prepare the input
-                    messages.append(message.consume())
+                    messages.append(contentsOf: inputMessages.consume())
 
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
                         let userInput = UserInput(
-                            chat: messages, processing: processing,
+                            chat: messages,
+                            processing: processing,
                             tools: tools, additionalContext: additionalContext)
                         let input = try await processor.prepare(input: userInput)
                         messages.removeAll()
 
                         // Select the token iterator based on speculative decoding configuration.
                         let (genStream, genTask): (AsyncStream<Generation>, Task<Void, Never>)
-
-                        if let speculativeDecoding {
-                            // Extract the draft model from its container (same pattern as the main model).
-                            let draftModel = await speculativeDecoding.draftModel.perform {
-                                context in
-                                SendableBox(context.model)
-                            }.consume()
-
-                            // Allocate the draft KV cache once and reuse it across turns,
-                            // exactly like the main model's KV cache.
-                            if draftKVCache == nil {
-                                draftKVCache = draftModel.newCache(parameters: generateParameters)
-                                cache = .kvcache(kvCache, draftKVCache: draftKVCache)
-                            }
-                            let draftCache = draftKVCache!
-
-                            let iterator = try SpeculativeTokenIterator(
-                                input: input,
-                                mainModel: model,
-                                draftModel: draftModel,
-                                mainCache: kvCache,
-                                draftCache: draftCache,
-                                parameters: generateParameters,
-                                numDraftTokens: speculativeDecoding.numDraftTokens
-                            )
-
-                            (genStream, genTask) = MLXLMCommon.generateTask(
-                                promptTokenCount: input.text.tokens.size,
-                                modelConfiguration: modelConfiguration,
-                                tokenizer: tokenizer,
-                                iterator: iterator,
-                                tools: tools
-                            )
-                        } else {
-                            // Standard path with no speculative decoding.
+                        func defaultGeneration() throws -> (
+                            AsyncStream<Generation>, Task<Void, Never>
+                        ) {
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
                                 parameters: generateParameters)
 
-                            (genStream, genTask) = MLXLMCommon.generateTask(
+                            return MLXLMCommon.generateTask(
                                 promptTokenCount: input.text.tokens.size,
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
                                 iterator: iterator,
                                 tools: tools
                             )
+                        }
+
+                        if let speculativeDecoding {
+                            var shouldFallBackBeforeLoadingDraft = false
+                            if let memoryPolicy = speculativeDecoding.memoryPolicy,
+                                let draftModelBytes =
+                                    speculativeDecoding.estimatedDraftModelBytes
+                            {
+                                let memoryEvaluation = memoryPolicy.evaluate(
+                                    mainModelBytes:
+                                        SpeculativeDecodingMemoryPolicy
+                                        .modelWeightBytes(model),
+                                    draftModelBytes: draftModelBytes
+                                )
+                                if !memoryEvaluation.shouldUseSpeculativeDecoding {
+                                    if memoryEvaluation.action == .fail {
+                                        throw SpeculativeDecodingMemoryError(
+                                            evaluation: memoryEvaluation)
+                                    }
+
+                                    shouldFallBackBeforeLoadingDraft = true
+                                }
+                            }
+
+                            if shouldFallBackBeforeLoadingDraft {
+                                (genStream, genTask) = try defaultGeneration()
+                            } else {
+                                let cachedDraftContainer = await loadedDraftModel.read { $0 }
+                                let draftContainer: ModelContainer
+                                if let cachedDraftContainer {
+                                    draftContainer = cachedDraftContainer
+                                } else {
+                                    draftContainer = try await speculativeDecoding.loadDraftModel()
+                                }
+
+                                // Extract the draft model from its container (same pattern as the main model).
+                                let draftModel = await draftContainer.perform { context in
+                                    SendableBox(context.model)
+                                }.consume()
+
+                                let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
+                                    mainModel: model,
+                                    draftModel: draftModel
+                                )
+                                if let memoryEvaluation,
+                                    !memoryEvaluation.shouldUseSpeculativeDecoding
+                                {
+                                    if memoryEvaluation.action == .fail {
+                                        throw SpeculativeDecodingMemoryError(
+                                            evaluation: memoryEvaluation)
+                                    }
+
+                                    (genStream, genTask) = try defaultGeneration()
+                                } else {
+                                    if cachedDraftContainer == nil {
+                                        await loadedDraftModel.update { storedDraftModel in
+                                            if storedDraftModel == nil {
+                                                storedDraftModel = draftContainer
+                                            }
+                                        }
+                                    }
+
+                                    // Allocate the draft KV cache once and reuse it across turns,
+                                    // exactly like the main model's KV cache.
+                                    if draftKVCache == nil {
+                                        draftKVCache = draftModel.newCache(
+                                            parameters: generateParameters)
+                                        cache = .kvcache(kvCache, draftKVCache: draftKVCache)
+                                    }
+                                    let draftCache = draftKVCache!
+
+                                    let iterator = try SpeculativeTokenIterator(
+                                        input: input,
+                                        mainModel: model,
+                                        draftModel: draftModel,
+                                        mainCache: kvCache,
+                                        draftCache: draftCache,
+                                        parameters: generateParameters,
+                                        numDraftTokens: speculativeDecoding.numDraftTokens
+                                    )
+
+                                    (genStream, genTask) = MLXLMCommon.generateTask(
+                                        promptTokenCount: input.text.tokens.size,
+                                        modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer,
+                                        iterator: iterator,
+                                        tools: tools
+                                    )
+                                }
+                            }
+                        } else {
+                            // Standard path with no speculative decoding.
+                            (genStream, genTask) = try defaultGeneration()
                         }
 
                         var pendingToolCalls: [ToolCall] = []
@@ -557,7 +780,7 @@ public final class ChatSession {
                         {
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
-                                messages.append(.tool(toolResult))
+                                messages.append(.tool(toolResult, id: toolCall.id))
                             }
                             continue restart
                         }
@@ -583,16 +806,19 @@ public final class ChatSession {
     ///   - prompt: the user prompt
     ///   - image: optional image (for use with VLMs)
     ///   - video: optional video (for use with VLMs)
+    ///   - audio: optional audio (for use with VLMs)
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
-        image: UserInput.Image? = nil,
-        video: UserInput.Video? = nil
+        image: consuming UserInput.Image? = nil,
+        video: consuming UserInput.Video? = nil,
+        audio: consuming UserInput.Audio? = nil
     ) -> AsyncThrowingStream<String, Error> {
         streamResponse(
             to: prompt,
             images: image.map { [$0] } ?? [],
-            videos: video.map { [$0] } ?? []
+            videos: video.map { [$0] } ?? [],
+            audios: audio.map { [$0] } ?? [],
         )
     }
 

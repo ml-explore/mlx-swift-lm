@@ -24,7 +24,7 @@ class Qwen3Attention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
-    let rope: RoPE
+    let rope: RoPELayer
 
     public init(_ args: Qwen3Configuration) {
         self.args = args
@@ -44,22 +44,13 @@ class Qwen3Attention: Module {
         _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
         _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
-        let ropeScale: Float
-        if let ropeScaling = args.ropeScaling, ropeScaling["type"] == .string("linear"),
-            let factor = ropeScaling["factor"]
-        {
-            if let v = factor.asFloat() {
-                ropeScale = 1 / v
-            } else {
-                fatalError("ropeScaling.factor must be a float")
-            }
-        } else {
-            ropeScale = 1
-        }
-
-        self.rope = RoPE(
-            dimensions: headDim, traditional: false, base: args.ropeTheta,
-            scale: ropeScale)
+        self.rope = initializeRope(
+            dims: headDim,
+            base: args.ropeTheta,
+            traditional: false,
+            scalingConfig: args.ropeScaling,
+            maxPositionEmbeddings: args.maxPositionEmbeddings
+        )
     }
 
     public func callAsFunction(
@@ -273,6 +264,12 @@ public struct Qwen3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         self.maxPositionEmbeddings =
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
+    }
+}
+
+extension Qwen3Configuration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        try validateRoPEConfiguration(ropeScaling, context: "Qwen3Configuration.rope_scaling")
     }
 }
 

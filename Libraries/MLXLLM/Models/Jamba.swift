@@ -325,8 +325,9 @@ class JambaMambaMixer: Module {
             x, convState: convState, ssmState: ssmState)
 
         if let cache = cache {
-            cache[0] = newConvState
+            cache[0] = contiguous(newConvState)
             cache[1] = newSsmState
+            cache.advance(x.dim(1))
         }
 
         return output
@@ -359,7 +360,7 @@ class JambaSparseMoeBlock: Module {
         scores = MLX.softmax(scores, axis: -1, precise: true)
 
         let y = switchMLP(x, inds)
-        return (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        return weightedExpertSum(y, scores)
     }
 }
 

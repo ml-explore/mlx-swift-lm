@@ -180,7 +180,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
         if let cache {
             let end = padded.dim(1)
             let start = max(0, end - (convKernelSize - 1))
-            cache[0] = padded[0..., start ..< end, 0...]
+            cache[0] = contiguous(padded[0..., start ..< end, 0...])
         }
 
         let convOutput = conv1d(padded)
@@ -232,6 +232,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
 
         if let cache {
             cache[1] = nextState
+            cache.advance(hiddenStates.dim(1))
         }
 
         let flattenedY = y.flattened(start: 2)
@@ -527,7 +528,7 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let sharedExperts {
             y = y + sharedExperts(x)

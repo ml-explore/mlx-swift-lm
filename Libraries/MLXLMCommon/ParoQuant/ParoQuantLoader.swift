@@ -384,14 +384,19 @@ public func loadParoQuantModel<T: LanguageModel>(
     // 4. EOS token override from generation_config.json
     var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
     let genConfigURL = directory.appendingPathComponent("generation_config.json")
-    if let genData = try? Data(contentsOf: genConfigURL),
-        let genConfig = try? JSONDecoder().decode(GenerationConfigFile.self, from: genData),
-        let genEos = genConfig.eosTokenIds?.values
-    {
+    let genConfig: GenerationConfigFile? =
+        if let genData = try? Data(contentsOf: genConfigURL) {
+            try? JSONDecoder().decode(GenerationConfigFile.self, from: genData)
+        } else {
+            nil
+        }
+    if let genEos = genConfig?.eosTokenIds?.values {
         eosTokenIds = Set(genEos)
     }
 
-    var config = ModelConfiguration(directory: directory, toolCallFormat: toolCallFormat)
+    var config = ModelConfiguration(
+        directory: directory, stopStrings: genConfig?.stopStrings,
+        toolCallFormat: toolCallFormat)
     config.eosTokenIds = eosTokenIds
 
     // 5. Load raw safetensors (top-level only; do not recurse into

@@ -5,9 +5,9 @@ import MLX
 
 private func recommendedWorkingSetBytes() -> Int? {
     #if canImport(Metal)
-        GPU.maxRecommendedWorkingSetBytes()
+    GPU.maxRecommendedWorkingSetBytes()
     #else
-        nil
+    nil
     #endif
 }
 

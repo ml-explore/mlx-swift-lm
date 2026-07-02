@@ -135,6 +135,18 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         }
     }
 
+    /// Generate an ID compatible with this tool-call syntax.
+    func generateToolCallID() -> String {
+        let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+
+        switch self {
+        case .mistral:
+            return String(uuid.prefix(9))
+        default:
+            return "call_" + uuid.lowercased()
+        }
+    }
+
     /// Infer the tool call format based on model type from config.json.
     ///
     /// This method maps known model types to their corresponding tool call formats,

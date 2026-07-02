@@ -25,6 +25,10 @@ public enum EmbedderTypeRegistry {
         "nomic_bert": create(NomicBertConfiguration.self) { NomicBertModel($0, pooler: false) },
         "qwen3": create(Qwen3Configuration.self) { Qwen3Model($0) },
 
+        // LFM2.5 bidirectional encoders (Embedding + ColBERT). Both share
+        // `model_type: "lfm2"`; the single model branches on the `"mlx"` head.
+        "lfm2": create(LFM2BidirectionalConfiguration.self) { LFM2BidirectionalModel($0) },
+
         "gemma3": create(Gemma3Configuration.self) { EmbeddingGemma($0) },
         "gemma3_text": create(Gemma3Configuration.self) { EmbeddingGemma($0) },
         "gemma3n": create(Gemma3Configuration.self) { EmbeddingGemma($0) },
@@ -72,6 +76,25 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let qwen3_embedding = ModelConfiguration(
         id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
 
+    /// LFM2.5 Embedding 350M — CLS-pooled 1024-d dense vectors (cosine).
+    public static let lfm2_embedding_350m = ModelConfiguration(
+        id: "mlx-community/LFM2.5-Embedding-350M-bf16")
+    /// LFM2.5 Embedding 350M — 4-bit quantized.
+    public static let lfm2_embedding_350m_4bit = ModelConfiguration(
+        id: "mlx-community/LFM2.5-Embedding-350M-4bit")
+    /// LFM2.5 Embedding 350M — 8-bit quantized.
+    public static let lfm2_embedding_350m_8bit = ModelConfiguration(
+        id: "mlx-community/LFM2.5-Embedding-350M-8bit")
+    /// LFM2.5 ColBERT 350M — per-token 128-d multi-vectors (MaxSim late interaction).
+    public static let lfm2_colbert_350m = ModelConfiguration(
+        id: "mlx-community/LFM2.5-ColBERT-350M-bf16")
+    /// LFM2.5 ColBERT 350M — 4-bit quantized.
+    public static let lfm2_colbert_350m_4bit = ModelConfiguration(
+        id: "mlx-community/LFM2.5-ColBERT-350M-4bit")
+    /// LFM2.5 ColBERT 350M — 8-bit quantized.
+    public static let lfm2_colbert_350m_8bit = ModelConfiguration(
+        id: "mlx-community/LFM2.5-ColBERT-350M-8bit")
+
     private static func all() -> [ModelConfiguration] {
         [
             bge_micro,
@@ -89,6 +112,12 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
             bge_m3,
             mixedbread_large,
             qwen3_embedding,
+            lfm2_embedding_350m,
+            lfm2_embedding_350m_4bit,
+            lfm2_embedding_350m_8bit,
+            lfm2_colbert_350m,
+            lfm2_colbert_350m_4bit,
+            lfm2_colbert_350m_8bit,
         ]
     }
 }
@@ -204,6 +233,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
             tokenizerSource: tokenizerSource,
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: configuration.extraEOSTokens,
+            stopStrings: configuration.stopStrings,
             eosTokenIds: configuration.eosTokenIds,
             toolCallFormat: configuration.toolCallFormat)
 

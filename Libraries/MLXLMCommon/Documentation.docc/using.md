@@ -118,23 +118,9 @@ So which adapter do you chose?
 
 - `huggingface/swift-transformers`
     - this is the package that mlx-swift-lm originally integrated with
-- `DePasqualeOrg/swift-tokenizers`
-    - Swift Tokenizers is a streamlined and optimized fork of Swift Transformers that focuses solely on tokenizer functionality, with an optional Rust backend for even better performance.
 
-You need a downloader package if you want to download weights at runtime -- this isn't
-required if you have some other way to get weights into a local directory.
-
-| Downloader package (implementation) | Adapter                                                      |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [DePasqualeOrg/swift-hf-api](https://github.com/DePasqualeOrg/swift-hf-api) | [DePasqualeOrg/swift-hf-api-mlx](https://github.com/DePasqualeOrg/swift-hf-api-mlx) |
-| [huggingface/swift-huggingface](https://github.com/huggingface/swift-huggingface) | [DePasqualeOrg/swift-huggingface-mlx](https://github.com/DePasqualeOrg/swift-huggingface-mlx) |
-
-The tokenizer package translates Strings into tokens for model consumption and back:
-
-| Tokenizer package (implementation) | Adapter                                                      |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [DePasqualeOrg/swift-tokenizers](https://github.com/DePasqualeOrg/swift-tokenizers) | [DePasqualeOrg/swift-tokenizers-mlx](https://github.com/DePasqualeOrg/swift-tokenizers-mlx) |
-| [huggingface/swift-transformers](https://github.com/huggingface/swift-transformers) | [DePasqualeOrg/swift-transformers-mlx](https://github.com/DePasqualeOrg/swift-transformers-mlx) |
+No additional integration packages are provided at this time, but feel free to
+contribute one!
 
 See <doc:#Xcode-projects> for information about how to hook it up.
 
@@ -237,22 +223,5 @@ You can use the <doc:#MLXHuggingFace-Macros> like this:
         .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
         .product(name: "HuggingFace", package: "swift-huggingface"),
         .product(name: "Tokenizers", package: "swift-transformers"),
-    ]),
-```
-
-or one of the integration packages:
-
-```swift
-.package(url: "https://github.com/DePasqualeOrg/swift-tokenizers-mlx", from: "0.2.0", traits: ["Swift"]),
-.package(url: "https://github.com/DePasqualeOrg/swift-hf-api-mlx", from: "0.2.0"),
-```
-
-```swift
-.target(
-    name: "YourTargetName",
-    dependencies: [
-        .product(name: "MLXLLM", package: "mlx-swift-lm"),
-        .product(name: "MLXLMTokenizers", package: "swift-tokenizers-mlx"),
-        .product(name: "MLXLMHFAPI", package: "swift-hf-api-mlx"),
     ]),
 ```
