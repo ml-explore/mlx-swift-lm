@@ -46,6 +46,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
+    let returnsReusableCache: Bool
+    public var reusableCache: [KVCache]? { returnsReusableCache ? mainCache : nil }
     /// Total tokens proposed per round (`blockSize - 1` drafted, plus the
     /// bonus token from the previous verify). Mirrors mlx-vlm's
     /// `draft_block_size` parameter.
@@ -122,13 +124,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvScheme: parameters.kvScheme
             )
         }
 

@@ -154,6 +154,10 @@ public struct GenerateParameters: Sendable {
         self.seed = seed
     }
 
+    var usesDynamicKVQuantization: Bool {
+        kvBits != nil || resolveAffineScheme(kvScheme) != nil
+    }
+
     public func sampler() -> LogitSampler {
         let usesTopP = topP > 0 && topP < 1
         let usesTopK = topK > 0
@@ -521,11 +525,15 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
     var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
+    var reusableCache: [KVCache]? { get }
+    var reusableDraftCache: [KVCache]? { get }
     mutating func discardGeneratedToken()
 }
 
 extension TokenIteratorProtocol {
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
+    public var reusableCache: [KVCache]? { nil }
+    public var reusableDraftCache: [KVCache]? { nil }
     public mutating func discardGeneratedToken() {}
 }
 
@@ -563,6 +571,8 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     public var tokenCount = 0
     public let maxTokens: Int?
+    let returnsReusableCache: Bool
+    public var reusableCache: [KVCache]? { returnsReusableCache ? cache : nil }
 
     // Cache quantization parameters
     let kvBits: Int?
@@ -593,6 +603,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -627,6 +638,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.returnsReusableCache = !parameters.usesDynamicKVQuantization
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -660,6 +672,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
+        self.returnsReusableCache = false
 
         // No cache quantization for this direct initialization
         self.kvBits = nil
@@ -786,6 +799,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
+    let returnsReusableCaches: Bool
+    public var reusableCache: [KVCache]? { returnsReusableCaches ? mainCache : nil }
+    public var reusableDraftCache: [KVCache]? { returnsReusableCaches ? draftCache : nil }
     let numDraftTokens: Int
 
     // Buffer of accepted tokens from the current speculation round
@@ -838,13 +854,15 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
+        self.returnsReusableCaches = !parameters.usesDynamicKVQuantization
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvScheme: parameters.kvScheme
             )
         }
 
@@ -1565,6 +1583,39 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     )
 }
 
+struct GenerationTrace: Sendable {
+    let contentTokens: [Int]
+    let committedTokens: [Int]
+    let stopReason: GenerateStopReason
+    let isLedgerSafe: Bool
+    let finalCache: SendableBox<[KVCache]>?
+    let finalDraftCache: SendableBox<[KVCache]>?
+}
+
+func generateTaskWithGenerationTrace<TOKEN: TokenIteratorProtocol>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming TOKEN,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    collectTokenTrace: Bool = true,
+    tools: [[String: any Sendable]]? = nil
+) -> (AsyncStream<Generation>, Task<GenerationTrace, Never>) {
+    generateLoopTaskWithGenerationTrace(
+        promptTokenCount: promptTokenCount,
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        collectTokenTrace: collectTokenTrace,
+        handler: TextToolTokenLoopHandler(
+            tokenizer: tokenizer,
+            format: modelConfiguration.toolCallFormat ?? .json,
+            tools: tools
+        )
+    )
+}
+
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
 ///
 /// This is similar to `generate(input:cache:parameters:context:)`, but yields raw token IDs instead of decoded text/tool calls.
@@ -1819,7 +1870,6 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     includeStopToken: Bool = false,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Void, Never>) {
-
     let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
 
     let iterator = SendableBox(iterator)
@@ -1830,98 +1880,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
         let performIteration = {
             var iterator = iterator.consume()
             var handler = handler.consume()
-
-            var start = Date.timeIntervalSinceReferenceDate
-            var promptTime: TimeInterval = 0
-            var tokenCount = 0
-            var stopReason: GenerateStopReason?
-
-            let stopTokenIds = buildStopTokenIds(
-                modelConfiguration: modelConfiguration,
-                tokenizer: tokenizer
-            )
-
-            tokenLoop: while let token = iterator.next() {
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                    break
-                }
-
-                if promptTime == 0 {
-                    let now = Date.timeIntervalSinceReferenceDate
-                    promptTime = now - start
-                    start = now
-                }
-
-                // Check for end-of-sequence tokens
-                if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
-                    if includeStopToken {
-                        tokenCount += 1
-                        switch handler.onStopToken(token, emit: continuation.yield) {
-                        case .more:
-                            break
-                        case .stop:
-                            stopReason = .stop
-                            break tokenLoop
-                        case .cancelled:
-                            stopReason = .cancelled
-                            break tokenLoop
-                        }
-                    } else {
-                        iterator.discardGeneratedToken()
-                    }
-                    stopReason = .stop
-                    break
-                }
-
-                tokenCount += 1
-                switch handler.onToken(token, emit: continuation.yield) {
-                case .more:
-                    break
-                case .stop:
-                    stopReason = .stop
-                    break tokenLoop
-                case .cancelled:
-                    stopReason = .cancelled
-                    break tokenLoop
-                }
-            }
-
-            if stopReason == nil {
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                } else if let maxTokens = iterator.maxTokens, iterator.tokenCount >= maxTokens {
-                    stopReason = .length
-                } else {
-                    stopReason = .cancelled
-                }
-            }
-
-            handler.onGenerationEnd(emit: continuation.yield)
-
-            let now = Date.timeIntervalSinceReferenceDate
-            let generateTime = now - start
-
-            let mtpStats = iterator as? MTPStatsCollecting
-            let info = GenerateCompletionInfo(
+            _ = runGenerateLoop(
                 promptTokenCount: promptTokenCount,
-                generationTokenCount: tokenCount,
-                promptTime: promptTime + iterator.promptPrefillTime,
-                generationTime: generateTime,
-                stopReason: stopReason ?? .cancelled,
-                proposedDraftTokens: mtpStats?.proposedDraftTokens,
-                acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
-                passthroughReason: mtpStats?.passthroughReason,
-                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
-            )
-            _ = continuation.yield(handler.infoEvent(info))
-
-            // Synchronize with the stream to ensure tasks are completed
-            Stream().synchronize()
-
-            // Finalize the stream
-            continuation.finish()
+                modelConfiguration: modelConfiguration,
+                tokenizer: tokenizer,
+                iterator: &iterator,
+                includeStopToken: includeStopToken,
+                collectTrace: false,
+                handler: &handler,
+                continuation: continuation)
         }
 
         if let ticket = wiredMemoryTicket {
@@ -1941,6 +1908,208 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     }
 
     return (stream, task)
+}
+
+private func generateLoopTaskWithGenerationTrace<Handler: TokenLoopHandler>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming any TokenIteratorProtocol,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    includeStopToken: Bool = false,
+    collectTokenTrace: Bool = true,
+    handler: consuming Handler
+) -> (AsyncStream<Handler.Output>, Task<GenerationTrace, Never>) {
+
+    let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
+
+    let iterator = SendableBox(iterator)
+    let handler = SendableBox(handler)
+
+    // Launch a Task to perform iteration asynchronously.
+    let task = Task { () -> GenerationTrace in
+        let performIteration = { () -> GenerationTrace in
+            var iterator = iterator.consume()
+            var handler = handler.consume()
+            return runGenerateLoop(
+                promptTokenCount: promptTokenCount,
+                modelConfiguration: modelConfiguration,
+                tokenizer: tokenizer,
+                iterator: &iterator,
+                includeStopToken: includeStopToken,
+                collectTrace: collectTokenTrace,
+                handler: &handler,
+                continuation: continuation)!
+        }
+
+        if let ticket = wiredMemoryTicket {
+            return await WiredMemoryTicket.withWiredLimit(ticket) {
+                performIteration()
+            }
+        } else {
+            return performIteration()
+        }
+    }
+
+    // When the consumer cancels (or ends) the stream, cancel our underlying task.
+    continuation.onTermination = { termination in
+        if case .cancelled = termination {
+            task.cancel()
+        }
+    }
+
+    return (stream, task)
+}
+
+private struct GenerationTraceBuilder {
+    private var contentTokens: [Int]?
+    private var committedTokens: [Int]?
+
+    init(enabled: Bool) {
+        if enabled {
+            contentTokens = []
+            committedTokens = []
+        }
+    }
+
+    mutating func recordCommitted(_ token: Int) {
+        committedTokens?.append(token)
+    }
+
+    mutating func recordContent(_ token: Int) {
+        contentTokens?.append(token)
+    }
+
+    func finish(
+        stopReason: GenerateStopReason,
+        finalCache: SendableBox<[KVCache]>?,
+        finalDraftCache: SendableBox<[KVCache]>?
+    ) -> GenerationTrace? {
+        return GenerationTrace(
+            contentTokens: contentTokens ?? [],
+            committedTokens: committedTokens ?? [],
+            stopReason: stopReason,
+            isLedgerSafe: stopReason != .cancelled,
+            finalCache: finalCache,
+            finalDraftCache: finalDraftCache)
+    }
+}
+
+private func runGenerateLoop<Handler: TokenLoopHandler>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: inout any TokenIteratorProtocol,
+    includeStopToken: Bool,
+    collectTrace: Bool,
+    handler: inout Handler,
+    continuation: AsyncStream<Handler.Output>.Continuation
+) -> GenerationTrace? {
+    var traceBuilder = GenerationTraceBuilder(enabled: collectTrace)
+    var start = Date.timeIntervalSinceReferenceDate
+    var promptTime: TimeInterval = 0
+    var tokenCount = 0
+    var stopReason: GenerateStopReason?
+
+    let stopTokenIds = buildStopTokenIds(
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer
+    )
+
+    tokenLoop: while let token = iterator.next() {
+        if collectTrace {
+            // TokenIterator.next() has already advanced the KV cache with this token.
+            traceBuilder.recordCommitted(token)
+        }
+
+        // Check for cancellation on every loop iteration.
+        if Task.isCancelled {
+            stopReason = .cancelled
+            break
+        }
+
+        if promptTime == 0 {
+            let now = Date.timeIntervalSinceReferenceDate
+            promptTime = now - start
+            start = now
+        }
+
+        // Check for end-of-sequence tokens
+        if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
+            if includeStopToken {
+                tokenCount += 1
+                traceBuilder.recordContent(token)
+                switch handler.onStopToken(token, emit: continuation.yield) {
+                case .more:
+                    break
+                case .stop:
+                    stopReason = .stop
+                    break tokenLoop
+                case .cancelled:
+                    stopReason = .cancelled
+                    break tokenLoop
+                }
+            } else {
+                iterator.discardGeneratedToken()
+            }
+            stopReason = .stop
+            break
+        }
+
+        tokenCount += 1
+        traceBuilder.recordContent(token)
+        switch handler.onToken(token, emit: continuation.yield) {
+        case .more:
+            break
+        case .stop:
+            stopReason = .stop
+            break tokenLoop
+        case .cancelled:
+            stopReason = .cancelled
+            break tokenLoop
+        }
+    }
+
+    if stopReason == nil {
+        if Task.isCancelled {
+            stopReason = .cancelled
+        } else if let maxTokens = iterator.maxTokens, iterator.tokenCount >= maxTokens {
+            stopReason = .length
+        } else {
+            stopReason = .cancelled
+        }
+    }
+
+    let finalStopReason = stopReason ?? .cancelled
+    handler.onGenerationEnd(emit: continuation.yield)
+
+    let now = Date.timeIntervalSinceReferenceDate
+    let generateTime = now - start
+
+    let mtpStats = iterator as? MTPStatsCollecting
+    let info = GenerateCompletionInfo(
+        promptTokenCount: promptTokenCount,
+        generationTokenCount: tokenCount,
+        promptTime: promptTime + iterator.promptPrefillTime,
+        generationTime: generateTime,
+        stopReason: finalStopReason,
+        proposedDraftTokens: mtpStats?.proposedDraftTokens,
+        acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
+        passthroughReason: mtpStats?.passthroughReason,
+        speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
+    )
+    _ = continuation.yield(handler.infoEvent(info))
+
+    // Synchronize with the stream to ensure tasks are completed
+    Stream().synchronize()
+
+    // Finalize the stream
+    continuation.finish()
+
+    return traceBuilder.finish(
+        stopReason: finalStopReason,
+        finalCache: iterator.reusableCache.map { SendableBox($0) },
+        finalDraftCache: iterator.reusableDraftCache.map { SendableBox($0) })
 }
 
 /// Measures the execution time of a closure.
@@ -2137,7 +2306,7 @@ private enum TokenLoopDisposition {
 }
 
 private protocol TokenLoopHandler {
-    associatedtype Output
+    associatedtype Output: Sendable
 
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
     mutating func onToken(

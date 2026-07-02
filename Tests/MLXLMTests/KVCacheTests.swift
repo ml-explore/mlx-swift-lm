@@ -260,6 +260,20 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(lifecycle.finalizeCallCount == 1)
 }
 
+@Test func testCachesReportStaticPrefixReuseSupport() throws {
+    #expect(KVCacheSimple().supportsStaticPrefixReuse)
+    #expect(QuantizedKVCache().supportsStaticPrefixReuse)
+    #expect(!RotatingKVCache(maxSize: 32).supportsStaticPrefixReuse)
+    #expect(ChunkedKVCache().supportsStaticPrefixReuse)
+    #expect(!ChunkedKVCache(chunkSize: 32).supportsStaticPrefixReuse)
+}
+
+@Test func testKVCacheSimpleSubclassMustOptInToStaticPrefixReuse() throws {
+    final class PrefixChangingKVCache: KVCacheSimple {}
+
+    #expect(!PrefixChangingKVCache().supportsStaticPrefixReuse)
+}
+
 @Test func testWithPreparedCacheScopesSequenceMetadata() throws {
     let cache = ArraysCache(size: 2)
 

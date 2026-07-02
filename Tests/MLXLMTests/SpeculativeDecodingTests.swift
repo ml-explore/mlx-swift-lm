@@ -214,6 +214,49 @@ struct SpeculativeDecodingTests {
         #expect(tokenCount == 3)
         #expect(telemetry.emittedTokenCount == tokenCount)
     }
+
+    @Test func `Token iterator reusable cache is withheld only for dynamic KV quantization`() throws
+    {
+        let model = StableTransitionLanguageModel(vocabularySize: 100)
+        let input = LMInput(tokens: MLXArray([1, 2, 3]))
+
+        let reusableIterator = try TokenIterator(
+            input: input,
+            model: model,
+            parameters: GenerateParameters(maxTokens: 1, temperature: 0.0))
+        let quantizedIterator = try TokenIterator(
+            input: input,
+            model: model,
+            parameters: GenerateParameters(maxTokens: 1, kvBits: 4, temperature: 0.0))
+
+        #expect(reusableIterator.reusableCache != nil)
+        #expect(quantizedIterator.reusableCache == nil)
+    }
+
+    @Test
+    func `Speculative iterator reusable caches are withheld only for dynamic KV quantization`()
+        throws
+    {
+        let input = LMInput(tokens: MLXArray([1, 2, 3]))
+
+        let reusableIterator = try SpeculativeTokenIterator(
+            input: input,
+            mainModel: StableTransitionLanguageModel(vocabularySize: 100),
+            draftModel: StableTransitionLanguageModel(vocabularySize: 100),
+            parameters: GenerateParameters(maxTokens: 1, temperature: 0.0),
+            numDraftTokens: 2)
+        let quantizedIterator = try SpeculativeTokenIterator(
+            input: input,
+            mainModel: StableTransitionLanguageModel(vocabularySize: 100),
+            draftModel: StableTransitionLanguageModel(vocabularySize: 100),
+            parameters: GenerateParameters(maxTokens: 1, kvBits: 4, temperature: 0.0),
+            numDraftTokens: 2)
+
+        #expect(reusableIterator.reusableCache != nil)
+        #expect(reusableIterator.reusableDraftCache != nil)
+        #expect(quantizedIterator.reusableCache == nil)
+        #expect(quantizedIterator.reusableDraftCache == nil)
+    }
 }
 
 /// Deterministic causal model for speculative decoding contract tests.
