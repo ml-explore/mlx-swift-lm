@@ -72,9 +72,10 @@ public class MediaProcesingTests: XCTestCase {
         // We know video is exactly 5 seconds long, expect 10 samples
         let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
             frame in
-            let image = preprocess(image: frame.frame, resizedSize: .init(width: 224, height: 224))
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
-            return VideoFrame.init(frame: image, timeStamp: frame.timeStamp)
+            return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
 
         XCTAssert(frames.frames.count == 10)
@@ -101,7 +102,7 @@ public class MediaProcesingTests: XCTestCase {
         for i in 0 ..< (seconds * framerate) {
             let image = imageWithColor(colors.randomElement()!)
             let timeStamp: CMTime = .init(value: Int64(i), timescale: Int32(framerate))
-            rawFrames.append(VideoFrame(frame: image, timeStamp: timeStamp))
+            rawFrames.append(VideoFrame(image: .ciImage(image), timeStamp: timeStamp))
         }
 
         // Bogus preprocessing values
@@ -117,9 +118,10 @@ public class MediaProcesingTests: XCTestCase {
         // We know video is exactly 5 seconds long, expect 10 samples
         let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
             frame in
-            let image = preprocess(image: frame.frame, resizedSize: .init(width: 224, height: 224))
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
-            return VideoFrame.init(frame: image, timeStamp: frame.timeStamp)
+            return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
 
         XCTAssert(frames.frames.count == 10)
