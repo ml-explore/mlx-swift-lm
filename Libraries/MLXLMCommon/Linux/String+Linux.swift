@@ -4,10 +4,10 @@ import Foundation
 
 #if os(Linux)
 
-    extension String {
-        public init(localized resource: String) {
-            self = resource
-        }
+extension String {
+    public init(localized resource: String) {
+        self = resource
     }
+}
 
 #endif

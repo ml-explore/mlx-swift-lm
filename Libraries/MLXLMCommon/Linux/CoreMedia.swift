@@ -2,9 +2,9 @@
 
 #if !canImport(CoreMedia)
 
-    public struct CMTime {
-        public var value: Int64
-        public var timescale: Int32
-    }
+public struct CMTime {
+    public var value: Int64
+    public var timescale: Int32
+}
 
 #endif

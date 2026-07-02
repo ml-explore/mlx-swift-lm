@@ -4,7 +4,7 @@ import Foundation
 import MLX
 
 #if canImport(CoreGraphics)
-    import CoreGraphics
+import CoreGraphics
 #endif
 
 /// Configuration for speculative decoding in a `ChatSession`.

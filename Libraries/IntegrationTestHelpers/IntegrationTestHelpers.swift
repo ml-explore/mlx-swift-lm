@@ -10,7 +10,7 @@ import MLXLMCommon
 import MLXVLM
 
 #if canImport(CoreImage)
-    import CoreImage
+import CoreImage
 #endif
 
 // Both MLXLMCommon and MLXEmbedders define ModelContainer.
@@ -180,21 +180,21 @@ public enum ChatSessionTests {
 
     public static func visionModel(container: LLModelContainer) async throws {
         #if canImport(CoreImage)
-            let session = ChatSession(container, generateParameters: generateParameters)
-            let redImage = CIImage(color: .red).cropped(
-                to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let session = ChatSession(container, generateParameters: generateParameters)
+        let redImage = CIImage(color: .red).cropped(
+            to: CGRect(x: 0, y: 0, width: 100, height: 100))
 
-            let result = try await streamAndCollect(
-                session.streamResponse(
-                    to: "What color is this image? Reply with just the color name.",
-                    image: .ciImage(redImage)), label: "Vision")
-            try check(
-                result.lowercased().contains("red"),
-                "Expected 'red' in response, got: \(result)"
-            )
+        let result = try await streamAndCollect(
+            session.streamResponse(
+                to: "What color is this image? Reply with just the color name.",
+                image: .ciImage(redImage)), label: "Vision")
+        try check(
+            result.lowercased().contains("red"),
+            "Expected 'red' in response, got: \(result)"
+        )
         #else
-            fatalError(
-                "Vision model test requires CoreImage, which is not available on this platform.")
+        fatalError(
+            "Vision model test requires CoreImage, which is not available on this platform.")
         #endif
     }
 
