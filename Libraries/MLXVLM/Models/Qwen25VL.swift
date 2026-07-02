@@ -877,7 +877,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                     }
                     let processedImage = preprocessVideoFrame(
                         image: resizedImage, resizedSize: resizedSize)
-                    return VideoFrame(frame: processedImage, timeStamp: frame.timeStamp)
+                    return VideoFrame(image: .ciImage(processedImage), timeStamp: frame.timeStamp)
                 }
 
                 videosAsImageSequences.append(imageSequence.frames)
