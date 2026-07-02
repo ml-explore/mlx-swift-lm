@@ -30,12 +30,12 @@ jobs:
         id: swift-format
         shell: sh
         run: |
-          cd /tmp
-          LATEST_TAG=$(curl -s https://api.github.com/repos/swiftlang/swift-format/releases/latest | \
-            grep '"tag_name":' | \
-            sed -E 's/.*"([^"]+)".*/\1/')
-          echo "swift-format $LATEST_TAG"
-          echo "SWIFT_FORMAT_VERSION=$LATEST_TAG" >> $GITHUB_OUTPUT
+          # Pinned instead of releases/latest: a new swift-format release can
+          # change formatting rules and reformat files no PR touched, turning
+          # the whole-repo `pre-commit run --all` red on every open PR at once.
+          # Bump this deliberately (with the matching reformat) rather than
+          # tracking latest. 603.0.0 is what `latest` resolved to at pin time.
+          echo "SWIFT_FORMAT_VERSION=603.0.0" >> $GITHUB_OUTPUT
 
       - name: Cache swift-format build
         uses: actions/cache@v4
