@@ -10,7 +10,7 @@ import Testing
 
 #if FoundationModelsIntegration
 
-/// Opt-in end-to-end VLM test: drives a real `gemma-4-e2b-it-4bit` through
+/// Opt-in end-to-end VLM test: drives a real `Qwen3-VL-4B-Instruct-4bit` through
 /// the FoundationModels adapter with a labeled image attachment and `.vision`
 /// declared, proving the labeled-attachment path reaches the already
 /// multimodal MLX pipeline.
@@ -50,7 +50,7 @@ struct VisionIntegrationTests {
     func namesImageColor(color: TestColor) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(
-            "mlx-community/gemma-4-e2b-it-4bit",
+            "mlx-community/Qwen3-VL-4B-Instruct-4bit",
             capabilities: [.vision])
         let session = LanguageModelSession(model: model, tools: [], instructions: nil)
         let image = VisionTestImages.solidColor(color.ciColor)
