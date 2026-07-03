@@ -1861,12 +1861,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: while let token = iterator.next() {
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                    break
-                }
+            // Check cancellation BEFORE iterator.next(): next() calls asyncEval() to
+            // pipeline the next GPU evaluation, so checking after it (the previous
+            // `while let token = iterator.next()` form) allowed one extra asyncEval to be
+            // submitted post-cancellation — which faults if the app has backgrounded
+            // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
+            // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+            // settles any in-flight evaluation at the end of the task body.
+            tokenLoop: while !Task.isCancelled {
+                guard let token = iterator.next() else { break }
 
                 if promptTime == 0 {
                     let now = Date.timeIntervalSinceReferenceDate
