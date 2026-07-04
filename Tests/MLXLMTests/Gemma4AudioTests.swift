@@ -332,7 +332,53 @@ struct Gemma4AudioTests {
 
             #expect(
                 validSubsampled == expectedTokens,
-                "samples=\(samples): tower produced \(validSubsampled) valid frames, processor would emit \(expectedTokens) audio tokens")
+                "samples=\(samples): tower produced \(validSubsampled) valid frames, processor would emit \(expectedTokens) audio tokens"
+            )
+        }
+    }
+
+    /// Numerical parity vs the Python reference (`mlx-vlm`
+    /// `audio_feature_extractor.py`, local HTK mel bank) on a deterministic
+    /// waveform. Reference probes were produced by running that extractor on the
+    /// exact same signal; the Swift extractor must reproduce them within tol.
+    @Test("Extractor matches the Python reference numerically")
+    func extractorMatchesPythonReference() {
+        let n = 8000
+        // Reduce each tone's phase into [0, 2π) via its fractional cycle count before
+        // sin(): the raw phase of a 3 kHz tone at large sample indices (~9400 rad)
+        // exceeds float32 precision (and MLX has no GPU float64), so a naive float32
+        // computation would diverge from the numpy (float64) reference. sin is
+        // 2π-periodic, so this is exact in real arithmetic and float32-accurate here.
+        let i = MLXArray(Array(0 ..< n)).asType(.float32)
+        func tone(_ freq: Float) -> MLXArray {
+            let cycles = (freq / 16_000.0) * i  // exact/near-exact in float32
+            return sin(2 * Float.pi * (cycles - floor(cycles)))
+        }
+        let wave = 0.6 * tone(220) + 0.3 * tone(1500) + 0.1 * tone(3000)
+
+        let (feat, mask) = Gemma4AudioFeatureExtractor()(wave)
+        eval(feat, mask)
+
+        #expect(feat.shape == [1, 50, 128])
+        #expect(mask.asType(.int32).sum().item(Int.self) == 49)
+
+        // Tolerance note: the reference uses numpy's float64 CPU FFT while this runs
+        // MLX's float32 (Metal) FFT, so log-mel values agree to ~1e-2 — looser at
+        // near-silent bins where `log` amplifies the tiny FFT-floor difference.
+        #expect(abs(feat.mean().item(Float.self) - (-3.516562)) < 2e-2)
+        // The empty-filter[0] cell is deterministic — log(mel_floor), no FFT dependence.
+        #expect(abs(feat[0, 0, 0].item(Float.self) - (-6.907755)) < 1e-4)
+
+        // Signal-region probes (energy present) from the Python reference.
+        let probes: [(Int, Int, Float)] = [
+            (0, 64, 0.609170), (5, 10, 1.511158), (10, 40, -5.128715),
+            (20, 80, -4.040174), (48, 50, -3.333589),
+        ]
+        for (f, m, expected) in probes {
+            let got = feat[0, f, m].item(Float.self)
+            #expect(
+                abs(got - expected) < 2e-2,
+                "mel[\(f),\(m)]: got \(got), reference \(expected)")
         }
     }
 }
