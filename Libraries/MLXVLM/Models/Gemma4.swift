@@ -568,6 +568,7 @@ public struct Gemma4Configuration: Codable, Sendable {
     public let boiTokenId: Int
     public let eoiTokenId: Int?
     public let visionSoftTokensPerImage: Int
+    public let visionSoftTokensPerVideoFrame: Int
     public let tieWordEmbeddings: Bool
 
     private let _vocabularySize: Int?
@@ -589,6 +590,7 @@ public struct Gemma4Configuration: Codable, Sendable {
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
         case visionSoftTokensPerImage = "vision_soft_tokens_per_image"
+        case visionSoftTokensPerVideoFrame = "vision_soft_tokens_per_video_frame"
         case tieWordEmbeddings = "tie_word_embeddings"
         case _vocabularySize = "vocab_size"
         case _hiddenSize = "hidden_size"
@@ -612,6 +614,8 @@ public struct Gemma4Configuration: Codable, Sendable {
         visionSoftTokensPerImage =
             try c.decodeIfPresent(Int.self, forKey: CodingKeys.visionSoftTokensPerImage)
             ?? visionConfiguration.defaultOutputLength
+        visionSoftTokensPerVideoFrame =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.visionSoftTokensPerVideoFrame) ?? 70
         tieWordEmbeddings =
             try c.decodeIfPresent(Bool.self, forKey: CodingKeys.tieWordEmbeddings)
             ?? textConfiguration.tieWordEmbeddings
@@ -2032,9 +2036,9 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             let expectedImageTokens = imageMask.asType(.int32).sum().item(Int.self)
 
             if expectedImageTokens != imageFeatures.dim(1) {
-                throw Gemma4Error.imageTokenCountMismatch(
-                    expectedVisionTokens: imageFeatures.dim(1),
-                    actualPromptTokens: expectedImageTokens)
+                throw Gemma4Error.multimodalTokenCountMismatch(
+                    kind: "image", featureTokens: imageFeatures.dim(1),
+                    promptTokens: expectedImageTokens)
             }
 
             var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
@@ -2046,39 +2050,45 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             )
         }
 
-        // Gemma 4 has no separate video encoder — video frames run through the same
-        // vision tower and scatter onto the `<video>` soft-token positions, mirroring
-        // `Gemma4Unified`. Video frames come from the processor at a uniform size,
-        // so they don't need the per-image aspect-preserving slicing above.
+        // Gemma 4 has no separate video encoder — each video frame runs through the
+        // same vision tower as images (producing `visionSoftTokensPerImage` pooled
+        // tokens per frame) and is then truncated to the smaller per-frame video
+        // budget before scattering onto the `<video>` soft-token positions. Video
+        // frames come from the processor at a uniform size, so they don't need the
+        // per-image aspect-preserving slicing above.
         if let video, let videoTokenId = config.videoTokenId {
-            inputsEmbeds = try scatterVisionFeatures(
-                into: inputsEmbeds, inputIds: inputIds, pixelValues: video.pixels,
-                tokenId: videoTokenId, kind: "video")
+            inputsEmbeds = try scatterVideoFeatures(
+                into: inputsEmbeds, inputIds: inputIds, videoPixelValues: video.pixels,
+                tokenId: videoTokenId, softTokensPerFrame: config.visionSoftTokensPerVideoFrame)
         }
 
         return (inputsEmbeds, perLayerInputs)
     }
 
-    /// Encode `pixelValues` through the shared vision tower and scatter the resulting
-    /// soft tokens onto the `tokenId` positions of `inputsEmbeds`. Used for the video
-    /// path (Gemma 4 reuses the vision stack for video frames); still images go
-    /// through the per-image aspect-preserving path in `getInputEmbeddings`.
-    private func scatterVisionFeatures(
+    /// Encode video frames (`[numFrames, C, H, W]`) through the shared vision tower,
+    /// keep the first `softTokensPerFrame` pooled tokens of each frame, and scatter the
+    /// resulting `numFrames * softTokensPerFrame` soft tokens onto the `tokenId`
+    /// positions. Gemma 4 gives video frames a smaller token budget than full images;
+    /// the processor resizes frames so those leading tokens carry the frame's content.
+    private func scatterVideoFeatures(
         into inputsEmbeds: MLXArray,
         inputIds: MLXArray,
-        pixelValues: MLXArray,
+        videoPixelValues: MLXArray,
         tokenId: Int,
-        kind: String
+        softTokensPerFrame: Int
     ) throws -> MLXArray {
-        var features = visionTower(pixelValues)
+        var features = visionTower(videoPixelValues)
         features = embedVision(features)
+        let cap = min(softTokensPerFrame, features.dim(1))
+        features = features[0..., 0 ..< cap, 0...]
         features = features.asType(inputsEmbeds.dtype)
 
+        let producedTokens = features.dim(0) * features.dim(1)
         let tokenMask = inputIds .== tokenId
         let expectedTokens = tokenMask.asType(.int32).sum().item(Int.self)
-        if expectedTokens != features.dim(1) {
+        if expectedTokens != producedTokens {
             throw Gemma4Error.multimodalTokenCountMismatch(
-                kind: kind, featureTokens: features.dim(1), promptTokens: expectedTokens)
+                kind: "video", featureTokens: producedTokens, promptTokens: expectedTokens)
         }
 
         var maskExpanded = expandedDimensions(tokenMask, axis: -1)
@@ -2672,6 +2682,38 @@ public struct Gemma4Processor: UserInputProcessor {
         return (pixelValues, THW(1, Int(targetSize.height), Int(targetSize.width)))
     }
 
+    /// Sample and preprocess the frames of each video into a single
+    /// `[totalFrames, C, H, W]` pixel tensor (frames from all videos concatenated),
+    /// plus the per-video frame count used to expand the `<video>` placeholders.
+    /// Frames are resized to `config.videoFixedSize` so the vision tower's leading
+    /// pooled tokens fit the per-frame video budget.
+    public func processVideos(_ videos: [UserInput.Video], processing: UserInput.Processing?)
+        async throws -> (pixels: MLXArray, frameCounts: [Int])
+    {
+        let targetSize = config.videoFixedSize
+        var allFrames: [MLXArray] = []
+        var frameCounts: [Int] = []
+        for video in videos {
+            let sequence = try await MediaProcessing.asProcessedSequence(
+                video, targetFPS: { _ in 1.0 }, maxFrames: config.videoMaxFrames
+            ) { frame in
+                var userProcessing = processing ?? UserInput.Processing()
+                userProcessing.resize = targetSize
+                var image = MediaProcessing.apply(frame.frame, processing: userProcessing)
+                image = MediaProcessing.inSRGBToneCurveSpace(image)
+                image = MediaProcessing.resampleBicubic(image, to: targetSize)
+                if config.doNormalize {
+                    image = MediaProcessing.normalize(
+                        image, mean: config.imageMeanTuple, std: config.imageStdTuple)
+                }
+                return VideoFrame(frame: image, timeStamp: frame.timeStamp)
+            }
+            allFrames.append(contentsOf: sequence.frames)
+            frameCounts.append(sequence.frames.count)
+        }
+        return (concatenated(allFrames), frameCounts)
+    }
+
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Gemma4MessageGenerator().generate(from: input)
 
@@ -2731,9 +2773,42 @@ public struct Gemma4Processor: UserInputProcessor {
             promptTokens = expandedTokens
         }
 
+        var processedVideo: LMInput.ProcessedVideo?
+        if !input.videos.isEmpty, let videoTokenId = config.videoTokenId {
+            let (videoPixels, frameCounts) = try await processVideos(
+                input.videos, processing: input.processing)
+            processedVideo = LMInput.ProcessedVideo(pixels: videoPixels)
+
+            // Expand the i-th `<video>` placeholder into one block per sampled frame:
+            // BOI + video_token * videoSoftTokensPerFrame + EOI. The model produces the
+            // matching count (frames * videoSoftTokensPerFrame) from `videoPixels`.
+            var expandedTokens: [Int] = []
+            var videoIndex = 0
+            for token in promptTokens {
+                if token == videoTokenId {
+                    let frames = videoIndex < frameCounts.count ? frameCounts[videoIndex] : 0
+                    for _ in 0 ..< frames {
+                        expandedTokens.append(config.boiTokenId)
+                        expandedTokens.append(
+                            contentsOf: Array(
+                                repeating: videoTokenId, count: config.videoSoftTokensPerFrame))
+                        if let eoiTokenId = config.eoiTokenId {
+                            expandedTokens.append(eoiTokenId)
+                        }
+                    }
+                    videoIndex += 1
+                } else {
+                    expandedTokens.append(token)
+                }
+            }
+            promptTokens = expandedTokens
+        }
+
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(
+            text: .init(tokens: promptArray, mask: mask), image: processedImage,
+            video: processedVideo)
     }
 }
 
@@ -2750,6 +2825,10 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     public let imageTokenId: Int
     public let boiTokenId: Int
     public let eoiTokenId: Int?
+
+    public let videoTokenId: Int?
+    public let videoSoftTokensPerFrame: Int
+    public let videoMaxFrames: Int
 
     /// Image keys nested under `image_processor` in processor_config.json.
     /// Repos that ship a flat preprocessor_config.json put the same keys at
@@ -2787,6 +2866,9 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         case imageTokenId = "image_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
+        case videoTokenId = "video_token_id"
+        case videoSoftTokensPerFrame = "video_soft_tokens_per_frame"
+        case videoMaxFrames = "video_max_frames"
     }
 
     public init(from decoder: any Swift.Decoder) throws {
@@ -2818,6 +2900,10 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
+        videoTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoTokenId) ?? 258_884
+        videoSoftTokensPerFrame =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoSoftTokensPerFrame) ?? 70
+        videoMaxFrames = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoMaxFrames) ?? 32
     }
 
     public func encode(to encoder: any Swift.Encoder) throws {
@@ -2886,6 +2972,12 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         return CGSize(
             width: targetWidth * sideMultiple, height: targetHeight * sideMultiple)
     }
+
+    /// Video frames use a smaller square (a multiple of patch_size * pooling_kernel_size
+    /// = 48) so the vision tower's leading pooled tokens cover the frame within the
+    /// ~70-token video budget: 432 → 27x27 patches → 81 pooled tokens, trimmed to
+    /// `visionSoftTokensPerVideoFrame` (70) in the model.
+    public var videoFixedSize: CGSize { CGSize(width: 432, height: 432) }
 }
 
 public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
