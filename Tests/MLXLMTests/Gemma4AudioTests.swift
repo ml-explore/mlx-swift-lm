@@ -243,4 +243,96 @@ struct Gemma4AudioTests {
         let subMaskValues = subMask.asType(.int32).asArray(Int32.self)
         #expect(subMaskValues.last == 1)
     }
+
+    // MARK: Mel feature extractor
+
+    @Test("HTK mel filterbank is [257, 128], non-negative, mostly non-empty")
+    func melFilterBankValid() {
+        let bins = 257
+        let mel = 128
+        let bank = Gemma4AudioFeatureExtractor.melFilterBank(
+            numFreqBins: bins, numMel: mel, minFrequency: 0, maxFrequency: 8000, sampleRate: 16_000)
+        #expect(bank.count == bins * mel)
+        #expect(bank.allSatisfy { $0 >= 0 && $0 <= 1.0001 })
+        #expect(bank.contains { $0 > 0.5 })  // triangles reach their peak
+
+        func columnMax(_ m: Int) -> Float {
+            var v: Float = 0
+            for k in 0 ..< bins { v = max(v, bank[k * mel + m]) }
+            return v
+        }
+        // The lowest mel filters can be narrower than the FFT bin spacing
+        // (31.25 Hz) and come out empty — this matches the reference
+        // `_mel_filter_bank` / librosa. Only a few may be empty; the upper mel
+        // range is always well resolved.
+        let nonEmpty = (0 ..< mel).filter { columnMax($0) > 0 }.count
+        #expect(nonEmpty >= mel - 5)
+        for m in (mel / 2) ..< mel { #expect(columnMax(m) > 0) }
+    }
+
+    @Test("Extractor yields [1, T, 128] with the reference frame count")
+    func extractorShapeAndFrameCount() {
+        let extractor = Gemma4AudioFeatureExtractor()
+        let samples = 16_000  // 1 s @ 16 kHz (already a multiple of 128)
+        let (features, mask) = extractor(MLXRandom.normal([samples]))
+        eval(features, mask)
+
+        #expect(features.dim(0) == 1)
+        #expect(features.dim(2) == 128)
+        #expect(mask.shape == [1, features.dim(1)])
+
+        // paddedLen = frameLength/2 + samples = 160 + 16000 = 16160;
+        // numFrames = (16160 - 321) / 160 + 1 = 99.
+        #expect(features.dim(1) == 99)
+        // A whole-second clip aligned to 128 samples has every frame valid.
+        #expect(mask.asType(.int32).sum().item(Int.self) == 99)
+        #expect(features.max().item(Float.self).isFinite)
+    }
+
+    @Test("Extractor is deterministic")
+    func extractorDeterministic() {
+        let extractor = Gemma4AudioFeatureExtractor()
+        let wave = MLXRandom.normal([12_000])
+        let (a, _) = extractor(wave)
+        let (b, _) = extractor(wave)
+        eval(a, b)
+        #expect((a - b).abs().max().item(Float.self) == 0)
+    }
+
+    @Test(
+        "audioTokenCount = ceil(ceil(V/2)/2)",
+        arguments: [1, 2, 4, 13, 25, 50, 99, 100, 400, 3000])
+    func audioTokenCountFormula(validFrames: Int) {
+        let expected = ((validFrames + 1) / 2 + 1) / 2
+        #expect(
+            Gemma4AudioFeatureExtractor.audioTokenCount(validFrames: validFrames) == expected)
+    }
+
+    /// The crucial end-to-end consistency check: the token count the processor
+    /// would emit for a clip (`audioTokenCount` of the valid mel frames) must equal
+    /// the number of valid frames the audio tower actually produces after
+    /// subsampling — otherwise the prompt's audio-token count and the scattered
+    /// encoder frames disagree and the scatter throws.
+    @Test("Extractor token count matches the tower's valid subsampled frames")
+    func extractorTowerFrameCountConsistency() {
+        let extractor = Gemma4AudioFeatureExtractor()
+        let model = Gemma4AudioModel(config: Self.audioConfig(layers: 2))
+        eval(model)
+
+        for samples in [8_000, 16_000, 24_000] {
+            let (features, mask) = extractor(MLXRandom.normal([samples]))
+            let validFrames = mask.asType(.int32).sum().item(Int.self)
+            let expectedTokens = Gemma4AudioFeatureExtractor.audioTokenCount(
+                validFrames: validFrames)
+
+            // Tower wants `true == padding`, so invert the extractor's valid mask.
+            let (encodings, subMask) = model(features, audioMelMask: logicalNot(mask))
+            eval(encodings, subMask)
+            let validSubsampled = logicalNot(subMask).asType(.int32).sum().item(Int.self)
+
+            #expect(
+                validSubsampled == expectedTokens,
+                "samples=\(samples): tower produced \(validSubsampled) valid frames, processor would emit \(expectedTokens) audio tokens")
+        }
+    }
 }

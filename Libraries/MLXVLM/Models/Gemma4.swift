@@ -2025,8 +2025,14 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             throw VLMError.processing(
                 "Audio input was provided, but this checkpoint has no audio_config.")
         }
-        let melMask =
-            mask ?? MLXArray.zeros([features.dim(0), features.dim(1)]).asType(.bool)
+        // `ProcessedAudio.mask` follows the HF `input_features_mask` convention
+        // (`true == valid`); the audio tower expects `true == padding`, so invert.
+        let melMask: MLXArray
+        if let mask {
+            melMask = logicalNot(mask)
+        } else {
+            melMask = MLXArray.zeros([features.dim(0), features.dim(1)]).asType(.bool)
+        }
         let (encodings, subsampledMask) = audioTower(features, audioMelMask: melMask)
         let projected = embedAudio(encodings)
         let validMask = logicalNot(subsampledMask)
@@ -2697,6 +2703,9 @@ public struct Gemma4MessageGenerator: MessageGenerator {
                     + message.videos.map { _ in
                         ["type": "video"]
                     }
+                    + message.audios.map { _ in
+                        ["type": "audio"]
+                    }
                     + [
                         ["type": "text", "text": message.content]
                     ],
@@ -2797,9 +2806,86 @@ public struct Gemma4Processor: UserInputProcessor {
             promptTokens = expandedTokens
         }
 
+        var processedAudio: LMInput.ProcessedAudio?
+        if !input.audios.isEmpty {
+            let (audio, tokenCounts) = try await prepareAudio(input.audios)
+            processedAudio = audio
+            // Expand each audio placeholder into `boa + audio_soft_token×N + eoa`,
+            // where N is the encoder's soft-token count for that clip's valid frames.
+            var expandedTokens: [Int] = []
+            var audioIndex = 0
+            for token in promptTokens {
+                if token == config.audioTokenId {
+                    let count =
+                        audioIndex < tokenCounts.count
+                        ? tokenCounts[audioIndex] : config.audioSeqLength
+                    expandedTokens.append(config.boaTokenId)
+                    expandedTokens.append(
+                        contentsOf: Array(repeating: config.audioTokenId, count: count))
+                    expandedTokens.append(config.eoaTokenId)
+                    audioIndex += 1
+                } else {
+                    expandedTokens.append(token)
+                }
+            }
+            promptTokens = expandedTokens
+        }
+
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(
+            text: .init(tokens: promptArray, mask: mask),
+            image: processedImage, audio: processedAudio)
+    }
+
+    /// Extracts log-mel features for each audio clip and stacks them into a batch,
+    /// returning the `ProcessedAudio` and per-clip audio soft-token counts (for
+    /// prompt expansion). Clips are resampled to the model's audio sample rate.
+    private func prepareAudio(
+        _ audios: [UserInput.Audio]
+    ) async throws -> (LMInput.ProcessedAudio, [Int]) {
+        let extractor = Gemma4AudioFeatureExtractor(sampleRate: config.audioSampleRate)
+        var processing = UserInput.AudioProcessing()
+        processing.sampleRate = Double(config.audioSampleRate)
+
+        var featureRows: [MLXArray] = []
+        var maskRows: [MLXArray] = []
+        var tokenCounts: [Int] = []
+        for audio in audios {
+            let waveform = try await audio.asMLXArray(processing: processing)
+            let (features, mask) = extractor(waveform)
+            featureRows.append(features)
+            maskRows.append(mask)
+            let validFrames = mask.asType(.int32).sum().item(Int.self)
+            tokenCounts.append(
+                min(
+                    Gemma4AudioFeatureExtractor.audioTokenCount(validFrames: validFrames),
+                    config.audioSeqLength))
+        }
+
+        let maxFrames = featureRows.map { $0.dim(1) }.max() ?? 0
+        var paddedFeatures: [MLXArray] = []
+        var paddedMasks: [MLXArray] = []
+        for (features, mask) in zip(featureRows, maskRows) {
+            let t = features.dim(1)
+            if t < maxFrames {
+                paddedFeatures.append(
+                    padded(features, widths: [0, IntOrPair((0, maxFrames - t)), 0]))
+                paddedMasks.append(
+                    padded(mask.asType(.int32), widths: [0, IntOrPair((0, maxFrames - t))])
+                        .asType(.bool))
+            } else {
+                paddedFeatures.append(features)
+                paddedMasks.append(mask)
+            }
+        }
+
+        return (
+            LMInput.ProcessedAudio(
+                features: concatenated(paddedFeatures, axis: 0),
+                mask: concatenated(paddedMasks, axis: 0)),
+            tokenCounts
+        )
     }
 }
 
@@ -2816,6 +2902,11 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     public let imageTokenId: Int
     public let boiTokenId: Int
     public let eoiTokenId: Int?
+    public let audioTokenId: Int
+    public let boaTokenId: Int
+    public let eoaTokenId: Int
+    public let audioSeqLength: Int
+    public let audioSampleRate: Int
 
     /// Image keys nested under `image_processor` in processor_config.json.
     /// Repos that ship a flat preprocessor_config.json put the same keys at
@@ -2853,6 +2944,11 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         case imageTokenId = "image_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
+        case audioTokenId = "audio_token_id"
+        case boaTokenId = "boa_token_id"
+        case eoaTokenId = "eoa_token_id"
+        case audioSeqLength = "audio_seq_length"
+        case audioSampleRate = "audio_sampling_rate"
     }
 
     public init(from decoder: any Swift.Decoder) throws {
@@ -2884,6 +2980,12 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
+        audioTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioTokenId) ?? 258_881
+        boaTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boaTokenId) ?? 256_000
+        eoaTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoaTokenId) ?? 258_883
+        audioSeqLength = try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioSeqLength) ?? 750
+        audioSampleRate =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioSampleRate) ?? 16_000
     }
 
     public func encode(to encoder: any Swift.Encoder) throws {
