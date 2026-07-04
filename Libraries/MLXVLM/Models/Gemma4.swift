@@ -9,6 +9,7 @@ import MLXNN
 private enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
     case multimodalTokenCountMismatch(kind: String, featureTokens: Int, promptTokens: Int)
+    case missingImageFrames
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +19,9 @@ private enum Gemma4Error: LocalizedError {
         case .multimodalTokenCountMismatch(let kind, let featureTokens, let promptTokens):
             return
                 "Gemma4 \(kind) token count mismatch: encoder produced \(featureTokens) soft tokens, but the prompt contains \(promptTokens) \(kind) tokens."
+        case .missingImageFrames:
+            return
+                "Gemma4 received image pixels without per-image frames; the vision path needs each image's (height, width) to reconstruct the flattened pixels."
         }
     }
 }
@@ -2059,7 +2063,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
     private func getInputEmbeddings(
         inputIds: MLXArray,
-        pixelValues: MLXArray? = nil
+        pixelValues: MLXArray? = nil,
+        frames: [THW]? = nil
     ) throws -> (MLXArray, MLXArray?) {
         var inputsEmbeds = languageModel.model.embedTokens(inputIds)
         inputsEmbeds =
@@ -2084,8 +2089,30 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         guard let pixelValues else {
             return (inputsEmbeds, perLayerInputs)
         }
+        guard let frames, !frames.isEmpty else {
+            throw Gemma4Error.missingImageFrames
+        }
 
-        var imageFeatures = visionTower(pixelValues)
+        // Images are preprocessed at their own aspect-ratio-preserving sizes, so
+        // they cannot be stacked into a single dense batch; they arrive flattened
+        // and concatenated, with `frames` carrying each image's (height, width).
+        // Run the vision tower once per image — the tower pools every image to a
+        // fixed `imageSeqLength` soft tokens, so the per-image outputs are equal
+        // length — then concatenate them into one
+        // `(1, numImages * imageSeqLength, hidden)` sequence.
+        let channels = 3
+        var visionOutputs: [MLXArray] = []
+        visionOutputs.reserveCapacity(frames.count)
+        var offset = 0
+        for frame in frames {
+            let count = channels * frame.h * frame.w
+            let imagePixels = pixelValues[offset ..< (offset + count)]
+                .reshaped(1, channels, frame.h, frame.w)
+            offset += count
+            visionOutputs.append(visionTower(imagePixels))
+        }
+
+        var imageFeatures = concatenated(visionOutputs, axis: 1)
         imageFeatures = embedVision(imageFeatures)
         imageFeatures = imageFeatures.asType(inputsEmbeds.dtype)
 
@@ -2114,7 +2141,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         let convertedCache = cache.map { $0 }
         if let imagePixels = input.image?.pixels {
             let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
-                inputIds: input.text.tokens, pixelValues: imagePixels)
+                inputIds: input.text.tokens, pixelValues: imagePixels,
+                frames: input.image?.frames)
             let result = languageModel(
                 nil,
                 cache: convertedCache,
@@ -2711,9 +2739,14 @@ public struct Gemma4Processor: UserInputProcessor {
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
             }
-            let imagePixelsConcatenated = concatenated(imagePixelsAndFrames.map { $0.0 })
+            // Each image is aspect-ratio-preserved to its own (height, width), so
+            // the per-image pixel tensors have different shapes and cannot be
+            // stacked. Flatten each to 1D and concatenate; the paired `frames`
+            // carry every image's (height, width) so the model can slice this
+            // buffer back apart and run the vision tower per image.
+            let flattenedPixels = concatenated(imagePixelsAndFrames.map { $0.0.flattened() })
             processedImage = LMInput.ProcessedImage(
-                pixels: imagePixelsConcatenated,
+                pixels: flattenedPixels,
                 frames: imagePixelsAndFrames.map { $0.1 }
             )
 
