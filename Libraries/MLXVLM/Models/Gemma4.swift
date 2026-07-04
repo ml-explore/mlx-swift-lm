@@ -2350,7 +2350,9 @@ private final class Gemma4UnifiedVisionEmbedder: Module {
 }
 
 public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
-    @ModuleInfo(key: "language_model") private var languageModel: Gemma4TextLanguageModel
+    // Module-internal (not `private`) — the MTP drafter in `Gemma4Assistant.swift`
+    // reaches `embed_tokens` / `embed_scale` through this, mirroring `Gemma4`.
+    @ModuleInfo(key: "language_model") var languageModel: Gemma4TextLanguageModel
     @ModuleInfo(key: "vision_embedder") private var visionEmbedder: Gemma4UnifiedVisionEmbedder?
     @ModuleInfo(key: "embed_vision") private var embedVision: Gemma4MultimodalEmbedder?
     @ModuleInfo(key: "embed_audio") private var embedAudio: Gemma4MultimodalEmbedder?
@@ -2555,6 +2557,22 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
     public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
         let logits = languageModel(inputs, cache: cache?.map { $0 })
         return logits.logits
+    }
+
+    /// MTP-aware `LanguageModel` entry point. Reads `mtpEmitFlagKey` from
+    /// the incoming `state` and threads it through to `Gemma4TextLanguageModel`;
+    /// the returned `LMOutput` carries `mtpLastHiddenStatesKey` and
+    /// `mtpSharedKVStatesKey` populated when the flag is set, empty otherwise.
+    /// Overrides the protocol-extension default at `LanguageModel` which
+    /// would discard `state`. Mirrors `Gemma4.callAsFunction(_:cache:state:)`.
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let emit = state?[mtpEmitFlagKey] ?? false
+        return languageModel(
+            input.tokens, cache: cache?.map { $0 },
+            emitDrafterState: emit
+        )
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
