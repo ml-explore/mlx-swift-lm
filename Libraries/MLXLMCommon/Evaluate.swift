@@ -114,6 +114,26 @@ public struct GenerateParameters: Sendable {
     /// number of tokens to consider for frequency penalty
     public var frequencyContextSize: Int
 
+    /// Optional factory producing a custom ``LogitProcessor`` that is composed
+    /// after the built-in penalty processors, see ``processor()``.
+    ///
+    /// This lets custom logit processing -- for example grammar-constrained or
+    /// otherwise structured decoding -- ride any API driven by
+    /// `GenerateParameters`, including ``ChatSession`` and the parameters-based
+    /// ``TokenIterator`` initializers:
+    ///
+    /// ```swift
+    /// var parameters = GenerateParameters(temperature: 0)
+    /// parameters.customLogitProcessorFactory = { GrammarProcessor(grammar: grammar) }
+    /// let session = ChatSession(model, generateParameters: parameters)
+    /// ```
+    ///
+    /// This is a factory rather than a stored ``LogitProcessor`` because
+    /// processors are stateful (see ``LogitProcessor/didSample(token:)``) --
+    /// each generation gets a fresh instance -- and because it keeps
+    /// `GenerateParameters` `Sendable`.
+    public var customLogitProcessorFactory: (@Sendable () -> any LogitProcessor)?
+
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -132,7 +152,8 @@ public struct GenerateParameters: Sendable {
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
         prefillStepSize: Int = 512,
-        seed: UInt64? = nil
+        seed: UInt64? = nil,
+        customLogitProcessorFactory: (@Sendable () -> any LogitProcessor)? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -152,6 +173,7 @@ public struct GenerateParameters: Sendable {
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
         self.seed = seed
+        self.customLogitProcessorFactory = customLogitProcessorFactory
     }
 
     public func sampler() -> LogitSampler {
@@ -200,15 +222,27 @@ public struct GenerateParameters: Sendable {
             frequencyContext = nil
         }
 
+        let penaltyProcessor: PenaltyProcessor?
         if repetitionContext == nil && presenceContext == nil && frequencyContext == nil {
-            return nil
+            penaltyProcessor = nil
+        } else {
+            penaltyProcessor = PenaltyProcessor(
+                repetitionContext: repetitionContext,
+                presenceContext: presenceContext,
+                frequencyContext: frequencyContext
+            )
         }
 
-        return PenaltyProcessor(
-            repetitionContext: repetitionContext,
-            presenceContext: presenceContext,
-            frequencyContext: frequencyContext
-        )
+        switch (penaltyProcessor, customLogitProcessorFactory?()) {
+        case (nil, nil):
+            return nil
+        case (let penaltyProcessor?, nil):
+            return penaltyProcessor
+        case (nil, let customProcessor?):
+            return customProcessor
+        case (let penaltyProcessor?, let customProcessor?):
+            return ChainedLogitProcessor(processors: [penaltyProcessor, customProcessor])
+        }
     }
 }
 
@@ -512,6 +546,36 @@ public struct PenaltyProcessor: LogitProcessor {
         repetitionContext?.didSample(token: token)
         presenceContext?.didSample(token: token)
         frequencyContext?.didSample(token: token)
+    }
+}
+
+/// Processor that applies multiple ``LogitProcessor`` instances in order.
+///
+/// ``GenerateParameters/processor()`` uses this to compose the built-in
+/// ``PenaltyProcessor`` with a processor from
+/// ``GenerateParameters/customLogitProcessorFactory``. It can also be used
+/// directly to combine several custom processors into one.
+public struct ChainedLogitProcessor: LogitProcessor {
+    var processors: [any LogitProcessor]
+
+    public init(processors: [any LogitProcessor]) {
+        self.processors = processors
+    }
+
+    mutating public func prompt(_ prompt: MLXArray) {
+        for index in processors.indices {
+            processors[index].prompt(prompt)
+        }
+    }
+
+    public func process(logits: MLXArray) -> MLXArray {
+        processors.reduce(logits) { $1.process(logits: $0) }
+    }
+
+    mutating public func didSample(token: MLXArray) {
+        for index in processors.indices {
+            processors[index].didSample(token: token)
+        }
     }
 }
 

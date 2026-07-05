@@ -172,6 +172,40 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertLessThan(actualPreparedMessageCount, replayedHistoryPreparedMessageCount)
     }
 
+    /// Processor that masks every logit except one, forcing that token to be sampled.
+    private struct ForceTokenProcessor: LogitProcessor {
+        let token: Int32
+
+        func prompt(_ prompt: MLXArray) {}
+
+        func process(logits: MLXArray) -> MLXArray {
+            let indices = MLXArray(0 ..< Int32(logits.dim(-1)))
+            return MLX.where(indices .== MLXArray(token), logits, MLXArray(-Float.infinity))
+        }
+
+        func didSample(token: MLXArray) {}
+    }
+
+    func testChatSessionUsesCustomLogitProcessor() async throws {
+        let forcedToken = 7
+        let inputProcessor = TestInputProcessor()
+        let model = model(processor: inputProcessor)
+
+        var parameters = GenerateParameters(maxTokens: 5, temperature: 0)
+        parameters.customLogitProcessorFactory = {
+            ForceTokenProcessor(token: Int32(forcedToken))
+        }
+
+        let session = ChatSession(model, generateParameters: parameters)
+        let result = try await session.respond(to: "hello")
+
+        // with all other logits masked, every generated token must be the forced token
+        let expectedWord = try XCTUnwrap(inputProcessor.tokenizer.convertIdToToken(forcedToken))
+        let words = result.split(separator: " ").map(String.init)
+        XCTAssertFalse(words.isEmpty, result)
+        XCTAssertTrue(words.allSatisfy { $0 == expectedWord }, result)
+    }
+
     func testChatSessionAsyncInterrupt() async throws {
         // interrupt the streamResponse and continue with another request
         let model = model()

@@ -355,4 +355,71 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(tokens.count, 8)
         for t in tokens { XCTAssertTrue((0 ..< 4).contains(t)) }
     }
+
+    // MARK: - Custom logit processor
+
+    private struct ScaleProcessor: LogitProcessor {
+        let scale: Float
+        func prompt(_ prompt: MLXArray) {}
+        func process(logits: MLXArray) -> MLXArray { logits * scale }
+        func didSample(token: MLXArray) {}
+    }
+
+    func testGenerateParametersCustomLogitProcessorFactory() {
+        // no penalties, no factory -> no processor
+        XCTAssertNil(GenerateParameters().processor())
+
+        // factory alone -> the custom processor, unwrapped
+        var parameters = GenerateParameters()
+        parameters.customLogitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+        XCTAssertNotNil(parameters.processor() as? ScaleProcessor)
+
+        // penalties + factory -> chained
+        parameters.presencePenalty = 0.5
+        XCTAssertNotNil(parameters.processor() as? ChainedLogitProcessor)
+    }
+
+    func testGenerateParametersAppliesCustomProcessorAfterPenalties() {
+        var parameters = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
+        parameters.customLogitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+
+        var processor = parameters.processor()
+        XCTAssertNotNil(processor)
+
+        processor?.prompt(MLXArray([1]))
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor?.process(logits: logits)
+        guard let values = processed?[0].asArray(Float.self) else {
+            XCTFail("Expected processed logits")
+            return
+        }
+
+        // penalty first, then scale: token 1 is (2.0 - 0.5) * 2 = 3.0
+        // (scale-then-penalty would give 2.0 * 2 - 0.5 = 3.5)
+        XCTAssertEqual(values[0], 2.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 6.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 8.0, accuracy: 1e-6)
+    }
+
+    func testChainedLogitProcessorForwardsPromptAndDidSample() {
+        var processor = ChainedLogitProcessor(processors: [
+            PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 5),
+            PresencePenaltyContext(presencePenalty: 0.25, presenceContextSize: 5),
+        ])
+
+        processor.prompt(MLXArray([1]))
+        processor.didSample(token: MLXArray([3]))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let values = processor.process(logits: logits)[0].asArray(Float.self)
+
+        // both processors saw the prompt (token 1) and the sampled token (token 3)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.25, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 3.25, accuracy: 1e-6)
+    }
 }
