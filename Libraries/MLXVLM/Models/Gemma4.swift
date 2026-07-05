@@ -2599,6 +2599,9 @@ public struct Gemma4MessageGenerator: MessageGenerator {
                     + message.videos.map { _ in
                         ["type": "video"]
                     }
+                    + message.audios.map { _ in
+                        ["type": "audio"]
+                    }
                     + [
                         ["type": "text", "text": message.content]
                     ],
@@ -2763,6 +2766,12 @@ public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
     public let videoTokenId: Int?
     public let boiTokenId: Int
     public let eoiTokenId: Int?
+    public let boaTokenId: Int
+    public let eoaTokenId: Int
+    public let audioSampleRate: Int
+    public let audioSamplesPerToken: Int
+    public let videoSoftTokensPerFrame: Int
+    public let videoMaxFrames: Int
 
     private struct ImageProcessorConfiguration: Decodable, Sendable {
         let doResize: Bool?
@@ -2794,9 +2803,35 @@ public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
         }
     }
 
+    /// `processor_config.json` nests the audio extractor params under
+    /// `feature_extractor`. The mel-related keys in there are vestigial
+    /// (written by mlx-vlm's `save_pretrained` fallback) — the unified
+    /// extractor only uses `sampling_rate` and `audio_samples_per_token`.
+    private struct FeatureExtractorConfiguration: Decodable, Sendable {
+        let samplingRate: Int?
+        let audioSamplesPerToken: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case samplingRate = "sampling_rate"
+            case audioSamplesPerToken = "audio_samples_per_token"
+        }
+    }
+
+    private struct VideoProcessorConfiguration: Decodable, Sendable {
+        let maxSoftTokens: Int?
+        let numFrames: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case maxSoftTokens = "max_soft_tokens"
+            case numFrames = "num_frames"
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case processorClass = "processor_class"
         case imageProcessor = "image_processor"
+        case featureExtractor = "feature_extractor"
+        case videoProcessor = "video_processor"
         case doResize = "do_resize"
         case doRescale = "do_rescale"
         case rescaleFactor = "rescale_factor"
@@ -2817,12 +2852,24 @@ public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
         case videoTokenId = "video_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
+        case boaTokenId = "boa_token_id"
+        case eoaTokenId = "eoa_token_id"
+        case eoaTokenIndex = "eoa_token_index"
+        case audioSampleRate = "audio_sampling_rate"
+        case audioSamplesPerToken = "audio_samples_per_token"
+        case videoSoftTokensPerFrame = "video_soft_tokens_per_frame"
+        case visionSoftTokensPerVideoFrame = "vision_soft_tokens_per_video_frame"
+        case videoMaxFrames = "video_max_frames"
     }
 
     public init(from decoder: any Swift.Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let imageProcessor = try c.decodeIfPresent(
             ImageProcessorConfiguration.self, forKey: CodingKeys.imageProcessor)
+        let featureExtractor = try c.decodeIfPresent(
+            FeatureExtractorConfiguration.self, forKey: CodingKeys.featureExtractor)
+        let videoProcessor = try c.decodeIfPresent(
+            VideoProcessorConfiguration.self, forKey: CodingKeys.videoProcessor)
 
         processorClass =
             try c.decodeIfPresent(String.self, forKey: CodingKeys.processorClass)
@@ -2884,6 +2931,28 @@ public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
         videoTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoTokenId) ?? 258_884
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
+        boaTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boaTokenId) ?? 256_000
+        eoaTokenId =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoaTokenId)
+            ?? c.decodeIfPresent(Int.self, forKey: CodingKeys.eoaTokenIndex)
+            ?? 258_883
+        audioSampleRate =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioSampleRate)
+            ?? featureExtractor?.samplingRate
+            ?? 16_000
+        audioSamplesPerToken =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioSamplesPerToken)
+            ?? featureExtractor?.audioSamplesPerToken
+            ?? 640
+        videoSoftTokensPerFrame =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoSoftTokensPerFrame)
+            ?? c.decodeIfPresent(Int.self, forKey: CodingKeys.visionSoftTokensPerVideoFrame)
+            ?? videoProcessor?.maxSoftTokens
+            ?? 70
+        videoMaxFrames =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.videoMaxFrames)
+            ?? videoProcessor?.numFrames
+            ?? 32
     }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
@@ -2901,10 +2970,16 @@ public struct Gemma4UnifiedProcessorConfiguration: Decodable, Sendable {
     }
 
     public func aspectRatioPreservingSize(for imageSize: CGSize) throws -> CGSize {
+        try aspectRatioPreservingSize(for: imageSize, maxTokens: maxSoftTokens)
+    }
+
+    public func aspectRatioPreservingSize(for imageSize: CGSize, maxTokens budget: Int) throws
+        -> CGSize
+    {
         let width = max(1, Int(ceil(imageSize.width)))
         let height = max(1, Int(ceil(imageSize.height)))
         let sideMultiple = max(1, patchSize * poolingKernelSize)
-        let maxTokens = max(1, maxSoftTokens)
+        let maxTokens = max(1, budget)
 
         let targetPixels = Double(maxTokens * sideMultiple * sideMultiple)
         let resizeFactor = sqrt(targetPixels / Double(width * height))
@@ -2945,13 +3020,13 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    private func patchify(_ pixelValues: MLXArray) -> (MLXArray, MLXArray, Int, THW) {
+    private func patchify(_ pixelValues: MLXArray, budget: Int) -> (MLXArray, MLXArray, Int, THW) {
         let channels = pixelValues.dim(1)
         let height = pixelValues.dim(2)
         let width = pixelValues.dim(3)
         let patchHeight = height / config.modelPatchSize
         let patchWidth = width / config.modelPatchSize
-        let realCount = min(patchHeight * patchWidth, config.maxSoftTokens)
+        let realCount = min(patchHeight * patchWidth, budget)
         let patchDim = config.modelPatchSize * config.modelPatchSize * channels
 
         var patches = pixelValues.reshaped(
@@ -2961,12 +3036,12 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         if realCount < patches.dim(0) {
             patches = patches[..<realCount, 0...]
         }
-        if realCount < config.maxSoftTokens {
-            patches = padded(patches, widths: [.init((0, config.maxSoftTokens - realCount)), 0])
+        if realCount < budget {
+            patches = padded(patches, widths: [.init((0, budget - realCount)), 0])
         }
 
         var positionValues: [Int32] = []
-        positionValues.reserveCapacity(config.maxSoftTokens * 2)
+        positionValues.reserveCapacity(budget * 2)
         var emitted = 0
         for y in 0 ..< patchHeight {
             for x in 0 ..< patchWidth where emitted < realCount {
@@ -2975,13 +3050,51 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
                 emitted += 1
             }
         }
-        while emitted < config.maxSoftTokens {
+        while emitted < budget {
             positionValues.append(-1)
             positionValues.append(-1)
             emitted += 1
         }
-        let positions = MLXArray(positionValues, [config.maxSoftTokens, 2])
+        let positions = MLXArray(positionValues, [budget, 2])
         return (patches, positions, realCount, THW(1, height, width))
+    }
+
+    /// Shared image/video-frame pipeline: user processing → sRGB tone curve →
+    /// aspect-preserving resize into `budget` model patches → rescale/normalize →
+    /// patchify. Images use `config.maxSoftTokens`; video frames use the smaller
+    /// `config.videoSoftTokensPerFrame` budget.
+    private func processFrame(
+        _ image: CIImage, processing: UserInput.Processing?, budget: Int
+    ) throws -> (patches: MLXArray, positions: MLXArray, tokenCount: Int, frame: THW) {
+        let processedImage = MediaProcessing.apply(image, processing: processing)
+        let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
+        let resizedImage =
+            if config.doResize {
+                try MediaProcessing.resampleBicubic(
+                    srgbImage,
+                    to: config.aspectRatioPreservingSize(
+                        for: srgbImage.extent.size, maxTokens: budget))
+            } else {
+                srgbImage
+            }
+
+        var pixelValues = MediaProcessing.asMLXArray(resizedImage)
+        let rescaleMultiplier = Float(config.doRescale ? config.rescaleFactor * 255 : 255)
+        if rescaleMultiplier != 1 {
+            pixelValues = pixelValues * MLXArray(rescaleMultiplier, dtype: pixelValues.dtype)
+        }
+        if config.doNormalize {
+            let mean = MLXArray(
+                config.imageMean.map { Float($0) }, [1, config.imageMean.count, 1, 1]
+            )
+            .asType(pixelValues.dtype)
+            let std = MLXArray(
+                config.imageStd.map { Float($0) }, [1, config.imageStd.count, 1, 1]
+            )
+            .asType(pixelValues.dtype)
+            pixelValues = (pixelValues - mean) / std
+        }
+        return patchify(pixelValues, budget: budget)
     }
 
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
@@ -2993,34 +3106,8 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         var frames: [THW] = []
 
         for image in images {
-            let processedImage = MediaProcessing.apply(image, processing: processing)
-            let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-            let resizedImage =
-                if config.doResize {
-                    try MediaProcessing.resampleBicubic(
-                        srgbImage,
-                        to: config.aspectRatioPreservingSize(for: srgbImage.extent.size))
-                } else {
-                    srgbImage
-                }
-
-            var pixelValues = MediaProcessing.asMLXArray(resizedImage)
-            let rescaleMultiplier = Float(config.doRescale ? config.rescaleFactor * 255 : 255)
-            if rescaleMultiplier != 1 {
-                pixelValues = pixelValues * MLXArray(rescaleMultiplier, dtype: pixelValues.dtype)
-            }
-            if config.doNormalize {
-                let mean = MLXArray(
-                    config.imageMean.map { Float($0) }, [1, config.imageMean.count, 1, 1]
-                )
-                .asType(pixelValues.dtype)
-                let std = MLXArray(
-                    config.imageStd.map { Float($0) }, [1, config.imageStd.count, 1, 1]
-                )
-                .asType(pixelValues.dtype)
-                pixelValues = (pixelValues - mean) / std
-            }
-            let (patches, positions, tokenCount, frame) = patchify(pixelValues)
+            let (patches, positions, tokenCount, frame) = try processFrame(
+                image, processing: processing, budget: config.maxSoftTokens)
             patchRows.append(patches)
             positionRows.append(positions)
             tokenCounts.append(tokenCount)
@@ -3032,6 +3119,142 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
             positionIds: stacked(positionRows, axis: 0),
             tokenCounts: tokenCounts,
             frames: frames
+        )
+    }
+
+    /// Sample up to `config.videoMaxFrames` frames (~1 fps) from each video and
+    /// patchify each frame like an image, but with the per-frame
+    /// `config.videoSoftTokensPerFrame` budget. Returns stacked patches and
+    /// positions with one row per frame (all videos concatenated), plus per-video
+    /// per-frame soft-token counts and timestamps (seconds) for the `mm:ss`
+    /// prompt prefixes.
+    public func processVideos(_ videos: [UserInput.Video], processing: UserInput.Processing?)
+        async throws -> (
+            pixels: MLXArray, positionIds: MLXArray,
+            tokenCounts: [[Int]], timestamps: [[Double]]
+        )
+    {
+        var patchRows: [MLXArray] = []
+        var positionRows: [MLXArray] = []
+        var tokenCounts: [[Int]] = []
+        var timestamps: [[Double]] = []
+
+        for video in videos {
+            let sequence = try await MediaProcessing.asProcessedSequence(
+                video, targetFPS: { _ in 1.0 }, maxFrames: config.videoMaxFrames
+            ) { frame in
+                let processedImage = MediaProcessing.apply(frame.frame, processing: processing)
+                let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
+                let resizedImage =
+                    if config.doResize {
+                        try MediaProcessing.resampleBicubic(
+                            srgbImage,
+                            to: config.aspectRatioPreservingSize(
+                                for: srgbImage.extent.size,
+                                maxTokens: config.videoSoftTokensPerFrame))
+                    } else {
+                        srgbImage
+                    }
+                return VideoFrame(frame: resizedImage, timeStamp: frame.timeStamp)
+            }
+
+            var videoTokenCounts: [Int] = []
+            for frame in sequence.frames {
+                var pixelValues = frame
+                let rescaleMultiplier = Float(
+                    config.doRescale ? config.rescaleFactor * 255 : 255)
+                if rescaleMultiplier != 1 {
+                    pixelValues =
+                        pixelValues * MLXArray(rescaleMultiplier, dtype: pixelValues.dtype)
+                }
+                if config.doNormalize {
+                    let mean = MLXArray(
+                        config.imageMean.map { Float($0) }, [1, config.imageMean.count, 1, 1]
+                    )
+                    .asType(pixelValues.dtype)
+                    let std = MLXArray(
+                        config.imageStd.map { Float($0) }, [1, config.imageStd.count, 1, 1]
+                    )
+                    .asType(pixelValues.dtype)
+                    pixelValues = (pixelValues - mean) / std
+                }
+                let (patches, positions, tokenCount, _) = patchify(
+                    pixelValues, budget: config.videoSoftTokensPerFrame)
+                patchRows.append(patches)
+                positionRows.append(positions)
+                videoTokenCounts.append(tokenCount)
+            }
+            tokenCounts.append(videoTokenCounts)
+            timestamps.append(sequence.timestamps.map { $0.seconds })
+        }
+
+        return (
+            pixels: stacked(patchRows, axis: 0),
+            positionIds: stacked(positionRows, axis: 0),
+            tokenCounts: tokenCounts,
+            timestamps: timestamps
+        )
+    }
+
+    /// Encoder-free audio features: the raw 16 kHz waveform is zero-padded to a
+    /// multiple of `audioSamplesPerToken` (640 = 40 ms) and reshaped into
+    /// `[1, tokens, samplesPerToken]` frames — each frame IS the feature vector
+    /// projected by the model's `embed_audio`, one soft token per frame. Clips
+    /// are truncated to `audioSeqLength` tokens (750 = 30 s) so the placeholder
+    /// count always matches the scattered feature rows. Mask is true on valid
+    /// frames (false only on cross-clip batch padding).
+    private func prepareAudio(
+        _ audios: [UserInput.Audio]
+    ) async throws -> (LMInput.ProcessedAudio, [Int]) {
+        var processing = UserInput.AudioProcessing()
+        processing.sampleRate = Double(config.audioSampleRate)
+        let samplesPerToken = max(1, config.audioSamplesPerToken)
+        let maxSamples = config.audioSeqLength * samplesPerToken
+
+        var featureRows: [MLXArray] = []
+        var maskRows: [MLXArray] = []
+        var tokenCounts: [Int] = []
+        for audio in audios {
+            var waveform = try await audio.asMLXArray(processing: processing)
+                .flattened().asType(.float32)
+            if waveform.dim(0) > maxSamples {
+                waveform = waveform[..<maxSamples]
+            }
+            guard waveform.dim(0) > 0 else {
+                throw VLMError.processing("Audio input contains no samples.")
+            }
+            let tokens = (waveform.dim(0) + samplesPerToken - 1) / samplesPerToken
+            let padLength = tokens * samplesPerToken - waveform.dim(0)
+            if padLength > 0 {
+                waveform = padded(waveform, widths: [IntOrPair((0, padLength))])
+            }
+            featureRows.append(waveform.reshaped(1, tokens, samplesPerToken))
+            maskRows.append(MLXArray.ones([1, tokens], dtype: .bool))
+            tokenCounts.append(tokens)
+        }
+
+        let maxFrames = featureRows.map { $0.dim(1) }.max() ?? 0
+        var paddedFeatures: [MLXArray] = []
+        var paddedMasks: [MLXArray] = []
+        for (features, mask) in zip(featureRows, maskRows) {
+            let t = features.dim(1)
+            if t < maxFrames {
+                paddedFeatures.append(
+                    padded(features, widths: [0, IntOrPair((0, maxFrames - t)), 0]))
+                paddedMasks.append(
+                    padded(mask.asType(.int32), widths: [0, IntOrPair((0, maxFrames - t))])
+                        .asType(.bool))
+            } else {
+                paddedFeatures.append(features)
+                paddedMasks.append(mask)
+            }
+        }
+
+        return (
+            LMInput.ProcessedAudio(
+                features: concatenated(paddedFeatures, axis: 0),
+                mask: concatenated(paddedMasks, axis: 0)),
+            tokenCounts
         )
     }
 
@@ -3078,8 +3301,90 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
             promptTokens = expandedTokens
         }
 
+        var processedVideo: LMInput.ProcessedVideo?
+        if !input.videos.isEmpty, let videoTokenId = config.videoTokenId {
+            let videoData = try await processVideos(input.videos, processing: input.processing)
+            processedVideo = LMInput.ProcessedVideo(
+                pixels: videoData.pixels, positionIds: videoData.positionIds)
+
+            // Expand the i-th `<video>` placeholder into one block per sampled
+            // frame — `mm:ss BOI + video_token×N + EOI`, blocks joined by a
+            // space — matching the HF/mlx-vlm processors. The timestamp text is
+            // tokenized in isolation, so merges across the text/special-token
+            // boundary can differ slightly from tokenizing the fully expanded
+            // prompt string; both sides of each timestamp are special tokens in
+            // the original too, so only the leading edge is affected.
+            var expandedTokens: [Int] = []
+            var videoIndex = 0
+            for token in promptTokens {
+                if token == videoTokenId {
+                    let frameTokenCounts =
+                        videoIndex < videoData.tokenCounts.count
+                        ? videoData.tokenCounts[videoIndex] : []
+                    let frameTimestamps =
+                        videoIndex < videoData.timestamps.count
+                        ? videoData.timestamps[videoIndex] : []
+                    for (frameIndex, count) in frameTokenCounts.enumerated() {
+                        let seconds =
+                            frameIndex < frameTimestamps.count ? frameTimestamps[frameIndex] : 0
+                        let timestampText =
+                            (frameIndex == 0 ? "" : " ")
+                            + gemma4VideoTimestampText(seconds: seconds) + " "
+                        expandedTokens.append(
+                            contentsOf: tokenizer.encode(
+                                text: timestampText, addSpecialTokens: false))
+                        expandedTokens.append(config.boiTokenId)
+                        expandedTokens.append(
+                            contentsOf: Array(repeating: videoTokenId, count: count))
+                        if let eoiTokenId = config.eoiTokenId {
+                            expandedTokens.append(eoiTokenId)
+                        }
+                    }
+                    videoIndex += 1
+                } else {
+                    expandedTokens.append(token)
+                }
+            }
+            promptTokens = expandedTokens
+        }
+
+        var processedAudio: LMInput.ProcessedAudio?
+        if !input.audios.isEmpty {
+            let (audio, tokenCounts) = try await prepareAudio(input.audios)
+            processedAudio = audio
+
+            // Expand each audio placeholder into `boa + audio_token×N + eoa`,
+            // N = the clip's frame count (= feature rows the model scatters).
+            var expandedTokens: [Int] = []
+            var audioIndex = 0
+            for token in promptTokens {
+                if token == config.audioTokenId {
+                    let count =
+                        audioIndex < tokenCounts.count
+                        ? tokenCounts[audioIndex] : config.audioSeqLength
+                    expandedTokens.append(config.boaTokenId)
+                    expandedTokens.append(
+                        contentsOf: Array(repeating: config.audioTokenId, count: count))
+                    expandedTokens.append(config.eoaTokenId)
+                    audioIndex += 1
+                } else {
+                    expandedTokens.append(token)
+                }
+            }
+            promptTokens = expandedTokens
+        }
+
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(
+            text: .init(tokens: promptArray, mask: mask),
+            image: processedImage, video: processedVideo, audio: processedAudio)
     }
+}
+
+/// `mm:ss` prefix for a sampled video frame, matching the reference processors
+/// (`f"{int(secs // 60):02d}:{int(secs % 60):02d}"`).
+func gemma4VideoTimestampText(seconds: Double) -> String {
+    let total = max(0, Int(seconds))
+    return String(format: "%02d:%02d", total / 60, total % 60)
 }
