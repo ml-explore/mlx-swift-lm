@@ -761,9 +761,22 @@ public final class ChatSession {
                                 pendingToolCalls.append(toolCall)
                             } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
+                                    genTask.cancel()
                                     break
                                 }
                             }
+                        }
+
+                        // The generation task is unstructured, so cancellation of
+                        // this task (stream onTermination) does not propagate to
+                        // it. Without an explicit cancel, `await genTask.value`
+                        // would wait for the FULL generation while holding the
+                        // cache lock — deadlocking the session's next call (e.g.
+                        // a caller that cancels mid-stream and immediately asks
+                        // again). The generate loop checks Task.isCancelled per
+                        // token, so this stops it promptly.
+                        if Task.isCancelled {
+                            genTask.cancel()
                         }
 
                         // wait for the task to complete -- this is important in
