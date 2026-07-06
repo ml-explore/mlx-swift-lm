@@ -1071,6 +1071,19 @@ public class Qwen35: Module, VLMModel {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
+        // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
+        // so the VLM and text paths agree: a pre-converted MLX checkpoint
+        // (conv1d already sanitized, no MTP tensors) has already been shifted at
+        // conversion time and must NOT be shifted again — doing so double-shifts
+        // every layernorm and produces garbage tokens. Computed on the incoming
+        // weights, before the `mtp.` filter below.
+        let hasMTPWeights = weights.keys.contains { $0.contains("mtp.") }
+        let hasUnsanitizedConv1d = weights.contains { key, value in
+            key.contains("conv1d.weight") && value.dim(-1) != 1
+        }
+        let shouldShiftNormWeights = hasMTPWeights || hasUnsanitizedConv1d
+
         var weights = weights.filter { !$0.key.contains("mtp.") }
 
         if config.textConfiguration.tieWordEmbeddings {
@@ -1111,7 +1124,9 @@ public class Qwen35: Module, VLMModel {
             if key.contains("conv1d.weight") && value.dim(-1) != 1 {
                 value = value.movedAxis(source: 2, destination: 1)
             }
-            if normKeys.contains(where: { key.hasSuffix($0) }) && value.ndim == 1 {
+            if shouldShiftNormWeights
+                && normKeys.contains(where: { key.hasSuffix($0) }) && value.ndim == 1
+            {
                 value = value + MLXArray(1, dtype: value.dtype)
             }
 
