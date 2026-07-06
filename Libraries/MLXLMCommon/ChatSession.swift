@@ -163,6 +163,26 @@ public final class ChatSession {
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
+    /// Text that closes the previous model turn when a new turn is appended to
+    /// a non-empty KV cache (e.g. `"<turn|>\n"` for Gemma 4, `"<end_of_turn>\n"`
+    /// for Gemma 3).
+    ///
+    /// The KV cache stores prior turns as raw tokens and always ends mid
+    /// model-turn: the stop token is *sampled* but never fed through the model,
+    /// and a cancelled generation stops anywhere. Chat templates only render
+    /// the messages they are given, so nothing ever closes that dangling turn —
+    /// every continuation turn is appended right after the previous reply's
+    /// last word, leaving the transcript malformed (`…reply<|turn>user…`).
+    /// When set, these tokens are prepended to each continuation prompt so the
+    /// cached transcript stays canonical (`…reply<turn|>\n<|turn>user…`), which
+    /// also heals turns truncated by cancellation. Off (nil) by default.
+    public var continuationTurnClosure: String?
+
+    /// Chat templates that begin with `{{ bos_token }}` re-emit `<bos>` on
+    /// every render; on continuation turns that would inject a spurious BOS
+    /// mid-transcript, so it is stripped. On by default.
+    public var stripsContinuationBOS: Bool = true
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
@@ -564,6 +584,42 @@ public final class ChatSession {
         )
     }
 
+}
+
+/// Repairs a continuation prompt (appended to a non-empty KV cache) so the
+/// cached transcript stays canonical: strips the duplicate `<bos>` that
+/// templates re-emit on every render, and prepends `continuationTurnClosure`
+/// to close the previous model turn (whose stop token was sampled but never
+/// fed — or which was truncated by a cancelled generation).
+private func repairContinuation(
+    _ input: LMInput, tokenizer: any Tokenizer,
+    closure: String?, stripBOS: Bool
+) -> LMInput {
+    var tokens = input.text.tokens
+    guard tokens.ndim == 2, tokens.dim(1) > 0 else { return input }
+    var changed = false
+    if stripBOS, let bos = tokenizer.bosTokenId, tokens.dim(1) > 1,
+        tokens[0, 0].item(Int.self) == bos
+    {
+        tokens = tokens[0..., 1...]
+        changed = true
+    }
+    if let closure, !closure.isEmpty {
+        let ids = tokenizer.encode(text: closure, addSpecialTokens: false)
+        if !ids.isEmpty {
+            tokens = concatenated(
+                [MLXArray(ids.map { Int32($0) }).expandedDimensions(axis: 0), tokens],
+                axis: 1)
+            changed = true
+        }
+    }
+    guard changed else { return input }
+    return LMInput(
+        text: .init(tokens: tokens, mask: ones(like: tokens).asType(.int8)),
+        image: input.image, video: input.video, audio: input.audio)
+}
+
+extension ChatSession {
     private func streamMap<R: Sendable>(
         messages: consuming [Chat.Message],
         transform: @Sendable @escaping (Generation) -> R?
@@ -574,6 +630,8 @@ public final class ChatSession {
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
 
+        let continuationTurnClosure = self.continuationTurnClosure
+        let stripsContinuationBOS = self.stripsContinuationBOS
         let task = Task {
             [
                 model,
@@ -612,6 +670,7 @@ public final class ChatSession {
 
                     var kvCache: [KVCache]
                     var draftKVCache: [KVCache]?
+                    var isContinuation = false
                     switch cache {
                     case .empty:
                         kvCache = model.newCache(parameters: generateParameters)
@@ -620,6 +679,7 @@ public final class ChatSession {
                     case .kvcache(let array, let storedDraftCache):
                         kvCache = array
                         draftKVCache = storedDraftCache
+                        isContinuation = kvCache.first.map { $0.offset > 0 } ?? false
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
@@ -637,7 +697,15 @@ public final class ChatSession {
                             chat: messages,
                             processing: processing,
                             tools: tools, additionalContext: additionalContext)
-                        let input = try await processor.prepare(input: userInput)
+                        let preparedInput = try await processor.prepare(input: userInput)
+                        let input =
+                            isContinuation
+                            ? repairContinuation(
+                                preparedInput, tokenizer: tokenizer,
+                                closure: continuationTurnClosure,
+                                stripBOS: stripsContinuationBOS)
+                            : preparedInput
+                        isContinuation = false
                         messages.removeAll()
 
                         // Select the token iterator based on speculative decoding configuration.
