@@ -171,6 +171,14 @@ let package = Package(
             ],
             path: "Libraries/MLXHuggingFace"
         ),
+        .testTarget(
+            name: "MLXHuggingFaceMacrosTests",
+            dependencies: [
+                "MLXHuggingFaceMacros",
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+            ],
+            path: "Tests/MLXHuggingFaceMacrosTests"
+        ),
         // C++ bridge for xgrammar: vendored upstream C++17 source under
         // Libraries/MLXCXGrammar/xgrammar/ compiled directly by SPM, plus our
         // own shim.cc exposing the extern "C" API from xgrammar_c.h.
