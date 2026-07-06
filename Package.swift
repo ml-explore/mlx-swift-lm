@@ -168,6 +168,10 @@ let package = Package(
             dependencies: [
                 "MLXHuggingFaceMacros",
                 "MLXLMCommon",
+                .target(
+                    name: "MLXFoundationModels",
+                    condition: .when(traits: ["FoundationModelsIntegration"])
+                ),
             ],
             path: "Libraries/MLXHuggingFace"
         ),
