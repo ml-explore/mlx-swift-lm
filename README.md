@@ -7,7 +7,6 @@ MLX Swift LM is a Swift package to build tools and applications with large langu
 > to decouple from tokenizer and downloader packages some breaking
 > changes were introduced. See [upgrading documentation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/upgrade) for detailed instructions on upgrading.
 
-
 > [!IMPORTANT]
 > We use `swift-format` to keep the code formatting consistent.  CI has this pinned to `602.0.0` right now.  603 has a behavior change that is [not controlled by configuration](https://github.com/swiftlang/swift-format/issues/1242) -- the plan is to pick up 604 when it is out and have configuration to keep the formatting consistent regardless of version.  For now, please use 602.  Thank you! 
 
@@ -29,7 +28,8 @@ Developers can use these examples in their own programs -- just import the swift
 - [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
 - [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
 - [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
-- [MLXFoundationModels](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxfoundationmodel): Bridge MLX models into Apple's `FoundationModels.LanguageModel` so they can plug into `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK. Gated by the `FoundationModelsIntegration` package trait (the adapter types; default on). Grammar-constrained generation comes from the separate `MLXGuidedGeneration` library, which this adapter always uses.
+- [MLXGuidedGeneration](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxguidedgeneration): Grammar-constrained generation (JSON Schema or EBNF) for any MLX model.
+- [MLXFoundationModels](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxfoundationmodels): Bridge MLX models into Apple's `FoundationModels.LanguageModel` for use with `LanguageModelSession`. (Requires the macOS/iOS/visionOS 27.0 SDK.)
 
 ## Usage
 
@@ -101,61 +101,41 @@ print(try await session.respond(to: "How about a great place to eat?"))
 
 For alternative integration approaches (custom downloaders, alternative tokenizer packages, local-only weights), see the [using documentation](Libraries/MLXLMCommon/Documentation.docc/using.md).
 
-### MLXFoundationModels: drop-in for `LanguageModelSession`
+## Apple Foundation Models
 
-If you're building on top of Apple's `FoundationModels` framework and want
-to swap `SystemLanguageModel` for an MLX-backed model (Qwen, Llama, Gemma,
-Phi), depend on `MLXFoundationModels` and `MLXHuggingFace`, build an
-`MLXLanguageModel` in one line with the `#huggingFaceLanguageModel` macro, and
-pass it to `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK.
+`MLXFoundationModels` lets you swap `SystemLanguageModel` for an MLX-backed model and drive it through Apple's `FoundationModels` framework. Build an `MLXLanguageModel` in one line, hand it to `LanguageModelSession`, and ask for a `@Generable` type: the response is grammar-constrained to that type's schema, so it always parses. Requires the macOS/iOS/visionOS 27.0 SDK.
 
 ```swift
-import Foundation
 import FoundationModels
-import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
-import MLXLMCommon
-import Tokenizers
+import MLXLLM
 
-let model = #huggingFaceLanguageModel(
-    configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
-    capabilities: [.guidedGeneration, .toolCalling])
-let session = LanguageModelSession(model: model)
-print(try await session.respond(to: "Explain MLX in one sentence."))
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+@Generable
+struct Recommendation {
+    let attraction: String
+    let neighborhood: String
+    let tip: String
+}
+
+if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+    let model = #huggingFaceLanguageModel(
+        configuration: LLMRegistry.gemma3_1B_qat_4bit,
+        capabilities: [.guidedGeneration])
+    let session = LanguageModelSession(model: model)
+
+    let recommendation = try await session.respond(
+        to: "Recommend one thing to do in Chicago.",
+        generating: Recommendation.self)
+    print(recommendation.content)
+    // Recommendation(
+    //     attraction: "Art Institute of Chicago",
+    //     neighborhood: "Loop",
+    //     tip: "Admire Seurat's Sunday on La Grande Jatte up close.")
+}
 ```
 
-The macro synthesizes the `weightsLocation:` and `load:` wiring (Hugging Face
-download plus tokenizer loading) that you would otherwise pass to the
-`MLXLanguageModel` initializer by hand. Call the initializer directly if you
-need a custom weights location or loader.
+That schema enforcement comes from [`MLXGuidedGeneration`](Libraries/MLXGuidedGeneration/README.md), a standalone primitive that constrains any MLX model's output to a schema with no FoundationModels dependency (macOS 14 / iOS 17+). `MLXFoundationModels` builds on it, but you can use it directly on any model you load yourself.
 
-Pass a `GenerationSchema` to `respond(to:schema:)` for grammar-constrained
-output. The constraint is enforced via the vendored xgrammar library, which
-ships in the separate `MLXGuidedGeneration` product and is always available
-when the `MLXFoundationModels` adapter is compiled in.
-
-#### Trait matrix
-
-`MLXFoundationModels` exposes one SwiftPM trait, default-on:
-
-| Trait | Gates |
-|---|---|
-| `FoundationModelsIntegration` | The `MLXLanguageModel` / `MLXLanguageModel.Executor` adapter types that bridge to `FoundationModels.LanguageModel`. Requires the 27.0 SDK to compile. Disabling it compiles `MLXFoundationModels` down to `MLXDownloadProgress` alone. |
-
-Grammar-constrained ("guided") generation lives in the separate
-`MLXGuidedGeneration` product. `MLXFoundationModels` always uses it when the
-adapter is compiled in, so guided output and tool calling are always available
-there. To use guided generation without FoundationModels (older OS floors),
-depend on `MLXGuidedGeneration` directly:
-
-```swift
-.package(
-    url: "https://github.com/ml-explore/mlx-swift-lm",
-    from: "3.33.0"
-)
-```
-
-`FoundationModelsIntegration` is default-on; disable it with
-`.disableDefaultTraits` (or by not enabling it) for iOS-17-era consumers that
-want `MLXLLM` / `MLXLMCommon` without the FoundationModels adapter.
+The same one-line setup scales up: declare `.vision` to pass images, `.toolCalling` to expose tools, or `.reasoning` for thinking models, all driven through the standard `LanguageModelSession`. See [Libraries/MLXFoundationModels](Libraries/MLXFoundationModels/README.md) for the full capability set, custom weights and loaders, and the SwiftPM trait matrix.
