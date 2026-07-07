@@ -72,6 +72,28 @@ final class LanguageModelMacroTests: XCTestCase {
             macros: testMacros)
     }
 
+    func testExplicitCapabilitiesAndConfigurationResolver() {
+        assertMacroExpansion(
+            "let model = #huggingFaceLanguageModel(configuration: config, capabilities: [.guidedGeneration, .toolCalling], configurationResolver: MyResolver())",
+            expandedSource: """
+                let model = MLXLanguageModel(
+                    configuration: config,
+                    capabilities: [.guidedGeneration, .toolCalling],
+                    configurationResolver: MyResolver(),
+                    weightsLocation: {
+                        HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
+                    },
+                    load: { configuration, progressHandler in
+                        try await loadModelContainer(
+                            from: #hubDownloader(),
+                            using: #huggingFaceTokenizerLoader(),
+                            configuration: configuration,
+                            progressHandler: progressHandler)
+                    })
+                """,
+            macros: testMacros)
+    }
+
     func testMissingConfigurationDiagnoses() {
         assertMacroExpansion(
             "let model = #huggingFaceLanguageModel()",
