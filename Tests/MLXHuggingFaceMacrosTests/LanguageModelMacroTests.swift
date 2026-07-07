@@ -20,7 +20,7 @@ final class LanguageModelMacroTests: XCTestCase {
                         HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
                     },
                     load: { configuration, progressHandler in
-                        loadModelContainer(
+                        try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
@@ -41,7 +41,7 @@ final class LanguageModelMacroTests: XCTestCase {
                         HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
                     },
                     load: { configuration, progressHandler in
-                        loadModelContainer(
+                        try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
@@ -62,7 +62,7 @@ final class LanguageModelMacroTests: XCTestCase {
                         HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
                     },
                     load: { configuration, progressHandler in
-                        loadModelContainer(
+                        try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,

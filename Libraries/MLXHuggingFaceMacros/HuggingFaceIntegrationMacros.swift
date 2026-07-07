@@ -245,7 +245,7 @@ public struct LanguageModelMacro: ExpressionMacro {
         arguments.append(
             """
             load: { configuration, progressHandler in
-                    loadModelContainer(
+                    try await loadModelContainer(
                         from: #hubDownloader(),
                         using: #huggingFaceTokenizerLoader(),
                         configuration: configuration,
