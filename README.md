@@ -105,31 +105,31 @@ For alternative integration approaches (custom downloaders, alternative tokenize
 
 If you're building on top of Apple's `FoundationModels` framework and want
 to swap `SystemLanguageModel` for an MLX-backed model (Qwen, Llama, Gemma,
-Phi), depend on `MLXFoundationModels` and pass an `MLXLanguageModel` to
-`LanguageModelSession`. Requires the macOS/iOS 27.0 SDK.
+Phi), depend on `MLXFoundationModels` and `MLXHuggingFace`, build an
+`MLXLanguageModel` in one line with the `#huggingFaceLanguageModel` macro, and
+pass it to `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK.
 
 ```swift
+import Foundation
+import FoundationModels
+import Hub
+import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLMCommon
-import FoundationModels
-import Hub
 import Tokenizers
 
-let model = MLXLanguageModel(
+let model = #huggingFaceLanguageModel(
     configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
-    capabilities: [.guidedGeneration, .toolCalling],
-    weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
-    load: { configuration, progressHandler in
-        try await loadModelContainer(
-            from: #hubDownloader(),
-            using: #huggingFaceTokenizerLoader(),
-            configuration: configuration,
-            progressHandler: progressHandler)
-    })
+    capabilities: [.guidedGeneration, .toolCalling])
 let session = LanguageModelSession(model: model)
 print(try await session.respond(to: "Explain MLX in one sentence."))
 ```
+
+The macro synthesizes the `weightsLocation:` and `load:` wiring (Hugging Face
+download plus tokenizer loading) that you would otherwise pass to the
+`MLXLanguageModel` initializer by hand. Call the initializer directly if you
+need a custom weights location or loader.
 
 Pass a `GenerationSchema` to `respond(to:schema:)` for grammar-constrained
 output. The constraint is enforced via the vendored xgrammar library, which
