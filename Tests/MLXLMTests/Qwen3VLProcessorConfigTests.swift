@@ -34,32 +34,38 @@ final class Qwen3VLProcessorConfigTests: XCTestCase {
 
     /// The real Qwen3.6/3.5 PARO shape: only new-style edges, no legacy keys.
     func testNewStyleEdgesDecodeToBudget() throws {
-        let cfg = try decode(config(
-            budget: #""size": { "longest_edge": 16777216, "shortest_edge": 65536 }"#))
+        let cfg = try decode(
+            config(
+                budget: #""size": { "longest_edge": 16777216, "shortest_edge": 65536 }"#))
         XCTAssertEqual(cfg.minPixels, 65536, "shortest_edge → minPixels")
         XCTAssertEqual(cfg.maxPixels, 16_777_216, "longest_edge → maxPixels")
     }
 
     /// Legacy top-level keys still win.
     func testLegacyTopLevelPixelsHonored() throws {
-        let cfg = try decode(config(
-            budget: #""min_pixels": 1024, "max_pixels": 200000"#))
+        let cfg = try decode(
+            config(
+                budget: #""min_pixels": 1024, "max_pixels": 200000"#))
         XCTAssertEqual(cfg.minPixels, 1024)
         XCTAssertEqual(cfg.maxPixels, 200_000)
     }
 
     /// Legacy keys nested inside `size` are honored.
     func testLegacySizePixelsHonored() throws {
-        let cfg = try decode(config(
-            budget: #""size": { "min_pixels": 2048, "max_pixels": 300000 }"#))
+        let cfg = try decode(
+            config(
+                budget: #""size": { "min_pixels": 2048, "max_pixels": 300000 }"#))
         XCTAssertEqual(cfg.minPixels, 2048)
         XCTAssertEqual(cfg.maxPixels, 300_000)
     }
 
     /// Top-level legacy keys take precedence over a `size` block.
     func testTopLevelPixelsBeatSizeEdges() throws {
-        let cfg = try decode(config(budget:
-            #""min_pixels": 100, "max_pixels": 999, "size": { "longest_edge": 5, "shortest_edge": 5 }"#))
+        let cfg = try decode(
+            config(
+                budget:
+                    #""min_pixels": 100, "max_pixels": 999, "size": { "longest_edge": 5, "shortest_edge": 5 }"#
+            ))
         XCTAssertEqual(cfg.minPixels, 100)
         XCTAssertEqual(cfg.maxPixels, 999)
     }
