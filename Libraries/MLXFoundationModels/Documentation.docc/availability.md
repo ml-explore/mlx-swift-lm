@@ -107,14 +107,16 @@ let model = MLXLanguageModel(
 ## Disk-space pre-flight
 
 Before kicking off a download, check the on-disk free space. Sum the
-sibling file sizes from the `Hub` client of your choice, then compare
-against `freeDiskSpaceBytes`:
+sibling file sizes for the repo, then compare against `freeDiskSpaceBytes`.
+This is a remote size lookup, so any Hub client works; the example uses
+`HubClient` to match the download and weights-location wiring above:
 
 ```swift
-import Hub
+import HuggingFace
 
-let metadata = try await HubApi.shared.getFileMetadata(from: HubApi.Repo(id: id))
-let remote = metadata.reduce(Int64(0)) { $0 + Int64($1.size ?? 0) }
+guard let repo = Repo.ID(rawValue: id) else { return }
+let remote = try await HubClient.default.listFiles(in: repo)
+    .reduce(Int64(0)) { $0 + Int64($1.size ?? 0) }
 if let free = model.freeDiskSpaceBytes,
    free < remote + safetyMargin {
     showDiskSpaceWarning(needed: remote, free: free)
@@ -123,9 +125,8 @@ if let free = model.freeDiskSpaceBytes,
 try await model.preload()
 ```
 
-`HubApi.getFileMetadata(from:)` issues a HEAD request per sibling file
-in the repo and returns the sizes; it requires network.
-``MLXLanguageModel/freeDiskSpaceBytes`` is a synchronous
+`HubClient.listFiles(in:)` fetches the repo file tree with per-file sizes;
+it requires network. ``MLXLanguageModel/freeDiskSpaceBytes`` is a synchronous
 `URLResourceValues` lookup against the volume hosting
 `weightsLocation(modelID)`.
 
