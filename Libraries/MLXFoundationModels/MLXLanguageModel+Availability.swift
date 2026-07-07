@@ -22,9 +22,8 @@ extension MLXLanguageModel {
     /// availability is ``unavailable(_:)`` with reason
     /// ``UnavailableReason/modelNotDownloaded``. To check whether a download
     /// will fit on disk before kicking it off, compare ``freeDiskSpaceBytes``
-    /// against a pre-flight size estimate (e.g. sum of sibling file sizes
-    /// from `HubClient.listFiles(...)` / `fetchFileMetadata(...)` in
-    /// `MLXLMHFAPI` / `swift-hf-api`).
+    /// against a pre-flight size estimate from your model source (e.g. summing
+    /// the remote file sizes reported by your `Downloader` / hub client).
     public enum Availability: Sendable, Equatable {
         /// Weights are downloaded; the model can serve a request.
         ///
