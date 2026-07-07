@@ -69,7 +69,7 @@ identifier.
 
 - `FoundationModelsIntegration` controls the `MLXLanguageModel` /
   `MLXLanguageModel.Executor` surface. Disabling it compiles this target
-  down to just ``MLXDownloadProgress``.
+  to an empty module.
 
 Grammar-constrained generation lives in the separate `MLXGuidedGeneration`
 product, which this target always uses when the adapter is compiled in.
@@ -79,7 +79,7 @@ Consumer configurations:
 | `FoundationModelsIntegration` | MLXLanguageModel | Guided generation | Chat / tools |
 |---|---|---|---|
 | On (default) | Yes | Yes | Yes |
-| Off | No (symbol absent) | Use `MLXGuidedGeneration` directly | Only `MLXDownloadProgress` remains |
+| Off | No (symbol absent) | Use `MLXGuidedGeneration` directly | Empty module |
 
 ## Topics
 

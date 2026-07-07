@@ -1,5 +1,12 @@
 // Copyright © 2026 Apple Inc.
 
+// Gated identically to the MLXLanguageModel adapter. This observable's only
+// producer is the adapter's download path (MLXLanguageModel reports into it),
+// so it lives and dies with the adapter rather than surviving as an orphan
+// when the trait or the 27.0 SDK is absent.
+#if FoundationModelsIntegration
+#if canImport(FoundationModels, _version: 2)
+
 import Foundation
 
 /// Observable download progress for MLX model loading.
@@ -143,3 +150,6 @@ public final class MLXDownloadProgress {
         throughputBytesPerSec = Double(db) / dt
     }
 }
+
+#endif  // canImport(FoundationModels, _version: 2)
+#endif  // FoundationModelsIntegration

@@ -68,11 +68,12 @@ struct TraitMatrixTests {
     // MARK: - FoundationModelsIntegration off
 
     #if !FoundationModelsIntegration
-    @Test("FM off: MLXFoundationModels exposes only MLXDownloadProgress")
+    @Test("FM off: MLXFoundationModels compiles to an empty surface")
     func fmOffSurface() {
-        _ = MLXDownloadProgress.self
-        // No MLXLanguageModel in this configuration; the fact that this file
-        // compiles without referencing it is the assertion.
+        // Trait off: the entire module compiles out, adapter and the
+        // MLXDownloadProgress observable alike. This file compiling with no
+        // MLXFoundationModels symbols referenced is the assertion.
+        #expect(Bool(true))
     }
     #endif
 }
