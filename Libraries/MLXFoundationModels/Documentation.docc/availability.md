@@ -59,13 +59,24 @@ and tokenizer loader into the `load` closure:
 ```swift
 import MLXHuggingFace
 import MLXLMCommon
-import Hub
+import HuggingFace
 import Tokenizers
 
 let model = MLXLanguageModel(
     configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
     capabilities: [.guidedGeneration, .toolCalling],
-    weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
+    weightsLocation: { id in
+        // Resolve against the same HubClient cache the loader downloads into.
+        let cache = HubCache.default
+        guard let repo = Repo.ID(rawValue: id) else { return cache.cacheDirectory }
+        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+            let snapshot = try? cache.snapshotPath(
+                repo: repo, kind: .model, commitHash: commit)
+        {
+            return snapshot
+        }
+        return cache.repoDirectory(repo: repo, kind: .model)
+    },
     load: { configuration, progressHandler in
         try await loadModelContainer(
             from: #hubDownloader(),

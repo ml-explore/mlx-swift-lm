@@ -112,7 +112,6 @@ pass it to `LanguageModelSession`. Requires the macOS/iOS 27.0 SDK.
 ```swift
 import Foundation
 import FoundationModels
-import Hub
 import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
