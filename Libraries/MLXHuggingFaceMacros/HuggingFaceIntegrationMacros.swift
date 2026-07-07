@@ -241,7 +241,19 @@ public struct LanguageModelMacro: ExpressionMacro {
             arguments.append("configurationResolver: \(resolver)")
         }
         arguments.append(
-            "weightsLocation: { HubApi.shared.localRepoLocation(HubApi.Repo(id: $0)) }")
+            """
+            weightsLocation: { id in
+                    let cache = HuggingFace.HubCache.default
+                    guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        return cache.cacheDirectory
+                    }
+                    if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                        let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                        return snapshot
+                    }
+                    return cache.repoDirectory(repo: repo, kind: .model)
+                }
+            """)
         arguments.append(
             """
             load: { configuration, progressHandler in

@@ -305,13 +305,25 @@ private actor ModelCache {
 /// import MLXFoundationModels
 /// import MLXHuggingFace
 /// import MLXLMCommon
-/// import Hub
+/// import HuggingFace
 /// import Tokenizers
 ///
 /// let model = MLXLanguageModel(
 ///     configuration: ModelConfiguration(id: "mlx-community/Qwen2.5-3B-Instruct-4bit"),
 ///     capabilities: [.guidedGeneration, .toolCalling],
-///     weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
+///     weightsLocation: { id in
+///         // Resolve against the same HubClient cache the loader below downloads
+///         // into, so the availability checks see the downloaded weights.
+///         let cache = HubCache.default
+///         guard let repo = Repo.ID(rawValue: id) else { return cache.cacheDirectory }
+///         if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+///             let snapshot = try? cache.snapshotPath(
+///                 repo: repo, kind: .model, commitHash: commit)
+///         {
+///             return snapshot
+///         }
+///         return cache.repoDirectory(repo: repo, kind: .model)
+///     },
 ///     load: { configuration, progressHandler in
 ///         try await loadModelContainer(
 ///             from: #hubDownloader(),

@@ -20,8 +20,7 @@ import MLXLMCommon
 /// import MLXHuggingFace       // this macro + #hubDownloader / #huggingFaceTokenizerLoader
 /// import MLXFoundationModels  // MLXLanguageModel
 /// import MLXLMCommon          // ModelConfiguration, loadModelContainer
-/// import Hub                  // HubApi (synthesized weightsLocation)
-/// import HuggingFace          // HubClient (via #hubDownloader)
+/// import HuggingFace          // HubClient (via #hubDownloader) + HubCache (synthesized weightsLocation)
 /// import Tokenizers           // AutoTokenizer (via #huggingFaceTokenizerLoader)
 /// ```
 ///

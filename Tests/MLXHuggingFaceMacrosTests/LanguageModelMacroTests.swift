@@ -16,8 +16,16 @@ final class LanguageModelMacroTests: XCTestCase {
             expandedSource: """
                 let model = MLXLanguageModel(
                     configuration: config,
-                    weightsLocation: {
-                        HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
                     },
                     load: { configuration, progressHandler in
                         try await loadModelContainer(
@@ -37,8 +45,16 @@ final class LanguageModelMacroTests: XCTestCase {
                 let model = MLXLanguageModel(
                     configuration: config,
                     capabilities: [.guidedGeneration, .toolCalling],
-                    weightsLocation: {
-                        HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
                     },
                     load: { configuration, progressHandler in
                         try await loadModelContainer(
@@ -58,8 +74,16 @@ final class LanguageModelMacroTests: XCTestCase {
                 let model = MLXLanguageModel(
                     configuration: config,
                     configurationResolver: MyResolver(),
-                    weightsLocation: {
-                        HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
                     },
                     load: { configuration, progressHandler in
                         try await loadModelContainer(
@@ -80,8 +104,16 @@ final class LanguageModelMacroTests: XCTestCase {
                     configuration: config,
                     capabilities: [.guidedGeneration, .toolCalling],
                     configurationResolver: MyResolver(),
-                    weightsLocation: {
-                        HubApi.shared.localRepoLocation(HubApi.Repo(id: $0))
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
                     },
                     load: { configuration, progressHandler in
                         try await loadModelContainer(
