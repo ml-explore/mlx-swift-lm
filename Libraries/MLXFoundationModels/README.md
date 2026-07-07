@@ -88,7 +88,3 @@ The full capabilities also require the macOS/iOS/visionOS 27.0 SDK. The bridge i
 | Off (`.disableDefaultTraits`) | Any | Nothing compiled in. Use this for iOS-17-era consumers that want `MLXLLM` / `MLXLMCommon` without the adapter. |
 
 You can use guided generation outside of FoundationModels through [`MLXGuidedGeneration`](../MLXGuidedGeneration/README.md) directly.
-
-## Further reading
-
-The `Documentation.docc` catalog covers the pieces in depth: availability tiers, the guided-generation bridge, and adapter internals.
