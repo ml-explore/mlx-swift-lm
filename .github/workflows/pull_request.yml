@@ -88,7 +88,7 @@ jobs:
           xcodebuild -version
           swift --version
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
-          xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+          xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'
 
       - name: Verify documentation
         run: scripts/verify-docs.sh
