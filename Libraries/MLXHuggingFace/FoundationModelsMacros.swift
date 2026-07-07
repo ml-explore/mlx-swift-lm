@@ -6,16 +6,17 @@ import FoundationModels
 import MLXFoundationModels
 import MLXLMCommon
 
-/// Builds an ``MLXLanguageModel`` backed by HuggingFace downloading and
+/// Builds an `MLXLanguageModel` backed by HuggingFace downloading and
 /// tokenizer loading, so a configuration is all the caller provides.
 ///
 /// The macro synthesizes the `weightsLocation:` and `load:` arguments; the
 /// caller supplies only `configuration` (plus optional `capabilities` and
 /// `configurationResolver`). A caller needing a custom weights location or
-/// loader should call the ``MLXLanguageModel`` initializer directly.
+/// loader should call the `MLXLanguageModel` initializer directly.
 ///
 /// The expansion references symbols the caller must have in scope:
 /// ```swift
+/// import Foundation          // URL, Progress (via #hubDownloader)
 /// import MLXHuggingFace       // this macro + #hubDownloader / #huggingFaceTokenizerLoader
 /// import MLXFoundationModels  // MLXLanguageModel
 /// import MLXLMCommon          // ModelConfiguration, loadModelContainer
