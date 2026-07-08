@@ -116,16 +116,18 @@ private func splitFusedMambaProjections(_ weights: inout [String: MLXArray]) {
 }
 
 /// Convert AutoAWQ checkpoint weights to MLX quantized format in-place.
-private func convertAutoAWQ(
+///
+/// Internal (not private) so the conversion contract is unit-testable.
+func convertAutoAWQ(
     _ weights: inout [String: MLXArray], groupSize: Int
 ) {
+    // Every `.qweight` prefix converts, with or without a sibling `theta`:
+    // MoE per-expert weights carry no theta (their rotations are shared per
+    // layer under `experts.*_weight_theta`) and would otherwise be skipped.
     let prefixes = Set(
         weights.keys
             .filter { $0.hasSuffix(".qweight") }
-            .compactMap { key -> String? in
-                let pfx = String(key.dropLast("qweight".count))
-                return weights["\(pfx)theta"] != nil ? pfx : nil
-            }
+            .map { String($0.dropLast("qweight".count)) }
     )
 
     guard !prefixes.isEmpty else { return }
@@ -154,7 +156,9 @@ private func convertAutoAWQ(
             weights["\(pfx)weight"] = packMLX(unpackAndReorder(val).transposed())
 
         case "scales":
-            weights[key] = weights[key]!.transposed()
+            // float16 to match `biases` in `quantizedMM` — f32 scales with
+            // f16 biases mismatch (upstream fix z-lab/paroquant#38).
+            weights[key] = weights[key]!.transposed().asType(.float16)
 
         case "channel_scales":
             if let val = weights[key], val.ndim == 1 {
