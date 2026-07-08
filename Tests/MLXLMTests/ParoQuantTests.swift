@@ -20,7 +20,7 @@ public class ParoQuantTests: XCTestCase {
         let row1 = (0 ..< dim).map { Int16((groupSize - 1) - ($0 % groupSize)) }
         let pairs = MLXArray(row0 + row1).reshaped(krot, dim)
 
-        let packed = packPairsForTesting(pairs, groupSize: groupSize)
+        let packed = packPairs(pairs, groupSize: groupSize)
         XCTAssertEqual(packed.shape, [krot, dim / 2])
 
         let values = packed.asArray(Int32.self)
@@ -51,7 +51,7 @@ public class ParoQuantTests: XCTestCase {
         let dim = 256
 
         let pairs = makeRandomPairs(krot: krot, dim: dim, groupSize: groupSize)
-        let packed = packPairsForTesting(pairs, groupSize: groupSize)
+        let packed = packPairs(pairs, groupSize: groupSize)
 
         let packedValues = packed.asArray(Int32.self)
         let originalValues = pairs.asArray(Int16.self)
@@ -239,6 +239,85 @@ public class ParoQuantTests: XCTestCase {
                 "Unexpected output shape under concurrent load: \(shape)")
         }
     }
+
+    // MARK: - PairwiseRotation
+
+    /// The checkpoint key contract `RotateSwitchGLU` relies on: Module
+    /// reflection must expose exactly `theta` / `pairs` / `channel_scales`
+    /// (so nested keys like `switch_mlp.gate_up_rot.theta` load), and none
+    /// of the underscore-prefixed derived state.
+    func testPairwiseRotationExposesCheckpointKeys() {
+        let rot = PairwiseRotation(dims: 16, groupSize: 8, krot: 2)
+        let keys = Set(rot.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(keys, ["theta", "pairs", "channel_scales"])
+    }
+
+    /// Freshly-initialized parameters (theta = 0, scales = 1) must be an
+    /// exact identity: cos = 1 / sin = 0 rotations and unit channel scales
+    /// round-trip every value bit-for-bit through the kernel.
+    func testPairwiseRotationDefaultIsIdentity() {
+        let rot = PairwiseRotation(dims: 16, groupSize: 8, krot: 2)
+        rot.prepareDerivedRotationState()
+
+        let x = MLXRandom.normal([4, 16]).asType(.float16)
+        eval(x)
+        let y = rot.rotate(x)
+        XCTAssertTrue(allClose(y, x, rtol: 0.0, atol: 0.0).item(Bool.self))
+    }
+
+    /// Kernel output vs a scalar CPU re-implementation of the same math
+    /// (channel scaling, then krot rounds of within-group Givens rotations),
+    /// on both tile paths (batch 1 → tile 1, batch 5 → tile 4).
+    func testPairwiseRotationMatchesCPUReference() throws {
+        let dim = 16
+        let groupSize = 8
+        let krot = 3
+
+        let rot = PairwiseRotation(dims: dim, groupSize: groupSize, krot: krot)
+        let theta = (MLXRandom.normal([krot, dim / 2]) * 0.5).asType(.float16)
+        let pairs = makeRandomPairs(krot: krot, dim: dim, groupSize: groupSize)
+        let channelScales = (MLXRandom.normal([1, dim]) * 0.1 + 1.0).asType(.float16)
+        try rot.update(
+            parameters: ModuleParameters.unflattened([
+                "theta": theta, "pairs": pairs, "channel_scales": channelScales,
+            ]),
+            verify: [.all])
+        rot.prepareDerivedRotationState()
+
+        for batch in [1, 5] {
+            let x = MLXRandom.normal([batch, dim]).asType(.float16)
+            eval(x)
+
+            let expected = referenceRotate(
+                x: x, pairs: pairs, theta: theta, channelScales: channelScales,
+                groupSize: groupSize)
+            let y = rot.rotate(x)
+
+            let relError = relativeRMSError(expected, y)
+            XCTAssertLessThan(
+                relError, 0.01, "batch \(batch): kernel diverges from CPU reference")
+        }
+    }
+
+    /// The reusability contract for gathered MoE activations: leading shape
+    /// is preserved for N-D input, and a zero-row input passes through
+    /// (no kernel dispatch on an empty grid).
+    func testPairwiseRotationPreservesLeadingShapeAndHandlesEmpty() {
+        let rot = PairwiseRotation(dims: 16, groupSize: 8, krot: 2)
+        rot.prepareDerivedRotationState()
+
+        let x4d = MLXRandom.normal([2, 3, 1, 16]).asType(.float16)
+        eval(x4d)
+        let y4d = rot.rotate(x4d)
+        XCTAssertEqual(y4d.shape, [2, 3, 1, 16])
+        // Same data through the 2-D path must give the same rows.
+        let yFlat = rot.rotate(x4d.reshaped(-1, 16))
+        XCTAssertTrue(allClose(y4d.reshaped(-1, 16), yFlat, rtol: 0.0, atol: 0.0).item(Bool.self))
+
+        let empty = MLXArray.zeros([0, 16]).asType(.float16)
+        let yEmpty = rot.rotate(empty)
+        XCTAssertEqual(yEmpty.shape, [0, 16])
+    }
 }
 
 /// Reference used to carry one layer into the `@Sendable` closure of
@@ -324,6 +403,47 @@ private func makeRandomPairs(krot: Int, dim: Int, groupSize: Int) -> MLXArray {
     return MLXArray(data).reshaped(krot, dim)
 }
 
+/// Scalar CPU re-implementation of the pairwise-rotation kernel's math for
+/// `testPairwiseRotationMatchesCPUReference`: scale each channel, then for
+/// each rotation round k apply the within-group Givens rotations
+/// `(a, b) → (a·cos + b·sin, b·cos − a·sin)`. Rounds are sequential; pairs
+/// within a round are a disjoint permutation, so element order is free.
+private func referenceRotate(
+    x: MLXArray, pairs: MLXArray, theta: MLXArray, channelScales: MLXArray,
+    groupSize: Int
+) -> MLXArray {
+    let batch = x.dim(0)
+    let dim = x.dim(1)
+    let krot = theta.dim(0)
+    let halfGroup = groupSize / 2
+
+    let xValues = x.asType(.float32).asArray(Float.self)
+    let thetaValues = theta.asType(.float32).asArray(Float.self)
+    let pairValues = pairs.asArray(Int16.self)
+    let scaleValues = channelScales.asType(.float32).asArray(Float.self)
+
+    var out = [Float]()
+    out.reserveCapacity(batch * dim)
+    for row in 0 ..< batch {
+        var v = (0 ..< dim).map { xValues[row * dim + $0] * scaleValues[$0] }
+        for k in 0 ..< krot {
+            for g in 0 ..< (dim / groupSize) {
+                for t in 0 ..< halfGroup {
+                    let i = g * groupSize + Int(pairValues[k * dim + g * groupSize + 2 * t])
+                    let j = g * groupSize + Int(pairValues[k * dim + g * groupSize + 2 * t + 1])
+                    let angle = thetaValues[k * (dim / 2) + g * halfGroup + t]
+                    let (c, s) = (cos(angle), sin(angle))
+                    let (a, b) = (v[i], v[j])
+                    v[i] = a * c + b * s
+                    v[j] = b * c - a * s
+                }
+            }
+        }
+        out.append(contentsOf: v)
+    }
+    return MLXArray(out).reshaped(batch, dim).asType(x.dtype)
+}
+
 /// Relative RMS error between two arrays: sqrt(mean((a-b)²) / mean(a²)).
 private func relativeRMSError(_ a: MLXArray, _ b: MLXArray) -> Float {
     let diff = (a - b).asType(.float32)
@@ -331,16 +451,6 @@ private func relativeRMSError(_ a: MLXArray, _ b: MLXArray) -> Float {
     let mse = mean(diff * diff).item(Float.self)
     let refVar = mean(ref * ref).item(Float.self)
     return sqrt(mse / max(refVar, 1e-10))
-}
-
-/// Mirrors `packPairs` from RotateQuantizedLinear.swift (file-private in production).
-private func packPairsForTesting(_ pairs: MLXArray, groupSize: Int) -> MLXArray {
-    let krot = pairs.dim(0)
-    let numGroups = pairs.dim(1) / groupSize
-    let p = pairs.reshaped(krot, numGroups, groupSize).asType(.int32)
-    let lo = p[0..., 0..., .stride(by: 2)]
-    let hi = p[0..., 0..., .stride(from: 1, by: 2)]
-    return (lo | (hi << 16)).reshaped(krot, -1)
 }
 
 /// Mirrors `unpackAndReorder` from ParoQuantLoader.swift (file-private in production).
