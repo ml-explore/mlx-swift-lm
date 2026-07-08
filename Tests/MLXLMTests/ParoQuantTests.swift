@@ -318,6 +318,271 @@ public class ParoQuantTests: XCTestCase {
         let yEmpty = rot.rotate(empty)
         XCTAssertEqual(yEmpty.shape, [0, 16])
     }
+
+    // MARK: - MoE Loader Passes
+
+    /// `…experts.{e}.{proj}.{suffix}` triples stack into 3-D `switch_mlp`
+    /// tensors in expert order, consuming the per-expert keys; groups with a
+    /// mid-gap expert are left untouched (the strict update fails loudly on
+    /// the real gap instead); non-stackable suffixes and shared rotation
+    /// keys are ignored.
+    func testStackMoEExpertWeightsStacksAndRemoves() {
+        let base = "model.layers.0.mlp"
+        var weights = [String: MLXArray]()
+        for e in 0 ..< 2 {
+            for suffix in ["weight", "scales", "biases"] {
+                weights["\(base).experts.\(e).gate_proj.\(suffix)"] =
+                    MLXArray(Array(repeating: Float(e), count: 8)).reshaped(4, 2)
+            }
+        }
+        // Mid-gap group (experts 0 and 2, no 1) must not stack.
+        weights["\(base).experts.0.up_proj.weight"] = MLXArray.zeros([4, 2])
+        weights["\(base).experts.2.up_proj.weight"] = MLXArray.zeros([4, 2])
+        // Unconverted AWQ suffix and shared rotation keys must be ignored.
+        weights["\(base).experts.0.down_proj.qweight"] = MLXArray.zeros([4, 2])
+        weights["\(base).experts.gate_up_weight_theta"] = MLXArray.zeros([2, 8])
+
+        stackMoEExpertWeights(&weights)
+
+        for suffix in ["weight", "scales", "biases"] {
+            let stacked = weights["\(base).switch_mlp.gate_proj.\(suffix)"]
+            XCTAssertEqual(stacked?.shape, [2, 4, 2])
+            // Expert order: slice e must hold expert e's values.
+            XCTAssertEqual(stacked?[1].max().item(Float.self), 1.0)
+            XCTAssertEqual(stacked?[1].min().item(Float.self), 1.0)
+            XCTAssertNil(weights["\(base).experts.0.gate_proj.\(suffix)"])
+            XCTAssertNil(weights["\(base).experts.1.gate_proj.\(suffix)"])
+        }
+        XCTAssertNil(weights["\(base).switch_mlp.up_proj.weight"])
+        XCTAssertNotNil(weights["\(base).experts.0.up_proj.weight"])
+        XCTAssertNotNil(weights["\(base).experts.2.up_proj.weight"])
+        XCTAssertNotNil(weights["\(base).experts.0.down_proj.qweight"])
+        XCTAssertNotNil(weights["\(base).experts.gate_up_weight_theta"])
+    }
+
+    /// The shared per-layer rotation keys remap onto the *nested*
+    /// `PairwiseRotation` children (deliberate divergence from upstream's
+    /// flat `gate_up_rot_theta` layout), with 1-D channel_scales normalised
+    /// to `[1, dims]`.
+    func testRemapSharedMoERotationsProducesNestedKeys() {
+        let base = "model.layers.3.mlp"
+        var weights = [String: MLXArray]()
+        weights["\(base).experts.gate_up_weight_theta"] = MLXArray.zeros([8, 1024])
+        weights["\(base).experts.gate_up_weight_pairs"] = MLXArray.zeros(
+            [8, 2048], type: Int16.self)
+        weights["\(base).experts.gate_up_weight_channel_scales"] = MLXArray.ones([1, 2048])
+        weights["\(base).experts.down_weight_theta"] = MLXArray.zeros([8, 256])
+        weights["\(base).experts.down_weight_pairs"] = MLXArray.zeros([8, 512], type: Int16.self)
+        // 1-D channel_scales must be normalised like convertAutoAWQ does.
+        weights["\(base).experts.down_weight_channel_scales"] = MLXArray.ones([512])
+        // Per-expert keys must not be touched.
+        weights["\(base).experts.0.gate_proj.weight"] = MLXArray.zeros([4, 2])
+
+        remapSharedMoERotations(&weights)
+
+        XCTAssertEqual(weights["\(base).switch_mlp.gate_up_rot.theta"]?.shape, [8, 1024])
+        XCTAssertEqual(weights["\(base).switch_mlp.gate_up_rot.pairs"]?.shape, [8, 2048])
+        XCTAssertEqual(
+            weights["\(base).switch_mlp.gate_up_rot.channel_scales"]?.shape, [1, 2048])
+        XCTAssertEqual(weights["\(base).switch_mlp.down_rot.theta"]?.shape, [8, 256])
+        XCTAssertEqual(weights["\(base).switch_mlp.down_rot.channel_scales"]?.shape, [1, 512])
+        XCTAssertNil(weights["\(base).experts.gate_up_weight_theta"])
+        XCTAssertNil(weights["\(base).experts.down_weight_channel_scales"])
+        XCTAssertNotNil(weights["\(base).experts.0.gate_proj.weight"])
+    }
+
+    /// The text_config flatten must keep the checkpoint's *top-level*
+    /// model_type (the registry key) instead of letting text_config's
+    /// "*_text" variant — or the old hard-coded "qwen3_5" — clobber it.
+    func testFlattenTextConfigPreservesModelType() {
+        let moe: [String: Any] = [
+            "model_type": "qwen3_5_moe",
+            "text_config": ["model_type": "qwen3_5_moe_text", "num_experts": 256],
+        ]
+        let flatMoe = flattenParoQuantTextConfig(moe)
+        XCTAssertEqual(flatMoe["model_type"] as? String, "qwen3_5_moe")
+        XCTAssertEqual(flatMoe["num_experts"] as? Int, 256)
+
+        let dense: [String: Any] = [
+            "model_type": "qwen3_5",
+            "text_config": ["model_type": "qwen3_5_text"],
+        ]
+        XCTAssertEqual(
+            flattenParoQuantTextConfig(dense)["model_type"] as? String, "qwen3_5")
+    }
+
+    /// Detection accepts both the dense and the MoE ForConditionalGeneration
+    /// architecture strings, and still rejects everything else.
+    func testDetectionAcceptsMoEArchitecture() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func writeConfig(architecture: String) throws {
+            let config: [String: Any] = [
+                "architectures": [architecture],
+                "quantization_config": ["quant_method": "paroquant"],
+            ]
+            try JSONSerialization.data(withJSONObject: config)
+                .write(to: dir.appendingPathComponent("config.json"))
+        }
+
+        try writeConfig(architecture: "Qwen3_5MoeForConditionalGeneration")
+        XCTAssertTrue(isParoQuantModel(directory: dir))
+        try writeConfig(architecture: "Qwen3_5ForConditionalGeneration")
+        XCTAssertTrue(isParoQuantModel(directory: dir))
+        try writeConfig(architecture: "LlamaForCausalLM")
+        XCTAssertFalse(isParoQuantModel(directory: dir))
+    }
+
+    // MARK: - RotateSwitchGLU
+
+    /// Nested checkpoint keys: the two `PairwiseRotation` children expose
+    /// `gate_up_rot.*` / `down_rot.*` alongside the inherited projections —
+    /// exactly what `remapSharedMoERotations` emits.
+    func testRotateSwitchGLUExposesNestedRotationKeys() {
+        let glu = RotateSwitchGLU(
+            inputDims: 16, hiddenDims: 8, numExperts: 4, groupSize: 8, krot: 2)
+        let keys = Set(glu.parameters().flattened().map { $0.0 })
+        for child in ["gate_up_rot", "down_rot"] {
+            for suffix in ["theta", "pairs", "channel_scales"] {
+                XCTAssertTrue(keys.contains("\(child).\(suffix)"), "missing \(child).\(suffix)")
+            }
+        }
+        XCTAssertTrue(keys.contains("gate_proj.weight"))
+    }
+
+    /// With identity rotations (the fresh-init state), RotateSwitchGLU must
+    /// reproduce stock SwitchGLU bit-for-bit on the same projection weights —
+    /// on both the broadcast (<64 indices) and gather/sort (≥64) paths.
+    func testRotateSwitchGLUIdentityMatchesSwitchGLU() throws {
+        let inputDims = 16
+        let hiddenDims = 8
+        let numExperts = 4
+
+        let reference = SwitchGLU(
+            inputDims: inputDims, hiddenDims: hiddenDims, numExperts: numExperts)
+        let rotated = RotateSwitchGLU(
+            inputDims: inputDims, hiddenDims: hiddenDims, numExperts: numExperts,
+            groupSize: 8, krot: 2)
+
+        // Copy the reference projections; rotations stay at their identity
+        // defaults, so `verify: []` (the rotation keys are legitimately absent).
+        try rotated.update(parameters: reference.parameters(), verify: [])
+        for case let rot as PairwiseRotation in rotated.modules() {
+            rot.prepareDerivedRotationState()
+        }
+
+        // Broadcast path: 2×2 indices (size 4 < 64).
+        let xSmall = MLXRandom.normal([1, 2, inputDims])
+        let idxSmall = MLXArray([Int32(0), 1, 2, 3]).reshaped(1, 2, 2)
+        eval(xSmall)
+        XCTAssertTrue(
+            allClose(
+                rotated(xSmall, idxSmall), reference(xSmall, idxSmall),
+                rtol: 0.0, atol: 0.0
+            ).item(Bool.self))
+
+        // Gather/sort path: 32×2 indices (size 64 ≥ 64).
+        let xLarge = MLXRandom.normal([1, 32, inputDims])
+        let idxLarge = randInt(Int32(0) ..< Int32(numExperts), [1, 32, 2])
+        eval(xLarge)
+        XCTAssertTrue(
+            allClose(
+                rotated(xLarge, idxLarge), reference(xLarge, idxLarge),
+                rtol: 0.0, atol: 0.0
+            ).item(Bool.self))
+    }
+
+    /// End-to-end loader mechanics on a miniature MoE block: the GLU swap
+    /// installs RotateSwitchGLU, the step-9 quantize pass converts its
+    /// SwitchLinear children to QuantizedSwitchLinear (checkpoint `.scales`
+    /// present, no `.theta`), the strict checkpoint update succeeds, and a
+    /// forward pass through both index paths produces finite output.
+    func testPatchMoESwitchGLULayersEndToEnd() throws {
+        let inputDims = 128
+        let hiddenDims = 64
+        let numExperts = 4
+        let groupSize = 64
+        let bits = 4
+        let krot = 2
+
+        let host = MoEHostBlock(
+            inputDims: inputDims, hiddenDims: hiddenDims, numExperts: numExperts)
+
+        // Synthetic stacked checkpoint: quantized 3-D expert projections
+        // (what stackMoEExpertWeights emits) + nested rotation parameters
+        // (what remapSharedMoERotations emits).
+        var weights = [String: MLXArray]()
+        for (proj, outDims, inDims) in [
+            ("gate_proj", hiddenDims, inputDims),
+            ("up_proj", hiddenDims, inputDims),
+            ("down_proj", inputDims, hiddenDims),
+        ] {
+            let w = MLXRandom.normal([numExperts, outDims, inDims]).asType(.float16)
+            let (wq, scales, biases) = quantized(w, groupSize: groupSize, bits: bits)
+            weights["switch_mlp.\(proj).weight"] = wq
+            weights["switch_mlp.\(proj).scales"] = scales
+            weights["switch_mlp.\(proj).biases"] = biases ?? MLXArray.zeros(scales.shape)
+        }
+        for (child, dims) in [("gate_up_rot", inputDims), ("down_rot", hiddenDims)] {
+            weights["switch_mlp.\(child).theta"] =
+                (MLXRandom.normal([krot, dims / 2]) * 0.1).asType(.float16)
+            weights["switch_mlp.\(child).pairs"] = makeRandomPairs(
+                krot: krot, dim: dims, groupSize: groupSize)
+            weights["switch_mlp.\(child).channel_scales"] =
+                (MLXRandom.normal([1, dims]) * 0.1 + 1.0).asType(.float16)
+        }
+
+        // Mirror the loader: GLU swap → quantize by checkpoint keys → strict
+        // update → derived rotation state.
+        try patchMoESwitchGLULayers(model: host, weights: weights, groupSize: groupSize)
+        XCTAssertTrue(host.switchMLP is RotateSwitchGLU)
+
+        quantize(model: host) { path, module in
+            guard module is Quantizable else { return nil }
+            guard weights["\(path).scales"] != nil, weights["\(path).theta"] == nil else {
+                return nil
+            }
+            return (groupSize, bits, .affine)
+        }
+        let leaves = Dictionary(uniqueKeysWithValues: host.leafModules().flattened())
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            XCTAssertTrue(
+                leaves["switch_mlp.\(proj)"] is QuantizedSwitchLinear, "\(proj) not quantized")
+        }
+
+        try host.update(
+            parameters: ModuleParameters.unflattened(weights),
+            verify: [.allModelKeysSet, .shapeMismatch])
+        for case let rot as PairwiseRotation in host.modules() {
+            rot.prepareDerivedRotationState()
+        }
+        eval(host)
+
+        for tokens in [2, 32] {  // 2×2=4 broadcast path, 32×2=64 gather/sort path
+            let x = MLXRandom.normal([1, tokens, inputDims]).asType(.float16)
+            let indices = randInt(Int32(0) ..< Int32(numExperts), [1, tokens, 2])
+            eval(x)
+            let y = host.switchMLP(x, indices)
+            XCTAssertEqual(y.shape, [1, tokens, 2, inputDims])
+            XCTAssertTrue(all(isFinite(y)).item(Bool.self), "\(tokens) tokens: non-finite output")
+        }
+    }
+}
+
+/// Miniature stand-in for an MoE block (e.g. `Qwen35SparseMoeBlock`): a
+/// `switch_mlp: SwitchGLU` property that `patchMoESwitchGLULayers` must be
+/// able to replace with a `RotateSwitchGLU` through `update(modules:)`.
+private final class MoEHostBlock: Module {
+    @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
+
+    init(inputDims: Int, hiddenDims: Int, numExperts: Int) {
+        self._switchMLP.wrappedValue = SwitchGLU(
+            inputDims: inputDims, hiddenDims: hiddenDims, numExperts: numExperts)
+        super.init()
+    }
 }
 
 /// Thread-safe `[[Int]]` accumulator used by `testRotateQuantizedLinearConcurrentSafe`.

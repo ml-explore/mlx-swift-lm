@@ -48,7 +48,38 @@ private func isSupportedParoQuantModel(directory: URL, configData: Data) -> Bool
     else { return false }
 
     let architectures = json["architectures"] as? [String] ?? []
-    return architectures.contains("Qwen3_5ForConditionalGeneration")
+    let supported: Set<String> = [
+        "Qwen3_5ForConditionalGeneration",  // dense Qwen3.5/3.6 PARO
+        "Qwen3_5MoeForConditionalGeneration",  // MoE (Qwen3.6-35B-A3B PARO)
+    ]
+    return architectures.contains(where: supported.contains)
+}
+
+// MARK: - Config Flattening
+
+/// Flatten a VLM config's `text_config` onto the top level so
+/// `BaseConfiguration` and the model-type registry see the text-model fields.
+///
+/// The checkpoint's *top-level* `model_type` is the registry key ("qwen3_5",
+/// "qwen3_5_moe"); `text_config` carries a "*_text" variant ("qwen3_5_text",
+/// "qwen3_5_moe_text") that no registry resolves, so the flatten would
+/// clobber the key. Preserve the top-level value instead of force-setting
+/// "qwen3_5" (which mis-resolved MoE checkpoints to the dense architecture).
+///
+/// Internal (not private) so the preservation contract is unit-testable.
+func flattenParoQuantTextConfig(_ configJSON: [String: Any]) -> [String: Any] {
+    guard let textConfig = configJSON["text_config"] as? [String: Any] else {
+        return configJSON
+    }
+    var flattened = configJSON
+    let checkpointModelType = configJSON["model_type"]
+    for (key, value) in textConfig {
+        flattened[key] = value
+    }
+    if let checkpointModelType {
+        flattened["model_type"] = checkpointModelType
+    }
+    return flattened
 }
 
 // MARK: - AutoAWQ Conversion
@@ -171,6 +202,82 @@ func convertAutoAWQ(
     }
 }
 
+// MARK: - MoE Passes
+
+/// Stack per-expert 2-D tensors into the 3-D `switch_mlp` layout that
+/// `SwitchGLU`/`QuantizedSwitchLinear` consume:
+/// `…experts.{e}.{proj}.{suffix}` → `…switch_mlp.{proj}.{suffix}` with a new
+/// leading experts axis (suffix ∈ weight / scales / biases, i.e. the
+/// already-converted AWQ triple). A stack is only emitted when every expert
+/// contributed the suffix; partial groups are left untouched so the strict
+/// `verify: [.allModelKeysSet]` update fails loudly on the real gap.
+///
+/// No-op for dense checkpoints (no `…experts.{e}.…` keys). Idempotent: an
+/// existing destination key is never overwritten.
+///
+/// Internal (not private) so the pass contract is unit-testable.
+func stackMoEExpertWeights(_ weights: inout [String: MLXArray]) {
+    let stackable = ["weight", "scales", "biases"]
+
+    // group key "{base}.switch_mlp.{proj}" → expert index → suffix → source key
+    var groups = [String: [Int: [String: String]]]()
+    for key in weights.keys {
+        guard let range = key.range(of: ".experts.") else { continue }
+        // "{e}.{proj}.{suffix}"
+        let parts = key[range.upperBound...].split(separator: ".")
+        guard parts.count == 3, let expert = Int(parts[0]),
+            stackable.contains(String(parts[2]))
+        else { continue }
+        let groupKey = "\(key[..<range.lowerBound]).switch_mlp.\(parts[1])"
+        groups[groupKey, default: [:]][expert, default: [:]][String(parts[2])] = key
+    }
+
+    for (groupKey, experts) in groups {
+        let numExperts = experts.keys.max()! + 1
+        for suffix in stackable {
+            let dest = "\(groupKey).\(suffix)"
+            guard weights[dest] == nil else { continue }
+            let sources = (0 ..< numExperts).compactMap { experts[$0]?[suffix] }
+            guard sources.count == numExperts else { continue }
+            weights[dest] = MLX.stacked(sources.map { weights[$0]! }, axis: 0)
+            for key in sources {
+                weights.removeValue(forKey: key)
+            }
+        }
+    }
+}
+
+/// Remap the shared per-layer expert rotation keys onto the nested
+/// `PairwiseRotation` children of `RotateSwitchGLU`:
+/// `…experts.{gate_up,down}_weight_{theta,pairs,channel_scales}` →
+/// `…switch_mlp.{gate_up,down}_rot.{theta,pairs,channel_scales}`.
+///
+/// Upstream z-lab keeps these keys flat on the GLU (`…gate_up_rot_theta`);
+/// the nested layout is a deliberate divergence (#208) so the rotation is a
+/// reusable `PairwiseRotation` Module rather than mixin state.
+///
+/// No-op for dense checkpoints. Internal for unit testing.
+func remapSharedMoERotations(_ weights: inout [String: MLXArray]) {
+    var renames = [(String, String)]()  // (checkpoint tail, module tail)
+    for proj in ["gate_up", "down"] {
+        for suffix in ["theta", "pairs", "channel_scales"] {
+            renames.append(
+                (".experts.\(proj)_weight_\(suffix)", ".switch_mlp.\(proj)_rot.\(suffix)"))
+        }
+    }
+
+    for key in Array(weights.keys) {
+        guard let (old, new) = renames.first(where: { key.hasSuffix($0.0) }) else { continue }
+        var value = weights.removeValue(forKey: key)!
+        // The 35B checkpoint ships channel_scales as [1, dims] already, but
+        // normalise 1-D just like convertAutoAWQ does for dense rotations.
+        if new.hasSuffix("channel_scales"), value.ndim == 1 {
+            value = value.reshaped(1, -1)
+        }
+        weights[String(key.dropLast(old.count)) + new] = value
+    }
+}
+
 // MARK: - Layer Patching
 
 private func requireTensor(
@@ -245,6 +352,68 @@ private func rotationModuleSpec(
     return (inputDims, outputDims, expectsBias, krot)
 }
 
+/// Replace SwitchGLU modules with RotateSwitchGLU where the remapped shared
+/// rotation keys exist (`…switch_mlp.gate_up_rot.theta` marks one MoE block).
+///
+/// Must run *before* `patchRotationLayers`: the remapped rotation keys also
+/// end in `.theta`, and the dense scan must find a `PairwiseRotation` leaf
+/// (which it skips) at those prefixes — not an unpatched non-Linear module.
+///
+/// Internal (not private) so the swap contract is unit-testable.
+func patchMoESwitchGLULayers(
+    model: Module, weights: [String: MLXArray], groupSize: Int
+) throws {
+    let marker = ".gate_up_rot.theta"
+    let gluPaths = weights.keys
+        .filter { $0.hasSuffix(marker) }
+        .map { String($0.dropLast(marker.count)) }
+        .sorted()
+
+    guard !gluPaths.isEmpty else { return }
+
+    let modules = Dictionary(uniqueKeysWithValues: model.namedModules())
+    var updates = [(String, Module)]()
+
+    for path in gluPaths {
+        guard let module = modules[path] else {
+            throw ParoQuantError.rotationLayerNotFound(path)
+        }
+        guard let glu = module as? SwitchGLU else {
+            throw ParoQuantError.rotationLayerTypeMismatch(
+                path: path,
+                actualType: String(describing: type(of: module))
+            )
+        }
+
+        // Both rotations must arrive complete; a partial set means a broken
+        // checkpoint and should fail here, with a key name, not at update().
+        let theta = try requireTensor("\(path).gate_up_rot.theta", weights: weights)
+        for child in ["gate_up_rot", "down_rot"] {
+            for suffix in ["theta", "pairs", "channel_scales"] {
+                _ = try requireTensor("\(path).\(child).\(suffix)", weights: weights)
+            }
+        }
+
+        let replacement = RotateSwitchGLU(
+            inputDims: glu.inputDims,
+            hiddenDims: glu.hiddenDims,
+            numExperts: glu.numExperts,
+            groupSize: groupSize,
+            krot: theta.dim(0)
+        )
+        updates.append((path, replacement))
+    }
+
+    try model.update(modules: ModuleChildren.unflattened(updates), verify: [.noUnusedKeys])
+
+    let patched = Dictionary(uniqueKeysWithValues: model.namedModules())
+    for (path, _) in updates {
+        guard patched[path] is RotateSwitchGLU else {
+            throw ParoQuantError.rotationLayerPatchFailed(path)
+        }
+    }
+}
+
 /// Replace Linear layers with RotateQuantizedLinear where rotation parameters exist.
 private func patchRotationLayers(
     model: Module, weights: [String: MLXArray],
@@ -261,6 +430,11 @@ private func patchRotationLayers(
     var updates = [(String, Module)]()
 
     for prefix in prefixes {
+        // MoE shared rotations: their keys also end in `.theta`, but they
+        // belong to the PairwiseRotation children installed by
+        // patchMoESwitchGLULayers, not to a Linear awaiting patching.
+        if leafModules[prefix] is PairwiseRotation { continue }
+
         let spec = try rotationModuleSpec(
             prefix: prefix,
             leafModules: leafModules,
@@ -363,11 +537,8 @@ public func loadParoQuantModel<T: LanguageModel>(
     else {
         throw ParoQuantError.missingConfig
     }
-    if let textConfig = configJSON["text_config"] as? [String: Any] {
-        for (key, value) in textConfig {
-            configJSON[key] = value
-        }
-        configJSON["model_type"] = "qwen3_5"
+    if configJSON["text_config"] != nil {
+        configJSON = flattenParoQuantTextConfig(configJSON)
         configData = try JSONSerialization.data(withJSONObject: configJSON)
     }
     let baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
@@ -433,10 +604,28 @@ public func loadParoQuantModel<T: LanguageModel>(
     //     layers see the already-split keys.
     splitFusedMambaProjections(&weights)
 
+    // 6c. MoE checkpoints: stack the per-expert converted AWQ tensors into
+    //     the 3-D switch_mlp layout and remap the shared per-layer rotation
+    //     keys onto the nested PairwiseRotation children. Both are key-driven
+    //     no-ops for dense checkpoints. The stack stays lazy (graph nodes over
+    //     the mmap'd source arrays) until eval — same whole-dict pattern as
+    //     the Python reference.
+    stackMoEExpertWeights(&weights)
+    remapSharedMoERotations(&weights)
+
     // 7. Model-specific sanitization
     weights = model.sanitize(weights: weights)
 
-    // 8. Patch rotation layers
+    // 8a. Swap SwitchGLU → RotateSwitchGLU where shared rotation keys exist.
+    //     Must precede the dense `.theta` scan in patchRotationLayers (the
+    //     rotation keys also end in `.theta`). The fresh RotateSwitchGLU's
+    //     SwitchLinear children are converted to QuantizedSwitchLinear by the
+    //     step-9 quantize pass — their stacked checkpoint `.scales` mark them
+    //     as checkpoint-quantized, the same mechanism the dense path uses.
+    try patchMoESwitchGLULayers(
+        model: model, weights: weights, groupSize: paroConfig.groupSize)
+
+    // 8b. Patch dense rotation layers
     try patchRotationLayers(
         model: model, weights: weights,
         bits: paroConfig.bits, groupSize: paroConfig.groupSize
@@ -463,7 +652,16 @@ public func loadParoQuantModel<T: LanguageModel>(
     //      prefixed private fields that Module reflection — and therefore
     //      step 12's eval(model) — skips.
     for (_, layer) in rotationLeafModules(model: model) {
-        (layer as? RotateQuantizedLinear)?.prepareDerivedRotationState()
+        switch layer {
+        case let dense as RotateQuantizedLinear:
+            dense.prepareDerivedRotationState()
+        case let shared as PairwiseRotation:
+            // MoE shared rotations (children of RotateSwitchGLU) are leaf
+            // modules of their own and carry the same derived-state contract.
+            shared.prepareDerivedRotationState()
+        default:
+            break
+        }
     }
 
     // 11. Quantize IO embedding path from FP16 weights
