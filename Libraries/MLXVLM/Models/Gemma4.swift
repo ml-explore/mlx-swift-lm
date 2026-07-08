@@ -824,7 +824,11 @@ final class Gemma4TextAttention: Module {
         self.isKVSharedLayer = layerIdx >= firstKVSharedLayer && firstKVSharedLayer > 0
 
         self._qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        if !kvSharedOnly {
+        // KV-shared layers reuse an earlier layer's K/V and own no K/V projections or norms
+        // (see `sanitize`, which drops these, and `Gemma4TextBackbone` which feeds them
+        // `sharedKV`). Skip building them here too, otherwise weight loading throws
+        // `keyNotFound` for e.g. `language_model.model.layers.15.self_attn.k_norm.weight`.
+        if !kvSharedOnly && !isKVSharedLayer {
             self._kProj.wrappedValue = Linear(
                 config.hiddenSize, numKVHeads * headDim, bias: false)
             if !useKEqV {
