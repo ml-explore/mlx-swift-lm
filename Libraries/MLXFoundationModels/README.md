@@ -11,11 +11,14 @@ import FoundationModels
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
+import MLXLMCommon
+import HuggingFace
+import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = #huggingFaceLanguageModel(
-        configuration: LLMRegistry.deepSeekR1_7B_4bit,
-        capabilities: [.guidedGeneration, .reasoning])
+        configuration: LLMRegistry.qwen3_0_6b_4bit,
+        capabilities: [.reasoning])
     let session = LanguageModelSession(model: model)
 
     let answer = try await session.respond(
@@ -31,19 +34,18 @@ The macro synthesizes the `weightsLocation:` and `load:` wiring (Hugging Face do
 The macro above expands to the call below. Reach for the initializer directly to point `weightsLocation:` at your own on-disk directory or to swap `load:` for a different downloader or tokenizer.
 
 ```swift
-import Foundation
 import FoundationModels
-import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import HuggingFace
 import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = MLXLanguageModel(
-        configuration: LLMRegistry.deepSeekR1_7B_4bit,
-        capabilities: [.guidedGeneration, .reasoning],
+        configuration: LLMRegistry.qwen3_0_6b_4bit,
+        capabilities: [.reasoning],
         weightsLocation: { id in
             let cache = HubCache.default
             guard let repo = Repo.ID(rawValue: id) else { return cache.cacheDirectory }

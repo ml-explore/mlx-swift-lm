@@ -110,6 +110,9 @@ import FoundationModels
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
+import MLXLMCommon
+import HuggingFace
+import Tokenizers
 
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @Generable
