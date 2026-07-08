@@ -1,8 +1,9 @@
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import XCTest
+
+@testable import MLXLMCommon
 
 public class ParoQuantTests: XCTestCase {
 
@@ -103,6 +104,41 @@ public class ParoQuantTests: XCTestCase {
                 XCTAssertEqual(Float(biasValues[j * 4 + i]), exp, accuracy: 0.01)
             }
         }
+    }
+
+    /// The converter must handle **every** `.qweight` prefix — MoE per-expert
+    /// weights carry no sibling `theta` (their rotations are shared per layer)
+    /// and were silently skipped by the old theta-filter — and must emit
+    /// float16 scales to match the f16 biases in `quantizedMM`.
+    func testAWQConversionCoversThetaLessPrefixesAndCastsScales() {
+        // AWQ layout for in=8, out=8, groupSize=8:
+        //   qweight [in, out/8] int32, qzeros [in/gs, out/8] int32, scales [in/gs, out] f32
+        let dense = "model.layers.0.mlp.gate_proj."
+        let expert = "model.layers.0.mlp.experts.0.gate_proj."
+
+        var weights: [String: MLXArray] = [:]
+        for pfx in [dense, expert] {
+            weights["\(pfx)qweight"] = MLXArray(Array(repeating: UInt32(0x7654_3210), count: 8))
+                .reshaped(8, 1)
+            weights["\(pfx)qzeros"] = MLXArray([UInt32(0x3333_3333)]).reshaped(1, 1)
+            weights["\(pfx)scales"] = MLXArray((0 ..< 8).map { Float($0) + 1.0 }).reshaped(1, 8)
+        }
+        // Only the dense prefix has rotation params, as in real MoE checkpoints.
+        weights["\(dense)theta"] = MLXArray.zeros([2, 4])
+
+        convertAutoAWQ(&weights, groupSize: 8)
+
+        for pfx in [dense, expert] {
+            XCTAssertNil(weights["\(pfx)qweight"], "\(pfx): qweight not consumed")
+            XCTAssertNil(weights["\(pfx)qzeros"], "\(pfx): qzeros not consumed")
+            let weight = try? XCTUnwrap(weights["\(pfx)weight"], "\(pfx): missing converted weight")
+            XCTAssertEqual(weight?.dtype, .uint32)
+            let scales = try? XCTUnwrap(weights["\(pfx)scales"], "\(pfx): missing scales")
+            XCTAssertEqual(scales?.dtype, .float16, "\(pfx): scales not cast to f16")
+            XCTAssertEqual(scales?.shape, [8, 1], "\(pfx): scales not transposed")
+            XCTAssertEqual(weights["\(pfx)biases"]?.dtype, .float16)
+        }
+        XCTAssertNotNil(weights["\(dense)theta"], "theta must pass through untouched")
     }
 
     func testAWQUnpackReorderPackRoundTrip() {
