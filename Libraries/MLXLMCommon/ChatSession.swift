@@ -788,6 +788,7 @@ public final class ChatSession {
                         if let toolDispatch, !pendingToolCalls.isEmpty,
                             !Task.isCancelled
                         {
+                            messages.append(.assistant("", toolCalls: pendingToolCalls))
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
                                 messages.append(.tool(toolResult, id: toolCall.id))
