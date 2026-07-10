@@ -16,9 +16,10 @@ import Tokenizers
 ///
 /// This is the counterpart to `HuggingFaceLanguageModelMacroSmoke`, which is
 /// deliberately network-free. Here we DO hit the network, so the suite is
-/// opt-in: run it explicitly (e.g.
-/// `-only-testing:IntegrationTestingTests/ColdHubClientFetchTests`) rather than
-/// as part of a broad sweep.
+/// opt-in behind the `MLX_RUN_COLD_FETCH` environment flag and never runs in a
+/// default sweep. Enable it explicitly by setting `MLX_RUN_COLD_FETCH=1` (on
+/// device, `TEST_RUNNER_MLX_RUN_COLD_FETCH=1`, which Xcode forwards to the test
+/// runner process).
 ///
 /// Forcing "cold" correctly means controlling the loader's cache, not the
 /// availability observer:
@@ -36,7 +37,7 @@ import Tokenizers
 ///   other test already loaded this model, `loadContainer()` would return the
 ///   cached instance and never touch our throwaway cache. `evictAll()` before
 ///   the load, plus `.serialized` and isolated invocation, keeps the fetch cold.
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_COLD_FETCH"] == "1"))
 struct ColdHubClientFetchTests {
 
     /// The smallest model in the fixtures, to keep the real download cheap.
@@ -96,8 +97,10 @@ struct ColdHubClientFetchTests {
             before == .unavailable(.modelNotDownloaded),
             "an empty throwaway cache must report .modelNotDownloaded, got \(before)")
 
-        // Trigger the genuine fetch. Treat network / Hub outages as a skip, not
-        // a failure — this test asserts the wiring, not HF uptime.
+        // Trigger the genuine fetch. Because the suite is opt-in, a network /
+        // Hub outage surfaces as a recorded issue rather than a hang: if you
+        // asked for the cold fetch and it could not reach the Hub, that is worth
+        // seeing rather than a silent pass.
         do {
             try await model.preload()
         } catch {
