@@ -98,6 +98,16 @@ let output = try await container.perform { context in
 print(output)  // valid JSON matching `schema`
 ```
 
+> [!WARNING]
+> `GuidedGenerationLoop.run` can block for hundreds of milliseconds on a cold
+> grammar compile: the first call for a given schema/grammar and tokenizer
+> compiles the grammar and builds its token mask, and neither step yields. Don't
+> call it from `@MainActor` — run it in `Task.detached` or on a background
+> executor. Later calls that reuse the same compiled grammar and tokenizer skip
+> the compile. Pre-warming the expected schema with a throwaway
+> `GrammarConstraint` from a background task before the user-visible request
+> removes the blocking window entirely.
+
 ## Why it is bundled this way
 
 The engine is backed by [XGrammar](https://github.com/mlc-ai/xgrammar), which we vendor in-repo and compile here rather than depend on the official XGrammar Swift package. Compiling it ourselves lets us rename its C++ namespace so our copy cannot collide with any other XGrammar linked into the same binary. Anyone else who depends on XGrammar can link their own copy alongside ours, each working independently.
