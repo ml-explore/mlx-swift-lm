@@ -43,6 +43,37 @@ private final class SuppressingMockModel: Module, LanguageModel, KVCacheDimensio
     }
 }
 
+/// Like `SuppressingMockModel`, but does NOT conform to
+/// `SuppressedTokensProviding` — used to verify that `suppress_tokens` from
+/// `generation_config.json` is honored for models without the conformance.
+private final class PlainMockModel: Module, LanguageModel, KVCacheDimensionProvider {
+    var kvHeads: [Int] { [1] }
+
+    let vocabularySize = 16
+    let peakToken: Int
+    let runnerUpToken: Int
+
+    init(peakToken: Int, runnerUpToken: Int) {
+        self.peakToken = peakToken
+        self.runnerUpToken = runnerUpToken
+        super.init()
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let positions = inputs.dim(-1)
+        var data = [Float](repeating: 0, count: positions * vocabularySize)
+        for position in 0 ..< positions {
+            data[position * vocabularySize + peakToken] = 10
+            data[position * vocabularySize + runnerUpToken] = 5
+        }
+        return MLXArray(data, [1, positions, vocabularySize])
+    }
+}
+
 public class SuppressTokensTests: XCTestCase {
 
     // MARK: - generation_config.json parsing
@@ -108,6 +139,34 @@ public class SuppressTokensTests: XCTestCase {
         XCTAssertEqual(token.item(Int.self), 1)
     }
 
+    func testSuppressTokensProcessorIgnoresOutOfRangeIds() throws {
+        // IDs beyond the logits vocabulary (e.g. a tiny test config
+        // inheriting 255k-range boi/boa defaults) must be dropped, not
+        // passed to putAlong.
+        let processor = try XCTUnwrap(SuppressTokensProcessor(tokenIds: [1, 258882, 258883]))
+        let logits = MLXArray([0.5, 5.0, 1.0, 9.0, 2.0] as [Float])[.newAxis, .ellipsis]
+
+        let processed = processor.process(logits: logits)
+
+        XCTAssertEqual(processed[0, 1].item(Float.self), -Float.infinity)
+        XCTAssertEqual(processed[0, 3].item(Float.self), 9.0)
+    }
+
+    func testSuppressTokensProcessorAllOutOfRangeIsNoOp() throws {
+        let processor = try XCTUnwrap(SuppressTokensProcessor(tokenIds: [258882, 258883]))
+        let logits = MLXArray([0.5, 5.0, 1.0] as [Float])[.newAxis, .ellipsis]
+
+        let processed = processor.process(logits: logits)
+
+        XCTAssertEqual(processed[0, 1].item(Float.self), 5.0)
+    }
+
+    func testSuppressTokensProcessorIgnoresNegativeIds() {
+        // Negative IDs are dropped at init; all-negative means nothing to
+        // suppress.
+        XCTAssertNil(SuppressTokensProcessor(tokenIds: [-1, -106]))
+    }
+
     // MARK: - ChainedLogitProcessor
 
     func testChainedLogitProcessorAppliesAllProcessors() throws {
@@ -169,6 +228,42 @@ public class SuppressTokensTests: XCTestCase {
         let tokens = try generate(model: model, parameters: parameters)
 
         XCTAssertFalse(tokens.contains(5))
+        XCTAssertEqual(tokens, [7, 7, 7, 7, 7])
+    }
+
+    func testTokenIteratorWithOutOfVocabularySuppressedIdsDoesNotCrash() throws {
+        // Regression: a model whose suppressed set mixes in-range and
+        // out-of-vocabulary IDs (tiny vocab + inherited 255k-range
+        // placeholder defaults) must generate normally, suppressing only
+        // the in-range IDs.
+        let model = SuppressingMockModel(
+            peakToken: 5, runnerUpToken: 7, suppressedTokenIds: [5, 258882, 258883])
+        let parameters = GenerateParameters(maxTokens: 5, temperature: 0)
+
+        let tokens = try generate(model: model, parameters: parameters)
+
+        XCTAssertEqual(tokens, [7, 7, 7, 7, 7])
+    }
+
+    // MARK: - generation_config.json suppression without protocol conformance
+
+    func testGenerationConfigSuppressionAppliesToNonConformingModel() throws {
+        // suppress_tokens from generation_config.json must be honored even
+        // when the model does not adopt SuppressedTokensProviding.
+        let model = PlainMockModel(peakToken: 5, runnerUpToken: 7)
+        let generationConfig = GenerationConfigFile(suppressTokens: IntOrIntArray([5]))
+
+        mergeGenerationConfigSuppressedTokens(generationConfig, into: model)
+
+        let input = LMInput(tokens: MLXArray([1, 2, 3]))
+        var iterator = try TokenIterator(
+            input: input, model: model,
+            parameters: GenerateParameters(maxTokens: 5, temperature: 0))
+        var tokens = [Int]()
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+
         XCTAssertEqual(tokens, [7, 7, 7, 7, 7])
     }
 
