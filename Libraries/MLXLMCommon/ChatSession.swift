@@ -163,6 +163,40 @@ public final class ChatSession {
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
+    /// Text that closes a *truncated* previous model turn when a new turn is
+    /// appended to a non-empty KV cache (e.g. `"<turn|>\n"` for Gemma 4,
+    /// `"<end_of_turn>\n"` for Gemma 3).
+    ///
+    /// The KV cache stores prior turns as raw tokens. A normally completed
+    /// turn ends with its stop token already in the cache (the iterator feeds
+    /// each sampled token through the model before the generate loop
+    /// recognizes it as a stop), but a generation that was cancelled
+    /// mid-stream — or capped by `maxTokens` — leaves the cached turn dangling
+    /// mid-sentence. Chat templates only render the messages they are given,
+    /// so nothing ever closes that dangling turn: the continuation is appended
+    /// right after the truncated reply's last word, leaving the transcript
+    /// malformed (`…repl<|turn>user…`).
+    ///
+    /// When set, these tokens are prepended to the continuation prompt *only
+    /// when the previous generation did not finish with a stop token*, so the
+    /// cached transcript stays canonical (`…repl<turn|>\n<|turn>user…`)
+    /// without duplicating the terminator of completed turns. Off (nil) by
+    /// default.
+    public var continuationTurnClosure: String?
+
+    /// Chat templates that begin with `{{ bos_token }}` re-emit `<bos>` on
+    /// every render; on continuation turns that would inject a spurious BOS
+    /// mid-transcript, so it is stripped. On by default.
+    public var stripsContinuationBOS: Bool = true
+
+    /// Stop reason of the most recent generation pass, kept across turns so
+    /// continuation repair can tell a completed turn (stop token already in
+    /// the KV cache) from a truncated one (cancelled or length-capped).
+    /// `nil` until a pass reports completion — and reset to `nil` at the
+    /// start of each pass, so a generation that dies without reporting is
+    /// treated as truncated.
+    private let lastStopReason = SerialAccessContainer<GenerateStopReason?>(nil)
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
@@ -564,6 +598,53 @@ public final class ChatSession {
         )
     }
 
+}
+
+/// Repairs a continuation prompt (appended to a non-empty KV cache) so the
+/// cached transcript stays canonical: strips the duplicate `<bos>` that
+/// templates re-emit on every render, and prepends `closure` to close the
+/// previous model turn when it was truncated (the caller passes `nil` for a
+/// turn that completed with its stop token, which is already in the cache).
+func repairContinuation(
+    _ input: LMInput, tokenizer: any Tokenizer,
+    closure: String?, stripBOS: Bool
+) -> LMInput {
+    var tokens = input.text.tokens
+    // Text-only processors produce rank-1 `[N]` tokens; VLM processors
+    // produce rank-2 `[1, N]`. Normalize to `[1, N]` and restore on the way
+    // out.
+    let wasRank1 = tokens.ndim == 1
+    if wasRank1 {
+        tokens = tokens.expandedDimensions(axis: 0)
+    }
+    guard tokens.ndim == 2, tokens.dim(1) > 0 else { return input }
+    var changed = false
+    if stripBOS, let bos = tokenizer.bosTokenId, tokens.dim(1) > 1,
+        tokens[0, 0].item(Int.self) == bos
+    {
+        tokens = tokens[0..., 1...]
+        changed = true
+    }
+    if let closure, !closure.isEmpty {
+        let ids = tokenizer.encode(text: closure, addSpecialTokens: false)
+        if !ids.isEmpty {
+            tokens = concatenated(
+                [MLXArray(ids.map { Int32($0) }).expandedDimensions(axis: 0), tokens],
+                axis: 1)
+            changed = true
+        }
+    }
+    guard changed else { return input }
+    let mask = input.text.mask == nil ? nil : ones(like: tokens).asType(.int8)
+    if wasRank1 {
+        tokens = tokens.squeezed(axis: 0)
+    }
+    return LMInput(
+        text: .init(tokens: tokens, mask: mask),
+        image: input.image, video: input.video, audio: input.audio)
+}
+
+extension ChatSession {
     private func streamMap<R: Sendable>(
         messages: consuming [Chat.Message],
         transform: @Sendable @escaping (Generation) -> R?
@@ -574,11 +655,14 @@ public final class ChatSession {
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
 
+        let continuationTurnClosure = self.continuationTurnClosure
+        let stripsContinuationBOS = self.stripsContinuationBOS
         let task = Task {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
+                additionalContext, cache, loadedDraftModel, generateParameters,
+                speculativeDecoding, lastStopReason
             ] in
             do {
                 try await cache.update { cache in
@@ -633,11 +717,35 @@ public final class ChatSession {
 
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
+                        // A continuation appends to a non-empty KV cache.
+                        // Derived from the live cache offset each pass, so
+                        // the tool-dispatch restart (same cache, new prompt)
+                        // is repaired too.
+                        let isContinuation = (kvCache.first?.offset ?? 0) > 0
+                        // A turn that finished with a stop token is already
+                        // closed in the cache — prepending the closure again
+                        // would duplicate the terminator. Only truncated
+                        // turns (cancelled, length-capped, or never
+                        // reported) need closing.
+                        let previousTurnCompleted = await lastStopReason.read {
+                            if case .stop = $0 { true } else { false }
+                        }
                         let userInput = UserInput(
                             chat: messages,
                             processing: processing,
                             tools: tools, additionalContext: additionalContext)
-                        let input = try await processor.prepare(input: userInput)
+                        let preparedInput = try await processor.prepare(input: userInput)
+                        let input =
+                            isContinuation
+                            ? repairContinuation(
+                                preparedInput, tokenizer: tokenizer,
+                                closure: previousTurnCompleted ? nil : continuationTurnClosure,
+                                stripBOS: stripsContinuationBOS)
+                            : preparedInput
+                        // Pessimistic until this pass reports completion: a
+                        // generation that dies mid-stream leaves a truncated
+                        // turn behind.
+                        await lastStopReason.update { $0 = nil }
                         messages.removeAll()
 
                         // Select the token iterator based on speculative decoding configuration.
@@ -752,8 +860,17 @@ public final class ChatSession {
                         }
 
                         var pendingToolCalls: [ToolCall] = []
+                        var passStopReason: GenerateStopReason? = nil
+                        var consumerTerminated = false
 
                         for await item in genStream {
+                            // record how the pass ended even after the
+                            // consumer went away — the next continuation
+                            // needs it to decide whether the turn is closed
+                            if let info = item.info {
+                                passStopReason = info.stopReason
+                            }
+                            if consumerTerminated { continue }
                             // collect tool calls for dispatch; if no
                             // toolDispatch the caller handles them via
                             // the transform (streamDetails path)
@@ -761,15 +878,18 @@ public final class ChatSession {
                                 pendingToolCalls.append(toolCall)
                             } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
-                                    break
+                                    consumerTerminated = true
                                 }
                             }
                         }
 
                         // wait for the task to complete -- this is important in
-                        // the case where we broke the loop early as the generation
-                        // work may continue (briefly) and use the KVCache
+                        // the case where the consumer terminated early as the
+                        // generation work may continue (briefly) and use the KVCache
                         await genTask.value
+
+                        let finalStopReason = passStopReason
+                        await lastStopReason.update { $0 = finalStopReason }
 
                         // dispatch all tool calls from this generation pass
                         if let toolDispatch, !pendingToolCalls.isEmpty,

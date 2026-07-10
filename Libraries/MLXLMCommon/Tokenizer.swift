@@ -29,6 +29,11 @@ extension Tokenizer {
         decode(tokenIds: tokenIds, skipSpecialTokens: false)
     }
 
+    public var bosTokenId: Int? {
+        guard let bosToken else { return nil }
+        return convertTokenToId(bosToken)
+    }
+
     public var eosTokenId: Int? {
         guard let eosToken else { return nil }
         return convertTokenToId(eosToken)
