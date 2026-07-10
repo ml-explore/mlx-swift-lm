@@ -106,12 +106,13 @@ For alternative integration approaches (custom downloaders, alternative tokenize
 `MLXFoundationModels` lets you swap `SystemLanguageModel` for an MLX-backed model and drive it through Apple's `FoundationModels` framework. Build an `MLXLanguageModel` in one line, hand it to `LanguageModelSession`, and ask for a `@Generable` type: the response is grammar-constrained to that type's schema, so it always parses. Requires the macOS/iOS/visionOS 27.0 SDK.
 
 ```swift
+import Foundation
 import FoundationModels
+import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
-import HuggingFace
 import Tokenizers
 
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)

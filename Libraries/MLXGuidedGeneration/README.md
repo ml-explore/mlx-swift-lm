@@ -13,10 +13,14 @@ Reach for guided generation whenever a model's output needs to be data your code
 When you drive an MLX model through FoundationModels, guided generation is automatic: ask `respond` for a `@Generable` type and the response is constrained to its schema for you.
 
 ```swift
+import Foundation
 import FoundationModels
+import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
+import MLXLMCommon
+import Tokenizers
 
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @Generable

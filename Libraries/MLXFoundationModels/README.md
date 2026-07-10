@@ -7,12 +7,13 @@ An MLX-backed drop-in for Apple's `FoundationModels.LanguageModel`. It lets you 
 Build an `MLXLanguageModel` with the `#huggingFaceLanguageModel` macro and pass it to a `LanguageModelSession`.
 
 ```swift
+import Foundation
 import FoundationModels
+import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
-import HuggingFace
 import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
@@ -34,12 +35,13 @@ The macro synthesizes the `weightsLocation:` and `load:` wiring (Hugging Face do
 The macro above expands to the call below. Reach for the initializer directly to point `weightsLocation:` at your own on-disk directory or to swap `load:` for a different downloader or tokenizer.
 
 ```swift
+import Foundation
 import FoundationModels
+import HuggingFace
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
-import HuggingFace
 import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
