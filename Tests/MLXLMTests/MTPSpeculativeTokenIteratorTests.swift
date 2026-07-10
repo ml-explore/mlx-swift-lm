@@ -245,6 +245,31 @@ func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     #expect(main.lastIncomingEmitFlag == true)
 }
 
+@Test
+func testMTPIteratorReusableCacheIsWithheldOnlyForDynamicKVQuantization() throws {
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    let reusableIterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: MockMainModel(nextLogitTokens: [0, 0, 5]),
+        drafter: MockDrafter(),
+        mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 1),
+        blockSize: 4
+    )
+    let quantizedIterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: MockMainModel(nextLogitTokens: [0, 0, 5]),
+        drafter: MockDrafter(),
+        mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 1, kvBits: 4),
+        blockSize: 4
+    )
+
+    #expect(reusableIterator.reusableCache != nil)
+    #expect(quantizedIterator.reusableCache == nil)
+}
+
 // MARK: - Passthrough fallback when state is absent
 
 @Test
