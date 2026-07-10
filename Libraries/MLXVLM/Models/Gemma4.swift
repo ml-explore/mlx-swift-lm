@@ -2350,9 +2350,7 @@ private final class Gemma4UnifiedVisionEmbedder: Module {
 }
 
 public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
-    // Module-internal (not `private`) — the MTP drafter in `Gemma4Assistant.swift`
-    // reaches `embed_tokens` / `embed_scale` through this, mirroring `Gemma4`.
-    @ModuleInfo(key: "language_model") var languageModel: Gemma4TextLanguageModel
+    @ModuleInfo(key: "language_model") private var languageModel: Gemma4TextLanguageModel
     @ModuleInfo(key: "vision_embedder") private var visionEmbedder: Gemma4UnifiedVisionEmbedder?
     @ModuleInfo(key: "embed_vision") private var embedVision: Gemma4MultimodalEmbedder?
     @ModuleInfo(key: "embed_audio") private var embedAudio: Gemma4MultimodalEmbedder?
@@ -2594,6 +2592,30 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
         }
         return languageModel.sanitize(weights: filtered)
     }
+}
+
+// MARK: - MTP drafter target access
+
+/// A Gemma 4 - family VLM whose text stack is the shared
+/// `Gemma4TextBackbone`. The MTP drafter
+/// (`Gemma4AssistantDraftModel.draftBlock`) casts its `target` to this
+/// protocol instead of dispatching on concrete classes, so it stays agnostic
+/// of which Gemma 4 variant wraps the backbone.
+///
+/// Declared in this file so the conformances can reach the classes' private
+/// `languageModel` without widening its visibility.
+protocol Gemma4BackboneProviding {
+    /// The text backbone whose `embedTokens` / `embedScale` the drafter
+    /// shares with the target.
+    var textBackbone: Gemma4TextBackbone { get }
+}
+
+extension Gemma4: Gemma4BackboneProviding {
+    var textBackbone: Gemma4TextBackbone { languageModel.model }
+}
+
+extension Gemma4Unified: Gemma4BackboneProviding {
+    var textBackbone: Gemma4TextBackbone { languageModel.model }
 }
 
 // MARK: - Processor

@@ -180,23 +180,17 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
 
         // Derive target-bound constants inline per round. Mirrors mlx-vlm's
         // walk (gemma4_assistant.py:79-101): for Gemma 4 the input embedding
-        // lives under `.language_model.model.embed_tokens`. `Gemma4Text‐
-        // LanguageModel` is not itself a `LanguageModel`, so only the
-        // top-level VLM classes are accepted here — `Gemma4` (`gemma4`:
-        // E-series, 26B-A4B, 31B) and `Gemma4Unified` (`gemma4_unified`: 12B),
-        // which wrap the same `Gemma4TextLanguageModel`. Stateless wrt target
-        // by construction (no ivars retain anything derived from `target`).
-        let backbone: Gemma4TextBackbone
-        switch target {
-        case let g4 as Gemma4:
-            backbone = g4.languageModel.model
-        case let g4u as Gemma4Unified:
-            backbone = g4u.languageModel.model
-        default:
+        // lives under `.language_model.model.embed_tokens`. The target is
+        // any Gemma 4 - family VLM that exposes the shared text backbone via
+        // `Gemma4BackboneProviding` (`Gemma4`: E-series, 26B-A4B, 31B;
+        // `Gemma4Unified`: 12B). Stateless wrt target by construction (no
+        // ivars retain anything derived from `target`).
+        guard let provider = target as? Gemma4BackboneProviding else {
             fatalError(
                 "Gemma4AssistantDraftModel.draftBlock: target is not a Gemma 4 VLM "
                     + "(got \(type(of: target)))")
         }
+        let backbone = provider.textBackbone
         let inputEmbed = backbone.embedTokens
         let embedScale = backbone.embedScale
 
