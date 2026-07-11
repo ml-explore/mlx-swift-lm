@@ -558,11 +558,12 @@ public struct TokenIterator: TokenIteratorProtocol {
     var state: LMOutput.State?
 
     var y: LMInput.Text
-    var cache: [KVCache]
+    var cacheContainer: KVCacheContainer
+    var cache: [KVCache] { cacheContainer.cache }
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
-    public var tokenCount = 0
+    private(set) public var tokenCount = 0
     public let maxTokens: Int?
 
     // Cache quantization parameters
@@ -587,12 +588,30 @@ public struct TokenIterator: TokenIteratorProtocol {
         prompt: MLXArray, model: any LanguageModel, cache: [KVCache]? = nil,
         parameters: GenerateParameters
     ) throws {
-        self.model = model
-        self.y = .init(tokens: prompt)
-        self.cache = cache ?? model.newCache(parameters: parameters)
+        let input = LMInput(tokens: prompt)
+        try self.init(input: input, model: model, cache: cache, parameters: parameters)
+    }
 
-        self.processor = parameters.processor()
-        self.sampler = parameters.sampler()
+    /// Initialize a `TokenIterator` with the given input.
+    ///
+    /// - Parameters:
+    ///   - input: language model input
+    ///   - model: the ``LanguageModel``
+    ///   - cacheContainer: ``KVCacheContainer``
+    ///   - parameters: the generation parameters
+    ///   - processor: the logit processor override
+    ///   - sampler: the logit sampler override
+    public init(
+        input: LMInput, model: any LanguageModel, cacheContainer: KVCacheContainer,
+        parameters: GenerateParameters, processor: LogitProcessor? = nil,
+        sampler: LogitSampler? = nil
+    ) throws {
+        self.model = model
+        self.y = input.text
+        self.cacheContainer = cacheContainer
+
+        self.processor = processor ?? parameters.processor()
+        self.sampler = sampler ?? parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
         self.kvBits = parameters.kvBits
@@ -601,7 +620,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvScheme = parameters.kvScheme
 
         self.promptPrefillTime = try measure {
-            try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
+            try prepare(input: input, windowSize: parameters.prefillStepSize)
         }
     }
 
@@ -617,26 +636,22 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
     ///   - parameters: the generation parameters
+    ///   - processor: the logit processor override
+    ///   - sampler: the logit sampler override
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
-        parameters: GenerateParameters
+        parameters: GenerateParameters, processor: LogitProcessor? = nil,
+        sampler: LogitSampler? = nil
     ) throws {
-        self.model = model
-        self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: parameters)
+        let container = KVCacheContainer(cache: cache, model: model, parameters: parameters)
 
-        self.processor = parameters.processor()
-        self.sampler = parameters.sampler()
-        self.maxTokens = parameters.maxTokens
-
-        self.kvBits = parameters.kvBits
-        self.kvGroupSize = parameters.kvGroupSize
-        self.quantizedKVStart = parameters.quantizedKVStart
-        self.kvScheme = parameters.kvScheme
-
-        self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
-        }
+        try self.init(
+            input: input,
+            model: model,
+            cacheContainer: container,
+            parameters: parameters,
+            processor: processor,
+            sampler: sampler)
     }
 
     /// Initialize a `TokenIterator` with the given input and logit handling.
@@ -654,23 +669,21 @@ public struct TokenIterator: TokenIteratorProtocol {
         processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int? = nil,
         maxTokens: Int? = nil
     ) throws {
-        self.model = model
-        self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: nil)
+        let parameters = GenerateParameters(
+            maxTokens: maxTokens,
+            kvBits: nil,
+            kvGroupSize: 64,
+            quantizedKVStart: 0,
+            kvScheme: nil,
+            prefillStepSize: prefillStepSize)
 
-        self.processor = processor
-        self.sampler = sampler
-        self.maxTokens = maxTokens
-
-        // No cache quantization for this direct initialization
-        self.kvBits = nil
-        self.kvGroupSize = 64
-        self.quantizedKVStart = 0
-        self.kvScheme = nil
-
-        self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: prefillStepSize)
-        }
+        try self.init(
+            input: input,
+            model: model,
+            cache: cache,
+            parameters: parameters,
+            processor: processor,
+            sampler: sampler)
     }
 
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
@@ -713,14 +726,10 @@ public struct TokenIterator: TokenIteratorProtocol {
         }
         self.state = result.state
 
-        // Apply dynamic cache quantization after each step
-        maybeQuantizeKVCache(
-            cache: &cache,
-            kvBits: kvBits,
-            kvGroupSize: kvGroupSize,
-            quantizedKVStart: quantizedKVStart,
-            kvScheme: kvScheme
-        )
+        // Attempt dynamic cache quantization after each step if needed
+        cacheContainer.maybeQuantize(
+            kvBits: kvBits, kvGroupSize: kvGroupSize, quantizedKVStart: quantizedKVStart,
+            kvScheme: kvScheme)
 
         return convertToToken(logits: result.logits)
     }
