@@ -172,32 +172,31 @@ func convertAutoAWQ(
         weights["\(pfx)biases"] = (-scales.asType(.float32) * zeros).transposed().asType(.float16)
     }
 
-    // Pass 2: convert remaining keys (qweight, scales, channel_scales)
-    let keysToConvert = weights.keys.filter { key in
-        prefixes.contains(where: { key.hasPrefix($0) })
-    }
-
-    for key in keysToConvert {
-        guard let pfx = prefixes.first(where: { key.hasPrefix($0) }) else { continue }
-        let suffix = String(key.dropFirst(pfx.count))
-
-        switch suffix {
-        case "qweight":
+    // Pass 2: convert remaining keys (qweight, scales, channel_scales).
+    // Each key's candidate prefix is derived by suffix-stripping and tested
+    // for set membership — O(keys), where the previous
+    // `prefixes.contains(where: key.hasPrefix)` scan was O(keys × prefixes)
+    // and cost ~29 s of the 35B MoE load (~12K per-expert prefixes).
+    // `channel_scales` must be tested before `scales` (suffix shadowing).
+    // theta, pairs, bias keep as-is.
+    for key in Array(weights.keys) {
+        if key.hasSuffix("qweight") {
+            // The stripped prefix is in `prefixes` by construction.
+            let pfx = String(key.dropLast("qweight".count))
             let val = weights.removeValue(forKey: key)!
             weights["\(pfx)weight"] = packMLX(unpackAndReorder(val).transposed())
-
-        case "scales":
-            // float16 to match `biases` in `quantizedMM` — f32 scales with
-            // f16 biases mismatch (upstream fix z-lab/paroquant#38).
-            weights[key] = weights[key]!.transposed().asType(.float16)
-
-        case "channel_scales":
+        } else if key.hasSuffix("channel_scales") {
+            guard prefixes.contains(String(key.dropLast("channel_scales".count))) else {
+                continue
+            }
             if let val = weights[key], val.ndim == 1 {
                 weights[key] = val.reshaped(1, -1)
             }
-
-        default:
-            break  // theta, pairs, bias — keep as-is
+        } else if key.hasSuffix("scales") {
+            guard prefixes.contains(String(key.dropLast("scales".count))) else { continue }
+            // float16 to match `biases` in `quantizedMM` — f32 scales with
+            // f16 biases mismatch (upstream fix z-lab/paroquant#38).
+            weights[key] = weights[key]!.transposed().asType(.float16)
         }
     }
 }
@@ -527,6 +526,20 @@ public func loadParoQuantModel<T: LanguageModel>(
     tokenizerLoader: any TokenizerLoader,
     toolCallFormat: ToolCallFormat? = nil
 ) async throws -> ModelContainer {
+    // Phase wall-clock breakdown, logged once at the end. MLX ops are lazy, so
+    // graph-building phases (convert/stack/remap) bill their kernel time to the
+    // step-12 `eval(model)` — the phase split separates CPU-side work from that
+    // final materialization, it does not attribute kernels to their builders.
+    let loadClock = ContinuousClock()
+    let loadStart = loadClock.now
+    var phaseStart = loadStart
+    var phaseTimes: [(String, Double)] = []
+    func markPhase(_ name: String) {
+        let now = loadClock.now
+        phaseTimes.append((name, (now - phaseStart) / .seconds(1)))
+        phaseStart = now
+    }
+
     // 1. Parse config.json (flatten VLM text_config if present)
     let configURL = directory.appendingPathComponent("config.json")
     var configData = try Data(contentsOf: configURL)
@@ -555,6 +568,7 @@ public func loadParoQuantModel<T: LanguageModel>(
     let model =
         try await typeRegistry
         .createModel(configuration: configData, modelType: baseConfig.modelType)
+    markPhase("createModel")
 
     // 4. EOS token override from generation_config.json
     var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
@@ -574,47 +588,73 @@ public func loadParoQuantModel<T: LanguageModel>(
         toolCallFormat: toolCallFormat)
     config.eosTokenIds = eosTokenIds
 
-    // 5. Load raw safetensors (top-level only; do not recurse into
-    //    subdirectories, otherwise nested artefacts like an HF snapshot
-    //    cache under the checkpoint dir would be pulled in).
+    // 5. Load weights. A fresh Prepared Checkpoint (the once-converted
+    //    MLX-native form, see `ParoQuantPreparedCheckpoint`) skips steps
+    //    6–6c entirely; otherwise load raw safetensors (top-level only; do
+    //    not recurse into subdirectories, otherwise nested artefacts like an
+    //    HF snapshot cache under the checkpoint dir would be pulled in) and
+    //    convert.
+    let preparedManifest = try ParoQuantPreparedCheckpoint.currentManifest(
+        directory: directory)
+    var usedPreparedCheckpoint = false
     var weights = [String: MLXArray]()
-    let contents = try FileManager.default.contentsOfDirectory(
-        at: directory, includingPropertiesForKeys: nil)
-    for url in contents
-    where url.pathExtension == "safetensors"
-        && url.lastPathComponent != "prerotated_cache.safetensors"
+    if let prepared = ParoQuantPreparedCheckpoint.load(
+        directory: directory, manifest: preparedManifest)
     {
-        let w = try loadArrays(url: url)
-        for (key, value) in w {
-            weights[key] = value
+        weights = prepared
+        usedPreparedCheckpoint = true
+        logger.info("Loaded \(weights.count) weight keys from the Prepared Checkpoint")
+        markPhase("preparedLoad")
+    } else {
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)
+        for url in contents
+        where url.pathExtension == "safetensors"
+            && !ParoQuantPreparedCheckpoint.excludedFileNames.contains(url.lastPathComponent)
+        {
+            let w = try loadArrays(url: url)
+            for (key, value) in w {
+                weights[key] = value
+            }
         }
+
+        logger.info("Loaded \(weights.count) weight keys from safetensors")
+        markPhase("rawLoad")
+
+        // 6. Convert AutoAWQ format → MLX format (BEFORE sanitize)
+        if weights.keys.contains(where: { $0.hasSuffix(".qweight") }) {
+            convertAutoAWQ(&weights, groupSize: paroConfig.groupSize)
+            logger.info("Converted AutoAWQ weights to MLX format")
+        }
+        markPhase("convertGraph")
+
+        // 6b. Split fused Mamba `in_proj_ba` into `in_proj_b` / `in_proj_a`.
+        //     PARO-specific layout detail, so it lives here rather than in the
+        //     generic Qwen35 sanitize. Runs before `model.sanitize` so downstream
+        //     layers see the already-split keys.
+        splitFusedMambaProjections(&weights)
+
+        // 6c. MoE checkpoints: stack the per-expert converted AWQ tensors into
+        //     the 3-D switch_mlp layout and remap the shared per-layer rotation
+        //     keys onto the nested PairwiseRotation children. Both are key-driven
+        //     no-ops for dense checkpoints. The stack stays lazy (graph nodes over
+        //     the mmap'd source arrays) until eval — same whole-dict pattern as
+        //     the Python reference.
+        stackMoEExpertWeights(&weights)
+        remapSharedMoERotations(&weights)
+        markPhase("moePasses")
     }
 
-    logger.info("Loaded \(weights.count) weight keys from safetensors")
-
-    // 6. Convert AutoAWQ format → MLX format (BEFORE sanitize)
-    if weights.keys.contains(where: { $0.hasSuffix(".qweight") }) {
-        convertAutoAWQ(&weights, groupSize: paroConfig.groupSize)
-        logger.info("Converted AutoAWQ weights to MLX format")
-    }
-
-    // 6b. Split fused Mamba `in_proj_ba` into `in_proj_b` / `in_proj_a`.
-    //     PARO-specific layout detail, so it lives here rather than in the
-    //     generic Qwen35 sanitize. Runs before `model.sanitize` so downstream
-    //     layers see the already-split keys.
-    splitFusedMambaProjections(&weights)
-
-    // 6c. MoE checkpoints: stack the per-expert converted AWQ tensors into
-    //     the 3-D switch_mlp layout and remap the shared per-layer rotation
-    //     keys onto the nested PairwiseRotation children. Both are key-driven
-    //     no-ops for dense checkpoints. The stack stays lazy (graph nodes over
-    //     the mmap'd source arrays) until eval — same whole-dict pattern as
-    //     the Python reference.
-    stackMoEExpertWeights(&weights)
-    remapSharedMoERotations(&weights)
+    // The Prepared Checkpoint persists this pre-sanitize snapshot: it is the
+    // last container-agnostic point (sanitize is model-class-specific, so one
+    // artifact serves both the LLM and VLM containers), and everything
+    // downstream — patching, quantize passes, update, rotation-state
+    // derivation — stays live code on every load.
+    let preSanitizeWeights = weights
 
     // 7. Model-specific sanitization
     weights = model.sanitize(weights: weights)
+    markPhase("sanitize")
 
     // 8a. Swap SwitchGLU → RotateSwitchGLU where shared rotation keys exist.
     //     Must precede the dense `.theta` scan in patchRotationLayers (the
@@ -630,6 +670,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         model: model, weights: weights,
         bits: paroConfig.bits, groupSize: paroConfig.groupSize
     )
+    markPhase("patch")
 
     // 9. Quantize non-rotation layers in MLX quantized form
     quantize(model: model) { path, module in
@@ -639,11 +680,13 @@ public func loadParoQuantModel<T: LanguageModel>(
         }
         return (paroConfig.groupSize, paroConfig.bits, .affine)
     }
+    markPhase("quantize")
 
     // 10. Load checkpoint weights into the patched model
     let parameters = ModuleParameters.unflattened(weights)
     let verify: Module.VerifyUpdate = [.allModelKeysSet, .shapeMismatch]
     try model.update(parameters: parameters, verify: verify)
+    markPhase("update")
 
     // 10b. Finalize rotation-derived state. Must run *after* the checkpoint
     //      update (so theta / pairs / channel_scales hold real values) and
@@ -663,6 +706,7 @@ public func loadParoQuantModel<T: LanguageModel>(
             break
         }
     }
+    markPhase("rotState")
 
     // 11. Quantize IO embedding path from FP16 weights
     quantize(model: model) { path, module in
@@ -671,12 +715,36 @@ public func loadParoQuantModel<T: LanguageModel>(
         }
         return (paroConfig.groupSize, paroConfig.bits, .affine)
     }
+    markPhase("quantizeIO")
 
     // 12. Prepare generic inference-only state, then materialize the model.
     // This must follow the final IO-layer topology update above, just like the
     // standard checkpoint-loading path.
     materializeModelForInference(model)
+    markPhase("eval")
     logger.info("ParoQuant model loaded and evaluated")
+    let totalSeconds = (loadClock.now - loadStart) / .seconds(1)
+    let breakdown = phaseTimes
+        .map { String(format: "%@=%.2fs", $0.0, $0.1) }
+        .joined(separator: " ")
+    logger.notice(
+        "ParoQuant load phases: \(breakdown, privacy: .public) total=\(String(format: "%.2f", totalSeconds), privacy: .public)s"
+    )
+
+    // 12b. Persist the Prepared Checkpoint in the background when this load
+    //      had to convert. Runs after the materialization above so the
+    //      model-bound tensors are already realized (the dict shares them
+    //      by reference); readiness never waits on the write, and a failed
+    //      or interrupted write only means the next load converts again.
+    if !usedPreparedCheckpoint {
+        let payload = PreparedCheckpointPayload(
+            weights: preSanitizeWeights, manifest: preparedManifest, directory: directory)
+        Task.detached(priority: .utility) {
+            ParoQuantPreparedCheckpoint.write(
+                weights: payload.weights, manifest: payload.manifest,
+                directory: payload.directory)
+        }
+    }
 
     // 13. Load tokenizer
     let tokenizer = try await tokenizerLoader.load(from: directory)
