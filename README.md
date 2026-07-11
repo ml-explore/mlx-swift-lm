@@ -6,10 +6,10 @@ MLX Swift LM is a Swift package to build tools and applications with large langu
 > The `main` branch is a _new_ major version number: 3.x.  In order
 > to decouple from tokenizer and downloader packages some breaking
 > changes were introduced. See [upgrading documentation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/upgrade) for detailed instructions on upgrading.
->
-> If that page shows a 404 you can view the source:
-> [upgrading](https://github.com/ml-explore/mlx-swift-lm/blob/main/Libraries/MLXLMCommon/Documentation.docc/upgrade.md) 
-> and [using](https://github.com/ml-explore/mlx-swift-lm/blob/main/Libraries/MLXLMCommon/Documentation.docc/using.md)
+
+
+> [!IMPORTANT]
+> We use `swift-format` to keep the code formatting consistent.  CI has this pinned to `602.0.0` right now.  603 has a behavior change that is [not controlled by configuration](https://github.com/swiftlang/swift-format/issues/1242) -- the plan is to pick up 604 when it is out and have configuration to keep the formatting consistent regardless of version.  For now, please use 602.  Thank you! 
 
 Some key features include:
 
