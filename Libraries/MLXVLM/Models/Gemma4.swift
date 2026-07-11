@@ -1807,6 +1807,7 @@ private final class Gemma4VisionPooler: Module {
     func callAsFunction(
         _ hiddenStates: MLXArray,
         patchPositions: MLXArray,
+        patchesW: Int,
         outputLength: Int
     ) -> MLXArray {
         let scale = MLXArray(rootHiddenSize, dtype: hiddenStates.dtype)
@@ -1821,13 +1822,12 @@ private final class Gemma4VisionPooler: Module {
         // divisible by kernel * patchSize, so the pooled grid covers the
         // image exactly.
         let positions = patchPositions[0]
-        let maxX = Int(positions[0..., 0].max().item(Int32.self)) + 1
         let kernel = max(Int(sqrt(Double(numPatches / length))), 1)
         let divisor = kernel * kernel
 
         let kernelIndices = floor(positions.asType(.float32) / Float(kernel)).asType(.int32)
         let flatKernel =
-            kernelIndices[0..., 0] + MLXArray(Int32(max(maxX / kernel, 1)))
+            kernelIndices[0..., 0] + MLXArray(Int32(max(patchesW / kernel, 1)))
             * kernelIndices[0..., 1]
         let weights =
             gemma4OneHot(flatKernel, numClasses: length).asType(.float32)
@@ -1884,15 +1884,14 @@ private final class Gemma4VisionModel: Module {
     }
 
     private func patchPositions(batch: Int, patchesH: Int, patchesW: Int) -> MLXArray {
-        var values = [Int32]()
-        values.reserveCapacity(patchesH * patchesW * 2)
-        for y in 0 ..< patchesH {
-            for x in 0 ..< patchesW {
-                values.append(Int32(x))
-                values.append(Int32(y))
-            }
-        }
-        let positions = MLXArray(values, [1, patchesH * patchesW, 2])
+        // .xy indexing makes x vary fastest, matching the row-major patch
+        // order the embedder and pooler expect.
+        let grids = meshGrid([
+            MLXArray.arange(patchesW, dtype: .int32),
+            MLXArray.arange(patchesH, dtype: .int32),
+        ])
+        let positions = stacked([grids[0].flattened(), grids[1].flattened()], axis: 1)
+            .reshaped(1, patchesH * patchesW, 2)
         return batch == 1
             ? positions
             : broadcast(positions, to: [batch, patchesH * patchesW, 2])
@@ -1919,7 +1918,8 @@ private final class Gemma4VisionModel: Module {
         var hiddenStates = patchEmbedder(pixels, patchPositions: patchPositions)
         hiddenStates = encoder(hiddenStates, positions: patchPositions, mask: nil)
         hiddenStates = pooler(
-            hiddenStates, patchPositions: patchPositions, outputLength: outputLength)
+            hiddenStates, patchPositions: patchPositions, patchesW: patchesW,
+            outputLength: outputLength)
 
         if let standardizationBias, let standardizationScale {
             hiddenStates = (hiddenStates - standardizationBias) * standardizationScale
