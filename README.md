@@ -101,9 +101,9 @@ print(try await session.respond(to: "How about a great place to eat?"))
 
 For alternative integration approaches (custom downloaders, alternative tokenizer packages, local-only weights), see the [using documentation](Libraries/MLXLMCommon/Documentation.docc/using.md).
 
-## Apple Foundation Models
+## `FoundationModels` integration
 
-`MLXFoundationModels` lets you swap `SystemLanguageModel` for an MLX-backed model and drive it through Apple's `FoundationModels` framework. Build an `MLXLanguageModel` in one line, hand it to `LanguageModelSession`, and ask for a `@Generable` type: the response is grammar-constrained to that type's schema, so it always parses. Requires the macOS/iOS/visionOS 27.0 SDK.
+`MLXFoundationModels` is a bridge between MLX models and Apple's `FoundationModels` framework: build an `MLXLanguageModel`, pass it to `LanguageModelSession`, and generate through the standard `FoundationModels` API. Requires the macOS/iOS/visionOS 27.0 SDK.
 
 ```swift
 import Foundation
@@ -140,6 +140,6 @@ if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
 }
 ```
 
-That schema enforcement comes from [`MLXGuidedGeneration`](Libraries/MLXGuidedGeneration/README.md), a standalone primitive that constrains any MLX model's output to a schema with no FoundationModels dependency (macOS 14 / iOS 17+). `MLXFoundationModels` builds on it, but you can use it directly on any model you load yourself.
+Here, we combine `MLXFoundationModels` with [`MLXGuidedGeneration`](Libraries/MLXGuidedGeneration/README.md) by requesting a `@Generable` type: the response is grammar-constrained to that type's schema. `MLXGuidedGeneration` is a standalone primitive that constrains any MLX model's output to a schema.
 
-The same one-line setup scales up: declare `.vision` to pass images, `.toolCalling` to expose tools, or `.reasoning` for thinking models, all driven through the standard `LanguageModelSession`. See [Libraries/MLXFoundationModels](Libraries/MLXFoundationModels/README.md) for the full capability set, custom weights and loaders, and the SwiftPM trait matrix.
+Other capabilities include `.vision`, `.toolCalling`, and `.reasoning`. See [Libraries/MLXFoundationModels](Libraries/MLXFoundationModels/README.md) for the full capability set, custom weights and loaders, and more information about using MLXFoundationModels.

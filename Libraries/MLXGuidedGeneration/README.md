@@ -1,16 +1,16 @@
 # MLXGuidedGeneration
 
-Guided (constrained) generation for MLX. It forces a language model's output to conform to a JSON Schema, an EBNF grammar, or a structural tag by masking the token logits at every decoding step, so the result is always structurally valid. It works with any MLX language model and needs no FoundationModels dependency, so it runs on macOS 14 / iOS 17 and later.
+Guided (constrained) generation for MLX. It forces a language model's output to conform to a JSON Schema, an EBNF grammar, or an XGrammar structural tag by masking the token logits at every decoding step, so the result is always structurally valid. It works with any MLX language model and runs on macOS 14 / iOS 17 and later.
 
-## When to reach for it
+## When to use it
 
-Reach for guided generation whenever a model's output needs to be data your code can rely on: pulling fields out of freeform text, filling in a form, or building the arguments for a tool call. Because the structure is guaranteed, you decode the result and move on, instead of writing defensive parsing or retrying until the output happens to come back valid.
+Use guided generation whenever a model's output needs to be data that your code can rely on, such as the fields of a form or the arguments for a tool call.
 
 ## Usage
 
-### Built-in with FoundationModels
+### Built-in with `MLXFoundationModels`
 
-When you drive an MLX model through FoundationModels, guided generation is automatic: ask `respond` for a `@Generable` type and the response is constrained to its schema for you.
+With an MLX model running through `MLXFoundationModels`, guided generation is automatic: pass a `@Generable` type to `respond`, and the response is constrained to match its schema.
 
 ```swift
 import Foundation
@@ -41,11 +41,11 @@ if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
 }
 ```
 
-Guided output is just the start. Learn how [`MLXFoundationModels`](../MLXFoundationModels/README.md) makes any MLX model a drop-in for Apple's `SystemLanguageModel`, adding tool calling, reasoning, and vision through the same `LanguageModelSession`.
+Learn more about how [`MLXFoundationModels`](../MLXFoundationModels/README.md) integrates `mlx-swift-lm` with Apple's `FoundationModels` framework.
 
 ### Standalone on any MLX model
 
-You don't need FoundationModels to get guaranteed-valid output. MLXGuidedGeneration constrains any MLX model you load yourself, back to macOS 14 / iOS 17: describe the shape you want as a JSON Schema, and every response conforms to it, the same guarantee as the `@Generable` path above, without the dependency.
+MLXGuidedGeneration constrains any MLX model's output to a JSON Schema, just as in the `@Generable` example above. It supports macOS 14 / iOS 17 and later.
 
 ```swift
 import HuggingFace
@@ -62,7 +62,7 @@ let container = try await #huggingFaceLoadModelContainer(
 let output = try await container.perform { context in
     let tokenizer = context.tokenizer
 
-    // 1. Extract the vocab in the shape xgrammar expects.
+    // 1. Extract the vocab in the shape XGrammar expects.
     let grammarVocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
 
     // 2. Build a grammar tokenizer.
