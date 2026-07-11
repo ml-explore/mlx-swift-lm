@@ -570,6 +570,111 @@ public class ParoQuantTests: XCTestCase {
             XCTAssertTrue(all(isFinite(y)).item(Bool.self), "\(tokens) tokens: non-finite output")
         }
     }
+
+    // MARK: - Prepared Checkpoint
+
+    /// Representative converted dict: packed quantized weights, f16
+    /// scales/biases, and verbatim rotation keys across dtypes.
+    private func makePreparedWeights() -> [String: MLXArray] {
+        let weights: [String: MLXArray] = [
+            "layers.0.q_proj.weight": MLXArray(
+                (0 ..< 64).map { UInt32($0) &* 2_654_435_761 }
+            ).reshaped(8, 8),
+            "layers.0.q_proj.scales": (MLXRandom.normal([8, 2]) * 0.02).asType(.float16),
+            "layers.0.q_proj.biases": (MLXRandom.normal([8, 2]) * 0.01).asType(.float16),
+            "layers.0.q_proj.theta": (MLXRandom.normal([2, 32]) * 0.1).asType(.float16),
+            "layers.0.q_proj.pairs": makeRandomPairs(krot: 2, dim: 64, groupSize: 8),
+            "layers.0.q_proj.channel_scales": (MLXRandom.normal([1, 64]) * 0.1 + 1.0)
+                .asType(.float16),
+        ]
+        eval(Array(weights.values))
+        return weights
+    }
+
+    private func makeTempCheckpointDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prepared-checkpoint-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static let testManifest = ParoQuantPreparedCheckpoint.Manifest(
+        formatVersion: ParoQuantPreparedCheckpoint.formatVersion,
+        sources: [
+            .init(name: "config.json", size: 42, mtimeNs: 1_000),
+            .init(name: "model.safetensors", size: 4_096, mtimeNs: 2_000),
+        ]
+    )
+
+    func testPreparedCheckpointRoundTripIsBitExact() throws {
+        let dir = try makeTempCheckpointDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let weights = makePreparedWeights()
+
+        ParoQuantPreparedCheckpoint.write(
+            weights: weights, manifest: Self.testManifest, directory: dir)
+        let loaded = try XCTUnwrap(
+            ParoQuantPreparedCheckpoint.load(directory: dir, manifest: Self.testManifest))
+
+        XCTAssertEqual(Set(loaded.keys), Set(weights.keys))
+        for (key, original) in weights {
+            let restored = try XCTUnwrap(loaded[key], key)
+            XCTAssertEqual(restored.dtype, original.dtype, key)
+            XCTAssertEqual(restored.shape, original.shape, key)
+            XCTAssertTrue(arrayEqual(original, restored).item(Bool.self), "\(key) not bit-equal")
+        }
+    }
+
+    func testPreparedCheckpointStaleManifestSelfHeals() throws {
+        let dir = try makeTempCheckpointDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        ParoQuantPreparedCheckpoint.write(
+            weights: makePreparedWeights(), manifest: Self.testManifest, directory: dir)
+        let artifact = dir.appendingPathComponent(ParoQuantPreparedCheckpoint.fileName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifact.path))
+
+        // A source changed (size differs) — the artifact is stale.
+        let staleExpectation = ParoQuantPreparedCheckpoint.Manifest(
+            formatVersion: ParoQuantPreparedCheckpoint.formatVersion,
+            sources: [
+                .init(name: "config.json", size: 42, mtimeNs: 1_000),
+                .init(name: "model.safetensors", size: 8_192, mtimeNs: 2_000),
+            ]
+        )
+        XCTAssertNil(
+            ParoQuantPreparedCheckpoint.load(directory: dir, manifest: staleExpectation))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: artifact.path),
+            "stale artifact must be deleted so the rewrite can publish a fresh one")
+    }
+
+    func testPreparedCheckpointCorruptArtifactSelfHeals() throws {
+        let dir = try makeTempCheckpointDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let artifact = dir.appendingPathComponent(ParoQuantPreparedCheckpoint.fileName)
+        try Data("not a safetensors file".utf8).write(to: artifact)
+
+        XCTAssertNil(ParoQuantPreparedCheckpoint.load(directory: dir, manifest: Self.testManifest))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: artifact.path),
+            "corrupt artifact must be deleted")
+    }
+
+    func testPreparedCheckpointManifestExcludesArtifactNames() throws {
+        let dir = try makeTempCheckpointDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("config.json"))
+        try Data([0x00]).write(to: dir.appendingPathComponent("model.safetensors"))
+        for name in ParoQuantPreparedCheckpoint.excludedFileNames {
+            try Data([0x00]).write(to: dir.appendingPathComponent(name))
+        }
+
+        let manifest = try ParoQuantPreparedCheckpoint.currentManifest(directory: dir)
+        XCTAssertEqual(
+            manifest.sources.map(\.name).sorted(), ["config.json", "model.safetensors"],
+            "artifact names must never count as conversion sources")
+    }
 }
 
 /// Miniature stand-in for an MoE block (e.g. `Qwen35SparseMoeBlock`): a
