@@ -1112,8 +1112,19 @@ final class Gemma4TextBackbone: Module {
 
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
-        self._layers.wrappedValue = (0 ..< config.hiddenLayers).map {
-            Gemma4TextDecoderLayer(config: config, layerIdx: $0)
+        // KV-shared tail layers (`layer_idx >= hidden_layers - num_kv_shared_layers`)
+        // reuse an earlier same-type layer's K/V and own no local K/V projection or
+        // K norm. Build them with `kvSharedOnly: true` so the module tree omits those
+        // tensors — matching what `sanitize` drops from the checkpoint, and mirroring
+        // both `Gemma4AssistantDraftInner` and upstream mlx-lm (`Attention.has_kv`).
+        // Without this, shared layers declare a `v_proj`/`k_proj`/`k_norm` that no
+        // weight fills, so loading a Gemma 4 checkpoint fails under the strict loader
+        // verify with e.g. `keyNotFound(… layers.24.self_attn.v_proj.weight …)`.
+        let firstKVSharedLayer = config.hiddenLayers - config.numKVSharedLayers
+        self._layers.wrappedValue = (0 ..< config.hiddenLayers).map { idx in
+            Gemma4TextDecoderLayer(
+                config: config, layerIdx: idx,
+                kvSharedOnly: firstKVSharedLayer > 0 && idx >= firstKVSharedLayer)
         }
         self._norm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
