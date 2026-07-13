@@ -489,18 +489,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 continue
             }
 
-            let residual = maximum(
-                exp(pLogProbabilities) - exp(qLogProbabilities),
-                MLXArray(Float(0)))
-            let residualMass = residual.sum().item(Float.self)
-            let correctionLogProbabilities: MLXArray
-            if residualMass.isFinite && residualMass > 1e-7 {
-                correctionLogProbabilities = log(residual)
-            } else {
-                // Numerical roundoff can collapse p-q when the distributions
-                // are effectively equal. Sampling from p is the stable limit.
-                correctionLogProbabilities = pLogProbabilities
-            }
+            let correctionLogProbabilities = speculativeResidualLogProbabilities(
+                target: pLogProbabilities,
+                draft: qLogProbabilities)
             emitted.append(sampleSpeculative(logProbabilities: correctionLogProbabilities))
             return (i, emitted)
         }
@@ -613,6 +604,19 @@ func speculativeAcceptanceProbability(
     guard !p.isNaN else { return 0 }
     if p >= q { return 1 }
     return Foundation.exp(Double(p - q))
+}
+
+/// Normalized residual distribution `max(p - q, 0)` used after a rejected
+/// speculative candidate. When finite-precision arithmetic collapses the
+/// residual mass, `p` is the stable limiting fallback.
+func speculativeResidualLogProbabilities(
+    target p: MLXArray,
+    draft q: MLXArray
+) -> MLXArray {
+    let residual = maximum(exp(p) - exp(q), MLXArray(Float(0)))
+    let residualMass = residual.sum().item(Float.self)
+    guard residualMass.isFinite && residualMass > 1e-7 else { return p }
+    return log(residual / residualMass)
 }
 
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
