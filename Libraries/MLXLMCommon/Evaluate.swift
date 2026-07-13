@@ -14,6 +14,21 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
+/// A sampler that can also expose the normalized distribution it samples.
+///
+/// Speculative sampling needs both the target distribution `p` and the
+/// drafter distribution `q` to apply the acceptance probability
+/// `min(1, p(token) / q(token))` and, on rejection, sample from the residual
+/// distribution `max(p - q, 0)`. Plain ``LogitSampler`` intentionally keeps
+/// the smaller API used by ordinary generation; samplers that can support the
+/// exact speculative algorithm opt in through this refinement.
+public protocol DistributionLogitSampler: LogitSampler {
+    /// Normalized log-probabilities after applying the sampler's temperature
+    /// and probability filters. The returned tensor has the same shape as
+    /// `logits` and sums to one in probability space along the last axis.
+    func logProbabilities(logits: MLXArray) -> MLXArray
+}
+
 /// A `LogitProcessor` is an optional visitor of `logits`.
 ///
 /// The ``LogitProcessor`` is called with the input (prompt) before generating tokens:
@@ -242,7 +257,7 @@ public struct ArgMaxSampler: LogitSampler {
 /// Each filter operates on the full vocabulary in original token order, masking
 /// rejected tokens with `-inf`. This matches the composable filter chain in
 /// `mlx_lm.sample_utils.make_sampler`.
-public struct TopPSampler: LogitSampler {
+public struct TopPSampler: DistributionLogitSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
@@ -269,27 +284,33 @@ public struct TopPSampler: LogitSampler {
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
+        return withRandomState(randomState) {
+            categorical(logProbabilities(logits: logits))
+        }
+    }
+
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
         var logits = logits
         if logits.dtype == .bfloat16 {
             logits = logits.asType(.float32)
         }
 
-        return withRandomState(randomState) {
-            var logprobs = logSoftmax(logits)
+        var logprobs = logSoftmax(logits)
 
-            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
-            if let topP {
-                logprobs = applyTopP(logprobs, topP: topP)
-            }
-            if let minP {
-                logprobs = applyMinP(logprobs, minP: minP)
-            }
-            if let topK {
-                logprobs = applyTopK(logprobs, topK: topK)
-            }
-
-            return categorical(logprobs * (1 / temp))
+        // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
         }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+
+        // `categorical` accepts unnormalized log weights. Normalize here as
+        // well so speculative rejection sampling can read exact p/q values.
+        return logSoftmax(logprobs * (1 / temp))
     }
 
     /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
@@ -327,7 +348,7 @@ public struct TopPSampler: LogitSampler {
 }
 
 /// Sampler that uses `temperature` to sample the logits.
-public struct CategoricalSampler: LogitSampler {
+public struct CategoricalSampler: DistributionLogitSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
 
@@ -340,8 +361,13 @@ public struct CategoricalSampler: LogitSampler {
 
     public func sample(logits: MLXArray) -> MLXArray {
         return withRandomState(randomState) {
-            categorical(logits * (1 / temp))
+            categorical(logProbabilities(logits: logits))
         }
+    }
+
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        let logits = logits.dtype == .bfloat16 ? logits.asType(.float32) : logits
+        return logSoftmax(logits * (1 / temp))
     }
 }
 

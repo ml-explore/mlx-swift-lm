@@ -12,7 +12,7 @@ import Testing
 /// Records `draftBlock(...)` invocations and returns a fixed token pattern
 /// so the iterator's draft/verify/accept flow can be exercised without a
 /// real drafter.
-private final class MockDrafter: Module, MTPDrafterModel {
+private final class MockDrafter: Module, MTPDistributionDrafterModel {
     private(set) var draftBlockCallCount = 0
     var draftedTokenValue: Int32
     /// Per-call record of what the iterator handed `draftBlock`: the
@@ -36,12 +36,47 @@ private final class MockDrafter: Module, MTPDrafterModel {
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
+        draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden,
+            sharedKV: sharedKV, queryOffset: queryOffset, blockSize: blockSize,
+            processor: nil, sampler: sampler
+        ).tokens
+    }
+
+    func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         draftBlockCallCount += 1
         receivedSharedKVSpans.append(sharedKV.mapValues { $0.0.dim(-2) })
         receivedQueryOffsets.append(queryOffset)
         let batch = lastToken.dim(0)
-        let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
-        return MLXArray(vals, [batch, blockSize - 1])
+        let vocab = 20
+        var processor = processor
+        var tokens = [MLXArray]()
+        var logitsRows = [MLXArray]()
+        for _ in 0 ..< (blockSize - 1) {
+            var values = [Float](repeating: 0, count: batch * vocab)
+            for row in 0 ..< batch {
+                values[row * vocab + Int(draftedTokenValue)] = 100
+            }
+            var logits = MLXArray(values, [batch, vocab])
+            logits = processor?.process(logits: logits) ?? logits
+            let token = sampler.sample(logits: logits)
+            processor?.didSample(token: token)
+            tokens.append(token.expandedDimensions(axis: 1))
+            logitsRows.append(logits.expandedDimensions(axis: 1))
+        }
+        return MTPDraftBlockOutput(
+            tokens: concatenated(tokens, axis: 1),
+            processedLogits: concatenated(logitsRows, axis: 1)
+        )
     }
 }
 
