@@ -138,9 +138,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.sampler = parameters.sampler()
         self.distributionSampler = self.sampler as? any DistributionLogitSampler
-        self.speculativeRandomState = parameters.seed.map {
-            MLXRandom.RandomState(seed: $0 &+ 0x9E37_79B9_7F4A_7C15)
-        } ?? MLXRandom.RandomState()
+        self.speculativeRandomState =
+            parameters.seed.map {
+                MLXRandom.RandomState(seed: $0 &+ 0x9E37_79B9_7F4A_7C15)
+            } ?? MLXRandom.RandomState()
         self.processor = parameters.processor()
 
         var draftParameters = parameters
@@ -476,23 +477,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let qLogits = draftProcessedLogits[0..., i, 0...]
             let qLogProbabilities = distributionSampler.logProbabilities(logits: qLogits)
 
-            eval(pLogProbabilities, qLogProbabilities)
-            let pLogProbability = pLogProbabilities[0, candidateID].item(Float.self)
-            let qLogProbability = qLogProbabilities[0, candidateID].item(Float.self)
-            let acceptanceProbability = speculativeAcceptanceProbability(
-                targetLogProbability: pLogProbability,
-                draftLogProbability: qLogProbability)
+            let decision = sampleSpeculativeDecision(
+                candidateID: candidateID,
+                targetLogProbabilities: pLogProbabilities,
+                draftLogProbabilities: qLogProbabilities)
 
-            if nextSpeculativeUniform() < acceptanceProbability {
+            if decision.accepted {
                 emitted.append(candidate)
                 verificationProcessor?.didSample(token: candidate)
                 continue
             }
 
-            let correctionLogProbabilities = speculativeResidualLogProbabilities(
-                target: pLogProbabilities,
-                draft: qLogProbabilities)
-            emitted.append(sampleSpeculative(logProbabilities: correctionLogProbabilities))
+            emitted.append(decision.correction)
             return (i, emitted)
         }
 
@@ -505,11 +501,30 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         return (numDraft, emitted)
     }
 
-    private func nextSpeculativeUniform() -> Double {
-        let sample = withRandomState(speculativeRandomState) {
-            MLXRandom.uniform(Float(0) ..< Float(1), [1])
+    /// Draw acceptance and the possible residual correction in one GPU
+    /// evaluation. Sampling the correction eagerly (and discarding it on
+    /// acceptance) preserves the distribution while avoiding a second or
+    /// third CPU/GPU synchronization per candidate.
+    private func sampleSpeculativeDecision(
+        candidateID: Int,
+        targetLogProbabilities p: MLXArray,
+        draftLogProbabilities q: MLXArray
+    ) -> (accepted: Bool, correction: MLXArray) {
+        let logAcceptance = minimum(
+            p[0, candidateID] - q[0, candidateID],
+            MLXArray(Float(0)))
+        let correctionLogProbabilities = speculativeResidualLogProbabilities(
+            target: p,
+            draft: q)
+        let draws = withRandomState(speculativeRandomState) {
+            (
+                MLXRandom.uniform(Float(0) ..< Float(1), [1]),
+                categorical(correctionLogProbabilities)
+            )
         }
-        return Double(sample.item(Float.self))
+        let accepted = log(draws.0) .< logAcceptance
+        eval(accepted, draws.1)
+        return (accepted.item(Bool.self), draws.1)
     }
 
     private func sampleSpeculative(logProbabilities: MLXArray) -> MLXArray {
@@ -614,9 +629,10 @@ func speculativeResidualLogProbabilities(
     draft q: MLXArray
 ) -> MLXArray {
     let residual = maximum(exp(p) - exp(q), MLXArray(Float(0)))
-    let residualMass = residual.sum().item(Float.self)
-    guard residualMass.isFinite && residualMass > 1e-7 else { return p }
-    return log(residual / residualMass)
+    let residualMass = residual.sum()
+    let hasResidual = residualMass .> Float(1e-7)
+    let safeMass = maximum(residualMass, MLXArray(Float(1e-7)))
+    return MLX.where(hasResidual, log(residual / safeMass), p)
 }
 
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
