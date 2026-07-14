@@ -419,7 +419,8 @@ public class Gemma3TextModel: Module, LLMModel {
 
     /// Handles prompt processing for sequences
     public func prepare(
-        _ input: LMInput, cache: [KVCache], windowSize: Int? = nil
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
+        windowSize: Int? = nil
     ) throws -> PrepareResult {
         let promptTokens = input.text.tokens
         let promptCount = promptTokens.dim(0)

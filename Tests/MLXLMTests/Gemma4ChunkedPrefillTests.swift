@@ -7,7 +7,7 @@ import Testing
 
 @testable import MLXVLM
 
-/// Unit tests for `Gemma4.prepare(_:cache:windowSize:)` chunked prefill.
+/// Unit tests for `Gemma4.prepare(_:cache:state:windowSize:)` chunked prefill.
 ///
 /// The core property under test is **chunk-size invariance**: prefilling the
 /// same prompt with a small `windowSize` (many chunks) and a `windowSize`
@@ -67,7 +67,7 @@ struct Gemma4ChunkedPrefillTests {
     ) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
         let cache = model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
-        let result = try model.prepare(input, cache: cache, windowSize: windowSize)
+        let result = try model.prepare(input, cache: cache, state: nil, windowSize: windowSize)
         guard case .logits(let output) = result else {
             Issue.record("Expected .logits from Gemma4.prepare, got .tokens")
             return (MLXArray(0), [])
@@ -123,7 +123,7 @@ struct Gemma4ChunkedPrefillTests {
 
         let cache = model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens))  // 1-D, no batch axis
-        let result = try model.prepare(input, cache: cache, windowSize: 6)
+        let result = try model.prepare(input, cache: cache, state: nil, windowSize: 6)
         guard case .logits(let output) = result else {
             Issue.record("Expected .logits from Gemma4.prepare")
             return

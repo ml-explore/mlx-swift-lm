@@ -1033,21 +1033,26 @@ public class Qwen35: Module, VLMModel {
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
+        state: LMOutput.State?,
         windowSize: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
-        // Qwen3.5. A cold cache is just a continuation anchored at offset 0,
-        // so the windowed forward in `prepareContinuation` serves both paths
-        // and bounds the full-attention scratch to [heads, window, L]. The
-        // windowed forward is single-sequence; batched inputs keep the
-        // single-shot path below.
-        if let windowSize, inputIds.ndim == 2, inputIds.dim(0) == 1,
-            inputIds.dim(-1) > windowSize
+        // Qwen3.5 — with the same default as the sibling chunked prefills
+        // (Gemma3/LLMModel: `windowSize ?? 512`). The windowed forward also
+        // owns every warm continuation (multi-turn chat, tool restart,
+        // restored prompt cache): a cold cache is just a continuation
+        // anchored at offset 0, and a warm one anchors M-RoPE positions at
+        // the cache offset plus the rope delta carried in `state` — never
+        // back at zero. The windowed forward is single-sequence; batched
+        // inputs keep the single-shot path below.
+        let window = windowSize ?? 512
+        if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
+            faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {
             return try prepareContinuation(
-                input, cache: cache, state: nil, windowSize: windowSize)
+                input, cache: cache, state: state, windowSize: window)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1059,7 +1064,7 @@ public class Qwen35: Module, VLMModel {
                 inputIds,
                 inputsEmbeds: inputEmbeddings,
                 cache: typedCache,
-                state: nil,
+                state: state,
                 mask: input.text.mask,
                 positionIds: nil,
                 pixelValues: pixelValues,
@@ -1069,6 +1074,13 @@ public class Qwen35: Module, VLMModel {
         }
 
         return .logits(output)
+    }
+
+    /// Offset of the first full-attention layer's cache — the model's notion
+    /// of "how many tokens are already cached".
+    private func faCacheOffset(_ cache: [any KVCache]) -> Int {
+        let faIdx = languageModel.model.faIdx
+        return cache.indices.contains(faIdx) ? cache[faIdx].offset : 0
     }
 
     /// Warm, windowed continuation through an image-bearing remainder — the
@@ -1089,7 +1101,7 @@ public class Qwen35: Module, VLMModel {
     /// post-image text tail resumes with (`getRopeIndex` delta − `P`), so a
     /// caller threading state end-to-end continues that tail with the ordinary
     /// flat-continuation branch. Decode stays caller-owned.
-    public func prepareContinuation(
+    private func prepareContinuation(
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
@@ -1101,8 +1113,7 @@ public class Qwen35: Module, VLMModel {
 
         // The Position Anchor: token offset already in the cache (P) plus the
         // rope delta the cached images accumulated, carried in `state`.
-        let faIdx = languageModel.model.faIdx
-        let cacheOffset = cache.indices.contains(faIdx) ? cache[faIdx].offset : 0
+        let cacheOffset = faCacheOffset(cache)
         var anchorRopeDelta = 0
         if let seeded = state?[ropeDeltasKey] {
             anchorRopeDelta = seeded.asType(.int32).item(Int.self)
@@ -1287,6 +1298,3 @@ extension Qwen35 {
         return castCache(cache)
     }
 }
-
-// `prepareContinuation` is defined on `Qwen35` above; `Qwen35MoE` inherits it.
-extension Qwen35: WindowedVisionContinuation {}

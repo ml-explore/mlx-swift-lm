@@ -982,7 +982,9 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         return (finalEmbedding.asType(inputsEmbeds.dtype), finalAttentionMask4d)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let prefillStepSize = windowSize ?? 512

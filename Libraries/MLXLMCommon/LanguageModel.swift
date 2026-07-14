@@ -218,7 +218,7 @@ public struct LMOutput {
     }
 }
 
-/// The result of the call to ``LanguageModel/prepare(_:cache:windowSize:)``
+/// The result of the call to ``LanguageModel/prepare(_:cache:state:windowSize:)``
 public enum PrepareResult {
     /// tokens to process by the ``TokenIterator``
     case tokens(LMInput.Text)
@@ -227,48 +227,31 @@ public enum PrepareResult {
     case logits(LMOutput)
 }
 
-/// Opt-in capability for a vision language model that can continue an already
-/// warmed KV cache *through* a new image, without recomputing the cached
-/// prefix and without a single-shot `[heads, L, L]` full-attention scratch.
-///
-/// `prepareContinuation` runs the vision tower and the image→token merge
-/// once, then drives the language-model forward in windows of `windowSize`,
-/// bounding the scratch to `[heads, windowSize, L]`. A cold cache is the
-/// degenerate case (anchor 0), so a conforming model's `prepare` can delegate
-/// its `windowSize` chunking here. Only families that have wired the windowed
-/// image path conform; callers feature-detect via
-/// `as? WindowedVisionContinuation`.
-public protocol WindowedVisionContinuation {
-    /// Continue `cache` (warmed to its current offset `P`) through `input`'s
-    /// image-bearing remainder, in windows of `windowSize`.
-    ///
-    /// - Parameter state: carries the Position Anchor's rope delta for the
-    ///   images cached before `P` (absent / zero for an image-free prefix). The
-    ///   new image's M-RoPE positions are computed from that anchor instead of
-    ///   resetting to zero.
-    /// - Returns: `.logits` whose `state` carries the rope delta the post-image
-    ///   text tail resumes with, for a caller threading state end-to-end.
-    func prepareContinuation(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int
-    ) throws -> PrepareResult
-}
-
 /// Interface for all Language Models (e.g. LLM, VLM).
 ///
 /// The language model is typically called by the ``TokenIterator`` and it:
 ///
 /// - consumes the ``LMInput``
-/// - calls ``prepare(_:cache:windowSize:)`` to initialize the KVCache and consume the prompt
+/// - calls ``prepare(_:cache:state:windowSize:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel {
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
+    /// `state` is the ``LMOutput/state`` a caller carried over from earlier
+    /// evaluation against the same `cache` — present when `cache` is already
+    /// warm (a multi-turn chat, a tool-call restart, a restored prompt
+    /// cache). Models that keep per-call positional state (e.g. the M-RoPE
+    /// `ropeDeltas` of the Qwen VLM families) use it to anchor the new
+    /// tokens' positions at the cache offset; models without such state can
+    /// ignore it. In the typical cold call it is `nil`.
+    ///
     /// This can return:
     /// - ``PrepareResult/tokens(_:)`` if the caller should evaluate the (remaining) tokens normally
     /// - ``PrepareResult/logits(_:)`` to produce the next token from the prompt
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult
+    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?)
+        throws -> PrepareResult
 
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)

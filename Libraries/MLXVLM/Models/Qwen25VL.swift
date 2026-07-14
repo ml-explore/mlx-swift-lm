@@ -979,7 +979,9 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         return (mergedEmbeds, positionIds, ropeDeltas)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let dtype = visionModel.patchEmbed.proj.weight.dtype

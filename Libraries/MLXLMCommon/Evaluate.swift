@@ -555,7 +555,13 @@ extension TokenIteratorProtocol {
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
 public struct TokenIterator: TokenIteratorProtocol {
     let model: any LanguageModel
-    var state: LMOutput.State?
+
+    /// Per-call model state (e.g. M-RoPE rope deltas), seeded from the
+    /// initializer's `state`, replaced by prefill, then threaded through
+    /// every decode step. A caller continuing this cache later (as
+    /// ``ChatSession`` does across turns) reads it back after
+    /// initialization and seeds the next iterator with it.
+    public internal(set) var state: LMOutput.State?
 
     var y: LMInput.Text
     var cache: [KVCache]
@@ -616,12 +622,16 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - parameters: the generation parameters
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+        state: LMOutput.State? = nil,
         parameters: GenerateParameters
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: parameters)
 
@@ -645,16 +655,20 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - processor: the logit processor
     ///   - sampler: the logit sampler
     ///   - prefillStepSize: optional prefill step size
     ///   - maxTokens: maximum number of tokens to generate
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+        state: LMOutput.State? = nil,
         processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int? = nil,
         maxTokens: Int? = nil
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: nil)
 
@@ -676,7 +690,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
         processor?.prompt(input.text.tokens)
 
-        switch try model.prepare(input, cache: cache, windowSize: windowSize) {
+        switch try model.prepare(input, cache: cache, state: state, windowSize: windowSize) {
         case .tokens(let tokens):
             y = tokens
 
@@ -861,7 +875,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.prompt(input.text.tokens)
 
         // Prefill main model
-        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        switch try mainModel.prepare(
+            input, cache: mainCache, state: mainState, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             y = tokens
         case .logits(let result):
@@ -874,7 +890,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
-        switch try draftModel.prepare(input, cache: draftCache, windowSize: windowSize) {
+        switch try draftModel.prepare(input, cache: draftCache, state: nil, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             draftY = tokens
         case .logits(let result):

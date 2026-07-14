@@ -2070,7 +2070,9 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         return (inputsEmbeds, perLayerInputs)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let convertedCache = cache.map { $0 }
@@ -2530,7 +2532,9 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
         return (inputsEmbeds, perLayerInputs)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         if input.image == nil, input.video == nil, input.audio == nil {

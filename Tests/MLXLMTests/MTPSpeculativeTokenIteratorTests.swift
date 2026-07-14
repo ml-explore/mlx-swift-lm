@@ -2,10 +2,9 @@
 
 import Foundation
 import MLX
+@_spi(Testing) @testable import MLXLMCommon
 import MLXNN
 import Testing
-
-@_spi(Testing) @testable import MLXLMCommon
 
 // MARK: - Synthetic mocks for iterator plumbing
 
@@ -69,7 +68,9 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+        throws -> PrepareResult
+    {
         // Return `.tokens(...)`; the iterator's `prepare` will follow up with
         // a one-position forward call that primes drafter state.
         .tokens(input.text)

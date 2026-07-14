@@ -1016,7 +1016,9 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         return (merged, positionIds, ropeDeltas)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let dtype = visionModel.patchEmbed.proj.weight.dtype

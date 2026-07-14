@@ -975,7 +975,9 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
         return (merged, positionIds, ropeDeltas)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let dtype = visionModel.patchEmbed.proj.weight.dtype
@@ -1002,7 +1004,7 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
             inputIds: input.text.tokens, pixelValues: allPixels,
             frames: allFrames.isEmpty ? nil : allFrames)
 
-        // #239: Qwen25VL.swift prepare(_:cache:windowSize:) (:982)
+        // #239: Qwen25VL.swift prepare(_:cache:state:windowSize:)
         // Seed per-call decoder state with the prefill-only MROPE positions +
         // ropeDeltas (both nil on the no-image path). The LMOutput's `state`
         // returned here is consumed by subsequent decode steps via
