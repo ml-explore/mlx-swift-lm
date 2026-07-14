@@ -9,7 +9,7 @@ MLX Swift LM is a Swift package to build tools and applications with large langu
 
 
 > [!IMPORTANT]
-> We use `swift-format` to keep the code formatting consistent.  CI has this pinned to `602.0.0` right now.  603 has a behavior change that is [not controlled by configuration](https://github.com/swiftlang/swift-format/issues/1242) -- the plan is to pick up 604 when it is out and have configuration to keep the formatting consistent regardless of version.  For now, please use 602.  Thank you! 
+> We use `swift-format` to keep the code formatting consistent.  CI has this pinned to `603.0.0` right now. 
 
 Some key features include:
 
