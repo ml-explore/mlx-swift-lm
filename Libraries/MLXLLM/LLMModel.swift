@@ -26,12 +26,20 @@ extension LLMModel {
         let prefillStepSize = windowSize ?? 512
         var y = input.text
 
-        withPreparedCache(cache, lengths: y.sequenceLengths) {
+        try withPreparedCache(cache, lengths: y.sequenceLengths) {
             // Prepare the prompt in chunks if larger than the prefill size.
             // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
             // chunk N.
             var state: LMOutput.State? = state
             while y.tokens.size > prefillStepSize {
+                // Cooperative cancellation between prefill windows. On iOS, GPU work
+                // submitted after the app moves to the background is rejected by the
+                // system ("Insufficient Permission"), and the resulting command-buffer
+                // error is thrown from a Metal completion handler where it cannot be
+                // caught, aborting the process. Without this check a long prompt's
+                // prefill cannot be interrupted, so apps cannot stop GPU submissions
+                // in time when entering the background. See ml-explore/mlx-swift-examples#230.
+                try Task.checkCancellation()
                 let input = y[.newAxis, ..<prefillStepSize]
                 let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
                 state = output.state
