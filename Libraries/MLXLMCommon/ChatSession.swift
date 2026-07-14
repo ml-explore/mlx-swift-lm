@@ -163,32 +163,6 @@ public final class ChatSession {
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
-    /// Text that closes a *truncated* previous model turn when a new turn is
-    /// appended to a non-empty KV cache (e.g. `"<turn|>\n"` for Gemma 4,
-    /// `"<end_of_turn>\n"` for Gemma 3).
-    ///
-    /// The KV cache stores prior turns as raw tokens. A normally completed
-    /// turn ends with its stop token already in the cache (the iterator feeds
-    /// each sampled token through the model before the generate loop
-    /// recognizes it as a stop), but a generation that was cancelled
-    /// mid-stream — or capped by `maxTokens` — leaves the cached turn dangling
-    /// mid-sentence. Chat templates only render the messages they are given,
-    /// so nothing ever closes that dangling turn: the continuation is appended
-    /// right after the truncated reply's last word, leaving the transcript
-    /// malformed (`…repl<|turn>user…`).
-    ///
-    /// When set, these tokens are prepended to the continuation prompt *only
-    /// when the previous generation did not finish with a stop token*, so the
-    /// cached transcript stays canonical (`…repl<turn|>\n<|turn>user…`)
-    /// without duplicating the terminator of completed turns. Off (nil) by
-    /// default.
-    public var continuationTurnClosure: String?
-
-    /// Chat templates that begin with `{{ bos_token }}` re-emit `<bos>` on
-    /// every render; on continuation turns that would inject a spurious BOS
-    /// mid-transcript, so it is stripped. On by default.
-    public var stripsContinuationBOS: Bool = true
-
     /// Stop reason of the most recent generation pass, kept across turns so
     /// continuation repair can tell a completed turn (stop token already in
     /// the KV cache) from a truncated one (cancelled or length-capped).
@@ -655,8 +629,6 @@ extension ChatSession {
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
 
-        let continuationTurnClosure = self.continuationTurnClosure
-        let stripsContinuationBOS = self.stripsContinuationBOS
         let task = Task {
             [
                 model,
@@ -715,6 +687,11 @@ extension ChatSession {
                     // prepare the input
                     messages.append(contentsOf: inputMessages.consume())
 
+                    // The model side owns the template-specific mechanics of
+                    // continuation repair; the session only determines the
+                    // semantics (continuation? truncated or completed?).
+                    let continuationPolicy = modelConfiguration.continuationPolicy
+
                     // loop can restart on tool calls
                     restart: while !messages.isEmpty {
                         // A continuation appends to a non-empty KV cache.
@@ -735,13 +712,16 @@ extension ChatSession {
                             processing: processing,
                             tools: tools, additionalContext: additionalContext)
                         let preparedInput = try await processor.prepare(input: userInput)
-                        let input =
-                            isContinuation
-                            ? repairContinuation(
+                        let input: LMInput
+                        if isContinuation, let continuationPolicy {
+                            input = repairContinuation(
                                 preparedInput, tokenizer: tokenizer,
-                                closure: previousTurnCompleted ? nil : continuationTurnClosure,
-                                stripBOS: stripsContinuationBOS)
-                            : preparedInput
+                                closure: previousTurnCompleted
+                                    ? nil : continuationPolicy.truncatedTurnClosure,
+                                stripBOS: continuationPolicy.stripsRepeatedBOS)
+                        } else {
+                            input = preparedInput
+                        }
                         // Pessimistic until this pass reports completion: a
                         // generation that dies mid-stream leaves a truncated
                         // turn behind.

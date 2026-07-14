@@ -118,6 +118,13 @@ public struct ModelConfiguration: Sendable {
     /// Tool call format for this model (nil = default JSON format)
     public var toolCallFormat: ToolCallFormat?
 
+    /// Model-specific policy for keeping a cached chat transcript canonical
+    /// across ``ChatSession`` continuation turns. `nil` (the default)
+    /// disables continuation repair. Like ``extraEOSTokens`` and
+    /// ``toolCallFormat``, this captures chat-template knowledge on the
+    /// model side so callers never handle template-specific token framing.
+    public var continuationPolicy: ContinuationPolicy?
+
     public init(
         id: String, revision: String = "main",
         tokenizerSource: TokenizerSource? = nil,
@@ -125,7 +132,8 @@ public struct ModelConfiguration: Sendable {
         extraEOSTokens: Set<String> = [],
         stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        continuationPolicy: ContinuationPolicy? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerSource = tokenizerSource
@@ -134,6 +142,7 @@ public struct ModelConfiguration: Sendable {
         self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.continuationPolicy = continuationPolicy
     }
 
     public init(
@@ -143,7 +152,8 @@ public struct ModelConfiguration: Sendable {
         extraEOSTokens: Set<String> = [],
         stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        continuationPolicy: ContinuationPolicy? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerSource = tokenizerSource
@@ -152,6 +162,34 @@ public struct ModelConfiguration: Sendable {
         self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.continuationPolicy = continuationPolicy
+    }
+
+    /// Model-specific knowledge for repairing a continuation prompt that is
+    /// appended to a non-empty KV cache.
+    ///
+    /// ``ChatSession`` determines the *semantics* (is this a continuation?
+    /// was the previous model turn truncated or completed?) and this policy
+    /// supplies the template-specific mechanics, keeping the session API
+    /// model-agnostic.
+    public struct ContinuationPolicy: Sendable, Equatable {
+
+        /// Text that closes a *truncated* model turn (e.g. `"<turn|>\n"` for
+        /// Gemma 4, `"<end_of_turn>\n"` for Gemma 3). Applied only when the
+        /// previous generation did not finish with a stop token — a
+        /// completed turn already has its terminator in the cache.
+        public let truncatedTurnClosure: String?
+
+        /// Whether the model's chat template begins with `{{ bos_token }}`
+        /// and therefore re-emits `<bos>` on every render; the duplicate is
+        /// stripped from continuation prompts. The strip only triggers when
+        /// the first prompt token actually equals the tokenizer's BOS.
+        public let stripsRepeatedBOS: Bool
+
+        public init(truncatedTurnClosure: String? = nil, stripsRepeatedBOS: Bool = true) {
+            self.truncatedTurnClosure = truncatedTurnClosure
+            self.stripsRepeatedBOS = stripsRepeatedBOS
+        }
     }
 
     /// Maps this configuration's behavioral properties into a

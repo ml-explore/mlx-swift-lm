@@ -167,47 +167,54 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma3_1B_qat_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-1b-it-qat-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3n_E4B_it_lm_bf16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-bf16",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3n_E2B_it_lm_bf16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-bf16",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3n_E4B_it_lm_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3n_E2B_it_lm_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma4_e4b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let gemma4_e2b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let qwen205b4bit = ModelConfiguration(

@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLLM
 import XCTest
 
 @testable import MLXLMCommon
@@ -112,6 +113,23 @@ public class ContinuationRepairTests: XCTestCase {
         XCTAssertEqual(repaired.text.tokens.ndim, 2)
         XCTAssertEqual(repaired.text.tokens.dim(0), 1)
         XCTAssertEqual(tokenList(repaired.text.tokens.squeezed(axis: 0)), [77, 78, 10, 11])
+    }
+
+    // MARK: - ContinuationPolicy plumbing
+
+    func testDefaultConfigurationHasNoContinuationPolicy() {
+        // No policy ⇒ ChatSession performs no repair: zero behavior change
+        // for models that don't declare one.
+        XCTAssertNil(ModelConfiguration(id: "test").continuationPolicy)
+    }
+
+    func testGemmaRegistrationsCarryContinuationPolicy() throws {
+        let gemma4 = try XCTUnwrap(LLMRegistry.gemma4_e4b_it_4bit.continuationPolicy)
+        XCTAssertEqual(gemma4.truncatedTurnClosure, "<turn|>\n")
+        XCTAssertTrue(gemma4.stripsRepeatedBOS)
+
+        let gemma3 = try XCTUnwrap(LLMRegistry.gemma3_1B_qat_4bit.continuationPolicy)
+        XCTAssertEqual(gemma3.truncatedTurnClosure, "<end_of_turn>\n")
     }
 
     // MARK: - mask handling

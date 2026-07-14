@@ -206,43 +206,50 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma3_4B_qat_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-4b-it-qat-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3_12B_qat_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-12b-it-qat-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma3_27B_qat_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-27b-it-qat-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<end_of_turn>\n")
     )
 
     static public let gemma4_E2B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let gemma4_E4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let gemma4_31B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-31b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-26b-a4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>"],
+        continuationPolicy: .init(truncatedTurnClosure: "<turn|>\n")
     )
 
     static public let smolvlm = ModelConfiguration(
