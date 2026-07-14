@@ -156,6 +156,13 @@ public final class ChatSession {
     private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
+
+    /// Optional behavioral components (e.g. a custom ``LogitProcessor``) applied
+    /// on each generation. The `logitProcessorFactory` is invoked fresh for
+    /// every ``respond(to:role:images:videos:audios:)`` so stateful processors
+    /// do not leak state across turns.
+    public var components: GenerationComponents
+
     public var additionalContext: [String: any Sendable]?
     public var tools: [ToolSpec]?
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
@@ -170,6 +177,7 @@ public final class ChatSession {
     ///   - instructions: optional system instructions for the session
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -179,6 +187,7 @@ public final class ChatSession {
         instructions: String? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -190,6 +199,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -203,6 +213,7 @@ public final class ChatSession {
     ///   - instructions: optional system instructions for the session
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -212,6 +223,7 @@ public final class ChatSession {
         instructions: String? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -223,6 +235,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -239,6 +252,7 @@ public final class ChatSession {
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -249,6 +263,7 @@ public final class ChatSession {
         history: consuming [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -260,6 +275,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -276,6 +292,7 @@ public final class ChatSession {
     ///   - history: The full array of messages to restore (including system prompt)
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -286,6 +303,7 @@ public final class ChatSession {
         history: [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -297,6 +315,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -322,6 +341,7 @@ public final class ChatSession {
     ///     matching the given model
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -332,6 +352,7 @@ public final class ChatSession {
         cache: consuming [KVCache],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -343,6 +364,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -368,6 +390,7 @@ public final class ChatSession {
     ///     matching the given model
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     ///   - processing: media processing configuration for images/videos
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
@@ -378,6 +401,7 @@ public final class ChatSession {
         cache: consuming [KVCache],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -389,6 +413,7 @@ public final class ChatSession {
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
+        self.components = components
         self.tools = tools
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
@@ -578,7 +603,8 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
+                additionalContext, cache, loadedDraftModel, generateParameters, components,
+                speculativeDecoding
             ] in
             do {
                 try await cache.update { cache in
@@ -647,7 +673,7 @@ public final class ChatSession {
                         ) {
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
-                                parameters: generateParameters)
+                                parameters: generateParameters, components: components)
 
                             return MLXLMCommon.generateTask(
                                 promptTokenCount: input.text.tokens.size,
@@ -734,7 +760,8 @@ public final class ChatSession {
                                         mainCache: kvCache,
                                         draftCache: draftCache,
                                         parameters: generateParameters,
-                                        numDraftTokens: speculativeDecoding.numDraftTokens
+                                        numDraftTokens: speculativeDecoding.numDraftTokens,
+                                        components: components
                                     )
 
                                     (genStream, genTask) = MLXLMCommon.generateTask(

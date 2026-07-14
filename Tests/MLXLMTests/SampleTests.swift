@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+import Foundation
 import MLX
 import MLXLMCommon
 import XCTest
@@ -365,25 +366,74 @@ public class SampleTests: XCTestCase {
         func didSample(token: MLXArray) {}
     }
 
-    func testGenerateParametersCustomLogitProcessorFactory() {
-        // no penalties, no factory -> no processor
-        XCTAssertNil(GenerateParameters().processor())
+    /// Thread-safe counter for asserting how many times a `@Sendable` factory runs.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
 
-        // factory alone -> the custom processor, unwrapped
-        var parameters = GenerateParameters()
-        parameters.customLogitProcessorFactory = { ScaleProcessor(scale: 2.0) }
-        XCTAssertNotNil(parameters.processor() as? ScaleProcessor)
+        func increment() {
+            lock.withLock { count += 1 }
+        }
 
-        // penalties + factory -> chained
-        parameters.presencePenalty = 0.5
-        XCTAssertNotNil(parameters.processor() as? ChainedLogitProcessor)
+        var value: Int {
+            lock.withLock { count }
+        }
     }
 
-    func testGenerateParametersAppliesCustomProcessorAfterPenalties() {
-        var parameters = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
-        parameters.customLogitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+    func testGenerationComponentsComposition() {
+        // no penalties, no factory -> no processor
+        XCTAssertNil(GenerationComponents().logitProcessor(parameters: GenerateParameters()))
 
-        var processor = parameters.processor()
+        // factory alone -> the custom processor, unwrapped
+        let parameters = GenerateParameters()
+        var components = GenerationComponents()
+        components.logitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+        XCTAssertNotNil(components.logitProcessor(parameters: parameters) as? ScaleProcessor)
+
+        // penalties + factory -> chained
+        let penalized = GenerateParameters(presencePenalty: 0.5)
+        XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? ChainedLogitProcessor)
+    }
+
+    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/processor()``
+    /// exactly -- the guarantee that threading `components` everywhere is non-breaking.
+    func testEmptyGenerationComponentsMatchesParametersProcessor() {
+        let components = GenerationComponents()
+
+        // no penalties -> nil, same as processor()
+        let plain = GenerateParameters()
+        XCTAssertNil(plain.processor())
+        XCTAssertNil(components.logitProcessor(parameters: plain))
+
+        // penalties only -> the penalty processor, unwrapped (no chaining)
+        let penalized = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
+        XCTAssertNotNil(penalized.processor() as? PenaltyProcessor)
+        XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? PenaltyProcessor)
+    }
+
+    /// The factory must be invoked on every call so each generation gets a fresh,
+    /// independent (stateful) processor instance.
+    func testGenerationComponentsInvokesFactoryPerCall() {
+        let counter = CallCounter()
+        var components = GenerationComponents()
+        components.logitProcessorFactory = {
+            counter.increment()
+            return ScaleProcessor(scale: 2.0)
+        }
+
+        let parameters = GenerateParameters()
+        _ = components.logitProcessor(parameters: parameters)
+        _ = components.logitProcessor(parameters: parameters)
+
+        XCTAssertEqual(counter.value, 2)
+    }
+
+    func testGenerationComponentsAppliesCustomProcessorAfterPenalties() {
+        let parameters = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
+        var components = GenerationComponents()
+        components.logitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+
+        var processor = components.logitProcessor(parameters: parameters)
         XCTAssertNotNil(processor)
 
         processor?.prompt(MLXArray([1]))

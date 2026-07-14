@@ -186,17 +186,34 @@ public class ChatSessionTests: XCTestCase {
         func didSample(token: MLXArray) {}
     }
 
+    /// Thread-safe counter for asserting how many times a `@Sendable` factory runs.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.withLock { count += 1 }
+        }
+
+        var value: Int {
+            lock.withLock { count }
+        }
+    }
+
+    /// A custom ``LogitProcessor`` injected via ``GenerationComponents`` must ride
+    /// the real ``ChatSession`` generation path -- the reason this API exists.
     func testChatSessionUsesCustomLogitProcessor() async throws {
         let forcedToken = 7
         let inputProcessor = TestInputProcessor()
         let model = model(processor: inputProcessor)
 
-        var parameters = GenerateParameters(maxTokens: 5, temperature: 0)
-        parameters.customLogitProcessorFactory = {
+        let parameters = GenerateParameters(maxTokens: 5, temperature: 0)
+        var components = GenerationComponents()
+        components.logitProcessorFactory = {
             ForceTokenProcessor(token: Int32(forcedToken))
         }
 
-        let session = ChatSession(model, generateParameters: parameters)
+        let session = ChatSession(model, generateParameters: parameters, components: components)
         let result = try await session.respond(to: "hello")
 
         // with all other logits masked, every generated token must be the forced token
@@ -204,6 +221,43 @@ public class ChatSessionTests: XCTestCase {
         let words = result.split(separator: " ").map(String.init)
         XCTAssertFalse(words.isEmpty, result)
         XCTAssertTrue(words.allSatisfy { $0 == expectedWord }, result)
+    }
+
+    /// A single ``ChatSession`` reuses one ``GenerationComponents`` across turns.
+    /// The factory MUST be invoked fresh for each generation so a stateful
+    /// processor never leaks state between turns.
+    func testChatSessionInvokesLogitProcessorFactoryPerGeneration() async throws {
+        let counter = CallCounter()
+        let model = model()
+
+        let parameters = GenerateParameters(maxTokens: 5, temperature: 0)
+        var components = GenerationComponents()
+        components.logitProcessorFactory = {
+            counter.increment()
+            return ForceTokenProcessor(token: 7)
+        }
+
+        let session = ChatSession(model, generateParameters: parameters, components: components)
+        _ = try await session.respond(to: "hello")
+        _ = try await session.respond(to: "hello again")
+
+        // two turns -> two fresh processor instances
+        XCTAssertEqual(counter.value, 2)
+    }
+
+    /// Passing an empty ``GenerationComponents()`` must be non-breaking: the
+    /// session still generates normally, exactly as when no components are
+    /// supplied. (The exact processor-equivalence guarantee is proven
+    /// deterministically by `testEmptyGenerationComponentsMatchesParametersProcessor`;
+    /// full token-sequence equality is not asserted here because argmax over
+    /// randomly-initialized weights is not bitwise-reproducible on GPU.)
+    func testChatSessionEmptyComponentsMatchesDefault() async throws {
+        let session = ChatSession(
+            model(),
+            generateParameters: GenerateParameters(maxTokens: 50),
+            components: GenerationComponents())
+        let result = try await session.respond(to: "hello")
+        XCTAssertGreaterThan(result.count, targetLength, result)
     }
 
     func testChatSessionAsyncInterrupt() async throws {
