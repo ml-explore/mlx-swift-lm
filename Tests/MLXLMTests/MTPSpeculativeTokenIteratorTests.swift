@@ -2,9 +2,10 @@
 
 import Foundation
 import MLX
-@_spi(Testing) @testable import MLXLMCommon
 import MLXNN
 import Testing
+
+@_spi(Testing) @testable import MLXLMCommon
 
 // MARK: - Synthetic mocks for iterator plumbing
 
