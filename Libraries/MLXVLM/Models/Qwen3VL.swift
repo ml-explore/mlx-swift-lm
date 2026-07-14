@@ -52,7 +52,18 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
         let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
 
-        let resampled = processed.map { MediaProcessing.resampleBicubic($0, to: targetSize) }
+        // The sRGB tone-curve step must precede resample/normalize: CoreImage
+        // filters run in a *linear-light* working space and `asMLXArray`
+        // renders with a nil colorSpace (raw working-space values), so without
+        // it the model receives linearized values instead of the gamma-encoded
+        // bytes the HF reference preprocesses — crushing dark-region contrast
+        // ~12× (near-black text becomes invisible to the model). The sibling
+        // Qwen25VL/Qwen2VL image paths and this file's own video path apply
+        // the same step.
+        let resampled = processed.map {
+            MediaProcessing.resampleBicubic(
+                MediaProcessing.inSRGBToneCurveSpace($0), to: targetSize)
+        }
 
         let normalized =
             resampled
