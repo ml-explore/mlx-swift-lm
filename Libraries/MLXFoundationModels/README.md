@@ -90,3 +90,7 @@ The full capabilities also require the macOS/iOS/visionOS 27.0 SDK. The bridge i
 | On (default) | 27.0 | The full `MLXLanguageModel` adapter bridging to `FoundationModels.LanguageModel`. |
 | On (default) | Older | Nothing; the adapter (and its download-progress observable) is compiled out. |
 | Off (`.disableDefaultTraits`) | Any | Nothing compiled in. Use this for iOS-17-era consumers that want `MLXLLM` / `MLXLMCommon` without the adapter. |
+
+## See also
+
+To learn more about the `LanguageModel` protocol this adapter conforms to, see [Bring an LLM provider to the Foundation Models framework](https://www.youtube.com/watch?v=u06ZVpSl0J4) from WWDC26.
