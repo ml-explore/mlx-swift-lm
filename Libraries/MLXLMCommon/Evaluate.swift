@@ -53,8 +53,9 @@ public protocol LogitProcessor {
 /// for the `TokenIterator`.
 public struct GenerateParameters: Sendable {
 
-    /// Step size for processing the prompt
-    public var prefillStepSize: Int
+    /// Step size for processing the prompt. `nil` lets each model pick its own prefill
+    /// chunk (the Gemma 3 text path uses a smaller chunk than the generic 512 default).
+    public var prefillStepSize: Int?
 
     /// Maximum tokens to generate
     public var maxTokens: Int?
@@ -131,7 +132,7 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512,
+        prefillStepSize: Int? = nil,
         seed: UInt64? = nil
     ) {
         self.maxTokens = maxTokens
@@ -584,7 +585,13 @@ extension TokenIteratorProtocol {
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
 public struct TokenIterator: TokenIteratorProtocol {
     let model: any LanguageModel
-    var state: LMOutput.State?
+
+    /// Per-call model state (e.g. M-RoPE rope deltas), seeded from the
+    /// initializer's `state`, replaced by prefill, then threaded through
+    /// every decode step. A caller continuing this cache later (as
+    /// ``ChatSession`` does across turns) reads it back after
+    /// initialization and seeds the next iterator with it.
+    public internal(set) var state: LMOutput.State?
 
     var y: LMInput.Text
     var cache: [KVCache]
@@ -604,7 +611,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     public var promptPrefillTime: TimeInterval = 0.0
 
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
-    /// replaced with ``init(input:model:cache:parameters:)``.
+    /// replaced with ``init(input:model:cache:state:parameters:)``.
     ///
     /// - Parameters:
     ///   - prompt: the prompt tokens
@@ -638,7 +645,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:)``
+    /// ``init(input:model:cache:state:processor:sampler:prefillStepSize:maxTokens:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///
@@ -646,13 +653,17 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - parameters: the generation parameters
     ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+        state: LMOutput.State? = nil,
         parameters: GenerateParameters, components: GenerationComponents = .init()
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: parameters)
 
@@ -676,16 +687,20 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - processor: the logit processor
     ///   - sampler: the logit sampler
     ///   - prefillStepSize: optional prefill step size
     ///   - maxTokens: maximum number of tokens to generate
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
-        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int = 512,
+        state: LMOutput.State? = nil,
+        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int? = nil,
         maxTokens: Int? = nil
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: nil)
 
@@ -707,7 +722,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
         processor?.prompt(input.text.tokens)
 
-        switch try model.prepare(input, cache: cache, windowSize: windowSize) {
+        switch try model.prepare(input, cache: cache, state: state, windowSize: windowSize) {
         case .tokens(let tokens):
             y = tokens
 
@@ -717,6 +732,8 @@ public struct TokenIterator: TokenIteratorProtocol {
             asyncEval(y.tokens)
 
         case .logits(let result):
+            // carry the prefill state into decode, as step(previous:) does for later steps
+            self.state = result.state
             y = .init(tokens: convertToToken(logits: result.logits))
             asyncEval(y.tokens)
 
@@ -892,7 +909,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.prompt(input.text.tokens)
 
         // Prefill main model
-        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        switch try mainModel.prepare(
+            input, cache: mainCache, state: mainState, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             y = tokens
         case .logits(let result):
@@ -905,7 +924,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
-        switch try draftModel.prepare(input, cache: draftCache, windowSize: windowSize) {
+        switch try draftModel.prepare(input, cache: draftCache, state: nil, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             draftY = tokens
         case .logits(let result):
@@ -1895,12 +1915,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: while let token = iterator.next() {
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                    break
-                }
+            // Check cancellation BEFORE iterator.next(): next() calls asyncEval() to
+            // pipeline the next GPU evaluation, so checking after it (the previous
+            // `while let token = iterator.next()` form) allowed one extra asyncEval to be
+            // submitted post-cancellation — which faults if the app has backgrounded
+            // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
+            // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+            // settles any in-flight evaluation at the end of the task body.
+            tokenLoop: while !Task.isCancelled {
+                guard let token = iterator.next() else { break }
 
                 if promptTime == 0 {
                     let now = Date.timeIntervalSinceReferenceDate

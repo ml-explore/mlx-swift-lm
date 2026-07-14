@@ -59,7 +59,8 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
                 argsStr = String(argsStr.dropFirst(marker.count))
                 guard let endEscape = argsStr.range(of: marker) else { break }
                 let value = String(argsStr[..<endEscape.lowerBound])
-                arguments[key] = value
+                arguments[key] = convertParameterValue(
+                    value, paramName: key, funcName: funcName, tools: tools)
                 argsStr = String(argsStr[endEscape.upperBound...])
                 // Skip comma if present
                 if argsStr.hasPrefix(",") {
@@ -76,7 +77,10 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
                 ? String(argsStr[argsStr.index(after: commaIdx)...]) : ""
 
             // Try JSON decode, fallback to string
-            if let data = value.data(using: .utf8),
+            if getParameterType(funcName: funcName, paramName: key, tools: tools) != nil {
+                arguments[key] = convertParameterValue(
+                    value, paramName: key, funcName: funcName, tools: tools)
+            } else if let data = value.data(using: .utf8),
                 let json = deserializeJSON(data)
             {
                 arguments[key] = json

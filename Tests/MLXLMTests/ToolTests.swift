@@ -807,6 +807,36 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("hello, world!"))
     }
 
+    @Test("Test Gemma 4 Function Parser - Type Conversion")
+    func testGemma4ParserTypeConversion() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "mail_read",
+                    "parameters": [
+                        "properties": [
+                            "account": ["type": "string"],
+                            "mailbox": ["type": "string"],
+                            "id": ["type": "integer"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+        let content =
+            #"<|tool_call>call:mail_read{account:<|"|>me@example.com<|"|>,mailbox:<|"|>INBOX<|"|>,id:<|"|>158348<|"|>}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.name == "mail_read")
+        #expect(toolCall.function.arguments["account"] == .string("me@example.com"))
+        #expect(toolCall.function.arguments["mailbox"] == .string("INBOX"))
+        #expect(toolCall.function.arguments["id"] == .int(158_348))
+        #expect(toolCall.function.arguments["id"] != .string("158348"))
+    }
+
     @Test("Test Gemma Format via ToolCallProcessor")
     func testGemmaFormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma)

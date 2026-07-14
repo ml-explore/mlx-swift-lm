@@ -419,7 +419,8 @@ public class Gemma3TextModel: Module, LLMModel {
 
     /// Handles prompt processing for sequences
     public func prepare(
-        _ input: LMInput, cache: [KVCache], windowSize: Int? = nil
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
+        windowSize: Int? = nil
     ) throws -> PrepareResult {
         let promptTokens = input.text.tokens
         let promptCount = promptTokens.dim(0)
@@ -430,8 +431,23 @@ public class Gemma3TextModel: Module, LLMModel {
             return .tokens(.init(tokens: emptyToken))
         }
 
-        return .tokens(input.text)
+        // Prefill through the inner model (no lm_head) to fill the KV cache, handing only
+        // the last token to the TokenIterator — skipping the 262k-vocab lm_head over every
+        // prompt position is the speedup. Chunk = explicit windowSize, else a tuned 128.
+        let prefillStepSize = Swift.min(
+            windowSize ?? Self.defaultPrefillChunkSize, config.slidingWindow)
+        var y = input.text
+        while y.tokens.size > 1 {
+            let n = Swift.min(prefillStepSize, y.tokens.size - 1)
+            _ = model(y[.newAxis, ..<n].tokens, mask: nil, cache: cache)
+            asyncEval(cache)
+            y = y[n...]
+        }
+        return .tokens(y)
     }
+
+    /// Prefill chunk size when the caller sets none, tuned for this path on Apple Silicon.
+    private static let defaultPrefillChunkSize = 128
 }
 
 extension Gemma3TextModel: LoRAModel {
