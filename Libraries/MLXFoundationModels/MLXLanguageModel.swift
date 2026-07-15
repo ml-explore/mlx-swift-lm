@@ -704,6 +704,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// default" -- so an unrecognized case never traps and never reaches the
         /// resolver. All value policy lives in `resolveSamplingParameters`; this
         /// shim is a pure 1:1 case translation.
+        ///
+        /// `Kind`'s case names track whatever the currently-required
+        /// FoundationModels SDK declares (`Kind.top`/`.nucleus` are
+        /// `.randomTopK`/`.randomProbabilityThreshold` as of this SDK); update
+        /// these cases if a newer SDK renames them again.
         static func samplingMode(
             from samplingMode: GenerationOptions.SamplingMode?
         ) -> MLXSamplingMode? {
@@ -711,9 +716,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             switch kind {
             case .greedy:
                 return .greedy
-            case .top(let k, _):
+            case .randomTopK(let k, _):
                 return .topK(k)
-            case .nucleus(let threshold, _):
+            case .randomProbabilityThreshold(let threshold, _):
                 return .nucleus(threshold)
             @unknown default:
                 return nil
