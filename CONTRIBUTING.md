@@ -54,6 +54,13 @@ xcodebuild test \
 
 See [Libraries/IntegrationTestHelpers/README.md](Libraries/IntegrationTestHelpers/README.md) for more details.
 
+CI also verifies that DocC documentation builds without warnings for every
+library target. Run the same check locally with:
+
+```bash
+scripts/verify-docs.sh
+```
+
 ## Issues
 
 We use GitHub issues to track public bugs. Please ensure your description is
