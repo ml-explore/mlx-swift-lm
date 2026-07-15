@@ -7,7 +7,6 @@ MLX Swift LM is a Swift package to build tools and applications with large langu
 > to decouple from tokenizer and downloader packages some breaking
 > changes were introduced. See [upgrading documentation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxlmcommon/upgrade) for detailed instructions on upgrading.
 
-
 > [!IMPORTANT]
 > We use `swift-format` to keep the code formatting consistent.  CI has this pinned to `602.0.0` right now.  603 has a behavior change that is [not controlled by configuration](https://github.com/swiftlang/swift-format/issues/1242) -- the plan is to pick up 604 when it is out and have configuration to keep the formatting consistent regardless of version.  For now, please use 602.  Thank you! 
 
@@ -29,6 +28,8 @@ Developers can use these examples in their own programs -- just import the swift
 - [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
 - [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
 - [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
+- [MLXGuidedGeneration](Libraries/MLXGuidedGeneration/README.md): Grammar-constrained generation (JSON Schema or EBNF) for any MLX model.
+- [MLXFoundationModels](Libraries/MLXFoundationModels/README.md): Bridge MLX models into Apple's `FoundationModels.LanguageModel` for use with `LanguageModelSession`. (Requires the macOS/iOS/visionOS 27.0 SDK.)
 
 ## Usage
 
@@ -99,3 +100,46 @@ print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
 For alternative integration approaches (custom downloaders, alternative tokenizer packages, local-only weights), see the [using documentation](Libraries/MLXLMCommon/Documentation.docc/using.md).
+
+## `FoundationModels` integration
+
+`MLXFoundationModels` is a bridge between MLX models and Apple's `FoundationModels` framework: build an `MLXLanguageModel`, pass it to `LanguageModelSession`, and generate through the standard `FoundationModels` API. Requires the macOS/iOS/visionOS 27.0 SDK.
+
+```swift
+import Foundation
+import FoundationModels
+import HuggingFace
+import MLXFoundationModels
+import MLXHuggingFace
+import MLXLLM
+import MLXLMCommon
+import Tokenizers
+
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+@Generable
+struct Recommendation {
+    let attraction: String
+    let neighborhood: String
+    let tip: String
+}
+
+if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+    let model = #huggingFaceLanguageModel(
+        configuration: LLMRegistry.gemma3_1B_qat_4bit,
+        capabilities: [.guidedGeneration])
+    let session = LanguageModelSession(model: model)
+
+    let recommendation = try await session.respond(
+        to: "Recommend one thing to do in Chicago.",
+        generating: Recommendation.self)
+    print(recommendation.content)
+    // Recommendation(
+    //     attraction: "Art Institute of Chicago",
+    //     neighborhood: "Loop",
+    //     tip: "Admire Seurat's Sunday on La Grande Jatte up close.")
+}
+```
+
+Here, we combine `MLXFoundationModels` with [`MLXGuidedGeneration`](Libraries/MLXGuidedGeneration/README.md) by requesting a `@Generable` type: the response is grammar-constrained to that type's schema. `MLXGuidedGeneration` is a standalone primitive that constrains any MLX model's output to a schema.
+
+Other capabilities include `.vision`, `.toolCalling`, and `.reasoning`. See [Libraries/MLXFoundationModels](Libraries/MLXFoundationModels/README.md) for the full capability set, custom weights and loaders, and more information about using MLXFoundationModels.

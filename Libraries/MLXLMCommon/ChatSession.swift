@@ -1,8 +1,11 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
 import Foundation
 import MLX
+
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 /// Configuration for speculative decoding in a `ChatSession`.
 ///
@@ -145,8 +148,12 @@ public struct SpeculativeDecodingConfig: Sendable {
 public final class ChatSession {
 
     enum Cache {
+        /// `state` is the per-call model state (e.g. M-RoPE rope deltas)
+        /// from the last prefill against this cache. It must survive across
+        /// turns: without it, a model that anchors positions on carried
+        /// state re-derives them from a cold start on the next turn.
         case empty
-        case kvcache([KVCache], draftKVCache: [KVCache]?)
+        case kvcache([KVCache], draftKVCache: [KVCache]?, state: LMOutput.State?)
         case history([Chat.Message])
     }
 
@@ -339,7 +346,7 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -385,7 +392,7 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -612,19 +619,24 @@ public final class ChatSession {
 
                     var kvCache: [KVCache]
                     var draftKVCache: [KVCache]?
+                    // Per-call model state (e.g. M-RoPE rope deltas) carried
+                    // across turns alongside the KV cache; updated after each
+                    // prefill and stored back at the end of the turn.
+                    var lmState: LMOutput.State?
                     switch cache {
                     case .empty:
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
 
-                    case .kvcache(let array, let storedDraftCache):
+                    case .kvcache(let array, let storedDraftCache, let storedState):
                         kvCache = array
                         draftKVCache = storedDraftCache
+                        lmState = storedState
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
                         messages.append(contentsOf: history)
                     }
 
@@ -645,9 +657,16 @@ public final class ChatSession {
                         func defaultGeneration() throws -> (
                             AsyncStream<Generation>, Task<Void, Never>
                         ) {
+                            // Seed the iterator with the carried state; read
+                            // back the post-prefill state (prefill runs in the
+                            // iterator's init, and the rope delta does not
+                            // change during decode) so the next turn — or the
+                            // next tool restart — anchors correctly.
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
+                                state: lmState,
                                 parameters: generateParameters)
+                            lmState = iterator.state
 
                             return MLXLMCommon.generateTask(
                                 promptTokenCount: input.text.tokens.size,
@@ -723,7 +742,8 @@ public final class ChatSession {
                                     if draftKVCache == nil {
                                         draftKVCache = draftModel.newCache(
                                             parameters: generateParameters)
-                                        cache = .kvcache(kvCache, draftKVCache: draftKVCache)
+                                        cache = .kvcache(
+                                            kvCache, draftKVCache: draftKVCache, state: lmState)
                                     }
                                     let draftCache = draftKVCache!
 
@@ -788,6 +808,7 @@ public final class ChatSession {
                         if let toolDispatch, !pendingToolCalls.isEmpty,
                             !Task.isCancelled
                         {
+                            messages.append(.assistant("", toolCalls: pendingToolCalls))
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
                                 messages.append(.tool(toolResult, id: toolCall.id))
@@ -795,6 +816,10 @@ public final class ChatSession {
                             continue restart
                         }
                     }
+
+                    // Store the carried state back alongside the KV cache so
+                    // the next turn resumes with correct position anchoring.
+                    cache = .kvcache(kvCache, draftKVCache: draftKVCache, state: lmState)
 
                     continuation.finish()
                 }
@@ -855,7 +880,7 @@ public final class ChatSession {
     {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 return try await body(cache)
             default:
                 return try await body(nil)
@@ -874,7 +899,7 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 try savePromptCache(url: url, cache: cache)
             default:
                 throw ChatSessionError.noCacheAvailable

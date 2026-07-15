@@ -218,7 +218,7 @@ public struct LMOutput {
     }
 }
 
-/// The result of the call to ``LanguageModel/prepare(_:cache:windowSize:)``
+/// The result of the call to ``LanguageModel/prepare(_:cache:state:windowSize:)``
 public enum PrepareResult {
     /// tokens to process by the ``TokenIterator``
     case tokens(LMInput.Text)
@@ -232,17 +232,26 @@ public enum PrepareResult {
 /// The language model is typically called by the ``TokenIterator`` and it:
 ///
 /// - consumes the ``LMInput``
-/// - calls ``prepare(_:cache:windowSize:)`` to initialize the KVCache and consume the prompt
+/// - calls ``prepare(_:cache:state:windowSize:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel {
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
+    /// `state` is the ``LMOutput/state`` a caller carried over from earlier
+    /// evaluation against the same `cache` — present when `cache` is already
+    /// warm (a multi-turn chat, a tool-call restart, a restored prompt
+    /// cache). Models that keep per-call positional state (e.g. the M-RoPE
+    /// `ropeDeltas` of the Qwen VLM families) use it to anchor the new
+    /// tokens' positions at the cache offset; models without such state can
+    /// ignore it. In the typical cold call it is `nil`.
+    ///
     /// This can return:
     /// - ``PrepareResult/tokens(_:)`` if the caller should evaluate the (remaining) tokens normally
     /// - ``PrepareResult/logits(_:)`` to produce the next token from the prompt
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult
+    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?)
+        throws -> PrepareResult
 
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)

@@ -1,0 +1,8 @@
+{
+  "bosTokenString" : "<bos>",
+  "constructionStatus" : "ok",
+  "eosTokenId" : 1,
+  "eosTokenString" : "<eos>",
+  "modelId" : "mlx-community\/gemma-3-270m-it-4bit",
+  "vocabSize" : 262145
+}
