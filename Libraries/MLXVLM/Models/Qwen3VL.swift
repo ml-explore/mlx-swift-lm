@@ -33,6 +33,19 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
     }
 
+    /// Pixels for the default 1,280 vision-token budget (`1280 * factor²`),
+    /// clamped to `ceiling`. Overflow-safe: a pathological config (an absurd
+    /// `patch_size`/`merge_size`) yields `ceiling` instead of trapping on the
+    /// unchecked multiply, so bad model metadata degrades to the config ceiling
+    /// rather than crashing preprocess.
+    private static func defaultVisionTokenBudgetPixels(factor: Int, ceiling: Int) -> Int {
+        let (squared, squaredOverflow) = factor.multipliedReportingOverflow(by: factor)
+        guard !squaredOverflow else { return ceiling }
+        let (budget, budgetOverflow) = squared.multipliedReportingOverflow(by: 1280)
+        guard !budgetOverflow else { return ceiling }
+        return min(ceiling, budget)
+    }
+
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
@@ -43,12 +56,24 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         }
 
         let extent = first.extent.size
+        // The qwen3_5 ViT runs *global* O(patches²) attention with no windowing,
+        // so an uncapped full-resolution screenshot can allocate a tens-of-GB
+        // score matrix (a 7.74 MP screenshot → 30,240 patches → a 29 GB matrix).
+        // Several published configs ship a ~16 MP `longest_edge` that never
+        // clamps, so default each image to a 1,280 vision-token budget
+        // (1280 * factor² pixels ⇒ 1,280 tokens after the spatial merge, since
+        // tokens = pixels / factor²), mirroring the sibling Qwen25VL. An
+        // explicit `processing.maxPixels` overrides it.
+        let factor = config.patchSize * config.mergeSize
+        let maxPixels =
+            processing?.maxPixels
+            ?? Self.defaultVisionTokenBudgetPixels(factor: factor, ceiling: config.maxPixels)
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(extent.height),
             width: Int(extent.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels,
-            maxPixels: config.size.maxPixels)
+            factor: factor,
+            minPixels: processing?.minPixels ?? config.minPixels,
+            maxPixels: maxPixels)
 
         let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
 
@@ -127,12 +152,21 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                         try frame.image.asCIImage(), processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
+                        // Same per-frame vision-token budget cap as the image
+                        // path: the global ViT is just as O(patches²) on a
+                        // video frame. Override-able via
+                        // `processing.maxPixels`.
+                        let factor = config.patchSize * config.mergeSize
+                        let maxPixels =
+                            input.processing.maxPixels
+                            ?? Self.defaultVisionTokenBudgetPixels(
+                                factor: factor, ceiling: config.maxPixels)
                         let (height, width) = try QwenVL.targetSize(
                             height: Int(size.height),
                             width: Int(size.width),
-                            factor: config.patchSize * config.mergeSize,
-                            minPixels: config.minPixels,
-                            maxPixels: config.maxPixels)
+                            factor: factor,
+                            minPixels: input.processing.minPixels ?? config.minPixels,
+                            maxPixels: maxPixels)
                         resizedSize = CGSize(width: width, height: height)
                     }
                     let finalImage = preprocess(image: processed, resizedSize: resizedSize)
