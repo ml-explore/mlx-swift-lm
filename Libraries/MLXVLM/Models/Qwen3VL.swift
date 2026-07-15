@@ -37,7 +37,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     /// clamped to `ceiling`. Overflow-safe: a pathological config (an absurd
     /// `patch_size`/`merge_size`) yields `ceiling` instead of trapping on the
     /// unchecked multiply, so bad model metadata degrades to the config ceiling
-    /// rather than crashing preprocess (tesseract ADR-0014).
+    /// rather than crashing preprocess.
     private static func defaultVisionTokenBudgetPixels(factor: Int, ceiling: Int) -> Int {
         let (squared, squaredOverflow) = factor.multipliedReportingOverflow(by: factor)
         guard !squaredOverflow else { return ceiling }
@@ -59,11 +59,11 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         // The qwen3_5 ViT runs *global* O(patches²) attention with no windowing,
         // so an uncapped full-resolution screenshot can allocate a tens-of-GB
         // score matrix (a 7.74 MP screenshot → 30,240 patches → a 29 GB matrix).
-        // PARO ships a ~16 MP `longest_edge` that never clamps, so default each
-        // image to a 2,560 vision-token budget (2560 * factor² pixels ⇒ 2,560
-        // tokens after the spatial merge, since tokens = pixels / factor²),
-        // mirroring the sibling Qwen25VL. An explicit `processing.maxPixels`
-        // overrides it (ADR-0008). (tesseract ADR-0014.)
+        // Several published configs ship a ~16 MP `longest_edge` that never
+        // clamps, so default each image to a 2,560 vision-token budget
+        // (2560 * factor² pixels ⇒ 2,560 tokens after the spatial merge, since
+        // tokens = pixels / factor²), mirroring the sibling Qwen25VL. An
+        // explicit `processing.maxPixels` overrides it.
         let factor = config.patchSize * config.mergeSize
         let maxPixels =
             processing?.maxPixels
@@ -140,9 +140,9 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                     let processed = MediaProcessing.apply(frame.frame, processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
-                        // Same per-frame Vision Token Budget cap as the image
-                        // path (tesseract ADR-0014): the global ViT is just as
-                        // O(patches²) on a video frame. Override-able via
+                        // Same per-frame vision-token budget cap as the image
+                        // path: the global ViT is just as O(patches²) on a
+                        // video frame. Override-able via
                         // `processing.maxPixels`.
                         let factor = config.patchSize * config.mergeSize
                         let maxPixels =
