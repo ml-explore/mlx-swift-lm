@@ -1,4 +1,4 @@
-# Contributing to MLX Swift Examples
+# Contributing to MLX Swift LM
 
 We want to make contributing to this project as easy and transparent as
 possible.
@@ -59,5 +59,5 @@ clear and has sufficient instructions to be able to reproduce the issue.
 
 ## License
 
-By contributing to MLX Swift Examples, you agree that your contributions will be licensed
+By contributing to MLX Swift LM, you agree that your contributions will be licensed
 under the LICENSE file in the root directory of this source tree.
