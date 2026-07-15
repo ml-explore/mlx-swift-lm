@@ -2,13 +2,16 @@
 // Integration packages inject their own Downloader and TokenizerLoader, then call
 // these functions which run the test and throw on failure.
 
-import CoreImage
 import Foundation
 import MLX
 import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
+
+#if canImport(CoreImage)
+import CoreImage
+#endif
 
 // Both MLXLMCommon and MLXEmbedders define ModelContainer.
 public typealias LLModelContainer = MLXLMCommon.ModelContainer
@@ -128,6 +131,15 @@ public actor IntegrationTestModels {
     }
 }
 
+// MARK: - Vision Test Images
+
+/// A solid-color square image for vision smoke tests.
+public enum VisionTestImages {
+    public static func solidColor(_ color: CIColor, size: CGFloat = 100) -> CIImage {
+        CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
+    }
+}
+
 // MARK: - ChatSession Tests
 
 private let generateParameters = GenerateParameters(maxTokens: 200, temperature: 0)
@@ -176,9 +188,9 @@ public enum ChatSessionTests {
     }
 
     public static func visionModel(container: LLModelContainer) async throws {
+        #if canImport(CoreImage)
         let session = ChatSession(container, generateParameters: generateParameters)
-        let redImage = CIImage(color: .red).cropped(
-            to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let redImage = VisionTestImages.solidColor(.red)
 
         let result = try await streamAndCollect(
             session.streamResponse(
@@ -188,6 +200,10 @@ public enum ChatSessionTests {
             result.lowercased().contains("red"),
             "Expected 'red' in response, got: \(result)"
         )
+        #else
+        fatalError(
+            "Vision model test requires CoreImage, which is not available on this platform.")
+        #endif
     }
 
     public static func streamDetailsWithTools(container: LLModelContainer) async throws {

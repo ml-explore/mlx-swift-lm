@@ -95,7 +95,9 @@ public enum WiredMemoryUtils {
     ) throws -> [KVCache] {
         var cache = model.newCache(parameters: parameters)
 
-        switch try model.prepare(input, cache: cache, windowSize: parameters.prefillStepSize) {
+        switch try model.prepare(
+            input, cache: cache, state: nil, windowSize: parameters.prefillStepSize)
+        {
         case .tokens(let tokens):
             let result = model(
                 tokens[text: .newAxis],
@@ -170,7 +172,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: tokenCount,
-            prefillStepSize: parameters.prefillStepSize
+            prefillStepSize: parameters.prefillStepSize ?? 512
         )
     }
 
@@ -214,7 +216,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: input.text.tokens.size,
-            prefillStepSize: parameters.prefillStepSize
+            prefillStepSize: parameters.prefillStepSize ?? 512
         )
     }
 

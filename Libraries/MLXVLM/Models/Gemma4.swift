@@ -824,7 +824,13 @@ final class Gemma4TextAttention: Module {
         self.isKVSharedLayer = layerIdx >= firstKVSharedLayer && firstKVSharedLayer > 0
 
         self._qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        if !kvSharedOnly {
+        // KV-shared layers (the last `num_kv_shared_layers`) reuse an earlier layer's
+        // K/V and own no k_proj/v_proj/k_norm/v_norm — the checkpoint ships none, so the
+        // module tree must not declare them (else loadWeights fails keyNotFound on the
+        // shared layers, e.g. E2B layer 15 / E4B layer 24). `kvSharedOnly` is the drafter's
+        // always-shared variant; `isKVSharedLayer` covers the target's own shared tail.
+        // Mirrors the text backbone (MLXLLM/Models/Gemma4Text.swift).
+        if !kvSharedOnly && !isKVSharedLayer {
             self._kProj.wrappedValue = Linear(
                 config.hiddenSize, numKVHeads * headDim, bias: false)
             if !useKEqV {
@@ -871,12 +877,13 @@ final class Gemma4TextAttention: Module {
             currentOffset = offset ?? 0
             kvState = sharedKV
         } else {
-            // Non-`kvSharedOnly` path: K/V projections must be present. If they
-            // are nil here the layer was built with `kvSharedOnly: true` and the
-            // caller forgot to pass `sharedKV` — a configuration bug.
+            // KV-owning path: K/V projections must be present. If they are nil
+            // here the layer is KV-shared (drafter `kvSharedOnly`, or the target's
+            // shared tail `isKVSharedLayer`) and the caller forgot to pass
+            // `sharedKV` — a configuration bug.
             guard let kProj, let kNorm, let vNorm else {
                 fatalError(
-                    "Gemma4 attention called without sharedKV on a kvSharedOnly layer")
+                    "Gemma4 attention called without sharedKV on a KV-shared layer")
             }
             currentOffset = cache?.offset ?? 0
             var keys = kProj(x).reshaped(batch, length, numKVHeads, headDim)
@@ -1112,8 +1119,19 @@ final class Gemma4TextBackbone: Module {
 
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
-        self._layers.wrappedValue = (0 ..< config.hiddenLayers).map {
-            Gemma4TextDecoderLayer(config: config, layerIdx: $0)
+        // KV-shared tail layers (`layer_idx >= hidden_layers - num_kv_shared_layers`)
+        // reuse an earlier same-type layer's K/V and own no local K/V projection or
+        // K norm. Build them with `kvSharedOnly: true` so the module tree omits those
+        // tensors — matching what `sanitize` drops from the checkpoint, and mirroring
+        // both `Gemma4AssistantDraftInner` and upstream mlx-lm (`Attention.has_kv`).
+        // Without this, shared layers declare a `v_proj`/`k_proj`/`k_norm` that no
+        // weight fills, so loading a Gemma 4 checkpoint fails under the strict loader
+        // verify with e.g. `keyNotFound(… layers.24.self_attn.v_proj.weight …)`.
+        let firstKVSharedLayer = config.hiddenLayers - config.numKVSharedLayers
+        self._layers.wrappedValue = (0 ..< config.hiddenLayers).map { idx in
+            Gemma4TextDecoderLayer(
+                config: config, layerIdx: idx,
+                kvSharedOnly: firstKVSharedLayer > 0 && idx >= firstKVSharedLayer)
         }
         self._norm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -2059,7 +2077,9 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         return (inputsEmbeds, perLayerInputs)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let convertedCache = cache.map { $0 }
@@ -2519,7 +2539,9 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
         return (inputsEmbeds, perLayerInputs)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         if input.image == nil, input.video == nil, input.audio == nil {

@@ -298,7 +298,14 @@ public func gatedDeltaUpdate(
         state = state.asType(.float32)
     }
 
-    if GatedDeltaKernelManager.shared.kernel != nil {
+    // The fused kernel distributes Dk over exactly 32 simd lanes
+    // (`n_per_t = Dk / 32`, integer-truncating). A key head dim that is not a
+    // multiple of 32 would silently drop its trailing `Dk % 32` state
+    // dimensions and produce wrong output with no error. Stock Qwen3.5 uses
+    // Dk = 192 (a multiple of 32), but the value is config-driven, so route any
+    // non-multiple-of-32 Dk to the ops fallback, which handles an arbitrary key
+    // dimension correctly (slower, but never truncating).
+    if GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 
