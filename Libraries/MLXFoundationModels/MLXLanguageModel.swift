@@ -545,6 +545,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights
     ///     directory, for the availability checks.
     ///   - load: Loads the model container for a configuration.
+    ///
+    /// For example, to read weights from a fixed directory:
+    ///
+    /// ```swift
+    /// weightsLocation: { id in
+    ///     URL(fileURLWithPath: "/Volumes/SharedCache/models/\(id)")
+    /// }
+    /// ```
     public init(
         configuration: ModelConfiguration,
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],

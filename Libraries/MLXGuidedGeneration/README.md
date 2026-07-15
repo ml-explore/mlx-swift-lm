@@ -111,3 +111,5 @@ print(output)  // valid JSON matching `schema`
 ## Why it is bundled this way
 
 The engine is backed by [XGrammar](https://github.com/mlc-ai/xgrammar), which we vendor in-repo and compile here rather than depend on the official XGrammar Swift package. Compiling it ourselves lets us rename its C++ namespace so our copy cannot collide with any other XGrammar linked into the same binary. Anyone else who depends on XGrammar can link their own copy alongside ours, each working independently.
+
+The C++ only compiles when you link `MLXGuidedGeneration` — directly, or through `MLXFoundationModels` with the `FoundationModelsIntegration` trait enabled.

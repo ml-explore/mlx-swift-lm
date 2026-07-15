@@ -79,6 +79,10 @@ Declare what a model may do with the `capabilities:` list at construction. Decla
 | `.reasoning` | Run "thinking" models that emit a reasoning trace. |
 | `.vision` | Accept image inputs. |
 
+## Availability
+
+`MLXLanguageModel` exposes an `availability` property — `.available`, `.downloading`, `.unavailable(...)` — for gating on model and download state.
+
 ## SwiftPM trait
 
 `FoundationModelsIntegration` is the single SwiftPM trait that turns on the adapter, and it is enabled by default. It is the integration point: with it on, `MLXFoundationModels` provides the `MLXLanguageModel` bridge to `FoundationModels.LanguageModel`.
