@@ -110,7 +110,7 @@ public enum GuidedGenerationLoop {
 
         // Prefill prompt and get first set of logits
         var logits: MLXArray
-        switch try model.prepare(input, cache: cache, windowSize: 512) {
+        switch try model.prepare(input, cache: cache, state: nil, windowSize: 512) {
         case .tokens(let tokens):
             let result = model(tokens[text: .newAxis], cache: cache, state: nil)
             modelState = result.state
