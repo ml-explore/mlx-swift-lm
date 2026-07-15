@@ -824,7 +824,13 @@ final class Gemma4TextAttention: Module {
         self.isKVSharedLayer = layerIdx >= firstKVSharedLayer && firstKVSharedLayer > 0
 
         self._qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        if !kvSharedOnly {
+        // KV-shared layers (the last `num_kv_shared_layers`) reuse an earlier layer's
+        // K/V and own no k_proj/v_proj/k_norm/v_norm — the checkpoint ships none, so the
+        // module tree must not declare them (else loadWeights fails keyNotFound on the
+        // shared layers, e.g. E2B layer 15 / E4B layer 24). `kvSharedOnly` is the drafter's
+        // always-shared variant; `isKVSharedLayer` covers the target's own shared tail.
+        // Mirrors the text backbone (MLXLLM/Models/Gemma4Text.swift).
+        if !kvSharedOnly && !isKVSharedLayer {
             self._kProj.wrappedValue = Linear(
                 config.hiddenSize, numKVHeads * headDim, bias: false)
             if !useKEqV {
@@ -871,12 +877,13 @@ final class Gemma4TextAttention: Module {
             currentOffset = offset ?? 0
             kvState = sharedKV
         } else {
-            // Non-`kvSharedOnly` path: K/V projections must be present. If they
-            // are nil here the layer was built with `kvSharedOnly: true` and the
-            // caller forgot to pass `sharedKV` — a configuration bug.
+            // KV-owning path: K/V projections must be present. If they are nil
+            // here the layer is KV-shared (drafter `kvSharedOnly`, or the target's
+            // shared tail `isKVSharedLayer`) and the caller forgot to pass
+            // `sharedKV` — a configuration bug.
             guard let kProj, let kNorm, let vNorm else {
                 fatalError(
-                    "Gemma4 attention called without sharedKV on a kvSharedOnly layer")
+                    "Gemma4 attention called without sharedKV on a KV-shared layer")
             }
             currentOffset = cache?.offset ?? 0
             var keys = kProj(x).reshaped(batch, length, numKVHeads, headDim)
