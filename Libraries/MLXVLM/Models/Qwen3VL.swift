@@ -33,7 +33,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
     }
 
-    /// Pixels for the default 2,560 vision-token budget (`2560 * factor²`),
+    /// Pixels for the default 1,280 vision-token budget (`1280 * factor²`),
     /// clamped to `ceiling`. Overflow-safe: a pathological config (an absurd
     /// `patch_size`/`merge_size`) yields `ceiling` instead of trapping on the
     /// unchecked multiply, so bad model metadata degrades to the config ceiling
@@ -41,7 +41,7 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     private static func defaultVisionTokenBudgetPixels(factor: Int, ceiling: Int) -> Int {
         let (squared, squaredOverflow) = factor.multipliedReportingOverflow(by: factor)
         guard !squaredOverflow else { return ceiling }
-        let (budget, budgetOverflow) = squared.multipliedReportingOverflow(by: 2560)
+        let (budget, budgetOverflow) = squared.multipliedReportingOverflow(by: 1280)
         guard !budgetOverflow else { return ceiling }
         return min(ceiling, budget)
     }
@@ -60,8 +60,8 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         // so an uncapped full-resolution screenshot can allocate a tens-of-GB
         // score matrix (a 7.74 MP screenshot → 30,240 patches → a 29 GB matrix).
         // Several published configs ship a ~16 MP `longest_edge` that never
-        // clamps, so default each image to a 2,560 vision-token budget
-        // (2560 * factor² pixels ⇒ 2,560 tokens after the spatial merge, since
+        // clamps, so default each image to a 1,280 vision-token budget
+        // (1280 * factor² pixels ⇒ 1,280 tokens after the spatial merge, since
         // tokens = pixels / factor²), mirroring the sibling Qwen25VL. An
         // explicit `processing.maxPixels` overrides it.
         let factor = config.patchSize * config.mergeSize
