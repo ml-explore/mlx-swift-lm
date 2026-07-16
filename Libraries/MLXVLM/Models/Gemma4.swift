@@ -9,6 +9,7 @@ import MLXNN
 private enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
     case multimodalTokenCountMismatch(kind: String, featureTokens: Int, promptTokens: Int)
+    case imagePlaceholderMismatch(images: Int, placeholders: Int)
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +19,9 @@ private enum Gemma4Error: LocalizedError {
         case .multimodalTokenCountMismatch(let kind, let featureTokens, let promptTokens):
             return
                 "Gemma4 \(kind) token count mismatch: encoder produced \(featureTokens) soft tokens, but the prompt contains \(promptTokens) \(kind) tokens."
+        case .imagePlaceholderMismatch(let images, let placeholders):
+            return
+                "Gemma4 image placeholder mismatch: the request has \(images) images but the prompt contains at least \(placeholders) image placeholders."
         }
     }
 }
@@ -85,24 +89,6 @@ private func gemma4MaskedScatter(
 
 private func gemma4OneHot(_ indices: MLXArray, numClasses: Int) -> MLXArray {
     expandedDimensions(indices, axis: -1) .== MLXArray(0 ..< numClasses)
-}
-
-/// Average-pool kernel for Gemma 4's vision pooler.
-///
-/// The padded patch tensor has length
-/// `paddedPatchCount = outputLength × pool²` where `pool` is the
-/// model's `pooling_kernel_size`. Recovering `pool` from these
-/// two values yields `floor(sqrt(paddedPatchCount / outputLength))`.
-///
-/// Matches HuggingFace's reference image processor (see
-/// `image_processing_gemma4.py`: `max_patches = max_soft_tokens *
-/// pooling_kernel_size**2`).
-internal func gemma4VisionPoolingKernel(
-    paddedPatchCount: Int, outputLength: Int
-) -> Int {
-    let safeLength = max(outputLength, 1)
-    let ratio = max(1, paddedPatchCount / safeLength)
-    return Int(sqrt(Double(ratio)))
 }
 
 private func gemma4RotateHalf(_ x: MLXArray) -> MLXArray {
@@ -1810,12 +1796,10 @@ private final class Gemma4VisionPatchEmbedder: Module {
 
 private final class Gemma4VisionPooler: Module {
     let hiddenSize: Int
-    let defaultOutputLength: Int
     let rootHiddenSize: Float
 
     init(config: Gemma4VisionConfiguration) {
         self.hiddenSize = config.hiddenSize
-        self.defaultOutputLength = config.defaultOutputLength
         self.rootHiddenSize = pow(Float(config.hiddenSize), 0.5)
         super.init()
     }
@@ -1823,40 +1807,34 @@ private final class Gemma4VisionPooler: Module {
     func callAsFunction(
         _ hiddenStates: MLXArray,
         patchPositions: MLXArray,
-        validCount: Int,
-        outputLength: Int? = nil
+        patchesW: Int,
+        outputLength: Int
     ) -> MLXArray {
-        let paddingPositions = patchPositions[0..., 0..., 0] .< 0
-        let pooledHiddenStates = MLX.where(
-            expandedDimensions(paddingPositions, axis: -1),
-            MLXArray(0.0, dtype: hiddenStates.dtype),
-            hiddenStates
-        )
-        let length = outputLength ?? defaultOutputLength
-        if pooledHiddenStates.dim(1) <= length {
-            return pooledHiddenStates * MLXArray(rootHiddenSize, dtype: pooledHiddenStates.dtype)
+        let scale = MLXArray(rootHiddenSize, dtype: hiddenStates.dtype)
+        let numPatches = hiddenStates.dim(1)
+        let length = max(outputLength, 1)
+        if numPatches <= length {
+            return hiddenStates * scale
         }
 
-        let actualPositions = patchPositions[0, ..<validCount]
-        let maxX = Int(actualPositions[0..., 0].max().item(Int32.self)) + 1
-        let kernel = gemma4VisionPoolingKernel(
-            paddedPatchCount: pooledHiddenStates.dim(1), outputLength: length)
-        let divisor = max(kernel * kernel, 1)
-        let pooledLength = max(length, 1)
+        // All batch rows share one position grid, so a single [l, L] weight
+        // matrix pools every row. The processor's resize keeps both sides
+        // divisible by kernel * patchSize, so the pooled grid covers the
+        // image exactly.
+        let positions = patchPositions[0]
+        let kernel = max(Int(sqrt(Double(numPatches / length))), 1)
+        let divisor = kernel * kernel
 
-        var kernelIndices = actualPositions.asType(.int32)
-        kernelIndices = floor(kernelIndices.asType(.float32) / Float(kernel)).asType(.int32)
+        let kernelIndices = floor(positions.asType(.float32) / Float(kernel)).asType(.int32)
         let flatKernel =
-            kernelIndices[0..., 0] + MLXArray(Int32(max(maxX / max(kernel, 1), 1)))
+            kernelIndices[0..., 0] + MLXArray(Int32(max(patchesW / kernel, 1)))
             * kernelIndices[0..., 1]
         let weights =
-            gemma4OneHot(flatKernel, numClasses: pooledLength).asType(.float32)
+            gemma4OneHot(flatKernel, numClasses: length).asType(.float32)
             / Float(divisor)
-        let output = einsum(
-            "lL,bld->bLd", weights, pooledHiddenStates[0..., ..<validCount, 0...]
-        )
-        .asType(pooledHiddenStates.dtype)
-        return output * MLXArray(rootHiddenSize, dtype: pooledHiddenStates.dtype)
+        let output = einsum("lL,bld->bLd", weights, hiddenStates)
+            .asType(hiddenStates.dtype)
+        return output * scale
     }
 }
 
@@ -1883,9 +1861,7 @@ private final class Gemma4VisionTransformerModel: Module {
 private final class Gemma4VisionModel: Module {
     let config: Gemma4VisionConfiguration
     let patchSize: Int
-    let defaultOutputLength: Int
     let poolingKernelSize: Int
-    let maxPatches: Int
 
     @ModuleInfo(key: "patch_embedder") var patchEmbedder: Gemma4VisionPatchEmbedder
     @ModuleInfo(key: "encoder") var encoder: Gemma4VisionTransformerModel
@@ -1896,10 +1872,7 @@ private final class Gemma4VisionModel: Module {
     init(config: Gemma4VisionConfiguration) {
         self.config = config
         self.patchSize = config.patchSize
-        self.defaultOutputLength = config.defaultOutputLength
         self.poolingKernelSize = config.poolingKernelSize
-        self.maxPatches =
-            config.defaultOutputLength * config.poolingKernelSize * config.poolingKernelSize
         self._patchEmbedder.wrappedValue = Gemma4VisionPatchEmbedder(config: config)
         self._encoder.wrappedValue = Gemma4VisionTransformerModel(config: config)
         self._pooler.wrappedValue = Gemma4VisionPooler(config: config)
@@ -1910,32 +1883,24 @@ private final class Gemma4VisionModel: Module {
         super.init()
     }
 
-    private func patchPositions(batch: Int, height: Int, width: Int) -> (MLXArray, Int) {
-        let patchesH = height / patchSize
-        let patchesW = width / patchSize
-        let realCount = patchesH * patchesW
-        let paddedCount = max(maxPatches - realCount, 0)
-
-        var values = [Int32]()
-        values.reserveCapacity(batch * (realCount + paddedCount) * 2)
-
-        for _ in 0 ..< batch {
-            for y in 0 ..< patchesH {
-                for x in 0 ..< patchesW {
-                    values.append(Int32(x))
-                    values.append(Int32(y))
-                }
-            }
-            for _ in 0 ..< paddedCount {
-                values.append(-1)
-                values.append(-1)
-            }
-        }
-
-        let count = realCount + paddedCount
-        return (MLXArray(values, [batch, count, 2]), realCount)
+    private func patchPositions(batch: Int, patchesH: Int, patchesW: Int) -> MLXArray {
+        // .xy indexing makes x vary fastest, matching the row-major patch
+        // order the embedder and pooler expect.
+        let grids = meshGrid([
+            MLXArray.arange(patchesW, dtype: .int32),
+            MLXArray.arange(patchesH, dtype: .int32),
+        ])
+        let positions = stacked([grids[0].flattened(), grids[1].flattened()], axis: 1)
+            .reshaped(1, patchesH * patchesW, 2)
+        return batch == 1
+            ? positions
+            : broadcast(positions, to: [batch, patchesH * patchesW, 2])
     }
 
+    /// Encodes a batch of same-sized images. Every patch is real (callers
+    /// slice padded canvases down to each image's true size first), so
+    /// attention is dense and the pooled output length falls out of the
+    /// patch grid: numPatches / poolingKernelSize².
     func callAsFunction(_ pixelValues: MLXArray) -> MLXArray {
         let pixels =
             if pixelValues.ndim == 3 {
@@ -1944,32 +1909,17 @@ private final class Gemma4VisionModel: Module {
                 pixelValues
             }
         let batch = pixels.dim(0)
-        let height = pixels.dim(2)
-        let width = pixels.dim(3)
-        let (patchPositions, realCount) = patchPositions(batch: batch, height: height, width: width)
+        let patchesH = pixels.dim(2) / patchSize
+        let patchesW = pixels.dim(3) / patchSize
+        let numPatches = patchesH * patchesW
+        let outputLength = max(numPatches / (poolingKernelSize * poolingKernelSize), 1)
 
-        let realPositions = patchPositions[0..., ..<realCount, 0...]
-        var hiddenStates = patchEmbedder(pixels, patchPositions: realPositions)
-
-        let paddingCount = maxPatches - realCount
-        if paddingCount > 0 {
-            let pad = MLXArray.zeros(
-                [batch, paddingCount, hiddenStates.dim(2)], dtype: hiddenStates.dtype)
-            hiddenStates = concatenated([hiddenStates, pad], axis: 1)
-        }
-
-        let validMask = patchPositions[0..., 0..., 0] .>= 0
-        var attentionMask =
-            expandedDimensions(validMask, axis: 1) * expandedDimensions(validMask, axis: 2)
-        attentionMask = MLX.where(
-            attentionMask,
-            MLXArray(0.0, dtype: hiddenStates.dtype),
-            MLXArray(-Float.infinity, dtype: hiddenStates.dtype)
-        )
-        attentionMask = expandedDimensions(attentionMask, axis: 1)
-
-        hiddenStates = encoder(hiddenStates, positions: patchPositions, mask: attentionMask)
-        hiddenStates = pooler(hiddenStates, patchPositions: patchPositions, validCount: realCount)
+        let patchPositions = patchPositions(batch: batch, patchesH: patchesH, patchesW: patchesW)
+        var hiddenStates = patchEmbedder(pixels, patchPositions: patchPositions)
+        hiddenStates = encoder(hiddenStates, positions: patchPositions, mask: nil)
+        hiddenStates = pooler(
+            hiddenStates, patchPositions: patchPositions, patchesW: patchesW,
+            outputLength: outputLength)
 
         if let standardizationBias, let standardizationScale {
             hiddenStates = (hiddenStates - standardizationBias) * standardizationScale
@@ -2028,7 +1978,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
     private func getInputEmbeddings(
         inputIds: MLXArray,
-        pixelValues: MLXArray? = nil
+        image: LMInput.ProcessedImage? = nil
     ) throws -> (MLXArray, MLXArray?) {
         var inputsEmbeds = languageModel.model.embedTokens(inputIds)
         inputsEmbeds =
@@ -2050,11 +2000,32 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             perLayerInputs = languageModel.model.getPerLayerInputs(perLayerTokens)
         }
 
-        guard let pixelValues else {
+        guard let image else {
             return (inputsEmbeds, perLayerInputs)
         }
 
-        var imageFeatures = visionTower(pixelValues)
+        // Images keep their own aspect-preserving sizes: the processor
+        // zero-pads them onto a shared canvas and records each real size in
+        // frames. Slice each image back out, run the tower on it alone, and
+        // concatenate the pooled tokens in placeholder order.
+        let pixels =
+            if image.pixels.ndim == 3 {
+                expandedDimensions(image.pixels, axis: 0)
+            } else {
+                image.pixels
+            }
+        let frames =
+            image.frames
+            ?? Array(repeating: THW(1, pixels.dim(2), pixels.dim(3)), count: pixels.dim(0))
+        var perImageFeatures: [MLXArray] = []
+        for (index, frame) in frames.enumerated() {
+            let imagePixels = pixels[index ..< index + 1, 0..., ..<frame.h, ..<frame.w]
+            perImageFeatures.append(visionTower(imagePixels))
+        }
+        var imageFeatures =
+            perImageFeatures.count == 1
+            ? perImageFeatures[0]
+            : concatenated(perImageFeatures, axis: 1)
         imageFeatures = embedVision(imageFeatures)
         imageFeatures = imageFeatures.asType(inputsEmbeds.dtype)
 
@@ -2083,9 +2054,9 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let convertedCache = cache.map { $0 }
-        if let imagePixels = input.image?.pixels {
+        if let image = input.image {
             let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
-                inputIds: input.text.tokens, pixelValues: imagePixels)
+                inputIds: input.text.tokens, image: image)
             let result = languageModel(
                 nil,
                 cache: convertedCache,
@@ -2640,30 +2611,26 @@ public struct Gemma4Processor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
+    public func preprocess(image: CIImage, processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        var userProcessing = processing ?? UserInput.Processing()
-        let targetSize = config.fixedSize
-        userProcessing.resize = targetSize
+        let processedImage = MediaProcessing.apply(image, processing: processing)
+        let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
+        let targetSize = config.aspectPreservingTargetSize(for: srgbImage.extent.size)
+        let resizedImage =
+            srgbImage.extent.size == targetSize
+            ? srgbImage
+            : MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
+        let finalImage =
+            if config.doNormalize {
+                MediaProcessing.normalize(
+                    resizedImage, mean: config.imageMeanTuple, std: config.imageStdTuple)
+            } else {
+                resizedImage
+            }
+        let pixelValues = MediaProcessing.asMLXArray(finalImage)
 
-        let processedImages = images.map { image in
-            let processedImage = MediaProcessing.apply(image, processing: userProcessing)
-            let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-            let resizedImage = MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
-            let finalImage =
-                if config.doNormalize {
-                    MediaProcessing.normalize(
-                        resizedImage, mean: config.imageMeanTuple, std: config.imageStdTuple)
-                } else {
-                    resizedImage
-                }
-            return MediaProcessing.asMLXArray(finalImage)
-        }
-
-        let pixelValues = concatenated(processedImages)
-
-        return (pixelValues, THW(images.count, Int(targetSize.height), Int(targetSize.width)))
+        return (pixelValues, THW(1, Int(targetSize.height), Int(targetSize.width)))
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
@@ -2676,24 +2643,48 @@ public struct Gemma4Processor: UserInputProcessor {
         var processedImage: LMInput.ProcessedImage?
         if !input.images.isEmpty {
             let imagePixelsAndFrames = try input.images.map {
-                try preprocess(images: [$0.asCIImage()], processing: input.processing)
+                try preprocess(image: $0.asCIImage(), processing: input.processing)
             }
-            let imagePixelsConcatenated = concatenated(imagePixelsAndFrames.map { $0.0 })
-            processedImage = LMInput.ProcessedImage(
-                pixels: imagePixelsConcatenated,
-                frames: imagePixelsAndFrames.map { $0.1 }
-            )
+            let frames = imagePixelsAndFrames.map { $0.1 }
 
+            // Each image keeps its own aspect-preserving size. ProcessedImage
+            // carries one array, so zero-pad every image onto the largest
+            // canvas in the request; the model slices the real regions back
+            // out using frames.
+            let maxHeight = frames.map(\.h).max() ?? 0
+            let maxWidth = frames.map(\.w).max() ?? 0
+            let paddedPixels = imagePixelsAndFrames.map { pixels, frame in
+                frame.h == maxHeight && frame.w == maxWidth
+                    ? pixels
+                    : MLX.padded(
+                        pixels,
+                        widths: [
+                            0, 0, .init((0, maxHeight - frame.h)), .init((0, maxWidth - frame.w)),
+                        ])
+            }
+            processedImage = LMInput.ProcessedImage(
+                pixels: concatenated(paddedPixels), frames: frames)
+
+            // Expand the i-th image placeholder to that image's soft token
+            // count: numPatches / poolingKernelSize².
+            let softTokenCounts = frames.map { config.softTokenCount(height: $0.h, width: $0.w) }
             var expandedTokens: [Int] = []
+            var imageIndex = 0
             for token in promptTokens {
                 if token == config.imageTokenId {
+                    guard imageIndex < softTokenCounts.count else {
+                        throw Gemma4Error.imagePlaceholderMismatch(
+                            images: softTokenCounts.count, placeholders: imageIndex + 1)
+                    }
                     expandedTokens.append(config.boiTokenId)
                     expandedTokens.append(
                         contentsOf: Array(
-                            repeating: config.imageTokenId, count: config.imageSeqLength))
+                            repeating: config.imageTokenId,
+                            count: softTokenCounts[imageIndex]))
                     if let eoiTokenId = config.eoiTokenId {
                         expandedTokens.append(eoiTokenId)
                     }
+                    imageIndex += 1
                 } else {
                     expandedTokens.append(token)
                 }
@@ -2713,11 +2704,36 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
     public let imageSeqLength: Int
-    public let size: Gemma3ProcessorConfiguration.ImageSize?
+    public let maxSoftTokens: Int
+    public let patchSize: Int
+    public let poolingKernelSize: Int
 
     public let imageTokenId: Int
     public let boiTokenId: Int
     public let eoiTokenId: Int?
+
+    /// Image keys nested under `image_processor` in processor_config.json.
+    /// Repos that ship a flat preprocessor_config.json put the same keys at
+    /// the top level, which wins when both are present.
+    private struct ImageProcessorConfiguration: Codable {
+        let doNormalize: Bool?
+        let imageMean: [CGFloat]?
+        let imageStd: [CGFloat]?
+        let imageSeqLength: Int?
+        let maxSoftTokens: Int?
+        let patchSize: Int?
+        let poolingKernelSize: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case doNormalize = "do_normalize"
+            case imageMean = "image_mean"
+            case imageStd = "image_std"
+            case imageSeqLength = "image_seq_length"
+            case maxSoftTokens = "max_soft_tokens"
+            case patchSize = "patch_size"
+            case poolingKernelSize = "pooling_kernel_size"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case processorClass = "processor_class"
@@ -2725,7 +2741,10 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         case imageMean = "image_mean"
         case imageStd = "image_std"
         case imageSeqLength = "image_seq_length"
-        case size
+        case maxSoftTokens = "max_soft_tokens"
+        case patchSize = "patch_size"
+        case poolingKernelSize = "pooling_kernel_size"
+        case imageProcessor = "image_processor"
         case imageTokenId = "image_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
@@ -2733,18 +2752,48 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
 
     public init(from decoder: any Swift.Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let nested = try c.decodeIfPresent(
+            ImageProcessorConfiguration.self, forKey: CodingKeys.imageProcessor)
         processorClass = try c.decode(String.self, forKey: CodingKeys.processorClass)
-        doNormalize = try c.decodeIfPresent(Bool.self, forKey: CodingKeys.doNormalize) ?? false
+        doNormalize =
+            try c.decodeIfPresent(Bool.self, forKey: CodingKeys.doNormalize)
+            ?? nested?.doNormalize ?? false
         imageMean =
-            try c.decodeIfPresent([CGFloat].self, forKey: CodingKeys.imageMean) ?? [0.5, 0.5, 0.5]
+            try c.decodeIfPresent([CGFloat].self, forKey: CodingKeys.imageMean)
+            ?? nested?.imageMean ?? [0.5, 0.5, 0.5]
         imageStd =
-            try c.decodeIfPresent([CGFloat].self, forKey: CodingKeys.imageStd) ?? [0.5, 0.5, 0.5]
-        imageSeqLength = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageSeqLength) ?? 280
-        size = try c.decodeIfPresent(
-            Gemma3ProcessorConfiguration.ImageSize.self, forKey: CodingKeys.size)
+            try c.decodeIfPresent([CGFloat].self, forKey: CodingKeys.imageStd)
+            ?? nested?.imageStd ?? [0.5, 0.5, 0.5]
+        imageSeqLength =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageSeqLength)
+            ?? nested?.imageSeqLength ?? 280
+        maxSoftTokens =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.maxSoftTokens)
+            ?? nested?.maxSoftTokens ?? 280
+        patchSize =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.patchSize)
+            ?? nested?.patchSize ?? 16
+        poolingKernelSize =
+            try c.decodeIfPresent(Int.self, forKey: CodingKeys.poolingKernelSize)
+            ?? nested?.poolingKernelSize ?? 3
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(processorClass, forKey: CodingKeys.processorClass)
+        try c.encode(doNormalize, forKey: CodingKeys.doNormalize)
+        try c.encode(imageMean, forKey: CodingKeys.imageMean)
+        try c.encode(imageStd, forKey: CodingKeys.imageStd)
+        try c.encode(imageSeqLength, forKey: CodingKeys.imageSeqLength)
+        try c.encode(maxSoftTokens, forKey: CodingKeys.maxSoftTokens)
+        try c.encode(patchSize, forKey: CodingKeys.patchSize)
+        try c.encode(poolingKernelSize, forKey: CodingKeys.poolingKernelSize)
+        try c.encode(imageTokenId, forKey: CodingKeys.imageTokenId)
+        try c.encode(boiTokenId, forKey: CodingKeys.boiTokenId)
+        try c.encodeIfPresent(eoiTokenId, forKey: CodingKeys.eoiTokenId)
     }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
@@ -2755,12 +2804,48 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         (imageStd[0], imageStd[1], imageStd[2])
     }
 
-    public var fixedSize: CGSize {
-        if let size {
-            return CGSize(width: size.width, height: size.height)
+    /// Soft tokens the vision tower produces for an image of the given
+    /// (already resized) pixel dimensions.
+    public func softTokenCount(height: Int, width: Int) -> Int {
+        ((height / patchSize) * (width / patchSize)) / (poolingKernelSize * poolingKernelSize)
+    }
+
+    /// Port of the Python Gemma4ImageProcessor's aspect-ratio preserving
+    /// resize: the largest dimensions that (a) stay within the patch budget
+    /// maxSoftTokens * poolingKernelSize², and (b) keep both sides divisible
+    /// by poolingKernelSize * patchSize, so the pooling kernel is exact and
+    /// the pooled grid covers the image fully at any aspect ratio.
+    ///
+    /// Note the config's `size` entry is deliberately ignored, as in the
+    /// Python reference — models ship a vestigial 224x224 there.
+    public func aspectPreservingTargetSize(for imageSize: CGSize) -> CGSize {
+        let kernelArea = poolingKernelSize * poolingKernelSize
+        let maxPatches = maxSoftTokens * kernelArea
+        let sideMultiple = poolingKernelSize * patchSize
+        let height = Double(imageSize.height)
+        let width = Double(imageSize.width)
+
+        let targetPixels = Double(maxPatches * patchSize * patchSize)
+        let factor = (targetPixels / max(height * width, 1)).squareRoot()
+        var targetHeight = Int((factor * height / Double(sideMultiple)).rounded(.down))
+        var targetWidth = Int((factor * width / Double(sideMultiple)).rounded(.down))
+
+        // One side can floor to zero for extreme aspect ratios (both cannot:
+        // their product is pinned near maxPatches, far above 1). Clamp it to
+        // one pooling cell and cap the long side at the full token budget.
+        let maxSideLength = maxSoftTokens
+        if targetHeight == 0 {
+            targetHeight = 1
+            targetWidth = min(Int((width / max(height, 1)).rounded(.down)), maxSideLength)
+            targetWidth = max(targetWidth, 1)
+        } else if targetWidth == 0 {
+            targetWidth = 1
+            targetHeight = min(Int((height / max(width, 1)).rounded(.down)), maxSideLength)
+            targetHeight = max(targetHeight, 1)
         }
-        // 800x800 keeps the patch count under Gemma4's 280 * 3^2 vision budget.
-        return CGSize(width: 800, height: 800)
+
+        return CGSize(
+            width: targetWidth * sideMultiple, height: targetHeight * sideMultiple)
     }
 }
 

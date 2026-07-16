@@ -74,8 +74,21 @@ public struct GenerateParameters: Sendable {
     public var quantizedKVStart: Int
 
     /// KV cache compression scheme. Overrides kvBits when set.
-    /// Built-in: "affine4", "affine8" (equivalent to kvBits 4/8).
-    /// Extensible for custom schemes (e.g. WHT-based compression).
+    ///
+    /// Built-in affine: "affine4", "affine8" (equivalent to kvBits 4/8).
+    ///
+    /// TurboQuant schemes (`turbo<K>v<V>`, keys × values). Start light,
+    /// verify quality on your model, then ratchet V:
+    /// - "turbo0v4"  FP16 K + 4-bit V, the safest start
+    /// - "turbo0v3"/"turbo0v2"  FP16 K, more aggressive V
+    /// - "turbo8v4"  8-bit affine K + 4-bit V, conservative asymmetric
+    /// - "turbo8v3"  recommended default (near-lossless K, compressed V)
+    /// - "turbo8v2"  aggressive V (boundary-layer protection auto-engages)
+    /// - "turbo4"/"turbo4v2"/"turbo3"/"turbo2"  turbo-quantized keys:
+    ///   maximum compression; K sensitivity varies by model family, so
+    ///   validate on your model (asym is the recommended starting point).
+    ///
+    /// Unrecognized schemes are ignored. See `resolveTurboScheme`.
     public var kvScheme: String?
 
     /// Sampling temperature
@@ -746,17 +759,35 @@ public struct TokenIterator: TokenIteratorProtocol {
             return nil
         }
 
-        // save current value -- this will be returned
-        let previousY = y
+        // Drain autoreleased MLX temporaries every step: a full model forward
+        // produces hundreds of autoreleased wrapper objects, and the token
+        // loop never returns to a pool boundary on its own; without this,
+        // long generations grow host memory without bound.
+        return autoreleasepool {
+            // save current value -- this will be returned
+            let previousY = y
 
-        // compute the next state and async eval the next token
-        let token = step(previous: previousY)
-        y = .init(tokens: token)
-        asyncEval(token)
+            // compute the next state and async eval the next token
+            let token = step(previous: previousY)
+            y = .init(tokens: token)
+            // Evaluate the cache state together with the token: caches update
+            // through functional ops (concatenation, slice assignment), and an
+            // unevaluated chain of those updates keeps every prior step's
+            // intermediates alive. Python mlx-lm settles cache state the same
+            // way in its generation loop.
+            asyncEval([token] + cache.flatMap { $0.state })
 
-        tokenCount += 1
+            tokenCount += 1
 
-        return previousY.tokens.item(Int.self)
+            // Periodically return freed buffers that cannot be reused (odd or
+            // monotonically growing sizes accumulate in the pool otherwise).
+            // Matches mlx-lm's clear cadence.
+            if tokenCount % 256 == 0 {
+                MLX.Memory.clearCache()
+            }
+
+            return previousY.tokens.item(Int.self)
+        }
     }
 }
 
@@ -861,7 +892,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvScheme: parameters.kvScheme
             )
         }
 
@@ -1018,10 +1050,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return token
         }
 
-        // Run a new speculation round
+        // Run a new speculation round. Pooled: a round runs draft + verify
+        // forwards whose autoreleased MLX temporaries otherwise accumulate
+        // across the whole generation.
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
             return nil
@@ -1168,7 +1202,7 @@ private func runSynchronousGenerationLoop(
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
-    while let token = iterator.next() {
+    while let token = autoreleasepool(invoking: { iterator.next() }) {
         // Compute the timing for the prompt.
         if promptTime == 0 {
             let now = Date.timeIntervalSinceReferenceDate
@@ -1864,12 +1898,12 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             // Check cancellation BEFORE iterator.next(): next() calls asyncEval() to
             // pipeline the next GPU evaluation, so checking after it (the previous
             // `while let token = iterator.next()` form) allowed one extra asyncEval to be
-            // submitted post-cancellation — which faults if the app has backgrounded
+            // submitted post-cancellation, which faults if the app has backgrounded
             // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
             // post-loop block below assigns `.cancelled`; Stream().synchronize() still
             // settles any in-flight evaluation at the end of the task body.
             tokenLoop: while !Task.isCancelled {
-                guard let token = iterator.next() else { break }
+                guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
 
                 if promptTime == 0 {
                     let now = Date.timeIntervalSinceReferenceDate
