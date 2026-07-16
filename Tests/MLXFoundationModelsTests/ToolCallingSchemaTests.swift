@@ -26,6 +26,29 @@ private struct AddArgs {
     var b: Int
 }
 
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct Traveler {
+    @Guide(description: "Full name.")
+    var name: String
+    @Guide(description: "Age.")
+    var age: Int
+}
+
+/// Arguments containing a nested `@Generable` type: `GenerationSchema`
+/// serializes `Traveler` as a root-level `$defs` entry referenced via a
+/// root-anchored `"$ref": "#/$defs/Traveler"` pointer.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct BookTripArgs {
+    @Guide(description: "Origin city.")
+    var origin: String
+    @Guide(description: "Destination city.")
+    var destination: String
+    @Guide(description: "The traveler.")
+    var traveler: Traveler
+}
+
 /// Unit tests for the tool-calling schema and grammar builders.
 ///
 /// Covers both:
@@ -135,6 +158,115 @@ struct ToolCallingSchemaTests {
         #expect(names.contains(FinalAnswerTool.toolName))
     }
 
+    // MARK: - $defs Hoisting
+
+    @Test
+    func nestedGenerableDefsAreHoistedToEnvelopeRoot() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let bookTrip = Transcript.ToolDefinition(
+            name: "book_trip",
+            description: "Books a trip",
+            parameters: BookTripArgs.generationSchema
+        )
+
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: [bookTrip])
+        let parsed = try parseAsDictionary(json)
+
+        // The nested type's def must live at the envelope root, namespaced
+        // per tool, because xgrammar resolves JSON Pointers from the
+        // document root.
+        let defs = try #require(parsed["$defs"] as? [String: Any])
+        #expect(defs["book_trip__Traveler"] != nil)
+
+        // The embedded arguments schema must no longer carry its own $defs.
+        let oneOf = try #require(parsed["oneOf"] as? [[String: Any]])
+        let arguments = try #require(
+            (oneOf[0]["properties"] as? [String: Any])?["arguments"] as? [String: Any]
+        )
+        #expect(arguments["$defs"] == nil, "tool-local $defs must be hoisted, not duplicated")
+    }
+
+    @Test
+    func everyRefInEnvelopeResolvesWithinTheDocument() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // Two tools sharing a same-named nested type: hoisting must also
+        // namespace, so the defs cannot collide or shadow each other.
+        let tools = [
+            Transcript.ToolDefinition(
+                name: "book_trip",
+                description: "Books a trip",
+                parameters: BookTripArgs.generationSchema
+            ),
+            Transcript.ToolDefinition(
+                name: "cancel_trip",
+                description: "Cancels a trip",
+                parameters: BookTripArgs.generationSchema
+            ),
+        ]
+
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: tools)
+        let parsed = try parseAsDictionary(json)
+
+        let defs = parsed["$defs"] as? [String: Any] ?? [:]
+        #expect(defs["book_trip__Traveler"] != nil)
+        #expect(defs["cancel_trip__Traveler"] != nil)
+
+        let refs = collectRefs(in: parsed)
+        #expect(!refs.isEmpty, "nested @Generable arguments must produce $refs")
+        for ref in refs {
+            #expect(ref.hasPrefix("#/$defs/"), "unexpected ref shape: \(ref)")
+            let key = String(ref.dropFirst("#/$defs/".count))
+            #expect(defs[key] != nil, "dangling $ref: \(ref)")
+        }
+    }
+
+    @Test
+    func nestedDefsEnvelopeCompilesWithXGrammar() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // End-to-end regression for the dangling-$refs failure: without
+        // hoisting, xgrammar rejects this envelope outright
+        // ("Cannot find field $defs in {\"oneOf\": ...").
+        let bookTrip = Transcript.ToolDefinition(
+            name: "book_trip",
+            description: "Books a trip",
+            parameters: BookTripArgs.generationSchema
+        )
+        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
+
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(
+            tools: [bookTrip, finalAnswer]
+        )
+
+        let tokenizer = try makeByteTokenizer()
+        _ = try GrammarConstraint(tokenizer: tokenizer, jsonSchema: json, fastForward: false)
+    }
+
+    @Test
+    func grammarBuilderHoistsNestedDefsInBothArms() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let bookTrip = Transcript.ToolDefinition(
+            name: "book_trip",
+            description: "Books a trip",
+            parameters: BookTripArgs.generationSchema
+        )
+
+        let grammar = try SchemaConverter.encodeToolCallingGrammar(tools: [bookTrip])
+        let parsed = try parseAsDictionary(grammar)
+
+        let format = try #require(parsed["format"] as? [String: Any])
+        let elements = try #require(format["elements"] as? [[String: Any]])
+        try #require(elements.count == 2)
+
+        let wrappedSchema = try #require(
+            (elements[0]["content"] as? [String: Any])?["json_schema"] as? [String: Any]
+        )
+        let bareSchema = try #require(elements[1]["json_schema"] as? [String: Any])
+        for schema in [wrappedSchema, bareSchema] {
+            let defs = try #require(schema["$defs"] as? [String: Any])
+            #expect(defs["book_trip__Traveler"] != nil)
+        }
+    }
+
     // MARK: - Grammar Compilation
 
     @Test
@@ -241,6 +373,23 @@ struct ToolCallingSchemaTests {
             return [:]
         }
         return obj
+    }
+
+    /// Recursively collects every `"$ref"` string value in a parsed JSON tree.
+    private func collectRefs(in value: Any) -> [String] {
+        switch value {
+        case let object as [String: Any]:
+            return object.flatMap { key, nested -> [String] in
+                if key == "$ref", let ref = nested as? String {
+                    return [ref]
+                }
+                return collectRefs(in: nested)
+            }
+        case let array as [Any]:
+            return array.flatMap { collectRefs(in: $0) }
+        default:
+            return []
+        }
     }
 
     private func makeByteTokenizer() throws -> GrammarTokenizer {

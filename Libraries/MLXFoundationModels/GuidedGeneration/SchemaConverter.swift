@@ -48,9 +48,16 @@ enum SchemaConverter {
     ///       }
     ///     },
     ///     ...
-    ///   ]
+    ///   ],
+    ///   "$defs": { "<tool name>__<def name>": ... }
     /// }
     /// ```
+    ///
+    /// If a tool's parameters schema carries `$defs` (named sub-schemas such
+    /// as nested `@Generable` types), they are hoisted to the envelope root
+    /// under per-tool namespaced keys, with that tool's `$ref`s rewritten to
+    /// match — JSON Pointers resolve from the document root, so defs left
+    /// nested inside `arguments` would leave every ref dangling.
     ///
     /// This is the *inner* schema -- it describes one tool call JSON object.
     /// For end-to-end grammar generation that also encodes the model's native
@@ -176,12 +183,41 @@ enum SchemaConverter {
         }
 
         let encoder = JSONEncoder()
+        // `GenerationSchema` serializes named sub-schemas (e.g. a nested
+        // `@Generable` type, or a named `DynamicGenerationSchema`) as
+        // root-level `$defs` plus root-anchored `"$ref": "#/$defs/..."`
+        // pointers. Embedding a tool's schema as a nested object under
+        // `oneOf[i].properties.arguments` buries its `$defs` inside
+        // `arguments` while the refs stay anchored to the document root —
+        // and xgrammar resolves JSON Pointers from the document root, so
+        // every ref dangles and grammar compilation hard-fails
+        // ("Cannot find field $defs in {\"oneOf\": ...",
+        // json_schema_converter.cc). Hoist each tool's `$defs` to the
+        // envelope root instead, namespacing keys per tool
+        // (`<tool>__<def>`) so same-named defs across tools cannot collide.
+        var hoistedDefs: [String: Any] = [:]
         let oneOf: [[String: Any]] = try tools.map { tool in
             // Round-trip the tool's parameters through JSONSerialization so we
             // can embed it as a nested object in the envelope we assemble via
             // JSONSerialization.data(withJSONObject:). Cheap: schemas are small.
             let paramsData = try encoder.encode(tool.parameters)
-            let paramsAny = try JSONSerialization.jsonObject(with: paramsData)
+            // Rewrite refs on the raw JSONEncoder output, where the
+            // "#/$defs/" prefix appears literally. (A JSONSerialization
+            // re-serialization escapes "/" as "\/", so the prefix would not
+            // match and the refs would silently survive unrewritten. Cover
+            // the escaped form too, defensively.)
+            let rewritten = String(data: paramsData, encoding: .utf8)!
+                .replacingOccurrences(of: "#/$defs/", with: "#/$defs/\(tool.name)__")
+                .replacingOccurrences(of: "#\\/$defs\\/", with: "#\\/$defs\\/\(tool.name)__")
+            var paramsAny = try JSONSerialization.jsonObject(with: Data(rewritten.utf8))
+            if var paramsObj = paramsAny as? [String: Any] {
+                if let defs = paramsObj.removeValue(forKey: "$defs") as? [String: Any] {
+                    for (key, value) in defs {
+                        hoistedDefs["\(tool.name)__\(key)"] = value
+                    }
+                }
+                paramsAny = paramsObj
+            }
             return [
                 "type": "object",
                 "required": ["name", "arguments"],
@@ -192,7 +228,11 @@ enum SchemaConverter {
                 ],
             ]
         }
-        return ["oneOf": oneOf]
+        var envelope: [String: Any] = ["oneOf": oneOf]
+        if !hoistedDefs.isEmpty {
+            envelope["$defs"] = hoistedDefs
+        }
+        return envelope
     }
 
     enum SchemaConversionError: Error {
