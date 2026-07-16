@@ -1318,6 +1318,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             incomplete = true
                         }
 
+                        GuidedGenerationDiagnosticSink.current?.recordBuffer(
+                            outputBuffer, incompleteOutput: incomplete)
+
                         try await emitToolCallingEvent(
                             outputBuffer: outputBuffer,
                             userResponseSchema: request.schema,
@@ -1860,12 +1863,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     as? [String: Any],
                 let name = obj["name"] as? String
             else {
+                GuidedGenerationDiagnosticSink.current?.recordParse(
+                    parsedAsToolCall: false, parsedName: nil)
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
                 await Self.emit(
                     text: outputBuffer, entryID: entryID, destination: .response, into: channel)
                 return
             }
+
+            GuidedGenerationDiagnosticSink.current?.recordParse(
+                parsedAsToolCall: true, parsedName: name)
 
             if name == FinalAnswerTool.toolName {
                 let text: String
