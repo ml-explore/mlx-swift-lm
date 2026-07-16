@@ -191,7 +191,7 @@ func makeExecutorRequest(
 /// compute on tokens nobody wants.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class TestResponseStream: AsyncSequence, @unchecked Sendable {
-    typealias Element = LanguageModelExecutorGenerationChannel.Event
+    typealias Element = MLXLanguageModel.Executor.GenerationEvent
     typealias AsyncIterator = AsyncThrowingStream<Element, Error>.AsyncIterator
 
     private let stream: AsyncThrowingStream<Element, Error>
@@ -207,27 +207,35 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
         let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
         self.stream = stream
 
-        // Collector: relay events from the framework channel into our stream.
+        // The SDK's channel events are opaque, so we read generated content via
+        // the executor's observation hook instead. We still must drain the
+        // channel: respond() sends into it, and without a consumer those sends
+        // would stall. The drained events are discarded; content comes from the
+        // observer below.
         let collector = Task<Void, Never> {
             do {
-                for try await event in channel {
-                    continuation.yield(event)
-                }
+                for try await _ in channel {}
             } catch {
                 // Including CancellationError; we don't depend on cancellation here.
             }
         }
         self.collectorTask = collector
 
-        // Producer: run respond(), then finish our stream so the test's
-        // iteration terminates.
+        // Producer: attach the observer (task-local, so it also reaches the
+        // guided-path forwarder child task), run respond(), then finish our
+        // stream so the test's iteration terminates.
         self.producerTask = Task<Void, Never> {
             defer { collector.cancel() }
-            do {
-                try await executor.respond(to: request, model: model, streamingInto: channel)
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
+            await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
+                continuation.yield(event)
+            }) {
+                do {
+                    try await executor.respond(
+                        to: request, model: model, streamingInto: channel)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
         }
     }
