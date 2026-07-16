@@ -753,3 +753,28 @@ func preservesScoreDtype() {
         #expect(out.asType(.float32).sum().item(Float.self).isFinite)  // no -inf → NaN
     }
 }
+
+// MARK: - ropeOffset overridability
+
+/// A `BaseKVCache` subclass reporting a per-row RoPE offset, as a batched cache does.
+private final class BatchOffsetProbeCache: BaseKVCache {
+    override var ropeOffset: RoPEOffset { .batch(MLXArray([10, 20])) }
+
+    override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+}
+
+/// Models read `ropeOffset` through a `KVCache` reference, so a subclass override has to
+/// survive that dispatch. When `BaseKVCache` did not declare `ropeOffset`, the extension
+/// default was the witness and this resolved to `.scalar(0)`, silently ignoring the subclass.
+@Test func testSubclassRopeOffsetOverrideIsHonoredThroughKVCacheReference() {
+    let cache: any KVCache = BatchOffsetProbeCache()
+
+    guard case .batch(let offsets) = cache.ropeOffset else {
+        Issue.record(
+            "subclass ropeOffset override ignored — resolved to the .scalar extension default")
+        return
+    }
+    #expect(offsets.asArray(Int32.self) == [10, 20])
+}
