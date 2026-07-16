@@ -593,6 +593,13 @@ public final class LLMModelFactory: GenericModelFactory {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
                 from: baseConfig.modelType, configData: configData)
         }
+        // Reasoning protocol: registry override wins; otherwise infer from
+        // model_type + repo id. `modelId` is load-bearing — R1-Distill reports a
+        // base model_type (qwen2/llama) and is only recognizable by id.
+        if mutableConfiguration.reasoningConfig == nil {
+            mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
+                from: baseConfig.modelType, modelId: configuration.name, configData: configData)
+        }
 
         // Load tokenizer and weights in parallel
         async let tokenizerTask = tokenizerLoader.load(
@@ -623,7 +630,8 @@ public final class LLMModelFactory: GenericModelFactory {
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            reasoningConfig: mutableConfiguration.reasoningConfig)
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,

@@ -729,7 +729,9 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         return finalEmbeds.expandedDimensions(axis: 0)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let inputIds = input.text.tokens
