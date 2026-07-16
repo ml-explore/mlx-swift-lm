@@ -350,6 +350,17 @@ enum TestFixtures {
 
     static let gemmaModelID = "mlx-community/gemma-3-270m-it-4bit"
 
+    /// Gemma 4 (E2B) instruction-tuned. Its chat template natively renders
+    /// tool calls and `tool` responses, so it exercises the multi-turn
+    /// tool-calling replay path (assistant tool-call + tool result).
+    static let gemma4ModelID = "mlx-community/gemma-4-e2b-it-4bit"
+
+    /// Qwen3 (4B) instruction-tuned. A second model family whose chat template
+    /// renders tool calls and `tool` responses, used alongside `gemma4ModelID`
+    /// to verify the multi-turn tool-calling path is model-agnostic rather than
+    /// tuned to any one template dialect.
+    static let qwen3ModelID = "mlx-community/Qwen3-4B-4bit"
+
     /// Default model ID for tests that don't care which specific MLX model runs,
     /// but do need a model known to exercise the full guided-generation and
     /// tool-calling paths.

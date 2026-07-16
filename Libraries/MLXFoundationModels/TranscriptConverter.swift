@@ -3,6 +3,7 @@
 #if FoundationModelsIntegration
 #if canImport(FoundationModels, _version: 2)
 
+import Foundation
 import FoundationModels
 import MLXLMCommon
 import os.log
@@ -66,8 +67,47 @@ struct TranscriptConverter {
                 logger.debug("Skipping reasoning entry (not replayed into chat history)")
                 return nil
 
+            case .toolCalls(let toolCalls):
+                // Replay prior tool calls as an assistant message carrying the
+                // structured calls. The model's tool-aware chat template renders
+                // these into its native tool-call channel; DefaultMessageGenerator
+                // serializes each id/name/arguments (see ToolCallIdTests). Without
+                // this, a continuation round would re-issue the same call.
+                let calls = toolCalls.map { call -> MLXLMCommon.ToolCall in
+                    let argumentsData = Data(call.arguments.jsonString.utf8)
+                    let arguments: [String: JSONValue]
+                    if let decoded = try? JSONDecoder().decode(
+                        [String: JSONValue].self, from: argumentsData)
+                    {
+                        arguments = decoded
+                    } else {
+                        logger.warning(
+                            "Failed to decode arguments for tool: \(call.toolName, privacy: .public)"
+                        )
+                        arguments = [:]
+                    }
+                    return MLXLMCommon.ToolCall(
+                        function: .init(name: call.toolName, arguments: arguments),
+                        id: call.id)
+                }
+                guard !calls.isEmpty else {
+                    logger.warning("Skipping toolCalls entry with no calls")
+                    return nil
+                }
+                return Chat.Message.assistant("", toolCalls: calls)
+
+            case .toolOutput(let output):
+                // Replay the tool result as a `tool` message correlated to its
+                // originating call by id. FoundationModels sets ToolOutput.id to
+                // the call id (ToolCallCoordinator), so the template resolves the
+                // tool name via the matching tool_call_id.
+                let text = extractText(from: output.segments) ?? ""
+                return Chat.Message.tool(text, id: output.id)
+
             default:
-                // Skip unsupported entry types (toolCalls, toolOutput, etc.)
+                // Skip unsupported entry types. Explicit `return nil` is a
+                // tripwire: a newly added SDK entry type surfaces here for review
+                // rather than being silently coerced into the wrong role.
                 logger.debug("Skipping unsupported entry type")
                 return nil
             }
