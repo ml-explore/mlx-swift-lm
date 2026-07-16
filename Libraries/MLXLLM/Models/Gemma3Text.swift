@@ -14,8 +14,8 @@ import MLXNN
 
 public struct Gemma3TextConfiguration: Codable {
     let modelType: String
-    let hiddenSize: Int
-    let hiddenLayers: Int
+    public let hiddenSize: Int
+    public let hiddenLayers: Int
     let intermediateSize: Int
     let attentionHeads: Int
     let headDim: Int
@@ -232,7 +232,10 @@ class Gemma3MLP: Module {
     }
 }
 
-class Gemma3TransformerBlock: Module {
+/// A single Gemma 3 transformer layer. Public so client code can drive the
+/// layer stack directly (e.g. encoder-style taps that collect every layer's
+/// hidden state); construction remains internal to ``Gemma3Model``.
+public class Gemma3TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Gemma3Attention
     @ModuleInfo var mlp: Gemma3MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
@@ -265,7 +268,7 @@ class Gemma3TransformerBlock: Module {
         super.init()
     }
 
-    func callAsFunction(
+    public func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
@@ -283,11 +286,15 @@ class Gemma3TransformerBlock: Module {
 }
 
 public class Gemma3Model: Module {
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo var layers: [Gemma3TransformerBlock]
+    /// Token embedding table. Note callers must scale its output by
+    /// `sqrt(hiddenSize)` (in bfloat16) to match Gemma 3 semantics — see
+    /// ``callAsFunction(_:mask:cache:)``.
+    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
+    /// The transformer layer stack, exposed for encoder-style client taps.
+    @ModuleInfo public var layers: [Gemma3TransformerBlock]
     @ModuleInfo var norm: Gemma.RMSNorm
 
-    let config: Gemma3TextConfiguration
+    public let config: Gemma3TextConfiguration
 
     init(_ config: Gemma3TextConfiguration) {
         self.config = config
