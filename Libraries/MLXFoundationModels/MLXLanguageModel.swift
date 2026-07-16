@@ -704,7 +704,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// default" -- so an unrecognized case never traps and never reaches the
         /// resolver. All value policy lives in `resolveSamplingParameters`; this
         /// shim is a pure 1:1 case translation.
-
         static func samplingMode(
             from samplingMode: GenerationOptions.SamplingMode?
         ) -> MLXSamplingMode? {
