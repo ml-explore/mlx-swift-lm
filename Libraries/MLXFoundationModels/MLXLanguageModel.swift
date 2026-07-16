@@ -1064,7 +1064,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let allTools =
                             Array(request.enabledToolDefinitions) + [finalAnswerDef]
 
-                        // Re-tokenize using the model's native tool-aware chat
+                        // Re-render using the model's native tool-aware chat
                         // template (Qwen/Llama/Phi/Gemma all ship one in their
                         // tokenizer_config.json). This is what teaches the model
                         // *what* tools exist and how to decide between them; the
@@ -1072,8 +1072,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // whatever tool call it emits.
                         let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                             from: allTools)
-                        let tokenizerMessages = DefaultMessageGenerator().generate(
-                            messages: messages)
 
                         // Think-then-call is gated to the enable_thinking
                         // family (Qwen3/QwQ): their template both renders the tool
@@ -1098,12 +1096,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 forThinkingEnabled: Self.thinkingEnabled(
                                     for: request.contextOptions.reasoningLevel))
                         }
-                        let toolAwareTokens = try context.tokenizer.applyChatTemplate(
-                            messages: tokenizerMessages,
-                            tools: toolSpecs,
-                            additionalContext: reasoningContext
-                        )
-                        let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
+                        // Prepare through the model's UserInputProcessor (like the
+                        // unconstrained and guided paths) instead of hand-building
+                        // an LMInput from raw applyChatTemplate output: processors
+                        // produce the token rank their model family requires (LLM
+                        // processors emit [N]; VLM processors emit [1, N], and VLM
+                        // `prepare` fatally aborts on 1-D input), and they carry
+                        // image/video content through to the model.
+                        let toolAwareInput = try await context.processor.prepare(
+                            input: UserInput(
+                                chat: messages,
+                                tools: toolSpecs,
+                                additionalContext: reasoningContext))
 
                         let toolCallingGrammar =
                             try SchemaConverter.encodeToolCallingGrammar(
@@ -1195,8 +1199,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let phase2Input =
                             reasoningTokenIDs.isEmpty
                             ? toolAwareInput
-                            : LMInput(
-                                tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
+                            : Self.continuationInput(
+                                from: toolAwareInput, appending: reasoningTokenIDs)
                         // Shared budget (match the unconstrained path): the
                         // envelope continues under the remaining budget, floored
                         // at the completion reserve so it always has room to close
@@ -1680,6 +1684,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Decodes the rendered prompt's tail and asks whether it ends inside an
         /// open reasoning block (some model families prefill the opening
         /// delimiter).
+        /// Build the Phase-2 continuation input: the tool-aware prompt with the
+        /// completed reasoning token IDs appended along the sequence axis.
+        ///
+        /// The prompt tokens keep whatever rank the model's processor produced
+        /// ([N] from LLM processors, [1, N] from VLM processors — VLM `prepare`
+        /// requires the batched form), and processed image/video content is
+        /// carried through so a VLM's Phase-2 prefill still sees its pixels.
+        static func continuationInput(
+            from input: LMInput, appending tokenIDs: [Int]
+        ) -> LMInput {
+            let promptTokens = input.text.tokens
+            var appended = MLXArray(tokenIDs.map { Int32($0) })
+                .asType(promptTokens.dtype)
+            if promptTokens.ndim == 2 {
+                appended = appended[.newAxis, 0...]
+            }
+            return LMInput(
+                text: .init(tokens: concatenated([promptTokens, appended], axis: -1)),
+                image: input.image,
+                video: input.video)
+        }
+
         private static func reasoningPrimedInside(
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
