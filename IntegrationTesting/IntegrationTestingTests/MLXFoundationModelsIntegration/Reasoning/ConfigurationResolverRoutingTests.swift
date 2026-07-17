@@ -47,14 +47,10 @@ struct ConfigurationResolverRoutingTests {
         var reasoning = ""
         var response = ""
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Reasoning,
-                case .appendText(let fragment) = r.action
-            {
-                reasoning += fragment.content
-            } else if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
-            {
-                response += fragment.content
+            if case .appendText(let chunk, _, .reasoning) = event {
+                reasoning += chunk
+            } else if case .appendText(let chunk, _, .response) = event {
+                response += chunk
             }
         }
         return (reasoning, response)
