@@ -101,10 +101,8 @@ struct MaxTokenTruncationTests {
 
         var fullText = ""
         for try await event in stream {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                fullText += delta.content
+            if case .appendText(let chunk, _, .response) = event {
+                fullText += chunk
             }
         }
 

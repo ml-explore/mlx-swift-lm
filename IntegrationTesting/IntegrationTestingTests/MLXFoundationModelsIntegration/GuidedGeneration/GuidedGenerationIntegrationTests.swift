@@ -53,28 +53,20 @@ struct GuidedGenerationIntegrationTests {
 
         let stream = try await executeResponse(executor, request: request, model: model)
 
-        var events: [LanguageModelExecutorGenerationChannel.Event] = []
+        var events: [MLXLanguageModel.Executor.GenerationEvent] = []
         for try await event in stream {
             events.append(event)
         }
 
         #expect(events.count >= 2, "Should produce metadata and text events")
 
-        guard
-            let firstResponse = events.first
-                as? LanguageModelExecutorGenerationChannel.Response,
-            case .updateMetadata = firstResponse.action
-        else {
+        guard case .updateMetadata = events.first else {
             Issue.record("First event should be metadataUpdate")
             return
         }
 
         let hasText = events.contains { event in
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
-            {
-                return true
-            }
+            if case .appendText(_, _, .response) = event { return true }
             return false
         }
         #expect(hasText, "Should produce text deltas")
@@ -100,9 +92,7 @@ struct GuidedGenerationIntegrationTests {
 
         var hasText = false
         for try await event in stream {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
-            {
+            if case .appendText(_, _, .response) = event {
                 hasText = true
                 break
             }
@@ -139,10 +129,8 @@ struct GuidedGenerationIntegrationTests {
         let stream1 = try await executeResponse(executor, request: request1, model: model)
         var text1 = ""
         for try await event in stream1 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                text1 += delta.content
+            if case .appendText(let chunk, _, .response) = event {
+                text1 += chunk
             }
         }
         #expect(!text1.isEmpty, "Turn 1 (unconstrained) should produce text")
@@ -159,10 +147,8 @@ struct GuidedGenerationIntegrationTests {
         let stream2 = try await executeResponse(executor, request: request2, model: model)
         var text2 = ""
         for try await event in stream2 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                text2 += delta.content
+            if case .appendText(let chunk, _, .response) = event {
+                text2 += chunk
             }
         }
         let trimmed2 = text2.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -187,10 +173,8 @@ struct GuidedGenerationIntegrationTests {
         let stream3 = try await executeResponse(executor, request: request3, model: model)
         var text3 = ""
         for try await event in stream3 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                text3 += delta.content
+            if case .appendText(let chunk, _, .response) = event {
+                text3 += chunk
             }
         }
         #expect(!text3.isEmpty, "Turn 3 (unconstrained) should produce text")
@@ -220,10 +204,8 @@ struct GuidedGenerationIntegrationTests {
                 let stream = try await executeResponse(executor, request: request, model: model)
                 var text = ""
                 for try await event in stream {
-                    if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                        case .appendText(let delta) = response.action
-                    {
-                        text += delta.content
+                    if case .appendText(let chunk, _, .response) = event {
+                        text += chunk
                     }
                 }
                 return text
@@ -244,10 +226,8 @@ struct GuidedGenerationIntegrationTests {
                 let stream = try await executeResponse(executor, request: request, model: model)
                 var text = ""
                 for try await event in stream {
-                    if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                        case .appendText(let delta) = response.action
-                    {
-                        text += delta.content
+                    if case .appendText(let chunk, _, .response) = event {
+                        text += chunk
                     }
                 }
                 return text
@@ -286,16 +266,14 @@ struct GuidedGenerationIntegrationTests {
 
         let stream = try await executeResponse(executor, request: request, model: model)
 
-        var events: [LanguageModelExecutorGenerationChannel.Event] = []
+        var events: [MLXLanguageModel.Executor.GenerationEvent] = []
         for try await event in stream {
             events.append(event)
         }
 
         let incompleteIdx = events.firstIndex { event in
-            guard let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .updateMetadata(let metadata) = response.action
-            else { return false }
-            return (metadata.values["incompleteOutput"] as? Bool) == true
+            guard case .updateMetadata(let metadata, _) = event else { return false }
+            return (metadata["incompleteOutput"] as? Bool) == true
         }
         #expect(
             incompleteIdx != nil,
@@ -304,9 +282,7 @@ struct GuidedGenerationIntegrationTests {
 
         if let incompleteIdx,
             let lastTextIdx = events.lastIndex(where: {
-                if let response = $0 as? LanguageModelExecutorGenerationChannel.Response,
-                    case .appendText = response.action
-                {
+                if case .appendText(_, _, .response) = $0 {
                     return true
                 } else {
                     return false
