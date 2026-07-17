@@ -721,7 +721,9 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         return MLX.concatenated(finalEmbeddings, axis: 1)
     }
 
-    public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let inputIds = input.text.tokens

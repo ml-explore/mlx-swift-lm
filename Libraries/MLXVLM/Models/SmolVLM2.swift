@@ -327,14 +327,15 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 }
             ) { frame in
 
-                let processedFrame = frame.frame
+                let processedFrame = try frame.image
+                    .asCIImage()
                     .toSRGB()
                     .resampled(
                         to: CGSize(width: fixedImageSize, height: fixedImageSize),
                         method: CIImage.ResamplingMethod.lanczos
                     )
                     .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-                return VideoFrame(frame: processedFrame, timeStamp: frame.timeStamp)
+                return VideoFrame(image: .ciImage(processedFrame), timeStamp: frame.timeStamp)
             }
 
             let thwFrames = (0 ..< processedFrames.frames.count).map {

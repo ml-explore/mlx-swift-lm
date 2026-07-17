@@ -144,11 +144,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         var prefillState = LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
-        // Note: `prepare(_:cache:windowSize:)` does not currently thread
-        // state through. To prime drafter state we run an explicit follow-up
-        // forward call after prefill (one position, the bonus token).
+        // Note: the drafter is primed via an explicit follow-up forward call
+        // after prefill (one position, the bonus token) rather than by
+        // passing `prefillState` into `prepare` — the emit flag is meant for
+        // exactly one position, not the whole prompt.
 
-        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        switch try mainModel.prepare(input, cache: mainCache, state: nil, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             y = tokens
             // Final prompt position not yet evaluated -- run one forward to

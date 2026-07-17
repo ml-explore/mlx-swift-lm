@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 
 export MLX_SWIFT_BUILD_DOC=1
 
-# Discover library product targets from Package.swift, skipping test/macro/executable targets
+# Discover library product targets from Package.swift, skipping test/macro/executable targets.
+# MLXFoundationModels is filtered out: it is gated on the FoundationModels v2 SDK, so its DocC
+# catalog can't be verified on SDKs that lack it.
 TARGETS=$(swift package dump-package | python3 -c "
 import json, sys
 pkg = json.load(sys.stdin)
@@ -15,7 +17,7 @@ for p in pkg['products']:
         targets.update(p['targets'])
 for t in sorted(targets):
     print(t)
-")
+" | grep -v '^MLXFoundationModels$')
 
 if [ -z "$TARGETS" ]; then
     echo "No targets found."
