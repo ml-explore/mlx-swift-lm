@@ -53,30 +53,15 @@ struct ToolCallGrammarCharacterizationTests {
     }
 
     static let cases: [Case] = [
-        // TODO(cwebb): Revisit before pushing. This gemma row is NOT stable.
-        // Running it to a verdict showed the parse outcome is non-deterministic:
-        // across 5 runs gemma parsed as a valid tool call in 3 and failed in 2
-        // (~40% failure), so pinning a single boolean invariant is flaky no
-        // matter which value we choose (`false` fails ~60%, `true` ~40%).
-        //
-        // Why it varies: decoding is greedy argMax (deterministic in principle,
-        // no temperature), but GPU floating-point non-determinism flips the
-        // argmax at structural positions where gemma's grammar mask is too loose
-        // to hard-enforce the JSON shape. The mask admits whitespace/formatting
-        // tokens and does not force the `name` key or the separating commas, so
-        // FP noise intermittently desyncs the fast-forward of the required keys.
-        // We observed both leak signatures the docstring predicts: empty-string
-        // keys (`{"":"set",...}`) and comma-less JSON
-        // (`{"name":"set_flashlight" "arguments":...}`), plus a semantic drift
-        // where gemma answers via `mlx_final_answer` instead of calling the tool.
-        //
-        // The motivating bug is therefore real and still unfixed: gemma's mask
-        // is (partially) inert. Left `false` and left failing on purpose as a
-        // pinned finding. Decide the fix/redesign here before pushing (options:
-        // tighten the mask for gemma's tokenizer; assert over N runs that gemma
-        // leaks at least once while qwen never does; or downgrade to a
-        // diagnostic-only probe). Do NOT flip to `true` to force green.
-        Case(modelID: TestFixtures.gemma4ModelID, expectsValidToolCall: false),
+        // Gemma-4 E2B was the motivating bug: its tool-call buffer failed to
+        // parse because the structural-tag grammar embedded a single
+        // `{name, arguments}` json_schema whose property order xgrammar did
+        // not hard-enforce, so greedy decoding could skip the `name` key.
+        // Forcing `name` first via per-tool tag prefixes
+        // (`SchemaConverter.encodeToolCallingGrammar`) fixed it: gemma now
+        // emits a clean `{"name": "set_flashlight", "arguments": {...}}` that
+        // parses. Pinned `true` alongside the qwen control.
+        Case(modelID: TestFixtures.gemma4ModelID, expectsValidToolCall: true),
         // Control: the grammar targets Qwen's dialect, so the buffer parses.
         Case(modelID: TestFixtures.qwen3ModelID, expectsValidToolCall: true),
     ]

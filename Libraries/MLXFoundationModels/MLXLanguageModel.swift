@@ -1073,10 +1073,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // Reasoning is only consumed by the unconstrained path
                     // (no tools, no schema). On the guided/tool paths the
                     // grammar already constrains output, so suppression-prep
-                    // would be wasted work. Continuation rounds run the tool
-                    // path (below) like fresh turns, so they are not part of
-                    // this gate; their reasoning is handled by the tool path's
-                    // think-then-call phase.
+                    // would be wasted work here. Continuation rounds run the
+                    // tool path (below) like fresh turns: that path renders its
+                    // own thinking state into the tool-aware prompt
+                    // (`toolAwareContext`) -- thinking on with the think-then-call
+                    // phase when reasoning is declared, forced off otherwise.
                     let mayRunReasoningPath =
                         request.enabledToolDefinitions.isEmpty
                         && request.schema == nil
@@ -1177,12 +1178,36 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             return cfg
                         }()
                         // Thread `enable_thinking` through the tool-aware template
-                        // (3-arg form) so the prompt is both tool-aware and
-                        // thinking-primed; nil on the single-phase path.
-                        let reasoningContext = try thinkThenCallConfig.flatMap {
-                            try $0.promptStrategy.additionalContext(
-                                forThinkingEnabled: Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel))
+                        // so the prompt's thinking state matches how we drive
+                        // generation. For a toggleable model (`.templateFlag`, e.g.
+                        // Qwen3 whose `enable_thinking` defaults ON) the effective
+                        // value is:
+                        //   - reasoning declared: honor the requested level
+                        //     (default ON), and the think-then-call phase below
+                        //     lets the model reason before the grammar constrains it;
+                        //   - reasoning NOT declared: force thinking OFF, mirroring
+                        //     the unconstrained path's suppression (see
+                        //     `suppressedInput` above).
+                        // Forcing OFF here is load-bearing: if we left the template
+                        // at its ON default while running the single-phase path, the
+                        // grammar forces the tool-call JSON from the first token so a
+                        // thinking-primed model can never emit its `<think>` block,
+                        // and greedy decoding of the free-text response degenerates
+                        // (Qwen: "1234567890..."). `.alwaysOn` models with reasoning
+                        // undeclared were already rejected by the capability gate
+                        // above; `.none`/no-config models take no context.
+                        let toolAwareContext: [String: any Sendable]?
+                        if case .templateFlag(let key, let defaultOn)? =
+                            resolved.reasoningConfig?.promptStrategy
+                        {
+                            let enabled =
+                                declaresReasoning
+                                ? (Self.thinkingEnabled(
+                                    for: request.contextOptions.reasoningLevel) ?? defaultOn)
+                                : false
+                            toolAwareContext = [key: enabled]
+                        } else {
+                            toolAwareContext = nil
                         }
                         // Prepare through the model's UserInputProcessor (like the
                         // unconstrained and guided paths) instead of hand-building
@@ -1195,7 +1220,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             input: UserInput(
                                 chat: messages,
                                 tools: toolSpecs,
-                                additionalContext: reasoningContext))
+                                additionalContext: toolAwareContext))
 
                         let toolCallingGrammar =
                             try SchemaConverter.encodeToolCallingGrammar(
@@ -1298,6 +1323,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         var outputBuffer = ""
                         var incomplete = false
                         var generatedTokenCount: Int?
+                        // With no developer response schema, the model picking
+                        // the synthetic final-answer tool means it chose to
+                        // answer in free text. Generating that text through the
+                        // greedy grammar-constrained JSON string degenerates on
+                        // small models (observed: Qwen/gemma spilling digit runs
+                        // like "1234567890…" into `response`), because greedy
+                        // argmax inside an unbounded string field is unstable.
+                        // So stop as soon as the final-answer tool is committed
+                        // and regenerate the answer unconstrained below. A
+                        // developer schema (structured output) stays on the
+                        // constrained path -- structure is the point there.
+                        let regenerateFinalAnswerUnconstrained = request.schema == nil
+                        var finalAnswerSelected = false
                         do {
                             generatedTokenCount = try GuidedGenerationLoop.run(
                                 input: phase2Input,
@@ -1312,6 +1350,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 whitespaceTokenIDs: whitespaceTokenIDs
                             ) { text in
                                 outputBuffer += text
+                                if regenerateFinalAnswerUnconstrained, !finalAnswerSelected,
+                                    outputBuffer.contains(FinalAnswerTool.toolName)
+                                {
+                                    // The grammar has fast-forwarded the
+                                    // `{"name": "mlx_final_answer", …` prefix, so
+                                    // the decision to answer is made. Halt before
+                                    // the greedy free-text field can degenerate.
+                                    finalAnswerSelected = true
+                                    return false
+                                }
                                 return !Task.isCancelled
                             }
                         } catch GuidedGenerationError.incompleteOutput {
@@ -1320,6 +1368,42 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         GuidedGenerationDiagnosticSink.current?.recordBuffer(
                             outputBuffer, incompleteOutput: incomplete)
+
+                        if finalAnswerSelected {
+                            // Regenerate the answer as a plain, unconstrained
+                            // completion of the conversation (which already
+                            // carries the tool result), so the response is
+                            // natural language rather than a grammar-forced JSON
+                            // string. Thinking is suppressed: a reasoning model
+                            // already reasoned in Phase 1 above, and a
+                            // non-reasoning one stays suppressed as elsewhere on
+                            // this path.
+                            let answerContext: [String: any Sendable]?
+                            if case .templateFlag(let key, _)? =
+                                resolved.reasoningConfig?.promptStrategy
+                            {
+                                answerContext = [key: false]
+                            } else {
+                                answerContext = nil
+                            }
+                            let answerInput = try await context.processor.prepare(
+                                input: UserInput(
+                                    chat: messages, additionalContext: answerContext))
+                            try await runUnconstrained(
+                                input: answerInput,
+                                requestedMaxTokens: requestedMaxTokens,
+                                requestedTemperature: request.generationOptions.temperature,
+                                samplingMode: requestedSamplingMode,
+                                entryID: entryID,
+                                context: context,
+                                channel: channel)
+                            // The early return skips the shared
+                            // `Stream.gpu.synchronize()` at the end of respond();
+                            // sync here so in-flight Metal work completes before
+                            // teardown.
+                            Stream.gpu.synchronize()
+                            return
+                        }
 
                         try await emitToolCallingEvent(
                             outputBuffer: outputBuffer,

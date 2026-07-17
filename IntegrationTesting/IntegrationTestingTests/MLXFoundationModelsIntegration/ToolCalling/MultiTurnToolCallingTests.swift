@@ -5,6 +5,7 @@
 import Foundation
 import FoundationModels
 import MLX
+import MLXLLM
 import MLXLMCommon
 import Testing
 
@@ -117,17 +118,42 @@ struct MultiTurnToolCallingTests {
         Transcript(entries: [.instructions(instructions())] + (try turnOnRound()))
     }
 
+    /// Constructs each model the way a real app would. Reasoning-first models
+    /// (Qwen3) must declare `.reasoning` so the tool path runs the
+    /// think-then-call phase (letting the model reason before the grammar
+    /// constrains it), and are built from their `LLMRegistry` configuration so
+    /// they carry the right `extraEOSTokens`. Other families keep the default
+    /// tool-calling capabilities. Returns the reasoning level to thread into the
+    /// request (nil for non-reasoning models).
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func makeMultiTurnModel(
+        _ modelID: String
+    ) -> (model: MLXLanguageModel, level: ContextOptions.ReasoningLevel?) {
+        switch modelID {
+        case TestFixtures.qwen3ModelID:
+            let model = MLXLanguageModel(
+                configuration: LLMRegistry.qwen3_4b_4bit,
+                capabilities: [.reasoning, .guidedGeneration, .toolCalling],
+                weightsLocation: testWeightsLocation(modelID:),
+                load: testLoad())
+            return (model, .moderate)
+        default:
+            return (makeTestModel(modelID), nil)
+        }
+    }
+
     @Test(arguments: MultiTurnToolCallingTests.models)
     func continuationRoundIncorporatesToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        let model = makeTestModel(modelID)
+        let (model, reasoningLevel) = makeMultiTurnModel(modelID)
         let executor = try makeMLXExecutor(for: model)
 
         let request = makeExecutorRequest(
             transcript: try continuationTranscript(),
             enabledTools: [flashlightTool()],
-            generationOptions: GenerationOptions(maximumResponseTokens: 128))
+            generationOptions: GenerationOptions(maximumResponseTokens: 128),
+            contextOptions: ContextOptions(reasoningLevel: reasoningLevel))
 
         let stream = try await executeResponse(executor, request: request, model: model)
 
