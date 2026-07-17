@@ -79,23 +79,16 @@ struct ToolCallingReasoningTests {
     private func collect(_ stream: TestResponseStream) async throws -> Collected {
         var c = Collected()
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Reasoning,
-                case .appendText(let fragment) = r.action
-            {
-                c.reasoning += fragment.content
-            } else if let t = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = t.action,
-                case .appendArguments(let argsDelta) = toolCall.action
-            {
+            if case .appendText(let chunk, _, .reasoning) = event {
+                c.reasoning += chunk
+            } else if case .toolCall(_, let name, let arguments) = event {
                 if c.toolCallName == nil {
-                    c.toolCallName = toolCall.name
+                    c.toolCallName = name
                     c.reasoningBeforeToolCall = !c.reasoning.isEmpty
                 }
-                c.toolArgs += argsDelta.content
-            } else if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
-            {
-                c.response += fragment.content
+                c.toolArgs += arguments
+            } else if case .appendText(let chunk, _, .response) = event {
+                c.response += chunk
             }
         }
         return c

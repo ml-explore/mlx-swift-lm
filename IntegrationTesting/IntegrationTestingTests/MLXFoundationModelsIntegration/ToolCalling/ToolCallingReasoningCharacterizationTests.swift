@@ -82,16 +82,11 @@ struct ToolCallingReasoningCharacterizationTests {
         var toolCallName: String? = nil
         var toolArgs = ""
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments(let argsDelta) = toolCall.action
-            {
-                toolCallName = toolCall.name
-                toolArgs += argsDelta.content
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                responseText += delta.content
+            if case .toolCall(_, let name, let arguments) = event {
+                toolCallName = name
+                toolArgs += arguments
+            } else if case .appendText(let chunk, _, .response) = event {
+                responseText += chunk
             }
         }
 
