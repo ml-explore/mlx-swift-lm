@@ -55,7 +55,7 @@ func promptLookupDraft(
 /// Generator of tokens using prompt-lookup (n-gram) speculative decoding.
 ///
 /// Structurally a ``SpeculativeTokenIterator`` whose draft source is
-/// ``promptLookupDraft(history:maxNGramLength:minNGramLength:maxTokens:)``
+/// `promptLookupDraft(history:maxNGramLength:minNGramLength:maxTokens:)`
 /// over the prompt plus the accepted tokens, instead of a second model:
 /// proposals are verified by the main model in a single batched forward
 /// pass, accepted while they match the main model's own samples, and the
