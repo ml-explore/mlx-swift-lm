@@ -183,8 +183,10 @@ func makeExecutorRequest(
 /// public `finish()`. In production the framework closes the channel after
 /// respond returns; tests bypass the framework, so iterating the channel
 /// directly hangs forever. We relay events into an `AsyncThrowingStream`
-/// that we own. A producer task runs `respond()`, then cancels a collector
-/// task (which relays channel events into our stream). Our stream's
+/// that we own. A producer task attaches an observer that yields readable
+/// `GenerationEvent`s into our stream, then runs `respond()` and cancels a
+/// collector task that drains and discards the channel's opaque events (just
+/// enough to keep `respond()`'s sends from stalling). Our stream's
 /// continuation is finished once both tasks settle, so `for try await`
 /// terminates naturally. Early break from iteration cancels both tasks via
 /// `deinit`, so tests that stop reading mid-generation don't waste GPU
