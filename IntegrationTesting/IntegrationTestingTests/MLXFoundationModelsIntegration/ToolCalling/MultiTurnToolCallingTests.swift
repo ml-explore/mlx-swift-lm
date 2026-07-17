@@ -135,15 +135,10 @@ struct MultiTurnToolCallingTests {
         var madeToolCall = false
 
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments = toolCall.action
-            {
+            if case .toolCall = event {
                 madeToolCall = true
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                textContent += delta.content
+            } else if case .appendText(let chunk, _, .response) = event {
+                textContent += chunk
             }
         }
 
