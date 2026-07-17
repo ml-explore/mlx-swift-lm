@@ -725,8 +725,39 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
             generationObserver?(.updateUsage(input: input, output: output, entryID: entryID))
-            await channel.send(
-                .response(entryID: entryID, action: .updateUsage(input: input, output: output)))
+
+            // TODO: papering over an FM-27 SDK symbol drift -- restore
+            // the channel usage send (the commented-out call at the end of this
+            // block) once the shipping dylib matches its own interface.
+            //
+            // Usage is intentionally NOT forwarded to the FoundationModels
+            // channel on this SDK. The FM-27 beta `.swiftinterface` declares
+            //   Response.Action.updateUsage(input:output:metadata: = [:])
+            // (three parameters), but the shipping FoundationModels dylib only
+            // exports the older two-parameter
+            //   Response.Action.updateUsage(input:output:)
+            // Because our call relies on the `metadata:` default, the compiler
+            // resolves it to the three-parameter symbol, which does not exist
+            // at runtime. dyld cannot bind it: under chained-fixups linking
+            // (the arm64 default) the reference aborts the process the moment
+            // the image loads, and under lazy binding it faults through null
+            // (SIGSEGV at 0x0) the instant this send executes -- crashing every
+            // `respond()` path right after generation completes.
+            //
+            // A runtime `dlsym` guard cannot save this: the compiled reference
+            // to the missing symbol is enough to abort at launch regardless of
+            // any surrounding check. The only safe option is to not reference
+            // the symbol at all, so no `channel.send(.updateUsage(...))` here.
+            //
+            // Effect: the framework does not receive our per-response usage
+            // event, so consumer-visible usage for these responses may be
+            // absent or zero. Tests still observe usage through
+            // `generationObserver` above. When a later SDK ships a dylib that
+            // matches its interface, restore the send:
+            //   await channel.send(
+            //       .response(
+            //           entryID: entryID,
+            //           action: .updateUsage(input: input, output: output)))
         }
 
         static func emitToolCall(
