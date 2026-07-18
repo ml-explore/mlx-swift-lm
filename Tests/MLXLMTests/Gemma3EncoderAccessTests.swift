@@ -2,19 +2,23 @@
 
 import Foundation
 import MLX
-import MLXLLM
+@_spi(GemmaEncoder) import MLXLLM
 import MLXNN
 import Testing
 
-/// Verifies that the public Gemma 3 surface (`Gemma3Model.embedTokens`,
-/// `Gemma3Model.layers`, `Gemma3TransformerBlock.callAsFunction`, and the
-/// config's `hiddenSize`/`hiddenLayers`) is sufficient for a CLIENT module to
-/// implement an encoder-style all-hidden-states tap — e.g. using Gemma 3 as a
-/// frozen text encoder whose per-layer states condition a downstream model.
+/// Verifies that the `@_spi(GemmaEncoder)` Gemma 3 surface
+/// (`Gemma3Model.embedTokens`, `Gemma3Model.layers`,
+/// `Gemma3TransformerBlock.callAsFunction`, and the config's
+/// `hiddenSize`/`hiddenLayers`) is sufficient for a CLIENT module to implement
+/// an encoder-style all-hidden-states tap — e.g. using Gemma 3 as a frozen text
+/// encoder whose per-layer states condition a downstream model.
 ///
-/// Deliberately imports `MLXLLM` without `@testable`: everything below must
-/// compile against public API only. Runs on a tiny randomly-initialized model;
-/// no weights are downloaded.
+/// Deliberately imports `MLXLLM` without `@testable`, opting in via
+/// `@_spi(GemmaEncoder)` exactly as a client module would: everything below
+/// must compile against declared API only, with no internal access. The SPI
+/// opt-in keeps this surface off the advertised public API of MLXLLM while
+/// still making it usable outside the module. Runs on a tiny
+/// randomly-initialized model; no weights are downloaded.
 struct Gemma3EncoderAccessTests {
 
     private static func makeModel() -> Gemma3TextModel {
