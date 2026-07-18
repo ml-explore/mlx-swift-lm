@@ -28,11 +28,35 @@ private struct AddArgs {
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
+private struct Passport {
+    @Guide(description: "Issuing country.")
+    var country: String
+    @Guide(description: "Passport number.")
+    var number: String
+}
+
+/// Contains a further nested `@Generable` type: `Traveler`'s own `$defs`
+/// body carries a `"$ref": "#/$defs/Passport"`, exercising refs that live
+/// inside other defs (not just under the schema root).
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
 private struct Traveler {
     @Guide(description: "Full name.")
     var name: String
     @Guide(description: "Age.")
     var age: Int
+    @Guide(description: "Travel document.")
+    var passport: Passport
+}
+
+/// No nested `@Generable` at all — but the description mentions the
+/// `#/$defs/` pointer text, which a naive string-level ref rewrite would
+/// mangle.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct PointerDocArgs {
+    @Guide(description: "A JSON Pointer such as #/$defs/Foo to resolve.")
+    var pointer: String
 }
 
 /// Arguments containing a nested `@Generable` type: `GenerationSchema`
@@ -210,6 +234,8 @@ struct ToolCallingSchemaTests {
         let defs = parsed["$defs"] as? [String: Any] ?? [:]
         #expect(defs["book_trip__Traveler"] != nil)
         #expect(defs["cancel_trip__Traveler"] != nil)
+        #expect(defs["book_trip__Passport"] != nil)
+        #expect(defs["cancel_trip__Passport"] != nil)
 
         let refs = collectRefs(in: parsed)
         #expect(!refs.isEmpty, "nested @Generable arguments must produce $refs")
@@ -218,6 +244,26 @@ struct ToolCallingSchemaTests {
             let key = String(ref.dropFirst("#/$defs/".count))
             #expect(defs[key] != nil, "dangling $ref: \(ref)")
         }
+    }
+
+    @Test
+    func nonRefStringMentioningDefsPointerIsNotRewritten() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // The ref rewrite must only touch strings under a `$ref` key: a
+        // description (or const/enum/default/pattern) that merely mentions
+        // the "#/$defs/" pointer text has to survive verbatim.
+        let probe = Transcript.ToolDefinition(
+            name: "probe_tool",
+            description: "Resolves JSON Pointers",
+            parameters: PointerDocArgs.generationSchema
+        )
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: [probe])
+        let strings = collectStringValues(in: try parseAsDictionary(json))
+
+        // The pointer text made it into the schema...
+        #expect(strings.contains { $0.contains("#/$defs/") })
+        // ...and came through untouched by the namespace rewrite.
+        #expect(strings.allSatisfy { !$0.contains("probe_tool__") })
     }
 
     @Test
@@ -373,6 +419,21 @@ struct ToolCallingSchemaTests {
             return [:]
         }
         return obj
+    }
+
+    /// Recursively collects every string value in a parsed JSON tree
+    /// (dictionary values and array elements, at any depth).
+    private func collectStringValues(in value: Any) -> [String] {
+        switch value {
+        case let string as String:
+            return [string]
+        case let object as [String: Any]:
+            return object.values.flatMap { collectStringValues(in: $0) }
+        case let array as [Any]:
+            return array.flatMap { collectStringValues(in: $0) }
+        default:
+            return []
+        }
     }
 
     /// Recursively collects every `"$ref"` string value in a parsed JSON tree.
