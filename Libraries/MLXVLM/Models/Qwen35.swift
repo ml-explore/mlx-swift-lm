@@ -238,12 +238,11 @@ enum Qwen35Language {
                     indices[index] = Int32(dimension)
                 }
             }
-            self.mropeIndices = MLXArray(indices)
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let indices = mropeIndices[.newAxis, .newAxis, .newAxis, 0...]
-            return takeAlong(freqs, indices, axis: 0).squeezed(axis: 0)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(x: MLXArray, positionIds: MLXArray) -> (MLXArray, MLXArray) {
