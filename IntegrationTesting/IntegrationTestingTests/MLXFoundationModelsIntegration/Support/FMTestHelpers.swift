@@ -183,15 +183,17 @@ func makeExecutorRequest(
 /// public `finish()`. In production the framework closes the channel after
 /// respond returns; tests bypass the framework, so iterating the channel
 /// directly hangs forever. We relay events into an `AsyncThrowingStream`
-/// that we own. A producer task runs `respond()`, then cancels a collector
-/// task (which relays channel events into our stream). Our stream's
+/// that we own. A producer task attaches an observer that yields readable
+/// `GenerationEvent`s into our stream, then runs `respond()` and cancels a
+/// collector task that drains and discards the channel's opaque events (just
+/// enough to keep `respond()`'s sends from stalling). Our stream's
 /// continuation is finished once both tasks settle, so `for try await`
 /// terminates naturally. Early break from iteration cancels both tasks via
 /// `deinit`, so tests that stop reading mid-generation don't waste GPU
 /// compute on tokens nobody wants.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class TestResponseStream: AsyncSequence, @unchecked Sendable {
-    typealias Element = LanguageModelExecutorGenerationChannel.Event
+    typealias Element = MLXLanguageModel.Executor.GenerationEvent
     typealias AsyncIterator = AsyncThrowingStream<Element, Error>.AsyncIterator
 
     private let stream: AsyncThrowingStream<Element, Error>
@@ -207,27 +209,35 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
         let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
         self.stream = stream
 
-        // Collector: relay events from the framework channel into our stream.
+        // The SDK's channel events are opaque, so we read generated content via
+        // the executor's observation hook instead. We still must drain the
+        // channel: respond() sends into it, and without a consumer those sends
+        // would stall. The drained events are discarded; content comes from the
+        // observer below.
         let collector = Task<Void, Never> {
             do {
-                for try await event in channel {
-                    continuation.yield(event)
-                }
+                for try await _ in channel {}
             } catch {
                 // Including CancellationError; we don't depend on cancellation here.
             }
         }
         self.collectorTask = collector
 
-        // Producer: run respond(), then finish our stream so the test's
-        // iteration terminates.
+        // Producer: attach the observer (task-local, so it also reaches the
+        // guided-path forwarder child task), run respond(), then finish our
+        // stream so the test's iteration terminates.
         self.producerTask = Task<Void, Never> {
             defer { collector.cancel() }
-            do {
-                try await executor.respond(to: request, model: model, streamingInto: channel)
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
+            await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
+                continuation.yield(event)
+            }) {
+                do {
+                    try await executor.respond(
+                        to: request, model: model, streamingInto: channel)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
         }
     }

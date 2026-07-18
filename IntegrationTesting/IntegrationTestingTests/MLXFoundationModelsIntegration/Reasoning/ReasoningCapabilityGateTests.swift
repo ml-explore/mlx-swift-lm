@@ -67,14 +67,10 @@ struct ReasoningCapabilityGateTests {
         var response = ""
         var reasoning = ""
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
-            {
-                response += fragment.content
-            } else if let r = event as? LanguageModelExecutorGenerationChannel.Reasoning,
-                case .appendText(let fragment) = r.action
-            {
-                reasoning += fragment.content
+            if case .appendText(let chunk, _, .response) = event {
+                response += chunk
+            } else if case .appendText(let chunk, _, .reasoning) = event {
+                reasoning += chunk
             }
         }
         // No <think> leak.

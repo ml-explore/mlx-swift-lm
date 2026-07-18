@@ -665,6 +665,114 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Executes inference requests for the model.
     public struct Executor: LanguageModelExecutor, Sendable {
 
+        // MARK: - Test observation hook
+        //
+        // The macOS 27 FoundationModels SDK made the generation-channel event
+        // and action types opaque: a consumer can no longer read back what was
+        // streamed. Tests need to read it, and the only place the content is
+        // available is here, right before it enters the channel. These emit
+        // helpers are the sole send sites for each event kind; each notifies an
+        // optional observer with a readable mirror. The observer is nil in
+        // shipping builds (only tests attach one via the task-local), so the
+        // arguments handed to `channel.send` are identical to before and
+        // behavior is unchanged.
+
+        /// Readable, internal-only mirror of the events this executor streams
+        /// into the opaque FoundationModels channel.
+        enum GenerationEvent: Sendable {
+            enum Destination: Sendable { case response, reasoning }
+            case appendText(String, entryID: String?, destination: Destination)
+            case toolCall(id: String, name: String, arguments: String)
+            case updateMetadata([String: any Sendable & Codable & Equatable], entryID: String?)
+            case updateUsage(
+                input: LanguageModelExecutorGenerationChannel.Usage.Input,
+                output: LanguageModelExecutorGenerationChannel.Usage.Output,
+                entryID: String?)
+        }
+
+        /// Attached only by tests (via `$generationObserver.withValue`); nil in
+        /// shipping. Task-local so it reaches child tasks that also emit (e.g.
+        /// the guided-generation text forwarder).
+        @TaskLocal static var generationObserver: (@Sendable (GenerationEvent) -> Void)?
+
+        static func emit(
+            text: String, entryID: String?, destination: GenerationEvent.Destination,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generationObserver?(.appendText(text, entryID: entryID, destination: destination))
+            switch destination {
+            case .response:
+                await channel.send(
+                    .response(entryID: entryID, action: .appendText(text, tokenCount: 1)))
+            case .reasoning:
+                await channel.send(
+                    .reasoning(entryID: entryID, action: .appendText(text, tokenCount: 1)))
+            }
+        }
+
+        static func emitMetadata(
+            _ values: [String: any Sendable & Codable & Equatable], entryID: String?,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generationObserver?(.updateMetadata(values, entryID: entryID))
+            await channel.send(.response(entryID: entryID, action: .updateMetadata(values)))
+        }
+
+        static func emitUsage(
+            input: LanguageModelExecutorGenerationChannel.Usage.Input,
+            output: LanguageModelExecutorGenerationChannel.Usage.Output,
+            entryID: String?,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generationObserver?(.updateUsage(input: input, output: output, entryID: entryID))
+
+            // TODO: papering over an FM-27 SDK symbol drift -- restore
+            // the channel usage send (the commented-out call at the end of this
+            // block) once the shipping dylib matches its own interface.
+            //
+            // Usage is intentionally NOT forwarded to the FoundationModels
+            // channel on this SDK. The FM-27 beta `.swiftinterface` declares
+            //   Response.Action.updateUsage(input:output:metadata: = [:])
+            // (three parameters), but the shipping FoundationModels dylib only
+            // exports the older two-parameter
+            //   Response.Action.updateUsage(input:output:)
+            // Because our call relies on the `metadata:` default, the compiler
+            // resolves it to the three-parameter symbol, which does not exist
+            // at runtime. dyld cannot bind it: under chained-fixups linking
+            // (the arm64 default) the reference aborts the process the moment
+            // the image loads, and under lazy binding it faults through null
+            // (SIGSEGV at 0x0) the instant this send executes -- crashing every
+            // `respond()` path right after generation completes.
+            //
+            // A runtime `dlsym` guard cannot save this: the compiled reference
+            // to the missing symbol is enough to abort at launch regardless of
+            // any surrounding check. The only safe option is to not reference
+            // the symbol at all, so no `channel.send(.updateUsage(...))` here.
+            //
+            // Effect: the framework does not receive our per-response usage
+            // event, so consumer-visible usage for these responses may be
+            // absent or zero. Tests still observe usage through
+            // `generationObserver` above. When a later SDK ships a dylib that
+            // matches its interface, restore the send:
+            //   await channel.send(
+            //       .response(
+            //           entryID: entryID,
+            //           action: .updateUsage(input: input, output: output)))
+        }
+
+        static func emitToolCall(
+            id: String, name: String, arguments: String, entryID: String,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generationObserver?(.toolCall(id: id, name: name, arguments: arguments))
+            await channel.send(
+                .toolCalls(
+                    entryID: entryID,
+                    action: .toolCall(
+                        id: id, name: name,
+                        action: .appendArguments(arguments, tokenCount: 1))))
+        }
+
         /// Default `maxTokens` when the caller doesn't set
         /// `GenerationOptions.maximumResponseTokens`. Applied uniformly
         /// across guided-JSON, tool-calling, and unconstrained generation
@@ -711,9 +819,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             switch kind {
             case .greedy:
                 return .greedy
-            case .top(let k, _):
+            case .randomTopK(let k, _):
                 return .topK(k)
-            case .nucleus(let threshold, _):
+            case .randomProbabilityThreshold(let threshold, _):
                 return .nucleus(threshold)
             @unknown default:
                 return nil
@@ -895,13 +1003,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             do {
                 // Send metadata first
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .updateMetadata([
-                            "modelID": modelID,
-                            "requestID": request.id.uuidString,
-                        ])))
+                await Self.emitMetadata(
+                    ["modelID": modelID, "requestID": request.id.uuidString],
+                    entryID: entryID, into: channel)
 
                 // Generate tokens inside actor isolation. `messages` carries
                 // non-Sendable `Chat.Message` instances (UserInput.Image and
@@ -1064,7 +1168,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let allTools =
                             Array(request.enabledToolDefinitions) + [finalAnswerDef]
 
-                        // Re-tokenize using the model's native tool-aware chat
+                        // Re-render using the model's native tool-aware chat
                         // template (Qwen/Llama/Phi/Gemma all ship one in their
                         // tokenizer_config.json). This is what teaches the model
                         // *what* tools exist and how to decide between them; the
@@ -1072,8 +1176,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // whatever tool call it emits.
                         let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                             from: allTools)
-                        let tokenizerMessages = DefaultMessageGenerator().generate(
-                            messages: messages)
 
                         // Think-then-call is gated to the enable_thinking
                         // family (Qwen3/QwQ): their template both renders the tool
@@ -1098,12 +1200,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 forThinkingEnabled: Self.thinkingEnabled(
                                     for: request.contextOptions.reasoningLevel))
                         }
-                        let toolAwareTokens = try context.tokenizer.applyChatTemplate(
-                            messages: tokenizerMessages,
-                            tools: toolSpecs,
-                            additionalContext: reasoningContext
-                        )
-                        let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
+                        // Prepare through the model's UserInputProcessor (like the
+                        // unconstrained and guided paths) instead of hand-building
+                        // an LMInput from raw applyChatTemplate output: processors
+                        // produce the token rank their model family requires (LLM
+                        // processors emit [N]; VLM processors emit [1, N], and VLM
+                        // `prepare` fatally aborts on 1-D input), and they carry
+                        // image/video content through to the model.
+                        let toolAwareInput = try await context.processor.prepare(
+                            input: UserInput(
+                                chat: messages,
+                                tools: toolSpecs,
+                                additionalContext: reasoningContext))
 
                         let toolCallingGrammar =
                             try SchemaConverter.encodeToolCallingGrammar(
@@ -1179,12 +1287,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 // `</think>`). Don't prefill a truncated thought
                                 // into the grammar — signal and finish. Phase 1
                                 // already synchronized the GPU on its way out.
-                                await channel.send(
-                                    .response(
-                                        entryID: entryID,
-                                        action: .updateMetadata([
-                                            "incompleteOutput": true
-                                        ])))
+                                await Self.emitMetadata(
+                                    ["incompleteOutput": true], entryID: entryID, into: channel)
                                 return
                             }
                         }
@@ -1195,8 +1299,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let phase2Input =
                             reasoningTokenIDs.isEmpty
                             ? toolAwareInput
-                            : LMInput(
-                                tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
+                            : Self.continuationInput(
+                                from: toolAwareInput, appending: reasoningTokenIDs)
                         // Shared budget (match the unconstrained path): the
                         // envelope continues under the remaining budget, floored
                         // at the completion reserve so it always has room to close
@@ -1244,30 +1348,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             // clamped ≤ total.
                             let reasoningCount = reasoningTokenIDs.count
                             let totalOutput = generatedTokenCount + reasoningCount
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateUsage(
-                                        input: .init(
-                                            totalTokenCount: toolAwareInput.text.tokens
-                                                .size,
-                                            cachedTokenCount: 0
-                                        ),
-                                        output: .init(
-                                            totalTokenCount: totalOutput,
-                                            reasoningTokenCount: Swift.min(
-                                                reasoningCount, totalOutput)
-                                        )
-                                    )
-                                ))
+                            await Self.emitUsage(
+                                input: .init(
+                                    totalTokenCount: toolAwareInput.text.tokens.size,
+                                    cachedTokenCount: 0),
+                                output: .init(
+                                    totalTokenCount: totalOutput,
+                                    reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
+                                entryID: entryID, into: channel)
                         }
 
                         if incomplete {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateMetadata(["incompleteOutput": true]))
-                            )
+                            await Self.emitMetadata(
+                                ["incompleteOutput": true], entryID: entryID, into: channel)
                         }
                     } else if let schemaJSON {
                         // Guided generation: stream text deltas as they arrive.
@@ -1322,11 +1415,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             .makeStream()
                         async let forwarder: Void = {
                             for await text in textStream {
-                                await channel.send(
-                                    .response(
-                                        entryID: entryID,
-                                        action: .appendText(text, tokenCount: 1)
-                                    ))
+                                await Self.emit(
+                                    text: text, entryID: entryID, destination: .response,
+                                    into: channel)
                             }
                         }()
 
@@ -1357,28 +1448,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         await forwarder
 
                         if let generatedTokenCount {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateUsage(
-                                        input: .init(
-                                            totalTokenCount: input.text.tokens.size,
-                                            cachedTokenCount: 0
-                                        ),
-                                        output: .init(
-                                            totalTokenCount: generatedTokenCount,
-                                            reasoningTokenCount: 0
-                                        )
-                                    )
-                                ))
+                            await Self.emitUsage(
+                                input: .init(
+                                    totalTokenCount: input.text.tokens.size, cachedTokenCount: 0),
+                                output: .init(
+                                    totalTokenCount: generatedTokenCount, reasoningTokenCount: 0),
+                                entryID: entryID, into: channel)
                         }
 
                         if incomplete {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateMetadata(["incompleteOutput": true]))
-                            )
+                            await Self.emitMetadata(
+                                ["incompleteOutput": true], entryID: entryID, into: channel)
                         }
                     } else {
                         try await runTextGeneration(
@@ -1441,31 +1521,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .appendText(text, tokenCount: 1)
-                        ))
+                    await Self.emit(
+                        text: text, entryID: entryID, destination: .response, into: channel)
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
                     // authoritative scalar token counts (`promptTokenCount`
                     // is the prompt; `generationTokenCount` is the
                     // model-generated completion -- see Evaluate.swift's
                     // `GenerateCompletionInfo` definition).
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .updateUsage(
-                                input: .init(
-                                    totalTokenCount: info.promptTokenCount,
-                                    cachedTokenCount: 0
-                                ),
-                                output: .init(
-                                    totalTokenCount: info.generationTokenCount,
-                                    reasoningTokenCount: 0
-                                )
-                            )
-                        ))
+                    await Self.emitUsage(
+                        input: .init(totalTokenCount: info.promptTokenCount, cachedTokenCount: 0),
+                        output: .init(
+                            totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
+                        entryID: entryID, into: channel)
                 case .toolCall(_):
                     break
                 }
@@ -1582,10 +1650,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // empty or partial answer for the model's chosen response — mirrors
             // the guided path's `incompleteOutput` convention.
             if emitter.isInsideReasoning {
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .updateMetadata(["incompleteOutput": true])))
+                await Self.emitMetadata(
+                    ["incompleteOutput": true], entryID: responseEntryID, into: channel)
             }
 
             if let info = completionInfo {
@@ -1593,21 +1659,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // `.updateUsage` (the framework's aggregator replaces wholesale,
                 // so we must not also rely on per-delta auto-summing). The
                 // reasoning count is clamped to never exceed the total.
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .updateUsage(
-                            input: .init(
-                                totalTokenCount: info.promptTokenCount,
-                                cachedTokenCount: 0
-                            ),
-                            output: .init(
-                                totalTokenCount: info.generationTokenCount,
-                                reasoningTokenCount: min(
-                                    reasoningTokenCount, info.generationTokenCount)
-                            )
-                        )
-                    ))
+                await Self.emitUsage(
+                    input: .init(totalTokenCount: info.promptTokenCount, cachedTokenCount: 0),
+                    output: .init(
+                        totalTokenCount: info.generationTokenCount,
+                        reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
+                    entryID: responseEntryID, into: channel)
             }
         }
 
@@ -1620,15 +1677,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             switch segment {
             case .reasoning(let text):
-                await channel.send(
-                    .reasoning(
-                        entryID: reasoningEntryID,
-                        action: .appendText(text, tokenCount: 1)))
+                await Self.emit(
+                    text: text, entryID: reasoningEntryID, destination: .reasoning, into: channel)
             case .response(let text):
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .appendText(text, tokenCount: 1)))
+                await Self.emit(
+                    text: text, entryID: responseEntryID, destination: .response, into: channel)
             }
         }
 
@@ -1680,6 +1733,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Decodes the rendered prompt's tail and asks whether it ends inside an
         /// open reasoning block (some model families prefill the opening
         /// delimiter).
+        /// Build the Phase-2 continuation input: the tool-aware prompt with the
+        /// completed reasoning token IDs appended along the sequence axis.
+        ///
+        /// The prompt tokens keep whatever rank the model's processor produced
+        /// ([N] from LLM processors, [1, N] from VLM processors — VLM `prepare`
+        /// requires the batched form), and processed image/video content is
+        /// carried through so a VLM's Phase-2 prefill still sees its pixels.
+        static func continuationInput(
+            from input: LMInput, appending tokenIDs: [Int]
+        ) -> LMInput {
+            let promptTokens = input.text.tokens
+            var appended = MLXArray(tokenIDs.map { Int32($0) })
+                .asType(promptTokens.dtype)
+            if promptTokens.ndim == 2 {
+                appended = appended[.newAxis, 0...]
+            }
+            return LMInput(
+                text: .init(tokens: concatenated([promptTokens, appended], axis: -1)),
+                image: input.image,
+                video: input.video)
+        }
+
         private static func reasoningPrimedInside(
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
@@ -1803,11 +1878,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .appendText(outputBuffer, tokenCount: 1)
-                    ))
+                await Self.emit(
+                    text: outputBuffer, entryID: entryID, destination: .response, into: channel)
                 return
             }
 
@@ -1824,11 +1896,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 } else {
                     text = ""
                 }
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .appendText(text, tokenCount: 1)
-                    ))
+                await Self.emit(
+                    text: text, entryID: entryID, destination: .response, into: channel)
             } else {
                 guard
                     let args = obj["arguments"],
@@ -1837,15 +1906,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 else {
                     return
                 }
-                await channel.send(
-                    .toolCalls(
-                        entryID: toolCallsEntryID,
-                        action: .toolCall(
-                            id: UUID().uuidString,
-                            name: name,
-                            action: .appendArguments(argsStr, tokenCount: 1)
-                        )
-                    ))
+                await Self.emitToolCall(
+                    id: UUID().uuidString, name: name, arguments: argsStr,
+                    entryID: toolCallsEntryID, into: channel)
             }
         }
 

@@ -69,23 +69,18 @@ struct FoundationModelsToolCallingTests {
         var textContent = ""
 
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments(let argsDelta) = toolCall.action
-            {
-                if toolCall.name == "get_weather" {
+            if case .toolCall(_, let name, let arguments) = event {
+                if name == "get_weather" {
                     sawWeatherToolCall = true
-                    let data = Data(argsDelta.content.utf8)
+                    let data = Data(arguments.utf8)
                     let parsed = try? JSONSerialization.jsonObject(with: data)
                     #expect(
                         parsed != nil,
-                        "Tool call arguments should be valid JSON: \(argsDelta.content)")
+                        "Tool call arguments should be valid JSON: \(arguments)")
                 }
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
+            } else if case .appendText(let chunk, _, .response) = event {
                 sawText = true
-                textContent += delta.content
+                textContent += chunk
             }
         }
 
@@ -148,16 +143,11 @@ struct FoundationModelsToolCallingTests {
         var textContent = ""
 
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments(let argsDelta) = toolCall.action
-            {
-                toolCallName = toolCall.name
-                toolCallArguments = argsDelta.content
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
-            {
-                textContent += delta.content
+            if case .toolCall(_, let name, let arguments) = event {
+                toolCallName = name
+                toolCallArguments = arguments
+            } else if case .appendText(let chunk, _, .response) = event {
+                textContent += chunk
             }
         }
 
