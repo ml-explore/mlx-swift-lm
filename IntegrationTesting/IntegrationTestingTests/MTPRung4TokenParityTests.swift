@@ -1,8 +1,10 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import HuggingFace
 import IntegrationTestHelpers
 import MLX
+import MLXHuggingFace
 import MLXLMCommon
 import MLXVLM
 import Testing
@@ -49,9 +51,9 @@ private struct Rung4BoundDrafter {
     let target: Gemma4
 }
 
-nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter?, Error>?
+nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter, Error>?
 
-private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
+private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
     if let cached = _rung4Cache {
         switch cached {
         case .success(let value): return value
@@ -59,7 +61,7 @@ private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
         }
     }
     do {
-        let result = try loadRung4Drafter()
+        let result = try await loadRung4Drafter()
         _rung4Cache = .success(result)
         return result
     } catch {
@@ -68,15 +70,22 @@ private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
     }
 }
 
-private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
-    guard let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-    else {
-        return nil
-    }
-    guard let targetDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit")
-    else {
-        return nil
-    }
+private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
+private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
+
+/// Shared downloader for the Rung 4 target+drafter pair. Fetches to the
+/// local HF cache on first use; subsequent tests and runs reuse the cache.
+private let downloader: any Downloader = #hubDownloader()
+
+private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
+    let drafterDir = try await downloader.download(
+        id: rung4DrafterModelId, revision: nil,
+        matching: ["*.safetensors", "*.json"],
+        useLatest: false, progressHandler: { _ in })
+    let targetDir = try await downloader.download(
+        id: rung4TargetModelId, revision: nil,
+        matching: ["*.safetensors", "*.json"],
+        useLatest: false, progressHandler: { _ in })
 
     // Drafter — bf16, no quantization.
     let drafterCfg = try JSONDecoder().decode(
@@ -112,6 +121,29 @@ private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
 // fixture inputs. They do NOT go through the full
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
+//
+// KNOWN ISSUE (as of this writing): `case_02_block4` and `case_03_block6`
+// fail against the currently-pinned `fixturesRevision`. This was
+// root-caused by cross-checking against a live re-run of the pinned
+// `mlx-vlm` reference (`draft_block`, same checkpoints, same fixture
+// inputs) — the fresh Python run reproduces Swift's output bit-for-bit
+// (`[89786, 174335, 531]` / `[537, 1515, 1399, 61333, 85815]`), NOT the
+// fixture's saved "expected" values (`[89786, 51297, 546]` /
+// `[537, 49613, 231982, 163844, 1344]`). Swift and current Python agree;
+// only the pre-recorded fixture disagrees with both, most likely because
+// the published checkpoint weights were updated after these two fixtures
+// were generated. This is the same class of staleness previously fixed
+// for the `drafter_forward` fixtures in commit `7e2f2b8` ("Stabilize
+// integration test skip semantics; bump fixture dataset revision").
+// `case_01_block2` (single-step, no autoregressive continuation) is
+// unaffected and still passes.
+//
+// Fix requires regenerating `drafter_block/case_02_block4.safetensors`
+// and `case_03_block6.safetensors` via `tools/generate_mtp_fixtures.py`,
+// re-uploading to the `angelsbrood/gemma4-mtp-fixtures` HF dataset, and
+// bumping `fixturesRevision` below (see `tools/fixtures/README.md`).
+// Left failing intentionally until that regeneration happens — do not
+// "fix" this by changing `draftBlock`'s implementation.
 
 @Suite(.serialized)
 struct Rung4TokenParityTests {
@@ -137,12 +169,7 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
     guard let fixturesDir = await mtpFixturesDirOrSkip(name: name) else {
         return
     }
-    guard let bound = try sharedBoundDrafter() else {
-        Issue.record(
-            "required checkpoint not in HF cache (drafter or 31B 8-bit target); skipping Rung 4 \(name)"
-        )
-        return
-    }
+    let bound = try await sharedBoundDrafter()
     let model = bound.drafter
     let target = bound.target
 

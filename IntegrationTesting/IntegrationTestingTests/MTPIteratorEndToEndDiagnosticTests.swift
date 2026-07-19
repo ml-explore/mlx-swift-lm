@@ -47,27 +47,38 @@ private struct EmissionLog: LogitProcessor {
     }
 }
 
+private let target31BModelId = "mlx-community/gemma-4-31b-it-8bit"
+private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
+
+/// Shared downloader for the 31B target+drafter pair. Fetches to the local
+/// HF cache on first use (~35GB); subsequent tests and runs reuse the cache.
+private let downloader: any Downloader = #hubDownloader()
+
 private func loadTargetAndDrafter(
     targetModelId: String,
     drafterModelId: String,
     drafterConfigType: any Codable.Type = Gemma4AssistantConfiguration.self
-) async throws -> LoadedPair? {
-    guard let targetDir = hfSnapshotDir(modelId: targetModelId) else { return nil }
-    guard let drafterDir = hfSnapshotDir(modelId: drafterModelId) else { return nil }
-
-    // Target — VLM factory's directory-load path gives us a full ModelContext
-    // (model + tokenizer + processor + configuration) without needing a
-    // Downloader. The 8-bit variant isn't in VLMRegistry but the factory
-    // resolves model type from `config.json` at the directory root.
+) async throws -> LoadedPair {
+    // Target — VLM factory's downloader-based load path gives us a full
+    // ModelContext (model + tokenizer + processor + configuration),
+    // auto-fetching the snapshot from the HF Hub if it isn't cached yet.
     let context = try await VLMModelFactory.shared.load(
-        from: targetDir,
-        using: #huggingFaceTokenizerLoader()
+        from: downloader,
+        using: #huggingFaceTokenizerLoader(),
+        configuration: .init(id: targetModelId)
     )
 
     // Drafter — same pattern as `MTPRung4TokenParityTests.loadRung4Drafter`:
-    // decode the Gemma4Assistant config, instantiate, then `loadWeights`.
-    // No explicit binding needed: the iterator passes the target through
-    // `draftBlock(target:...)` per round.
+    // fetch the snapshot, decode the Gemma4Assistant config, instantiate,
+    // then `loadWeights`. No explicit binding needed: the iterator passes
+    // the target through `draftBlock(target:...)` per round.
+    let drafterDir = try await downloader.download(
+        id: drafterModelId,
+        revision: nil,
+        matching: ["*.safetensors", "*.json"],
+        useLatest: false,
+        progressHandler: { _ in }
+    )
     let cfg = try JSONDecoder().decode(
         Gemma4AssistantConfiguration.self,
         from: Data(contentsOf: drafterDir.appendingPathComponent("config.json")))
@@ -95,17 +106,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// after a real number is on the table.
     @Test
     func testMTP31BPairProducesAcceptedDrafts() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
@@ -187,17 +191,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// (n=66 vs n=29) and is the better regression gate.
     @Test
     func testMTP31BBlockSize4AcceptanceLifted() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
@@ -261,17 +258,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// pre-fix baseline while leaving ~8pp headroom for variance.
     @Test
     func testMTP31BBlockSize6AcceptanceLifted() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
@@ -332,17 +322,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// output stream silently started 1 or 2 positions ahead of baseline.
     @Test
     func testMTP31BMatchesBaselineByteIdentical() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
         let userInput = UserInput(chat: [.user(prompt)])
@@ -461,17 +444,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// configuration.
     @Test
     func testMTP31BLongerStreamProducesValidContinuation() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
         let userInput = UserInput(chat: [.user(prompt)])
@@ -595,17 +571,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// this stream length and the Phase B "failure" is reframed.
     @Test
     func testBaselineSelfDeterminism128() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
         let userInput = UserInput(chat: [.user(prompt)])
@@ -661,17 +630,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// quantization triggers around round 3.
     @Test
     func testMTP31BQuantizationOnsetEngagesPassthrough() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
@@ -762,17 +724,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// position from the recorded-sequence start.
     @Test
     func testMTPLogitProcessorReceivesOnlyEmittedTokens() async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
@@ -912,17 +867,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
         maxTokens: Int,
         blockSize: Int = 4
     ) async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: "mlx-community/gemma-4-31b-it-8bit",
-                drafterModelId: "mlx-community/gemma-4-31B-it-assistant-bf16"
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (31B 8-bit target or 31B drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: target31BModelId,
+            drafterModelId: drafter31BModelId
+        )
 
         let userInput = UserInput(chat: [.user(prompt)])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
@@ -995,17 +943,10 @@ struct MTPIteratorEndToEndDiagnosticTests {
         targetModelId: String,
         drafterModelId: String
     ) async throws {
-        guard
-            let loaded = try await loadTargetAndDrafter(
-                targetModelId: targetModelId,
-                drafterModelId: drafterModelId
-            )
-        else {
-            Issue.record(
-                "required checkpoint not in HF cache (\(label) target or \(label) drafter); skipping"
-            )
-            return
-        }
+        let loaded = try await loadTargetAndDrafter(
+            targetModelId: targetModelId,
+            drafterModelId: drafterModelId
+        )
 
         let userInput = UserInput(chat: [
             .user("Why is the sky blue? Explain in one paragraph.")
