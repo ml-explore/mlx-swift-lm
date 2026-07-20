@@ -1,5 +1,6 @@
 // Copyright © 2024 Apple Inc.
 
+import Foundation
 import MLX
 import MLXLMCommon
 
@@ -40,11 +41,15 @@ extension LLMModel {
                 // prefill cannot be interrupted, so apps cannot stop GPU submissions
                 // in time when entering the background. See ml-explore/mlx-swift-examples#230.
                 try Task.checkCancellation()
-                let input = y[.newAxis, ..<prefillStepSize]
-                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
-                asyncEval(cache)
-                y = y[prefillStepSize...]
+                // Pool per chunk: long prompts run hundreds of chunk forwards
+                // before returning to any autorelease boundary.
+                autoreleasepool {
+                    let input = y[.newAxis, ..<prefillStepSize]
+                    let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
+                    state = output.state
+                    asyncEval(cache)
+                    y = y[prefillStepSize...]
+                }
             }
 
             // Single sync after the loop to flush any remaining async work.

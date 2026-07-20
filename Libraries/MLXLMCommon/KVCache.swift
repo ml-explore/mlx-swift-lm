@@ -801,7 +801,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
-private func resolvedKVQuantizationGroupSize(
+func resolvedKVQuantizationGroupSize(
     requested: Int,
     keyHeadDim: Int,
     valueHeadDim: Int
@@ -1581,6 +1581,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
+    case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
     default: return "KVCache"
@@ -1732,6 +1733,22 @@ private func restoreCacheFromMetaState(
     case "ArraysCache":
         let cache = ArraysCache(size: 0)
         cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return cache
+
+    case "TurboQuantKVCache":
+        guard metaState.count >= 5,
+            let bits = Int(metaState[1]),
+            let keyBits = Int(metaState[2]),
+            let valueBits = Int(metaState[3]),
+            let seed = UInt64(metaState[4])
+        else {
+            throw KVCacheError(
+                message: "Invalid TurboQuantKVCache metaState")
+        }
+        let cache = TurboQuantKVCache(
+            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
+        cache.state = state
+        cache.metaState = metaState
         return cache
 
     case "CacheList":
@@ -2008,8 +2025,9 @@ public func resolveAffineScheme(_ scheme: String?) -> (bits: Int, groupSize: Int
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
 ///   - kvScheme: Scheme selector; overrides kvBits when it names a built-in
-///     affine scheme ("affine4", "affine8"). Unrecognized schemes are left to
-///     custom cache implementations and do not quantize here.
+///     affine scheme ("affine4", "affine8") or a TurboQuant scheme
+///     ("turbo4", "turbo4v2", ...). Unrecognized schemes are left to custom
+///     cache implementations and do not quantize here.
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
@@ -2017,6 +2035,18 @@ public func maybeQuantizeKVCache(
     quantizedKVStart: Int = 0,
     kvScheme: String? = nil
 ) {
+    // TurboQuant schemes convert eligible layers to TurboQuantKVCache
+    // (handled in TurboQuantKVCache.swift to keep this file scheme-agnostic).
+    if let scheme = kvScheme, let turbo = resolveTurboScheme(scheme) {
+        maybeTurboQuantizeKVCache(
+            cache: &cache,
+            keyBits: turbo.keyBits,
+            valueBits: turbo.valueBits,
+            quantizedKVStart: quantizedKVStart
+        )
+        return
+    }
+
     // Resolve effective bits: kvScheme overrides kvBits.
     let effectiveBits: Int
     let effectiveGroupSize: Int
