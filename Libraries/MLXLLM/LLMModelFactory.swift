@@ -573,7 +573,7 @@ public final class LLMModelFactory: GenericModelFactory {
         }
 
         // Load EOS token IDs from config.json, with optional override from generation_config.json
-        var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+        var eosTokenIds = baseConfig.effectiveEOSTokenIds
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         let generationConfig: GenerationConfigFile? =
             if let generationData = try? Data(contentsOf: generationConfigURL) {
