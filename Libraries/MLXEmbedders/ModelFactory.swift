@@ -169,7 +169,6 @@ public struct EmbedderModelContext: Sendable {
 public final class EmbedderModelFactory: GenericModelFactory {
 
     public typealias ContextType = EmbedderModelContext
-    public typealias ContainerType = EmbedderModelContainerConstraint
 
     public init(
         typeRegistry: ModelTypeRegistry<TrainableEmbeddingModel>,
@@ -254,7 +253,39 @@ public final class EmbedderModelFactory: GenericModelFactory {
         )
     }
 
-    public func _wrap(_ context: EmbedderModelContext) -> EmbedderModelContainerConstraint {
-        .init(context: context)
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
+    public func loadContainer(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> EmbedderModelContainer {
+        let context = try await load(
+            from: downloader,
+            using: tokenizerLoader,
+            configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return EmbedderModelContainer(context: context)
+    }
+
+    /// Load a model from a local directory, producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
+    public func loadContainer(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader
+    ) async throws -> EmbedderModelContainer {
+        let context = try await load(
+            from: LocalDownloader(url: directory),
+            using: tokenizerLoader,
+            configuration: .init(directory: directory),
+            useLatest: false, progressHandler: { _ in })
+        return EmbedderModelContainer(context: context)
     }
 }

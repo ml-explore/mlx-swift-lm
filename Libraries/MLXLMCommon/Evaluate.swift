@@ -1451,13 +1451,14 @@ public func generate(
 ///     }
 /// }
 /// ```
-public func generate(
-    input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
+public func generate<C: ModelContextProviding>(
+    input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters,
+    context: C,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, parameters: parameters)
+        input: input, model: context.languageModel, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,

@@ -307,7 +307,6 @@ public typealias ModelRegistry = VLMRegistry
 public final class VLMModelFactory: GenericModelFactory, TrainableModelContextLoader {
 
     public typealias ContextType = ModelContext
-    public typealias ContainerType = ModelContainerConstraint
 
     public init(
         typeRegistry: ModelTypeRegistry<TrainableLanguageModel>,

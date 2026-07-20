@@ -121,8 +121,6 @@ public final class MTPDrafterContainer: Sendable {
     }
 }
 
-public typealias MTPDrafterContainerConstraint = MTPDrafterContainer
-
 // MARK: - Cross-model state keys
 //
 // Public ``LMOutput/Key`` declarations for MTP speculative decoding. The

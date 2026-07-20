@@ -31,10 +31,10 @@ import MLXLMCommon
 ///
 /// ## Implementation Note
 ///
-/// Previously the `ModelContainer` held the `EmbedderModelContext` in a `SerialAccessContainer` -- an internal type
-/// that provided a lock-like exclusive access for ``perform(_:)-((ModelContext)->R)`` and ``update(_:)``.
+/// Previously the `EmbedderModelContainer` held the `EmbedderModelContext` in a `SerialAccessContainer` -- an internal type
+/// that provided a lock-like exclusive access for ``perform(_:)-((EmbedderModelContext)->R)`` and ``update(_:)``.
 /// The `EmbedderModelContext` was not `Sendable` and this provided the `@unchecked Sendable` protection needed.
-/// In practice, some code would use ``perform(_:)-((ModelContext)->R)`` to
+/// In practice, some code would use ``perform(_:)-((EmbedderModelContext)->R)`` to
 /// _borrow_ the model.  This wouldn't have been safe if
 /// another thread was mutating through the reference, of course.
 ///
@@ -146,5 +146,3 @@ public final class EmbedderModelContainer: @unchecked (Sendable) {
         }
     }
 }
-
-public typealias EmbedderModelContainerConstraint = EmbedderModelContainer

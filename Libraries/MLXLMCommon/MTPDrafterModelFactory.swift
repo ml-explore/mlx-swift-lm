@@ -44,7 +44,6 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
 /// tokenizer).
 public final class MTPDrafterModelFactory: GenericModelFactory {
     public typealias ContextType = MTPDrafterContext
-    public typealias ContainerType = MTPDrafterContainerConstraint
 
     public static let shared = MTPDrafterModelFactory(
         typeRegistry: MTPDrafterTypeRegistry.shared,
@@ -103,10 +102,5 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
             defaultPrompt: ""
         )
         return MTPDrafterContext(configuration: modelConfig, model: model)
-    }
-
-    @available(*, deprecated, message: "use MTPDrafterContext instead")
-    public func _wrap(_ context: MTPDrafterContext) -> MTPDrafterContainer {
-        .init(context: context)
     }
 }

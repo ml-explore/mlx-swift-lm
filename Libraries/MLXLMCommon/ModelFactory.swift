@@ -61,6 +61,20 @@ public protocol ModelConfigurationValidating {
     func validateModelConfiguration() throws
 }
 
+/// Protocol for generic ``ModelContext``.
+///
+/// This should be used for functions that can take either a ``ModelContext`` or a
+/// ``TrainableModelContext`` -- they use the base ``LanguageModel``
+/// protocol for inference.
+///
+/// This should be strictly for parameter types and not a return value.
+public protocol ModelContextProviding {
+    var configuration: ModelConfiguration { get }
+    var languageModel: any LanguageModel { get }
+    var processor: any UserInputProcessor { get }
+    var tokenizer: Tokenizer { get }
+}
+
 /// Context of types that work together to provide a ``LanguageModel``.
 ///
 /// A ``ModelContext`` is `Sendable` and is created by ``loadModel(from:using:configuration:useLatest:progressHandler:)``
@@ -74,11 +88,13 @@ public protocol ModelConfigurationValidating {
 ///
 /// See also the deprecated ``GenericModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)`` and
 /// ``ModelContainer``.
-public struct ModelContext: Sendable {
+public struct ModelContext: Sendable, ModelContextProviding {
     public var configuration: ModelConfiguration
     public var model: any LanguageModel & Sendable
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
+
+    public var languageModel: any LanguageModel { model }
 
     public init(
         configuration: ModelConfiguration, model: some TrainableLanguageModel,
@@ -109,11 +125,13 @@ public struct ModelContext: Sendable {
 ///
 /// Produced by ``loadTrainable(from:using:configuration:useLatest:progressHandler:)`` or the
 /// equivalent methods on `LLMModelFactory` and `VLMModelFactory`.
-public struct TrainableModelContext {
+public struct TrainableModelContext: ModelContextProviding {
     public var configuration: ModelConfiguration
     public var model: any TrainableLanguageModel
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
+
+    public var languageModel: any LanguageModel { model }
 
     public init(
         configuration: ModelConfiguration, model: some TrainableLanguageModel,
@@ -140,10 +158,9 @@ public struct TrainableModelContext {
 /// - ``loadModelContainer(from:using:configuration:useLatest:progressHandler:)``
 ///
 /// or variants.
-public protocol GenericModelFactory<ContextType, ContainerType>: Sendable {
+public protocol GenericModelFactory<ContextType>: Sendable {
 
     associatedtype ContextType: Sendable
-    associatedtype ContainerType: Sendable
 
     var modelRegistry: AbstractModelRegistry { get }
 
@@ -155,12 +172,6 @@ public protocol GenericModelFactory<ContextType, ContainerType>: Sendable {
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
     ) async throws -> ContextType
-
-    /// Wrap a ``ContextType`` in a ``ContainerType``.
-    ///
-    /// The `ContainerType` is a `Sendable` container for managing the model contained
-    /// in the `ContextType`.
-    func _wrap(_ context: ContextType) -> ContainerType
 }
 
 extension GenericModelFactory {
@@ -207,25 +218,6 @@ extension GenericModelFactory {
         return try await _load(configuration: resolved, tokenizerLoader: tokenizerLoader)
     }
 
-    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
-    /// producing a ``ModelContainer``.
-    ///
-    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
-    @available(*, deprecated, message: "use load instead")
-    public func loadContainer(
-        from downloader: any Downloader,
-        using tokenizerLoader: any TokenizerLoader,
-        configuration: ModelConfiguration,
-        useLatest: Bool = false,
-        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
-    ) async throws -> ContainerType {
-        let resolved = try await resolve(
-            configuration: configuration, from: downloader,
-            useLatest: useLatest, progressHandler: progressHandler)
-        let context = try await _load(configuration: resolved, tokenizerLoader: tokenizerLoader)
-        return _wrap(context)
-    }
-
     /// Load a model from a local directory, producing a ``ModelContext``.
     ///
     /// No downloader is needed — the model and tokenizer are loaded from
@@ -236,28 +228,6 @@ extension GenericModelFactory {
     ) async throws -> sending ContextType {
         try await _load(
             configuration: .init(directory: directory), tokenizerLoader: tokenizerLoader)
-    }
-
-    /// Load a model from a local directory, producing a ``ModelContainer``.
-    ///
-    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
-    @available(*, deprecated, message: "use load instead")
-    public func loadContainer(
-        from directory: URL,
-        using tokenizerLoader: any TokenizerLoader
-    ) async throws -> ContainerType {
-        let context = try await _load(
-            configuration: .init(directory: directory), tokenizerLoader: tokenizerLoader)
-        return _wrap(context)
-    }
-
-}
-
-extension GenericModelFactory
-where ContextType == ModelContext, ContainerType == ModelContainerConstraint {
-
-    public func _wrap(_ context: ModelContext) -> ModelContainerConstraint {
-        .init(context: context)
     }
 
 }
@@ -287,10 +257,45 @@ extension TrainableModelContextLoader {
             useLatest: useLatest, progressHandler: progressHandler)
     }
 
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
+    public func loadContainer(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> ModelContainer {
+        let trainableContext = try await loadTrainable(
+            from: downloader,
+            using: tokenizerLoader,
+            configuration: configuration,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return ModelContainer(context: trainableContext)
+    }
+
+    /// Load a model from a local directory, producing a ``ModelContainer``.
+    ///
+    /// Note: `ModelContext` is now `Sendable` and is preferred over `ModelContainer`.
+    @available(*, deprecated, message: "use load instead")
+    public func loadContainer(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader
+    ) async throws -> ModelContainer {
+        let trainableContext = try await loadTrainable(
+            from: LocalDownloader(url: directory),
+            using: tokenizerLoader,
+            configuration: .init(directory: directory),
+            useLatest: false, progressHandler: { _ in })
+        return ModelContainer(context: trainableContext)
+    }
 }
 
 /// For backward compatibility: `ModelFactory` refers to an LLM/VLM model factory.
-public typealias ModelFactory = GenericModelFactory<ModelContext, ModelContainerConstraint>
+public typealias ModelFactory = GenericModelFactory<ModelContext>
     & TrainableModelContextLoader
 
 /// Resolve a ``ModelConfiguration`` into a ``ResolvedModelConfiguration`` by

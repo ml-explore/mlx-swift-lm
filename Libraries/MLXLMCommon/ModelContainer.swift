@@ -6,7 +6,8 @@ import MLXNN
 
 /// Container for models that guarantees single threaded access.
 ///
-/// * Important: `ModelContext` is now `Sendable` that can be used directly.
+/// * Important: `ModelContext` is now `Sendable` that can be used directly.  `ModelContainer`
+/// is now deprecated.
 ///
 /// Wrap models used by e.g. the UI in a ModelContainer. Callers can access
 /// the model and/or tokenizer (any values from the ``ModelContext``):
@@ -32,16 +33,121 @@ import MLXNN
 /// }
 /// ```
 ///
-/// ## Mutable Models
+/// ## Source Compatibility
+///
+/// All callers _should_ migrate to using ``ModelContext`` or ``TrainableModelContext`` directly.
+///
+/// Previously this held and provided a `ModelContext`.  That type still exists but is now `Sendable`
+/// and immutable.  The container now holds a `TrainableModelContext`, which is equivalent
+/// to the old mutable context.
+///
+/// Methods, such as ``perform(_:)->_``, call the closure with a `TrainableModelContext`.
+/// Typical calls to this will still compile -- the type inference finds the new type and the methods are
+/// the same.
+///
+/// From example code, there are two cases that must be updated.  The first is when your closure calls
+/// a function that will mutate the context:
+///
+/// ```swift
+/// // OLD
+/// func prepare(_ context: inout ModelContext) { ... }
+///
+/// // NEW
+/// func prepare(_ context: inout TrainableModelContext) { ... }
+/// ```
+///
+/// The second is when the closure calls a method that will do inference (or related) and
+/// just needs access to the tokenizer and `LanguageModel`:
+///
+/// ```swift
+/// // OLD
+/// func generate(input: LMInput, context: ModelContext) async throws -> ... { ... }
+///
+/// // NEW
+/// func generate(input: LMInput, context: ModelContextProviding) async throws -> ... { ... }
+/// ```
+///
+/// Code that relies on type inference should build without change.
+///
+/// ## Migration
+///
+/// `ModelContainer` and methods that create it are all deprecated.  There are two main
+/// patterns for migration off of it and onto ``ModelContext`` and ``TrainableModelContext``.
+/// For inference-only uses, migrate onto `ModelContext`.
+///
+/// * Note: Both original examples still work, but they now have deprecation warnings.
+///
+/// For example, if you had code along these lines:
+///
+/// ```swift
+/// let modelContainer = try await LLMModelFactory.shared.loadContainer(
+///     from: self.downloader,
+///     using: #huggingFaceTokenizerLoader(),
+///     configuration: modelConfiguration)
+///
+/// let session = ChatSession(
+///     modelContainer,
+///     instructions: "You are a helpful assistant."
+/// )
+///
+/// let response = try await session.respond(to: "Tell me a story.")
+/// print(response)
+/// ```
+///
+/// You could switch it to `ModelContext` by calling `loadModel()` instead
+/// of `loadContainer()`:
+///
+/// ```swift
+/// let modelContext = try await LLMModelFactory.shared.loadModel(
+///     from: self.downloader,
+///     using: #huggingFaceTokenizerLoader(),
+///     configuration: modelConfiguration)
+///
+/// let session = ChatSession(
+///     modelContext,
+///     instructions: "You are a helpful assistant."
+/// )
+///
+/// let response = try await session.respond(to: "Tell me a story.")
+/// print(response)
+/// ```
+///
+/// For cases where the goal is model mutation, e.g. training or LoRA fine-tuning, you will need
+/// a ``TrainableModelContext``.  If the previous code looked like this:
+///
+/// ```swift
+/// let modelContainer = try await LLMModelFactory.shared.loadContainer(
+///     from: self.downloader,
+///     using: #huggingFaceTokenizerLoader(),
+///     configuration: modelConfiguration)
+///
+/// modelAdapter = try await modelContainer.perform { context in
+///     return try LoRAContainer.from(
+///         model: context.model, configuration: LoRAConfiguration(numLayers: loraLayers))
+/// }
+/// ```
+///
+/// The migrated code would call `loadTrainable()` instead:
+///
+/// ```swift
+/// // load a mutable language model
+/// let modelContext = try await LLMModelFactory.shared.loadTrainable(
+///     from: self.downloader,
+///     using: #huggingFaceTokenizerLoader(),
+///     configuration: modelConfiguration)
+///
+/// // augment the model with LoRA adaptors
+/// modelAdapter = try! LoRAContainer.from(
+///     model: modelContext.model, configuration: LoRAConfiguration(numLayers: loraLayers))
+/// ```
+///
+/// ## Mutation and Thread Safety
 ///
 /// In earlier versions, `ModelContainer` stored a plain `Module`.  If you had reference to it,
 /// you could mutate it.  The ``update(_:)`` method was meant for this purpose, though in
-/// practice that was only used to mutate the `ModelConfiguration`.
+/// practice that was only used to mutate the `ModelConfiguration`,
 ///
-/// The `ModelContext` stored in the container is no longer a plain `Module` -- in order to
-/// be `Sendable`, it is also immutable.  The `update()` path cannot mutate it (though it could
-/// replace it).  The ``perform(_:)-((ModelContext)->R)`` calls also can't mutate
-/// the model.  For example, in the LoRA example code:
+/// However, there are cases where callers also mutated through the context's `model` reference:
 ///
 /// ```swift
 /// modelAdapter = try await modelContainer.perform { context in
@@ -50,68 +156,97 @@ import MLXNN
 /// }
 /// ```
 ///
-/// That mutates the `context.model` as a side effect (since the `Module` is a reference type
-/// there was nothing to prevent it).
+/// This appears to be thread safe -- the `ModelContainer` guarantees exclusive access to the
+/// context during calls to ``perform(_:)->_``, but in practice callers would carefully _borrow_
+/// the model in order to allow concurrent evaluation.  As long as LoRA (or other training) was not
+/// done at the same time as inference, this worked, but was unsafe.  See:
 ///
-/// This code will no longer compile and has to be done this way:
+/// - ``generate(input:parameters:wiredMemoryTicket:)``
+/// - ``ChatSession``
 ///
-/// ```swift
-/// // load a mutable language model
-/// let modelContext = try await args.loadTrainable(
-///     defaultModel: defaultModel, modelFactory: modelFactory)
+/// Now, the container stores a ``TrainableModelContext`` and a private `MaterializedState`.
+/// If a caller initializes a ``ChatSession`` with a `ModelContainer`, this will materialize the
+/// model and produce a `ModelContext`.  Callers who attempt to access the
+/// ``TrainableModelContext`` after this occurs will be met with a `fatalError`.
 ///
-/// // augment the model with LoRA adaptors
-/// modelAdapter = try! LoRAContainer.from(
-///     model: modelContext.model, configuration: LoRAConfiguration(numLayers: loraLayers))
-/// ```
+/// * Important: there is a race when initializing `ChatSession` and using `perform()`.
+/// This implements a best effort check, but cannot guarantee it doesn't happen.  This race is
+/// probably insignificant when compared to callers that escape the `model` in calls to
+/// `perform()` (including this type's own ``generate(input:parameters:wiredMemoryTicket:)``).
+/// These are done on purpose, but were never safe when combined with mutation
 ///
-/// ## Implementation Note
-///
-/// Previously the `ModelContainer` held the `ModelContext` in a `SerialAccessContainer` -- an internal type
-/// that provided a lock-like exclusive access for ``perform(_:)-((ModelContext)->R)`` and ``update(_:)``.
-/// The `ModelContext` was not `Sendable` and this provided the `@unchecked Sendable` protection needed.
-/// In practice, some code like `ChatSession` would use ``perform(_:)-((ModelContext)->R)`` to
-/// _borrow_ the model.  The code was carefully constructed to allow thread-safe access to the shared model
-/// state (the weights) so that multiple sessions could be run concurrently.  This wouldn't have been safe if
-/// another thread was doing LoRA style mutations, of course.
-///
-/// The new code uses an `NSLock` to guard access to the `ModelContext`.  The context is now `Sendable`
-/// and the model itself is immutable.  This now allows concurrent _use_ of the context -- all reads of the struct
-/// itself are done under the lock.  Callers to ``update(_:)`` can modify the context (to a lesser extent than before)
-/// and this is done with the lock held.
-///
-/// Ideally, all use cases will move to use `ModelContext` directly, but in the meantime be aware of this
-/// change in implementation.
+/// Please migrate to ``ModelContext`` and ``TrainableModelContext`` directly as
+/// soon as possible.
 @available(*, deprecated, message: "use ModelContext instead")
 public final class ModelContainer: @unchecked (Sendable) {
 
-    private var _context: ModelContext
+    private let context: SerialAccessContainer<TrainableModelContext>
+
+    /// Internal state to provide `ChatSession` with synchronous access to the ModelContext
+    private enum MaterializedState {
+        case editable(TrainableModelContext)
+        case materialized(ModelContext)
+    }
+
+    private var _state: MaterializedState
     private let lock = NSLock()
-    private var context: ModelContext {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _context
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            _context = newValue
+
+    public var configuration: ModelConfiguration {
+        get async {
+            await context.read { $0.configuration }
         }
     }
 
-    public var modelContext: ModelContext { context }
+    public var processor: UserInputProcessor {
+        get async {
+            await context.read { $0.processor }
+        }
+    }
 
-    public var configuration: ModelConfiguration { context.configuration }
+    public var tokenizer: Tokenizer {
+        get async {
+            await context.read { $0.tokenizer }
+        }
+    }
 
-    public var model: any LanguageModel & Sendable { context.model }
+    public init(context: TrainableModelContext) {
+        self.context = .init(context)
+        self._state = .editable(context)
+    }
 
-    public var processor: UserInputProcessor { context.processor }
+    /// Verify that the model is still mutable (has not been materialized).
+    ///
+    /// Note: there is a race in calling this and using `context`.  This is
+    /// best effort on top of the fact that many callers allowed the `model`
+    /// to escape calls to `perform()`.
+    ///
+    /// Migrate off `ModelContainer` at your earliest convenience.
+    private func check() {
+        lock.withLock {
+            switch _state {
+            case .editable:
+                break
+            case .materialized:
+                fatalError("context has been converted to ModelContext (immutable)")
+            }
+        }
+    }
 
-    public var tokenizer: Tokenizer { context.tokenizer }
-
-    public init(context: ModelContext) {
-        self._context = context
+    /// Allow ChatSession to obtain a materialized version of the ModelContext.
+    ///
+    /// Note: this permanently marks the main context as unusable as it is not longer
+    /// mutable.
+    func materialize() -> ModelContext {
+        lock.withLock {
+            switch _state {
+            case .editable(let context):
+                let materialized = ModelContext.init(context)
+                _state = .materialized(materialized)
+                return materialized
+            case .materialized(let context):
+                return context
+            }
+        }
     }
 
     /// Perform an action on the model and/or tokenizer. Callers _must_ eval any `MLXArray` before returning as
@@ -119,16 +254,27 @@ public final class ModelContainer: @unchecked (Sendable) {
     @available(*, deprecated, message: "prefer perform(_:) that uses a ModelContext")
     public func perform<R: Sendable>(
         _ action: @Sendable (any LanguageModel, Tokenizer) throws -> sending R
-    ) rethrows -> sending R {
-        try action(context.model, context.tokenizer)
+    )
+        async rethrows
+        -> sending R
+    {
+        check()
+        return try await context.read {
+            try action($0.model, $0.tokenizer)
+        }
     }
 
     /// Perform an action on the model and/or tokenizer with additional context values.
+    /// Callers _must_ eval any `MLXArray` before returning as
+    /// `MLXArray` is not `Sendable`.
     @available(*, deprecated, message: "prefer perform(values:_:) that uses a ModelContext")
     public func perform<V: Sendable, R: Sendable>(
         values: V, _ action: @Sendable (any LanguageModel, Tokenizer, V) throws -> sending R
-    ) rethrows -> sending R {
-        try action(context.model, context.tokenizer, values)
+    ) async rethrows -> sending R {
+        check()
+        return try await context.read {
+            try action($0.model, $0.tokenizer, values)
+        }
     }
 
     /// Perform an action on the ``ModelContext``. Callers _must_ eval any `MLXArray` before returning as
@@ -139,37 +285,46 @@ public final class ModelContainer: @unchecked (Sendable) {
     /// - Note: The `sending` keyword indicates the return value is transferred (not shared) across
     ///   isolation boundaries, allowing non-Sendable types to be safely returned.
     public func perform<R: Sendable>(
-        _ action: @Sendable (ModelContext) async throws -> sending R
+        _ action: @Sendable (TrainableModelContext) async throws -> sending R
     ) async rethrows -> sending R {
-        try await action(context)
+        check()
+        return try await context.read {
+            try await action($0)
+        }
     }
 
     /// Perform an action on the ``ModelContext`` with additional context values.
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<V: Sendable, R: Sendable>(
-        values: V, _ action: @Sendable (ModelContext, V) async throws -> R
+        values: V, _ action: @Sendable (TrainableModelContext, V) async throws -> R
     ) async rethrows -> sending R {
-        try await action(context, values)
+        check()
+        return try await context.read {
+            try await action($0, values)
+        }
     }
 
     /// Perform an action on the ``ModelContext`` with additional (non `Sendable`) context values.
     /// Callers _must_ eval any `MLXArray` before returning as
     /// `MLXArray` is not `Sendable`.
     public func perform<V, R: Sendable>(
-        nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
+        nonSendable values: consuming V,
+        _ action: @Sendable (TrainableModelContext, V) async throws -> R
     ) async rethrows -> sending R {
-        try await action(context, values)
+        check()
+        let values = SendableBox(values)
+        return try await context.read {
+            try await action($0, values.consume())
+        }
     }
 
     /// Update the owned `ModelContext`.
     /// - Parameter action: update action
-    @available(
-        *, deprecated, message: "ModelContext is now Sendable -- hold that and mutate as needed"
-    )
-    public func update(_ action: @Sendable (inout ModelContext) -> Void) async {
-        lock.withLock {
-            action(&_context)
+    public func update(_ action: @Sendable (inout TrainableModelContext) -> Void) async {
+        check()
+        return await context.update {
+            action(&$0)
         }
     }
 
@@ -177,12 +332,18 @@ public final class ModelContainer: @unchecked (Sendable) {
 
     /// The resolved local model directory for the loaded container.
     public var modelDirectory: URL {
-        get throws { try context.configuration.modelDirectory }
+        get async throws {
+            check()
+            return try (await configuration).modelDirectory
+        }
     }
 
     /// The resolved local tokenizer directory for the loaded container.
     public var tokenizerDirectory: URL {
-        get throws { try context.configuration.tokenizerDirectory }
+        get async throws {
+            check()
+            return try (await configuration).tokenizerDirectory
+        }
     }
 
     /// Prepare user input for generation.
@@ -195,7 +356,8 @@ public final class ModelContainer: @unchecked (Sendable) {
     /// - Note: The `sending` keyword indicates the return value is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
     public func prepare(input: consuming sending UserInput) async throws -> sending LMInput {
-        let processor = self.processor
+        check()
+        let processor = await self.processor
         return try await processor.prepare(input: input)
     }
 
@@ -229,34 +391,67 @@ public final class ModelContainer: @unchecked (Sendable) {
         parameters: GenerateParameters,
         wiredMemoryTicket: WiredMemoryTicket? = nil
     ) async throws -> AsyncStream<Generation> {
-        try MLXLMCommon.generate(
-            input: input,
-            parameters: parameters,
-            context: context,
-            wiredMemoryTicket: wiredMemoryTicket
-        )
+        // handle a model that has been materialized
+        let materializedStream: AsyncStream<Generation>? = try lock.withLock {
+            switch _state {
+            case .editable:
+                return nil
+            case .materialized(let context):
+                return try MLXLMCommon.generate(
+                    input: input,
+                    parameters: parameters,
+                    context: context,
+                    wiredMemoryTicket: wiredMemoryTicket
+                )
+            }
+        }
+
+        if let materializedStream {
+            return materializedStream
+        }
+
+        // else, generate using the non-materialized model
+        let input = SendableBox(input)
+
+        // Note: this is only visiting the model exclusively
+        // for the pre-fill time.  Beyond that there is no
+        // shared mutable state.
+        //
+        // This means that there may be concurrent access to the
+        // model weights themselves (but they are already evaluated).
+
+        return try await context.read { context in
+            try MLXLMCommon.generate(
+                input: input.consume(),
+                parameters: parameters,
+                context: context,
+                wiredMemoryTicket: wiredMemoryTicket
+            )
+        }
     }
 
     /// Decode token IDs to a string.
     ///
     /// - Parameter tokenIds: Array of token IDs
     /// - Returns: Decoded string
-    public func decode(tokenIds: [Int]) -> String {
-        let tokenizer = self.tokenizer
+    public func decode(tokenIds: [Int]) async -> String {
+        check()
+        let tokenizer = await self.tokenizer
         return tokenizer.decode(tokenIds: tokenIds)
     }
 
     @available(*, deprecated, renamed: "decode(tokenIds:)")
-    public func decode(tokens: [Int]) -> String {
-        decode(tokenIds: tokens)
+    public func decode(tokens: [Int]) async -> String {
+        await decode(tokenIds: tokens)
     }
 
     /// Encode a string to token IDs.
     ///
     /// - Parameter text: Text to encode
     /// - Returns: Array of token IDs
-    public func encode(_ text: String) -> [Int] {
-        let tokenizer = self.tokenizer
+    public func encode(_ text: String) async -> [Int] {
+        check()
+        let tokenizer = await self.tokenizer
         return tokenizer.encode(text: text)
     }
 
@@ -265,11 +460,9 @@ public final class ModelContainer: @unchecked (Sendable) {
     /// - Parameter messages: Array of message dictionaries with "role" and "content" keys
     /// - Returns: Array of token IDs
     @available(*, deprecated, message: "Use applyChatTemplate directly on tokenizer")
-    public func applyChatTemplate(messages: [[String: String]]) throws -> [Int] {
-        let tokenizer = self.tokenizer
+    public func applyChatTemplate(messages: [[String: String]]) async throws -> [Int] {
+        check()
+        let tokenizer = await self.tokenizer
         return try tokenizer.applyChatTemplate(messages: messages)
     }
 }
-
-/// For internal implementation we declare a non-deprecated typealias that can be used e.g. for type parameters
-public typealias ModelContainerConstraint = ModelContainer

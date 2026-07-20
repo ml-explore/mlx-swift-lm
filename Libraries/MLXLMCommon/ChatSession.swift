@@ -194,7 +194,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.modelContext = model.modelContext
+        self.modelContext = model.materialize()
         self.instructions = instructions
         self.cache = .init(.empty)
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -265,7 +265,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.modelContext = model.modelContext
+        self.modelContext = model.materialize()
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
@@ -349,7 +349,7 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.modelContext = model.modelContext
+        self.modelContext = model.materialize()
         self.instructions = instructions
         self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
