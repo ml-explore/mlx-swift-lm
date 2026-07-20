@@ -16,13 +16,13 @@ public typealias Message = [String: any Sendable]
 ///
 /// A ``UserInputProcessor`` can convert this to ``LMInput``.
 /// See also ``ModelContext``.
-public struct UserInput {
+public struct UserInput: Sendable {
 
     /// Representation of a prompt or series of messages (conversation).
     ///
     /// This may be a single string with a user prompt or a series of back
     /// and forth responses representing a conversation.
-    public enum Prompt: CustomStringConvertible {
+    public enum Prompt: CustomStringConvertible, Sendable {
         /// A single string
         case text(String)
 
