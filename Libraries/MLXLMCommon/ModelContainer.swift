@@ -98,7 +98,7 @@ import MLXNN
 /// of `loadContainer()`:
 ///
 /// ```swift
-/// let modelContext = try await LLMModelFactory.shared.loadModel(
+/// let modelContext = try await LLMModelFactory.shared.load(
 ///     from: self.downloader,
 ///     using: #huggingFaceTokenizerLoader(),
 ///     configuration: modelConfiguration)

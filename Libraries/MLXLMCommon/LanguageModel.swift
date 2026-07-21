@@ -10,6 +10,9 @@ public protocol BaseLanguageModel {
     /// Sum of all the `nbytes` of the parameters in the encapsulated model.
     var parameterNBytes: Int { get }
 
+    /// Sum of all the `parameterCount` of the modules in the encapsulated model.
+    var parameterCount: Int { get }
+
     /// Optionally preprocess the weights and modify / remove values as needed.
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
 
