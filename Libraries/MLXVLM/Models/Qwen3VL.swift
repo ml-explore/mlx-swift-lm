@@ -986,37 +986,26 @@ enum Qwen3VLLanguage {
     final class RotaryEmbedding {
 
         private let invFreq: MLXArray
-        private let mropeSection: [Int]
+        private let mropeIndices: MLXArray
 
         init(headDim: Int, base: Double, ropeScaling: Qwen3VLConfiguration.RoPEScaling?) {
             var freq = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
             freq = freq / Float(headDim)
             let baseArray = MLXArray(Float(base))
             self.invFreq = 1.0 / pow(baseArray, freq)
-            self.mropeSection = ropeScaling?.mropeSection ?? [24, 20, 20]
+            let sections = ropeScaling?.mropeSection ?? [24, 20, 20]
+            var indices = [Int32](repeating: 0, count: freq.dim(0))
+            for (dimension, offset) in [(1, 1), (2, 2)] {
+                let end = min(sections[dimension] * 3, indices.count)
+                for index in stride(from: offset, to: end, by: 3) {
+                    indices[index] = Int32(dimension)
+                }
+            }
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let freqs_t = freqs[0, 0..., 0..., 0...]  // (bs, seq_len, head_dim // 2)
-
-            let dims = freqs_t.dim(-1)
-            var slices: [MLXArray] = []
-
-            for idx in 0 ..< dims {
-                var slice = freqs_t[0..., 0..., idx]
-
-                for (dimIndex, offset) in [(1, 1), (2, 2)] {
-                    let end = min(mropeSection[dimIndex] * 3, dims)
-                    if idx >= offset && idx < end && (idx - offset) % 3 == 0 {
-                        slice = freqs[dimIndex, 0..., 0..., idx]
-                        break
-                    }
-                }
-
-                slices.append(slice)
-            }
-
-            return stacked(slices, axis: -1)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(positionIds: MLXArray, dtype: MLX.DType) -> (MLXArray, MLXArray) {
