@@ -74,8 +74,8 @@ private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
 
 /// Pinned checkpoint revisions matching the weights that were live when the
-/// `drafter_block` fixtures were generated. See the Rung 4 note below for
-/// why this pin exists.
+/// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
+/// parity assertions reproducible as the published checkpoints move.
 private let rung4DrafterRevision = "28e92270316e89288579ec59c17939541d9ca433"
 private let rung4TargetRevision = "fe92291011fc698452920c0b558b52f790dff711"
 
@@ -127,19 +127,6 @@ private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
 // fixture inputs. They do NOT go through the full
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
-//
-// `case_02_block4` and `case_03_block6` previously failed against
-// `fixturesRevision`: the published `mlx-community/gemma-4-31b-it-8bit` and
-// `.../gemma-4-31B-it-assistant-bf16` checkpoints had moved past the weights
-// that were live when these fixtures were captured, so the "expected"
-// `outputs/drafted_tokens` no longer matched a live re-run of the pinned
-// `mlx-vlm` reference against the same fixture inputs (same staleness class
-// previously fixed for `drafter_forward` in commit `7e2f2b8`, "Stabilize
-// integration test skip semantics; bump fixture dataset revision"). Fixed
-// here by pinning `rung4TargetRevision`/`rung4DrafterRevision` to the exact
-// commits live at fixture-generation time (confirmed via HF's per-commit
-// LFS-OID listing that the weight blobs are unchanged since), rather than
-// regenerating the fixtures.
 
 @Suite(.serialized)
 struct Rung4TokenParityTests {

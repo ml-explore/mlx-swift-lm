@@ -51,9 +51,9 @@ private let target31BModelId = "mlx-community/gemma-4-31b-it-8bit"
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
 /// Pinned checkpoint revisions matching the weights that were live when the
-/// Rung 4 `drafter_block` fixtures were generated — see the note in
-/// `MTPRung4TokenParityTests.swift`. Kept in sync here so this diagnostic
-/// suite exercises the same bit-exact-verified checkpoint pair.
+/// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
+/// `MTPRung4TokenParityTests` so this diagnostic suite exercises the same
+/// bit-exact-verified checkpoint pair.
 private let target31BRevision = "fe92291011fc698452920c0b558b52f790dff711"
 private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 

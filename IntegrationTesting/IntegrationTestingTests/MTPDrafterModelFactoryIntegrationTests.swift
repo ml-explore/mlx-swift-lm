@@ -11,8 +11,8 @@ import Testing
 // MARK: - Factory load (auto-downloads the checkpoint if not cached)
 
 /// Pinned checkpoint revision matching the weights that were live when the
-/// Rung 4 `drafter_block` fixtures were generated — see the note in
-/// `MTPRung4TokenParityTests.swift`.
+/// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
+/// `MTPRung4TokenParityTests`.
 private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 
 @Test

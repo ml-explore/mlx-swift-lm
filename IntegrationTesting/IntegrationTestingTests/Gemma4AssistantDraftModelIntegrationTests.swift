@@ -41,8 +41,8 @@ private func drafterForwardFixturesOrSkip(name: String) async -> URL? {
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
 /// Pinned checkpoint revision matching the weights that were live when the
-/// Rung 4 `drafter_block` fixtures were generated — see the note in
-/// `MTPRung4TokenParityTests.swift`.
+/// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
+/// `MTPRung4TokenParityTests`.
 private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 
 /// Shared downloader for the drafter checkpoint. Fetches to the local HF
