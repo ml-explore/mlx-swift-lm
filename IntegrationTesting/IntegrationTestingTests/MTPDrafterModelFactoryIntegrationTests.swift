@@ -10,6 +10,11 @@ import Testing
 
 // MARK: - Factory load (auto-downloads the checkpoint if not cached)
 
+/// Pinned checkpoint revision matching the weights that were live when the
+/// Rung 4 `drafter_block` fixtures were generated — see the note in
+/// `MTPRung4TokenParityTests.swift`.
+private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
+
 @Test
 func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws {
     await Gemma4AssistantRegistration.register()
@@ -18,7 +23,8 @@ func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws 
     let container = try await factory.loadContainer(
         from: #hubDownloader(),
         using: NoOpTokenizerLoader(),
-        configuration: .init(id: "mlx-community/gemma-4-31B-it-assistant-bf16")
+        configuration: .init(
+            id: "mlx-community/gemma-4-31B-it-assistant-bf16", revision: drafter31BRevision)
     )
     let isDrafter = await container.perform { ctx in
         ctx.model is Gemma4AssistantDraftModel

@@ -40,6 +40,11 @@ private func drafterForwardFixturesOrSkip(name: String) async -> URL? {
 /// Model ID of the 31B assistant drafter checkpoint shared by the tests below.
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
+/// Pinned checkpoint revision matching the weights that were live when the
+/// Rung 4 `drafter_block` fixtures were generated — see the note in
+/// `MTPRung4TokenParityTests.swift`.
+private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
+
 /// Shared downloader for the drafter checkpoint. Fetches to the local HF
 /// cache on first use; subsequent tests and runs reuse the cache.
 private let downloader: any Downloader = #hubDownloader()
@@ -47,7 +52,7 @@ private let downloader: any Downloader = #hubDownloader()
 private func drafter31BDirectory() async throws -> URL {
     try await downloader.download(
         id: drafter31BModelId,
-        revision: nil,
+        revision: drafter31BRevision,
         matching: ["*.safetensors", "*.json"],
         useLatest: false,
         progressHandler: { _ in }

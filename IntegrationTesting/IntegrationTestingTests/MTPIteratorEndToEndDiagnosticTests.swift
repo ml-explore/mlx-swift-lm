@@ -50,6 +50,13 @@ private struct EmissionLog: LogitProcessor {
 private let target31BModelId = "mlx-community/gemma-4-31b-it-8bit"
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
+/// Pinned checkpoint revisions matching the weights that were live when the
+/// Rung 4 `drafter_block` fixtures were generated — see the note in
+/// `MTPRung4TokenParityTests.swift`. Kept in sync here so this diagnostic
+/// suite exercises the same bit-exact-verified checkpoint pair.
+private let target31BRevision = "fe92291011fc698452920c0b558b52f790dff711"
+private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
+
 /// Shared downloader for the 31B target+drafter pair. Fetches to the local
 /// HF cache on first use (~35GB); subsequent tests and runs reuse the cache.
 private let downloader: any Downloader = #hubDownloader()
@@ -57,6 +64,8 @@ private let downloader: any Downloader = #hubDownloader()
 private func loadTargetAndDrafter(
     targetModelId: String,
     drafterModelId: String,
+    targetRevision: String? = nil,
+    drafterRevision: String? = nil,
     drafterConfigType: any Codable.Type = Gemma4AssistantConfiguration.self
 ) async throws -> LoadedPair {
     // Target — VLM factory's downloader-based load path gives us a full
@@ -65,7 +74,7 @@ private func loadTargetAndDrafter(
     let context = try await VLMModelFactory.shared.load(
         from: downloader,
         using: #huggingFaceTokenizerLoader(),
-        configuration: .init(id: targetModelId)
+        configuration: .init(id: targetModelId, revision: targetRevision ?? "main")
     )
 
     // Drafter — same pattern as `MTPRung4TokenParityTests.loadRung4Drafter`:
@@ -74,7 +83,7 @@ private func loadTargetAndDrafter(
     // the target through `draftBlock(target:...)` per round.
     let drafterDir = try await downloader.download(
         id: drafterModelId,
-        revision: nil,
+        revision: drafterRevision,
         matching: ["*.safetensors", "*.json"],
         useLatest: false,
         progressHandler: { _ in }
@@ -108,7 +117,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BPairProducesAcceptedDrafts() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [
@@ -193,7 +204,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BBlockSize4AcceptanceLifted() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [
@@ -260,7 +273,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BBlockSize6AcceptanceLifted() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [
@@ -324,7 +339,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BMatchesBaselineByteIdentical() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
@@ -446,7 +463,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BLongerStreamProducesValidContinuation() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
@@ -573,7 +592,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testBaselineSelfDeterminism128() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
@@ -632,7 +653,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTP31BQuantizationOnsetEngagesPassthrough() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [
@@ -726,7 +749,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     func testMTPLogitProcessorReceivesOnlyEmittedTokens() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [
@@ -869,7 +894,9 @@ struct MTPIteratorEndToEndDiagnosticTests {
     ) async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
-            drafterModelId: drafter31BModelId
+            drafterModelId: drafter31BModelId,
+            targetRevision: target31BRevision,
+            drafterRevision: drafter31BRevision
         )
 
         let userInput = UserInput(chat: [.user(prompt)])
