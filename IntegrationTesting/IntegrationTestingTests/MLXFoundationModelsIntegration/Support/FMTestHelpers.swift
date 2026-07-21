@@ -229,7 +229,11 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
         // stream so the test's iteration terminates.
         self.producerTask = Task<Void, Never> {
             defer { collector.cancel() }
-            await GuidedGenerationDiagnosticSink.$current.withValue(guidedGenerationSink) {
+            let resolvedGuidedGenerationSink =
+                guidedGenerationSink ?? GuidedGenerationDiagnosticSink.current
+            await GuidedGenerationDiagnosticSink.$current.withValue(
+                resolvedGuidedGenerationSink
+            ) {
                 await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
                     continuation.yield(event)
                     if cancelProducerWhen?(event) == true {
