@@ -157,32 +157,6 @@ struct ToolCallingSchemaTests {
         #expect(names == ["get_weather", "add"])
     }
 
-    @Test
-    func finalAnswerToolFitsInEnvelope() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
-        let tools = [
-            Transcript.ToolDefinition(
-                name: "get_weather",
-                description: "Get weather",
-                parameters: WeatherArgs.generationSchema
-            ),
-            finalAnswer,
-        ]
-
-        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: tools)
-        let parsed = try parseAsDictionary(json)
-        let oneOf = try #require(parsed["oneOf"] as? [[String: Any]])
-        #expect(oneOf.count == 2)
-
-        let names: [String] = oneOf.compactMap { entry in
-            (entry["properties"] as? [String: Any])
-                .flatMap { $0["name"] as? [String: Any] }
-                .flatMap { $0["const"] as? String }
-        }
-        #expect(names.contains(FinalAnswerTool.toolName))
-    }
-
     // MARK: - $defs Hoisting
 
     @Test
@@ -278,10 +252,9 @@ struct ToolCallingSchemaTests {
             description: "Books a trip",
             parameters: BookTripArgs.generationSchema
         )
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
 
         let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(
-            tools: [bookTrip, finalAnswer]
+            tools: [bookTrip]
         )
 
         let tokenizer = try makeByteTokenizer()
@@ -319,16 +292,13 @@ struct ToolCallingSchemaTests {
     @Test
     func envelopeCompilesWithXGrammar() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
         let weather = Transcript.ToolDefinition(
             name: "get_weather",
             description: "Get weather",
             parameters: WeatherArgs.generationSchema
         )
 
-        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(
-            tools: [weather, finalAnswer]
-        )
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: [weather])
 
         // Build a minimal byte-fallback tokenizer and attempt to compile the
         // envelope as a grammar.

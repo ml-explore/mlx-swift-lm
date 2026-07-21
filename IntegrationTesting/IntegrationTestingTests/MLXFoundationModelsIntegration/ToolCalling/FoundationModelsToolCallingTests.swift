@@ -21,6 +21,18 @@ private struct Greeting {
     var message: String
 }
 
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private enum DeveloperMarkerValue: String {
+    case recorded
+}
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct DeveloperMarkerArguments {
+    var value: DeveloperMarkerValue
+}
+
 /// End-to-end tests for Foundation Models tool-calling modes.
 ///
 /// This suite validates that when a request has `enabledTools`, the
@@ -225,15 +237,19 @@ struct FoundationModelsToolCallingTests {
         #expect(!response.isEmpty)
     }
 
-    @Test func requiredTreatsDeveloperFinalAnswerNameAsTool() async throws {
+    @Test func formerSyntheticNameIsADeveloperTool() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
+        let developerTool = Transcript.ToolDefinition(
+            name: "mlx_final_answer",
+            description: "Record a developer-owned marker.",
+            parameters: DeveloperMarkerArguments.generationSchema)
         let request = makeExecutorRequest(
-            transcript: singlePromptTranscript("Use the available tool."),
-            enabledTools: [developerTool(named: FinalAnswerTool.toolName)],
+            transcript: singlePromptTranscript("Record the marker."),
+            enabledTools: [developerTool],
             generationOptions: GenerationOptions(
-                maximumResponseTokens: 128,
+                maximumResponseTokens: 64,
                 toolCallingMode: .required))
 
         let stream = try await executeResponse(executor, request: request, model: model)
@@ -244,7 +260,7 @@ struct FoundationModelsToolCallingTests {
             if case .appendText(let text, _, .response) = event { response += text }
         }
 
-        #expect(names == [FinalAnswerTool.toolName])
+        #expect(names == ["mlx_final_answer"])
         #expect(response.isEmpty)
     }
 

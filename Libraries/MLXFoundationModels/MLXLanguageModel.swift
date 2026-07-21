@@ -1145,9 +1145,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // *what* tools exist and how to decide between them; the
                         // grammar constraint below only enforces the *shape* of
                         // whatever tool call it emits.
-                        let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                            from: enabledToolDefinitions)
-
                         // Think-then-call is gated to the enable_thinking
                         // family (Qwen3/QwQ): their template both renders the tool
                         // block AND honors `enable_thinking`. R1-style `.alwaysOn`
@@ -1202,13 +1199,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // processors emit [N]; VLM processors emit [1, N], and VLM
                         // `prepare` fatally aborts on 1-D input), and they carry
                         // image/video content through to the model.
-                        let toolAwareInput = try await context.processor.prepare(
-                            input: UserInput(
-                                chat: messages,
-                                tools: toolSpecs,
-                                additionalContext: toolAwareContext))
-
                         if ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode) {
+                            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
+                                from: enabledToolDefinitions)
+                            let toolAwareInput = try await context.processor.prepare(
+                                input: UserInput(
+                                    chat: messages,
+                                    tools: toolSpecs,
+                                    additionalContext: toolAwareContext))
                             let reasoning = thinkThenCallConfig.map {
                                 (
                                     config: $0,
@@ -1273,12 +1271,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         // Required mode is the only mode that reaches guided
                         // tool generation, and it uses developer definitions only.
-                        let allowsSyntheticResponse = false
-                        let generationTools = enabledToolDefinitions
+                        let requiredToolDefinitions = enabledToolDefinitions
+                        let toolSpecs = try ToolCallingConversions.makeToolSpecs(
+                            from: requiredToolDefinitions)
+                        let toolAwareInput = try await context.processor.prepare(
+                            input: UserInput(
+                                chat: messages,
+                                tools: toolSpecs,
+                                additionalContext: toolAwareContext))
 
                         let toolCallingGrammar =
                             try SchemaConverter.encodeToolCallingGrammar(
-                                tools: generationTools
+                                tools: requiredToolDefinitions
                             )
                         // The inner JSON envelope is still needed separately to
                         // seed `CompletionReserve` -- the wrapper tokens
@@ -1287,7 +1291,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // tokenized size adds noise rather than accuracy.
                         let toolCallingEnvelopeJSON =
                             try SchemaConverter.encodeToolCallingEnvelopeJSON(
-                                tools: generationTools
+                                tools: requiredToolDefinitions
                             )
 
                         let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
@@ -1377,20 +1381,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         var outputBuffer = ""
                         var incomplete = false
                         var generatedTokenCount: Int?
-                        // With no developer response schema, the model picking
-                        // the synthetic final-answer tool means it chose to
-                        // answer in free text. Generating that text through the
-                        // greedy grammar-constrained JSON string degenerates on
-                        // small models (observed: Qwen/gemma spilling digit runs
-                        // like "1234567890…" into `response`), because greedy
-                        // argmax inside an unbounded string field is unstable.
-                        // So stop as soon as the final-answer tool is committed
-                        // and regenerate the answer unconstrained below. A
-                        // developer schema (structured output) stays on the
-                        // constrained path -- structure is the point there.
-                        let regenerateFinalAnswerUnconstrained =
-                            allowsSyntheticResponse && request.schema == nil
-                        var finalAnswerSelected = false
                         do {
                             generatedTokenCount = try GuidedGenerationLoop.run(
                                 input: phase2Input,
@@ -1405,16 +1395,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 whitespaceTokenIDs: whitespaceTokenIDs
                             ) { text in
                                 outputBuffer += text
-                                if regenerateFinalAnswerUnconstrained, !finalAnswerSelected,
-                                    outputBuffer.contains(FinalAnswerTool.toolName)
-                                {
-                                    // The grammar has fast-forwarded the
-                                    // `{"name": "mlx_final_answer", …` prefix, so
-                                    // the decision to answer is made. Halt before
-                                    // the greedy free-text field can degenerate.
-                                    finalAnswerSelected = true
-                                    return false
-                                }
                                 return !Task.isCancelled
                             }
                         } catch GuidedGenerationError.incompleteOutput {
@@ -1424,47 +1404,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         GuidedGenerationDiagnosticSink.current?.recordBuffer(
                             outputBuffer, incompleteOutput: incomplete)
 
-                        if finalAnswerSelected {
-                            // Regenerate the answer as a plain, unconstrained
-                            // completion of the conversation (which already
-                            // carries the tool result), so the response is
-                            // natural language rather than a grammar-forced JSON
-                            // string. Thinking is suppressed: a reasoning model
-                            // already reasoned in Phase 1 above, and a
-                            // non-reasoning one stays suppressed as elsewhere on
-                            // this path.
-                            let answerContext: [String: any Sendable]?
-                            if case .templateFlag(let key, _)? =
-                                resolved.reasoningConfig?.promptStrategy
-                            {
-                                answerContext = [key: false]
-                            } else {
-                                answerContext = nil
-                            }
-                            let answerInput = try await context.processor.prepare(
-                                input: UserInput(
-                                    chat: messages, additionalContext: answerContext))
-                            try await runUnconstrained(
-                                input: answerInput,
-                                requestedMaxTokens: requestedMaxTokens,
-                                requestedTemperature: request.generationOptions.temperature,
-                                samplingMode: requestedSamplingMode,
-                                entryID: entryID,
-                                context: context,
-                                channel: channel)
-                            // The early return skips the shared
-                            // `Stream.gpu.synchronize()` at the end of respond();
-                            // sync here so in-flight Metal work completes before
-                            // teardown.
-                            Stream.gpu.synchronize()
-                            return
-                        }
-
-                        try await emitToolCallingEvent(
+                        await emitRequiredToolCallEvent(
                             outputBuffer: outputBuffer,
-                            userResponseSchema: request.schema,
-                            allowsSyntheticResponse: allowsSyntheticResponse,
-                            entryID: entryID,
                             toolCallsEntryID: toolCallsEntryID,
                             channel: channel
                         )
@@ -2071,8 +2012,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return (collector.reasoningTokenIDs, closed)
         }
 
-        /// Parses a tool-calling envelope JSON object and emits the
-        /// appropriate channel event.
+        /// Parses a required-mode tool-calling envelope JSON object and emits
+        /// its developer tool call.
         ///
         /// The output buffer is expected to be a JSON object matching the
         /// shape `{"name": <tool-name>, "arguments": <args>}`. Grammars from
@@ -2080,29 +2021,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// shape directly (bare JSON) or that shape wrapped in Qwen's
         /// `<tool_call>\n...\n</tool_call>` special-token delimiters --
         /// `unwrapToolCallMarkers` below strips the wrapper if present. The
-        /// best-effort fallback only exists so that unexpected upstream
-        /// changes don't silently swallow output.
+        /// guided path emits a single `.toolCallDelta` with the arguments JSON
+        /// and a freshly minted toolCallID.
         ///
-        /// - If `name` is the synthetic final-answer tool in allowed mode:
-        ///   - With no developer response schema: unwrap `arguments.response`
-        ///     into a `.textDelta` event.
-        ///   - With a developer response schema: re-serialize `arguments`
-        ///     back to JSON text and emit as a single `.textDelta`. The
-        ///     session's normal response-parsing path will decode the JSON
-        ///     through the developer's `GenerationSchema`.
-        /// - If `name` is any real tool: emit a single `.toolCallDelta`
-        ///   with the arguments JSON and a freshly minted toolCallID.
-        ///
-        /// `entryID` and `toolCallsEntryID` must be distinct: SKILL.md requires
-        /// `.response` and `.toolCalls` to live in separate transcript entries.
-        private func emitToolCallingEvent(
+        /// Required mode never degrades malformed or partial output into a
+        /// response event.
+        private func emitRequiredToolCallEvent(
             outputBuffer: String,
-            userResponseSchema: GenerationSchema?,
-            allowsSyntheticResponse: Bool,
-            entryID: String,
             toolCallsEntryID: String,
             channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
+        ) async {
             let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)
             let data = Data(unwrapped.utf8)
             guard
@@ -2112,47 +2040,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 GuidedGenerationDiagnosticSink.current?.recordParse(
                     parsedAsToolCall: false, parsedName: nil)
-                // Malformed output. The grammar should have prevented this;
-                // only allowed mode can surface it as response text. Required
-                // mode must never degrade a partial tool call into a response.
-                if allowsSyntheticResponse {
-                    await Self.emit(
-                        text: outputBuffer, entryID: entryID, destination: .response,
-                        into: channel)
-                }
                 return
             }
 
             GuidedGenerationDiagnosticSink.current?.recordParse(
                 parsedAsToolCall: true, parsedName: name)
 
-            if allowsSyntheticResponse, name == FinalAnswerTool.toolName {
-                let text: String
-                if userResponseSchema == nil {
-                    let args = obj["arguments"] as? [String: Any]
-                    text = (args?["response"] as? String) ?? ""
-                } else if let args = obj["arguments"],
-                    let argsData = try? JSONSerialization.data(withJSONObject: args),
-                    let argsStr = String(data: argsData, encoding: .utf8)
-                {
-                    text = argsStr
-                } else {
-                    text = ""
-                }
-                await Self.emit(
-                    text: text, entryID: entryID, destination: .response, into: channel)
-            } else {
-                guard
-                    let args = obj["arguments"],
-                    let argsData = try? JSONSerialization.data(withJSONObject: args),
-                    let argsStr = String(data: argsData, encoding: .utf8)
-                else {
-                    return
-                }
-                await Self.emitToolCall(
-                    id: UUID().uuidString, name: name, arguments: argsStr,
-                    entryID: toolCallsEntryID, into: channel)
+            guard
+                let arguments = obj["arguments"],
+                let argumentsData = try? JSONSerialization.data(withJSONObject: arguments),
+                let argumentsJSON = String(data: argumentsData, encoding: .utf8)
+            else {
+                return
             }
+            await Self.emitToolCall(
+                id: UUID().uuidString,
+                name: name,
+                arguments: argumentsJSON,
+                entryID: toolCallsEntryID,
+                into: channel)
         }
 
         /// Strips Qwen-style `<tool_call>\n...\n</tool_call>` wrapper markers

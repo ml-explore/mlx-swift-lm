@@ -34,12 +34,12 @@ private struct FlashlightArguments {
 /// - Continuation round: after the session executes a tool and re-invokes us
 ///   with the call + output appended, we replay both into the model's context
 ///   so its answer reflects the result rather than re-issuing the call.
-/// - Multi-round: with tools still enabled on a continuation round, the model
-///   may chain another tool or answer from the replayed result. Whether it
-///   chains is a model-dependent choice (the tool path always offers a
-///   synthetic final-answer branch), so it is not asserted; the deterministic
-///   guarantee that each round's context is assembled correctly lives in the
-///   converter test ``testTwoToolRoundsProduceCorrelatedMessages``.
+/// - Multi-round: with tools still enabled on a continuation round, native
+///   `.allowed` routing lets the model chain another tool or answer from the
+///   replayed result. Whether it chains is model-dependent, so it is not
+///   asserted; the deterministic guarantee that each round's context is
+///   assembled correctly lives in the converter test
+///   ``testTwoToolRoundsProduceCorrelatedMessages``.
 ///
 /// The tool loop is faked here: instead of letting `LanguageModelSession` run
 /// the flashlight tool, the transcript is seeded with the call and output the
@@ -171,11 +171,11 @@ struct MultiTurnToolCallingTests {
         let lowered = textContent.lowercased()
         let reflectsOutput = lowered.contains("light") || lowered.contains("on")
 
-        // Multi-round: with the tool still enabled on the continuation round,
-        // the model may either answer from the replayed result or call a tool
-        // again -- both are valid, unlike the old one-round cap. The regression
-        // this guards is the model ignoring the tool output: a plain answer
-        // that neither reflects the result nor issues a tool call.
+        // Multi-round: `.allowed` mode controls termination on a continuation
+        // round, so the model may answer from the replayed result or call a tool
+        // again. The regression this guards is the model ignoring the tool
+        // output: a plain answer that neither reflects the result nor issues a
+        // tool call.
         #expect(
             reflectsOutput || madeToolCall,
             "Continuation must reflect the tool output or issue a tool call, not ignore the result. Got: \"\(textContent)\" (\(modelID))"

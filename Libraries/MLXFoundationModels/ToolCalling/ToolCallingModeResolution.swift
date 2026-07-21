@@ -43,18 +43,6 @@ enum ToolCallingModeResolution {
         guard !definitions.isEmpty else { throw Error.requiredToolsMissing }
         return definitions
     }
-
-    static func guidedToolDefinitions(
-        for mode: GenerationOptions.ToolCallingMode,
-        from definitions: [Transcript.ToolDefinition],
-        responseSchema: GenerationSchema?
-    ) throws -> [Transcript.ToolDefinition] {
-        let enabled = try enabledToolDefinitions(for: mode, from: definitions)
-        guard usesAllowedBehavior(mode), !enabled.isEmpty else { return enabled }
-        return enabled + [
-            FinalAnswerTool.makeToolDefinition(responseSchema: responseSchema)
-        ]
-    }
 }
 
 #endif
