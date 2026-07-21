@@ -16,7 +16,7 @@ import Testing
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
 private enum CharacterizationFlashlightState: String {
-    case on, off
+    case on
 }
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -111,7 +111,9 @@ struct ToolCallGrammarCharacterizationTests {
         let request = makeExecutorRequest(
             transcript: freshTurnTranscript(),
             enabledTools: [flashlightTool()],
-            generationOptions: GenerationOptions(maximumResponseTokens: 128))
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required))
 
         let sink = GuidedGenerationDiagnosticSink()
 
