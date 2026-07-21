@@ -14,6 +14,7 @@ struct AllowedToolOutputRouter {
 
     private var reasoningEmitter: ReasoningEventEmitter?
     private let toolProcessor: ToolCallProcessor
+    private let allowedToolNames: Set<String>
 
     init(
         format: ToolCallFormat,
@@ -21,6 +22,9 @@ struct AllowedToolOutputRouter {
         reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.toolProcessor = ToolCallProcessor(format: format, tools: tools)
+        self.allowedToolNames = Set(tools.compactMap { tool in
+            (tool["function"] as? [String: any Sendable])?["name"] as? String
+        })
         self.reasoningEmitter = reasoning.map {
             ReasoningEventEmitter(config: $0.config, primedInside: $0.primedInside)
         }
@@ -60,20 +64,23 @@ struct AllowedToolOutputRouter {
             }
             reasoningEmitter = emitter
         }
-        if let text = toolProcessor.processEOS(returnBufferedText: true), !text.isEmpty {
-            events.append(.response(text))
-        }
-        events.append(contentsOf: toolProcessor.drainToolCalls().map(Event.toolCall))
+        events.append(contentsOf: route(toolProcessor.processEOSOutputs()))
         return events
     }
 
     private mutating func processResponse(_ text: String) -> [Event] {
-        var events: [Event] = []
-        if let visible = toolProcessor.processChunk(text), !visible.isEmpty {
-            events.append(.response(visible))
+        route(toolProcessor.processChunkOutputs(text))
+    }
+
+    private func route(_ outputs: [ToolCallProcessor.Output]) -> [Event] {
+        outputs.compactMap { output in
+            switch output {
+            case .response(let text):
+                .response(text)
+            case .toolCall(let call):
+                allowedToolNames.contains(call.function.name) ? .toolCall(call) : nil
+            }
         }
-        events.append(contentsOf: toolProcessor.drainToolCalls().map(Event.toolCall))
-        return events
     }
 }
 

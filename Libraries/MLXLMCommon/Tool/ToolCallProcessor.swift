@@ -24,6 +24,12 @@ import Foundation
 /// ```
 public class ToolCallProcessor {
 
+    /// An ordered item emitted while processing generated output.
+    public enum Output: Sendable, Equatable {
+        case response(String)
+        case toolCall(ToolCall)
+    }
+
     // MARK: - Properties
 
     private let format: ToolCallFormat
@@ -91,6 +97,17 @@ public class ToolCallProcessor {
         return processTaggedChunk(chunk)
     }
 
+    /// Processes a generated chunk and removes its output in source order.
+    ///
+    /// Tool protocol syntax that does not parse as a call is not emitted as a
+    /// response. Use this streaming operation when tool calls and response text
+    /// must retain their relative order.
+    public func processChunkOutputs(_ chunk: String) -> [Output] {
+        let visible = processChunk(chunk)
+        let calls = drainToolCalls()
+        return orderedOutputs(for: chunk, visible: visible, calls: calls)
+    }
+
     /// Removes and returns every parsed call in parse order.
     /// A second call returns an empty array until more chunks are processed.
     public func drainToolCalls() -> [ToolCall] {
@@ -141,6 +158,28 @@ public class ToolCallProcessor {
         state = .normal
 
         return returnBufferedText && parsedCalls.isEmpty ? buffered : nil
+    }
+
+    /// Finishes processing and removes residual output in source order.
+    ///
+    /// This preserves non-tool text following Mistral's EOS-delimited calls.
+    public func processEOSOutputs() -> [Output] {
+        if format == .mistral, let outputs = processMistralEOSOutputs() {
+            return outputs
+        }
+
+        let visible = processEOS(returnBufferedText: true)
+        let calls = drainToolCalls()
+        guard !calls.isEmpty else {
+            guard let visible, !containsToolProtocol(visible) else { return [] }
+            return [.response(visible)]
+        }
+
+        var outputs = calls.map(Output.toolCall)
+        if let visible, !visible.isEmpty, !containsToolProtocol(visible) {
+            outputs.append(.response(visible))
+        }
+        return outputs
     }
 
     // MARK: - Private Methods
@@ -203,6 +242,129 @@ public class ToolCallProcessor {
             // Still collecting
             return nil
         }
+    }
+
+    private func orderedOutputs(
+        for chunk: String,
+        visible: String?,
+        calls: [ToolCall]
+    ) -> [Output] {
+        guard !calls.isEmpty else {
+            guard let visible, !containsToolProtocol(visible) else { return [] }
+            return [.response(visible)]
+        }
+
+        if format == .llama3 {
+            return orderedLlama3Outputs(for: chunk, visible: visible, calls: calls)
+        }
+
+        guard let startTag = parser.startTag, let endTag = parser.endTag else {
+            var outputs = calls.map(Output.toolCall)
+            if let visible, !visible.isEmpty, !containsToolProtocol(visible) {
+                outputs.append(.response(visible))
+            }
+            return outputs
+        }
+
+        guard chunk.contains(startTag) else {
+            var outputs = calls.map(Output.toolCall)
+            if let visible, !visible.isEmpty, !containsToolProtocol(visible) {
+                outputs.append(.response(visible))
+            }
+            return outputs
+        }
+
+        var outputs: [Output] = []
+        var callIndex = 0
+        var cursor = chunk.startIndex
+
+        while let startRange = chunk.range(of: startTag, range: cursor..<chunk.endIndex) {
+            appendResponse(String(chunk[cursor..<startRange.lowerBound]), to: &outputs)
+            guard let endRange = chunk.range(of: endTag, range: startRange.upperBound..<chunk.endIndex)
+            else {
+                return outputs
+            }
+            if callIndex < calls.count {
+                outputs.append(.toolCall(calls[callIndex]))
+                callIndex += 1
+            }
+            cursor = endRange.upperBound
+        }
+
+        appendResponse(String(chunk[cursor...]), to: &outputs)
+        while callIndex < calls.count {
+            outputs.append(.toolCall(calls[callIndex]))
+            callIndex += 1
+        }
+
+        if outputs.isEmpty, let visible, !visible.isEmpty, !containsToolProtocol(visible) {
+            outputs.append(.response(visible))
+        }
+        return outputs
+    }
+
+    private func orderedLlama3Outputs(
+        for chunk: String,
+        visible: String?,
+        calls: [ToolCall]
+    ) -> [Output] {
+        var outputs: [Output] = []
+        if let marker = chunk.range(of: "<|python_tag|>") {
+            appendResponse(String(chunk[..<marker.lowerBound]), to: &outputs)
+        } else if let brace = chunk.firstIndex(of: "{") {
+            appendResponse(String(chunk[..<brace]), to: &outputs)
+        }
+        outputs.append(contentsOf: calls.map(Output.toolCall))
+
+        if outputs.isEmpty, let visible, !visible.isEmpty, !containsToolProtocol(visible) {
+            outputs.append(.response(visible))
+        }
+        return outputs
+    }
+
+    private func appendResponse(_ text: String, to outputs: inout [Output]) {
+        guard !text.isEmpty else { return }
+        outputs.append(.response(text))
+    }
+
+    private func containsToolProtocol(_ text: String) -> Bool {
+        if format == .llama3, text.contains("<|python_tag|>") {
+            return true
+        }
+        return parser.startTag.map(text.contains) ?? false
+    }
+
+    private func processMistralEOSOutputs() -> [Output]? {
+        guard
+            state == .collectingToolCall || state == .potentialToolCall
+                || state == .collectingJSONToolCall,
+            !toolCallBuffer.isEmpty
+        else { return nil }
+
+        let startTag = "[TOOL_CALLS]"
+        let argsTag = "[ARGS]"
+        var remaining = toolCallBuffer
+        var outputs: [Output] = []
+
+        while remaining.hasPrefix(startTag) {
+            guard let argsRange = remaining.range(of: argsTag) else { break }
+            let arguments = String(remaining[argsRange.upperBound...])
+            guard let split = jsonObjectScanner.splitLeadingObject(from: arguments) else { break }
+
+            let callText = String(remaining[..<argsRange.upperBound]) + split.object
+            guard let call = parser.parse(content: callText, tools: tools) else { break }
+            appendToolCall(call)
+            outputs.append(.toolCall(toolCalls.removeLast()))
+            remaining = split.trailing
+        }
+
+        toolCallBuffer = ""
+        state = .normal
+
+        if !remaining.isEmpty, !containsToolProtocol(remaining) {
+            outputs.append(.response(remaining))
+        }
+        return outputs
     }
 
     /// Check whether open/close braces are balanced in the string.
