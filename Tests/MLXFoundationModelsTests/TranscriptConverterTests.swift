@@ -10,6 +10,13 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct StructuredWeatherToolResult {
+    var temperature: Int
+    var condition: String
+}
+
 @Suite
 struct TranscriptConverterTests {
 
@@ -208,6 +215,78 @@ struct TranscriptConverterTests {
         // carries a tool_call_id that the template correlates to the call.
         let raw = DefaultMessageGenerator().generate(message: messages[0])
         #expect(raw["tool_call_id"] as? String == "call_1")
+    }
+
+    @Test
+    func testStructuredToolOutputPreservesEveryGeneratedContentJSONShape() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let cases: [(id: String, content: GeneratedContent)] = [
+            (
+                id: "generable",
+                content: StructuredWeatherToolResult(
+                    temperature: 18,
+                    condition: "sunny"
+                ).generatedContent
+            ),
+            (id: "array", content: try GeneratedContent(json: #"["Paris","Tokyo"]"#)),
+            (id: "scalar", content: try GeneratedContent(json: #"18"#)),
+        ]
+
+        for testCase in cases {
+            let output = Transcript.ToolOutput(
+                id: "call_\(testCase.id)",
+                toolName: "get_weather",
+                segments: [
+                    .structure(
+                        Transcript.StructuredSegment(
+                            schemaName: "WeatherResult",
+                            content: testCase.content))
+                ])
+
+            let messages = TranscriptConverter.mlxMessages(for: [.toolOutput(output)])
+
+            #expect(messages.count == 1)
+            let message = try #require(messages.first)
+            #expect(message.role == .tool)
+            #expect(message.content == testCase.content.jsonString)
+
+            let raw = DefaultMessageGenerator().generate(message: message)
+            #expect(raw["tool_call_id"] as? String == "call_\(testCase.id)")
+        }
+    }
+
+    @Test
+    func testMixedTextAndStructuredToolOutputPreservesSegmentOrder() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let content = try GeneratedContent(
+            json: #"{"temperature":18,"condition":"sunny"}"#)
+        let output = Transcript.ToolOutput(
+            id: "call_mixed",
+            toolName: "get_weather",
+            segments: [
+                .text(Transcript.TextSegment(content: "Weather result:")),
+                .structure(
+                    Transcript.StructuredSegment(
+                        schemaName: "WeatherResult",
+                        content: content)),
+                .text(Transcript.TextSegment(content: "Use this current reading.")),
+            ])
+
+        let messages = TranscriptConverter.mlxMessages(for: [.toolOutput(output)])
+
+        let message = try #require(messages.first)
+        #expect(
+            message.content
+                == [
+                    "Weather result:",
+                    content.jsonString,
+                    "Use this current reading.",
+                ].joined(separator: "\n"))
+
+        let raw = DefaultMessageGenerator().generate(message: message)
+        #expect(raw["tool_call_id"] as? String == "call_mixed")
     }
 
     @Test

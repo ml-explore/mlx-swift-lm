@@ -64,6 +64,7 @@ struct MultiTurnToolCallingTests {
 
     private static let toolName = "set_flashlight"
     private static let flashlightOnResult = "Flashlight turned on."
+    private static let structuredConfirmationCode = "fm-structured-4821"
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func flashlightTool() -> Transcript.ToolDefinition {
@@ -116,6 +117,38 @@ struct MultiTurnToolCallingTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func continuationTranscript() throws -> Transcript {
         Transcript(entries: [.instructions(instructions())] + (try turnOnRound()))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func structuredContinuationTranscript() throws -> Transcript {
+        let callID = "call_flashlight_structured"
+        let result = try GeneratedContent(
+            json: #"{"state":"on","confirmationCode":"fm-structured-4821"}"#)
+        let toolCall = Transcript.ToolCall(
+            id: callID,
+            toolName: Self.toolName,
+            arguments: try GeneratedContent(json: #"{"state":"on"}"#))
+        let toolOutput = Transcript.ToolOutput(
+            id: callID,
+            toolName: Self.toolName,
+            segments: [
+                .structure(
+                    Transcript.StructuredSegment(
+                        schemaName: "FlashlightResult",
+                        content: result))
+            ])
+
+        return Transcript(entries: [
+            .instructions(instructions()),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [
+                        .text(Transcript.TextSegment(content: "Turn on the flashlight."))
+                    ],
+                    responseFormat: nil)),
+            .toolCalls(Transcript.ToolCalls(id: "toolcalls_structured", [toolCall])),
+            .toolOutput(toolOutput),
+        ])
     }
 
     /// Constructs each model the way a real app would. Reasoning-first models
@@ -228,6 +261,29 @@ struct MultiTurnToolCallingTests {
             decoded.lowercased().contains("flashlight turned on"),
             "Rendered continuation prompt must contain the tool output text (\(modelID))"
         )
+    }
+
+    @Test(arguments: MultiTurnToolCallingTests.models)
+    func continuationPromptContainsStructuredToolOutput(modelID: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let model = makeTestModel(modelID)
+        let container = try await model.loadContainer()
+        let transcript = try structuredContinuationTranscript()
+
+        let decoded = try await container.perform { context in
+            let messages = TranscriptConverter.mlxMessages(for: transcript)
+            let raw = DefaultMessageGenerator().generate(messages: messages)
+            let tokens = try context.tokenizer.applyChatTemplate(messages: raw)
+            return context.tokenizer.decode(tokenIds: tokens)
+        }
+
+        #expect(
+            decoded.contains(Self.structuredConfirmationCode),
+            "Rendered continuation prompt must contain the structured tool result (\(modelID))")
+        #expect(
+            decoded.contains("confirmationCode"),
+            "Rendered continuation prompt must preserve the structured result field (\(modelID))")
     }
 }
 

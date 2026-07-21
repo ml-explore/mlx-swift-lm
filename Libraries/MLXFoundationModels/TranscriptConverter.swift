@@ -98,11 +98,11 @@ struct TranscriptConverter {
 
             case .toolOutput(let output):
                 // Replay the tool result as a `tool` message correlated to its
-                // originating call by id. FoundationModels sets ToolOutput.id to
-                // the call id (ToolCallCoordinator), so the template resolves the
-                // tool name via the matching tool_call_id.
-                let text = extractText(from: output.segments) ?? ""
-                return Chat.Message.tool(text, id: output.id)
+                // originating call by id. Text remains verbatim; structured
+                // GeneratedContent is serialized as JSON so the native chat
+                // template can expose it to the continuation model turn.
+                let content = extractToolOutputContent(from: output.segments)
+                return Chat.Message.tool(content, id: output.id)
 
             default:
                 // Skip unsupported entry types. Explicit `return nil` is a
@@ -112,6 +112,29 @@ struct TranscriptConverter {
                 return nil
             }
         }
+    }
+
+    /// Extracts supported tool-output content in transcript segment order.
+    ///
+    /// Foundation Models lowers `String` outputs to `.text` and
+    /// `GeneratedContent`/`@Generable` outputs to `.structure`. MLX chat
+    /// templates accept tool results as strings, so structured values retain
+    /// their JSON representation. Attachments and custom segments are deferred
+    /// until their media and prompt-representation contracts are implemented.
+    private static func extractToolOutputContent(
+        from segments: [Transcript.Segment]
+    ) -> String {
+        segments.compactMap { segment -> String? in
+            switch segment {
+            case .text(let textSegment):
+                return textSegment.content
+            case .structure(let structuredSegment):
+                return structuredSegment.content.jsonString
+            default:
+                logger.debug("Skipping unsupported tool-output segment")
+                return nil
+            }
+        }.joined(separator: "\n")
     }
 
     /// Extracts text content from transcript segments.
