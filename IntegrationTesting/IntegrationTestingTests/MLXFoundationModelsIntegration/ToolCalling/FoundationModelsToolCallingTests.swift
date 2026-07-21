@@ -15,14 +15,19 @@ private struct WeatherArgs {
     var location: String
 }
 
-/// End-to-end test for tool calling via guided generation.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct Greeting {
+    var message: String
+}
+
+/// End-to-end tests for Foundation Models tool-calling modes.
 ///
 /// This suite validates that when a request has `enabledTools`, the
 /// executor (1) formats tools into the prompt via the tokenizer's native
-/// tool-aware chat template, (2) constrains the model's output to a
-/// union-of-tools JSON envelope via xgrammar, and (3) parses the result
-/// into either a `toolCallDelta` (real tool) or `textDelta` (synthetic
-/// final-answer tool).
+/// tool-aware chat template, (2) routes native `.allowed` output to either
+/// a response or a real tool call, and (3) constrains `.required` output to
+/// a developer-tool JSON envelope via xgrammar.
 @Suite(.serialized, .timeLimit(.minutes(5)))
 struct FoundationModelsToolCallingTests {
 
@@ -60,63 +65,79 @@ struct FoundationModelsToolCallingTests {
         print("[ToolCallingSetup] freed \(freed)MB active, \(cache)MB cache")
     }
 
-    @Test
-    func toolsEnabledEmitsToolCallOrText() async throws {
+    @Test func allowedCanAnswerWithoutCallingATool() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
-
         let request = makeExecutorRequest(
-            transcript: singlePromptTranscript("What's the weather in Tokyo?"),
-            enabledTools: [weatherTool()]
-        )
+            transcript: singlePromptTranscript("Say hello in one short sentence."),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 64,
+                toolCallingMode: .allowed))
 
         let stream = try await executeResponse(executor, request: request, model: model)
-
-        var sawWeatherToolCall = false
-        var sawText = false
-        var textContent = ""
-
+        var calls: [String] = []
+        var response = ""
         for try await event in stream {
-            if case .toolCall(_, let name, let arguments) = event {
-                if name == "get_weather" {
-                    sawWeatherToolCall = true
-                    let data = Data(arguments.utf8)
-                    let parsed = try? JSONSerialization.jsonObject(with: data)
-                    #expect(
-                        parsed != nil,
-                        "Tool call arguments should be valid JSON: \(arguments)")
-                }
-            } else if case .appendText(let chunk, _, .response) = event {
-                sawText = true
-                textContent += chunk
-            }
+            if case .toolCall(_, let name, _) = event { calls.append(name) }
+            if case .appendText(let text, _, .response) = event { response += text }
         }
-
-        // Exactly one of the two paths should have produced output.
-        #expect(
-            sawWeatherToolCall || sawText,
-            "Executor with enabled tools must emit either a toolCallDelta or a textDelta"
-        )
-
-        if sawWeatherToolCall {
-            #expect(
-                textContent.isEmpty,
-                "When a real tool call fires, no text deltas should be emitted"
-            )
-        } else {
-            #expect(
-                !textContent.isEmpty,
-                "When the synthetic final-answer tool fires, text should be non-empty"
-            )
-        }
+        #expect(calls.isEmpty)
+        #expect(!response.isEmpty)
     }
 
-    /// With tool-aware prompt formatting plus the tool-call grammar
-    /// that allows `<tool_call>`-wrapped output, the model can both *see* the
-    /// available tools in the prompt and emit them in its trained format.
+    @Test func allowedCanChooseARealTool() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("What is the current weather in Tokyo?"),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .allowed))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var calls: [String] = []
+        var response = ""
+        for try await event in stream {
+            if case .toolCall(_, let name, _) = event { calls.append(name) }
+            if case .appendText(let text, _, .response) = event { response += text }
+        }
+        #expect(calls == ["get_weather"])
+        #expect(response.isEmpty)
+    }
+
+    @Test func allowedResponseStillHonorsResponseSchema() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("Say hello in one short sentence."),
+            enabledTools: [weatherTool()],
+            schema: Greeting.generationSchema,
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .allowed))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var calls: [String] = []
+        var responseJSON = ""
+        for try await event in stream {
+            if case .toolCall(_, let name, _) = event { calls.append(name) }
+            if case .appendText(let text, _, .response) = event { responseJSON += text }
+        }
+        #expect(calls.isEmpty)
+        let content = try GeneratedContent(json: responseJSON)
+        _ = try Greeting(content)
+    }
+
+    /// With tool-aware prompt formatting plus native allowed generation, the
+    /// model can both *see* the available tools in the prompt and emit them in
+    /// its trained format.
     /// For a weather query, Qwen should pick `get_weather` rather than
-    /// hallucinating via the synthetic final-answer path.
+    /// answering without the requested live data.
     @Test
     func toolAwarePromptRoutesWeatherQueryToGetWeather() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

@@ -17,13 +17,12 @@ private struct WeatherArgs {
     var location: String
 }
 
-/// Think-then-call: a reasoning model given tools reasons unconstrained
-/// first, then emits a grammar-constrained tool call.
+/// Native allowed tool use: a reasoning model given tools can reason first,
+/// then either answer or emit a model-native tool call.
 ///
 /// Device-only (requires a device running iOS 27.0+): loads real models. v1 family scope is
 /// Qwen3/QwQ (template renders tools AND honors `enable_thinking`); R1-Distill is
-/// de-scoped (tool-blind template) and must fall through to the existing
-/// single-phase tool path unchanged.
+/// de-scoped (tool-blind template) and stays on its single-phase behavior.
 @Suite(.serialized, .timeLimit(.minutes(15)))
 struct ToolCallingReasoningTests {
 

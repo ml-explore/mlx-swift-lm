@@ -36,6 +36,33 @@ struct AllowedToolOutputRouterTests {
         #expect(call.function.arguments["location"] == .string("Tokyo"))
     }
 
+    @Test func eosRecoversQwenJSONCallWithRedundantOuterBraces() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(
+            router.process(
+                #"<tool_call>{{"name":"get_weather","arguments":{"location":"Tokyo"}}}}"#
+            ).isEmpty)
+
+        let events = router.finish()
+        #expect(events.count == 1)
+        guard events.count == 1 else { return }
+        guard case .toolCall(let call) = events[0] else {
+            Issue.record("Expected the EOS-delimited Qwen JSON tool call")
+            return
+        }
+        #expect(call.function.name == "get_weather")
+        #expect(call.function.arguments["location"] == .string("Tokyo"))
+    }
+
+    @Test func eosDoesNotRecoverRedundantJSONBracesWithArbitrarySuffix() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(
+            router.process(
+                #"<tool_call>{{"name":"get_weather","arguments":{"location":"Tokyo"}}}}oops"#
+            ).isEmpty)
+        #expect(router.finish().isEmpty)
+    }
+
     @Test func splitToolCallIsBufferedUntilComplete() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(router.process(#"<tool_call>{"name":"get_weather","arguments":{"#).isEmpty)

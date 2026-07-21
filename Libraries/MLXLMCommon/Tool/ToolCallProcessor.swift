@@ -765,7 +765,7 @@ public class ToolCallProcessor {
     }
 }
 
-private struct JSONLeadingObjectScanner {
+struct JSONLeadingObjectScanner {
     enum PrefixState {
         case needsMore
         case validObject
