@@ -502,9 +502,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     // MARK: - LanguageModel Conformance
 
     /// MLX supports guided generation via xgrammar grammar-constrained
-    /// decoding (provided by the MLXGuidedGeneration library), tool
-    /// calling via the synthetic-final-answer envelope, and reasoning
-    /// (chain-of-thought) routing on the unconstrained generation path.
+    /// decoding (provided by the MLXGuidedGeneration library), native
+    /// `.allowed` tool routing, guided `.required` developer tool calls,
+    /// and reasoning (chain-of-thought) routing.
     ///
     /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:weightsLocation:load:)``
     /// and stored verbatim. The caller includes
@@ -1171,14 +1171,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         //   - reasoning NOT declared: force thinking OFF, mirroring
                         //     the unconstrained path's suppression (see
                         //     `suppressedInput` above).
-                        // Forcing OFF here is load-bearing: if we left the template
-                        // at its ON default while running the single-phase path, the
-                        // grammar forces the tool-call JSON from the first token so a
-                        // thinking-primed model can never emit its `<think>` block,
-                        // and greedy decoding of the free-text response degenerates
-                        // (Qwen: "1234567890..."). `.alwaysOn` models with reasoning
-                        // undeclared were already rejected by the capability gate
-                        // above; `.none`/no-config models take no context.
+                        // Forcing OFF here is load-bearing for both modes. Native
+                        // `.allowed` generation would otherwise surface undeclared
+                        // reasoning through response/tool parsing. In `.required`,
+                        // the grammar forces tool-call JSON from the first token, so
+                        // a thinking-primed model cannot emit its `<think>` block and
+                        // greedy decoding of unconstrained developer tool string
+                        // arguments can degenerate (Qwen: "1234567890...").
+                        // `.alwaysOn` models with reasoning undeclared were already
+                        // rejected by the capability gate above; `.none`/no-config
+                        // models take no context.
                         let toolAwareContext: [String: any Sendable]?
                         if case .templateFlag(let key, let defaultOn)? =
                             resolved.reasoningConfig?.promptStrategy

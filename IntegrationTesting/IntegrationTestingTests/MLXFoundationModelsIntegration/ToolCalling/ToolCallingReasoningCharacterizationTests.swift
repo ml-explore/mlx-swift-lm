@@ -11,21 +11,27 @@ import MLXLMCommon
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
+private enum WeatherLocation: String {
+    case tokyo = "Tokyo"
+}
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
 private struct WeatherArgs {
-    @Guide(description: "City and state, e.g. 'San Francisco, CA'.")
-    var location: String
+    @Guide(description: "Location to query.")
+    var location: WeatherLocation
 }
 
 /// Characterizes two empirical facts about today's tool-calling path
 /// (device/manual-gated, requires a device running iOS 27.0+). Touches no production code.
 ///
 /// What it answers:
-///   1. SEPARABILITY (`qwen3WithToolsSuppressesThink`): does the tool-calling
-///      grammar suppress `<think>` today? The structural tag is compiled in the
-///      *non-triggered* form (`xg_compile_structural_tag` with `nullopt`, no
-///      `token_triggered_tags`; see `XGrammarBridge.swift:409`), so the model is
-///      masked to `<tool_call>`/`{` from generated-token zero and cannot emit
-///      `<think>`. If a marker leaks, the grammar does not in fact suppress it.
+///   1. REQUIRED ENVELOPE (`qwen3RequiredModeEmitsOnlyDeveloperToolCall`): does
+///      `.required` mode emit only its enabled developer tool? The structural tag
+///      is compiled in the *non-triggered* form (`xg_compile_structural_tag` with
+///      `nullopt`, no `token_triggered_tags`; see `XGrammarBridge.swift:409`), so
+///      guided generation starts at generated-token zero and must produce a tool
+///      envelope rather than response text or reasoning markers.
 ///   2. TOOL-AWARE THINKING SEED (`toolAwareTemplateHonorsEnableThinking`): does the
 ///      3-arg `applyChatTemplate(messages:tools:additionalContext:)` produce a
 ///      *distinct* thinking-primed prompt on the tool path, and what `primedInside`
@@ -51,14 +57,14 @@ struct ToolCallingReasoningCharacterizationTests {
         await releaseAllGPUMemory()
     }
 
-    // MARK: - 1. Separability: does the tool grammar suppress `<think>` today?
+    // MARK: - 1. Required mode: does guidance emit only the developer tool?
 
-    /// Drives Qwen3 (thinking-on by template default) + a weather tool through the
-    /// CURRENT single-phase tool path. Qwen3 wants to emit `<think>` on the
-    /// unconstrained path, but the token-zero structural-tag grammar should mask it
-    /// out. The falsifiable assertion: no response/tool-call delta contains `<think>`
-    /// or `</think>`.
-    @Test func qwen3WithToolsSuppressesThink() async throws {
+    /// Drives Qwen3 plus a weather tool through explicit `.required` mode. This
+    /// fixture does not declare reasoning, so production disables thinking in the
+    /// tool-aware template before token-zero structural guidance begins. The
+    /// falsifiable assertion is that guidance emits the enabled developer tool,
+    /// its arguments contain no reasoning markers, and no response text appears.
+    @Test func qwen3RequiredModeEmitsOnlyDeveloperToolCall() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(Self.qwen3)
         let executor = try makeMLXExecutor(for: model)
@@ -75,7 +81,12 @@ struct ToolCallingReasoningCharacterizationTests {
                         .text(Transcript.TextSegment(content: "What's the weather in Tokyo?"))
                     ], responseFormat: nil))
         ])
-        let request = makeExecutorRequest(transcript: transcript, enabledTools: [weatherTool])
+        let request = makeExecutorRequest(
+            transcript: transcript,
+            enabledTools: [weatherTool],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required))
         let stream = try await executeResponse(executor, request: request, model: model)
 
         var responseText = ""
@@ -95,21 +106,14 @@ struct ToolCallingReasoningCharacterizationTests {
                 + "responseText=<<<\(responseText.prefix(200))>>> args=<<<\(toolArgs.prefix(200))>>>"
         )
 
-        // THE confirmation: the grammar must have suppressed the think markers.
-        let leakedInResponse =
-            responseText.contains("<think>") || responseText.contains("</think>")
+        // Required guidance must emit the enabled developer tool rather than
+        // reasoning markers or response text.
         let leakedInArgs = toolArgs.contains("<think>") || toolArgs.contains("</think>")
-        #expect(
-            !leakedInResponse,
-            "Grammar-suppression hypothesis failed: <think>/</think> reached .response on the tool path."
-        )
         #expect(
             !leakedInArgs,
             "Tool-call arguments must not contain reasoning markers.")
-        // Sanity: something was produced (tool call or synthetic-final-answer text).
-        #expect(
-            toolCallName != nil || !responseText.isEmpty,
-            "The tool path must emit a tool call or text.")
+        #expect(toolCallName == "get_weather")
+        #expect(responseText.isEmpty)
     }
 
     // MARK: - 2. Tool-aware thinking seed: does the 3-arg template honor enable_thinking?
