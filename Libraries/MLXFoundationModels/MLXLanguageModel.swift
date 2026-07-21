@@ -1397,11 +1397,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 whitespaceTokenIDs: whitespaceTokenIDs
                             ) { text in
                                 outputBuffer += text
+                                GuidedGenerationDiagnosticSink.current?.recordEmit()
                                 return !Task.isCancelled
                             }
                         } catch GuidedGenerationError.incompleteOutput {
                             incomplete = true
                         }
+                        try Task.checkCancellation()
 
                         GuidedGenerationDiagnosticSink.current?.recordBuffer(
                             outputBuffer, incompleteOutput: incomplete)
@@ -1645,13 +1647,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     whitespaceTokenIDs: bias.whitespaceTokenIDs
                 ) { text in
                     textContinuation.yield(text)
+                    GuidedGenerationDiagnosticSink.current?.recordEmit()
                     return !Task.isCancelled
                 }
             } catch GuidedGenerationError.incompleteOutput {
                 incomplete = true
             }
+
+            let cancellationError: Error?
+            do {
+                try Task.checkCancellation()
+                cancellationError = nil
+            } catch {
+                cancellationError = error
+            }
             textContinuation.finish()
             await forwarder
+            if let cancellationError {
+                throw cancellationError
+            }
 
             if let generatedTokenCount {
                 await Self.emitUsage(
@@ -1987,6 +2001,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             reasoningEntryID: reasoningEntryID, channel: channel)
                     }
                     if collector.shouldStopAfterReasoning {
+                        GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
                         closed = true
                         break
                     }

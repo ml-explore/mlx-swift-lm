@@ -7,6 +7,7 @@ import Foundation
 import MLX
 import FoundationModels
 @testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
@@ -212,6 +213,35 @@ struct FoundationModelsToolCallingTests {
 
         #expect(names == ["get_weather"])
         #expect(response.isEmpty)
+    }
+
+    @Test func requiredGuidedCancellationPropagates() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("What is the weather in Tokyo?"),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required))
+        let sink = GuidedGenerationDiagnosticSink(cancelAfterEmitCount: 1)
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            guidedGenerationSink: sink)
+
+        var sawCancellation = false
+        do {
+            for try await _ in stream {}
+        } catch is CancellationError {
+            sawCancellation = true
+        }
+        await stream.cancelAndWait()
+
+        #expect(sink.emitCount >= 1, "required generation must reach its guided emit")
+        #expect(sawCancellation, "required guided cancellation must not become normal EOS")
     }
 
     @Test func disallowedIgnoresManuallyEnabledTools() async throws {

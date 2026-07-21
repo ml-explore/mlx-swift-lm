@@ -43,7 +43,22 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// The parsed tool name, when the buffer parsed as a tool call.
     public private(set) var parsedName: String?
 
-    public init() {}
+    /// Number of synchronous executor-side guided emit boundaries observed.
+    public private(set) var emitCount = 0
+
+    /// Number of required-tool reasoning close boundaries observed.
+    public private(set) var toolReasoningCloseCount = 0
+
+    private let cancelAfterEmitCount: Int?
+    private let cancelOnToolReasoningClose: Bool
+
+    public init(
+        cancelAfterEmitCount: Int? = nil,
+        cancelOnToolReasoningClose: Bool = false
+    ) {
+        self.cancelAfterEmitCount = cancelAfterEmitCount
+        self.cancelOnToolReasoningClose = cancelOnToolReasoningClose
+    }
 
     // MARK: Recording (called from generation; no-ops when the sink is unbound)
 
@@ -68,5 +83,24 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     public func recordParse(parsedAsToolCall: Bool, parsedName: String?) {
         self.parsedAsToolCall = parsedAsToolCall
         self.parsedName = parsedName
+    }
+
+    /// Records a guided loop's synchronous emit boundary and optionally
+    /// cancels its calling task. Cancellation is opt-in and used only by tests
+    /// that bind this sink through ``current``.
+    public func recordEmit() {
+        emitCount += 1
+        if emitCount == cancelAfterEmitCount {
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
+    }
+
+    /// Records the boundary where Phase 1 has consumed the reasoning close
+    /// marker and optionally cancels its calling task.
+    public func recordToolReasoningClose() {
+        toolReasoningCloseCount += 1
+        if cancelOnToolReasoningClose {
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
     }
 }

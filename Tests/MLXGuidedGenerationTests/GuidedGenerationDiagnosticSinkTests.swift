@@ -41,4 +41,52 @@ struct GuidedGenerationDiagnosticSinkTests {
         #expect(sink.sampledTokenIDs == [42])
         #expect(GuidedGenerationDiagnosticSink.current == nil)
     }
+
+    @Test
+    func configuredEmitHookCancelsTheCallingTask() async {
+        let sink = GuidedGenerationDiagnosticSink(cancelAfterEmitCount: 1)
+        let wasCancelled = await Task {
+            sink.recordEmit()
+            return Task.isCancelled
+        }.value
+
+        #expect(sink.emitCount == 1)
+        #expect(wasCancelled)
+    }
+
+    @Test
+    func ordinaryEmitHookDoesNotCancelTheCallingTask() async {
+        let sink = GuidedGenerationDiagnosticSink()
+        let wasCancelled = await Task {
+            sink.recordEmit()
+            return Task.isCancelled
+        }.value
+
+        #expect(sink.emitCount == 1)
+        #expect(!wasCancelled)
+    }
+
+    @Test
+    func configuredReasoningCloseHookCancelsTheCallingTask() async {
+        let sink = GuidedGenerationDiagnosticSink(cancelOnToolReasoningClose: true)
+        let wasCancelled = await Task {
+            sink.recordToolReasoningClose()
+            return Task.isCancelled
+        }.value
+
+        #expect(sink.toolReasoningCloseCount == 1)
+        #expect(wasCancelled)
+    }
+
+    @Test
+    func ordinaryReasoningCloseHookDoesNotCancelTheCallingTask() async {
+        let sink = GuidedGenerationDiagnosticSink()
+        let wasCancelled = await Task {
+            sink.recordToolReasoningClose()
+            return Task.isCancelled
+        }.value
+
+        #expect(sink.toolReasoningCloseCount == 1)
+        #expect(!wasCancelled)
+    }
 }

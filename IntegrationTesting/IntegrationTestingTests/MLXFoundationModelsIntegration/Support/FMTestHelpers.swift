@@ -203,7 +203,8 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
         executor: MLXLanguageModel.Executor,
         request: LanguageModelExecutorGenerationRequest,
         model: MLXLanguageModel,
-        cancelProducerWhen: (@Sendable (Element) -> Bool)? = nil
+        cancelProducerWhen: (@Sendable (Element) -> Bool)? = nil,
+        guidedGenerationSink: GuidedGenerationDiagnosticSink? = nil
     ) {
         let channel = LanguageModelExecutorGenerationChannel()
         let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
@@ -228,18 +229,20 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
         // stream so the test's iteration terminates.
         self.producerTask = Task<Void, Never> {
             defer { collector.cancel() }
-            await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
-                continuation.yield(event)
-                if cancelProducerWhen?(event) == true {
-                    withUnsafeCurrentTask { $0?.cancel() }
-                }
-            }) {
-                do {
-                    try await executor.respond(
-                        to: request, model: model, streamingInto: channel)
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+            await GuidedGenerationDiagnosticSink.$current.withValue(guidedGenerationSink) {
+                await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
+                    continuation.yield(event)
+                    if cancelProducerWhen?(event) == true {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                }) {
+                    do {
+                        try await executor.respond(
+                            to: request, model: model, streamingInto: channel)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
         }
@@ -274,6 +277,22 @@ func executeResponse(
     model: MLXLanguageModel
 ) async throws -> TestResponseStream {
     TestResponseStream(executor: executor, request: request, model: model)
+}
+
+/// Test-only variant that binds guided-generation diagnostics to the producer
+/// task, including its synchronous guided emit closure.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func executeResponse(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel,
+    guidedGenerationSink: GuidedGenerationDiagnosticSink
+) async throws -> TestResponseStream {
+    TestResponseStream(
+        executor: executor,
+        request: request,
+        model: model,
+        guidedGenerationSink: guidedGenerationSink)
 }
 
 /// Test-only variant that synchronously cancels the producer from its event

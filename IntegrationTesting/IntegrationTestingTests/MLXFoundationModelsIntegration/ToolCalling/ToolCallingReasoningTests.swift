@@ -8,6 +8,7 @@ import FoundationModels
 import Testing
 
 @testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 import MLXLMCommon
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -220,6 +221,38 @@ struct ToolCallingReasoningTests {
         await stream.cancelAndWait()
         #expect(sawReasoning, "must cancel from inside native allowed reasoning")
         #expect(sawCancellation, "native generation must terminate by cancellation, not EOS")
+    }
+
+    /// Cancellation at the exact reasoning-close boundary must be observed
+    /// before required guided tool generation begins.
+    @Test func requiredCancellationAtReasoningClosePropagates() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeReasoningTestModel(Models.qwen3)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: weatherTranscript(),
+            enabledTools: [Self.weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 1024,
+                toolCallingMode: .required))
+        let sink = GuidedGenerationDiagnosticSink(cancelOnToolReasoningClose: true)
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            guidedGenerationSink: sink)
+
+        var sawCancellation = false
+        do {
+            for try await _ in stream {}
+        } catch is CancellationError {
+            sawCancellation = true
+        }
+        await stream.cancelAndWait()
+
+        #expect(sink.toolReasoningCloseCount == 1, "reasoning must reach its close boundary")
+        #expect(sink.emitCount == 0, "cancellation must stop before guided tool generation emits")
+        #expect(sawCancellation, "reasoning-close cancellation must not become normal EOS")
     }
 }
 
