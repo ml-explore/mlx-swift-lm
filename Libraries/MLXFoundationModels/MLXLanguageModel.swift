@@ -1150,6 +1150,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // Buffers the full output before emitting; streaming
                         // within the final-answer path (reparse-each-delta) is
                         // not yet implemented.
+                        let allowsSyntheticResponse =
+                            ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode)
                         let generationTools = try ToolCallingModeResolution.guidedToolDefinitions(
                             for: toolCallingMode,
                             from: request.enabledToolDefinitions,
@@ -1336,7 +1338,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // and regenerate the answer unconstrained below. A
                         // developer schema (structured output) stays on the
                         // constrained path -- structure is the point there.
-                        let regenerateFinalAnswerUnconstrained = request.schema == nil
+                        let regenerateFinalAnswerUnconstrained =
+                            allowsSyntheticResponse && request.schema == nil
                         var finalAnswerSelected = false
                         do {
                             generatedTokenCount = try GuidedGenerationLoop.run(
@@ -1410,6 +1413,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         try await emitToolCallingEvent(
                             outputBuffer: outputBuffer,
                             userResponseSchema: request.schema,
+                            allowsSyntheticResponse: allowsSyntheticResponse,
                             entryID: entryID,
                             toolCallsEntryID: toolCallsEntryID,
                             channel: channel
@@ -1923,7 +1927,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// best-effort fallback only exists so that unexpected upstream
         /// changes don't silently swallow output.
         ///
-        /// - If `name` is the synthetic final-answer tool:
+        /// - If `name` is the synthetic final-answer tool in allowed mode:
         ///   - With no developer response schema: unwrap `arguments.response`
         ///     into a `.textDelta` event.
         ///   - With a developer response schema: re-serialize `arguments`
@@ -1938,6 +1942,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func emitToolCallingEvent(
             outputBuffer: String,
             userResponseSchema: GenerationSchema?,
+            allowsSyntheticResponse: Bool,
             entryID: String,
             toolCallsEntryID: String,
             channel: LanguageModelExecutorGenerationChannel
@@ -1952,16 +1957,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 GuidedGenerationDiagnosticSink.current?.recordParse(
                     parsedAsToolCall: false, parsedName: nil)
                 // Malformed output. The grammar should have prevented this;
-                // emit the raw buffer as text so failures surface loudly.
-                await Self.emit(
-                    text: outputBuffer, entryID: entryID, destination: .response, into: channel)
+                // only allowed mode can surface it as response text. Required
+                // mode must never degrade a partial tool call into a response.
+                if allowsSyntheticResponse {
+                    await Self.emit(
+                        text: outputBuffer, entryID: entryID, destination: .response,
+                        into: channel)
+                }
                 return
             }
 
             GuidedGenerationDiagnosticSink.current?.recordParse(
                 parsedAsToolCall: true, parsedName: name)
 
-            if name == FinalAnswerTool.toolName {
+            if allowsSyntheticResponse, name == FinalAnswerTool.toolName {
                 let text: String
                 if userResponseSchema == nil {
                     let args = obj["arguments"] as? [String: Any]

@@ -27,11 +27,16 @@ private struct WeatherArgs {
 struct FoundationModelsToolCallingTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func weatherTool() -> Transcript.ToolDefinition {
+    private func developerTool(named name: String) -> Transcript.ToolDefinition {
         Transcript.ToolDefinition(
-            name: "get_weather",
+            name: name,
             description: "Get the current weather in a given location.",
             parameters: WeatherArgs.generationSchema)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func weatherTool() -> Transcript.ToolDefinition {
+        developerTool(named: "get_weather")
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -197,6 +202,54 @@ struct FoundationModelsToolCallingTests {
 
         #expect(!sawToolCall)
         #expect(!response.isEmpty)
+    }
+
+    @Test func requiredTreatsDeveloperFinalAnswerNameAsTool() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("Use the available tool."),
+            enabledTools: [developerTool(named: FinalAnswerTool.toolName)],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var names: [String] = []
+        var response = ""
+        for try await event in stream {
+            if case .toolCall(_, let name, _) = event { names.append(name) }
+            if case .appendText(let text, _, .response) = event { response += text }
+        }
+
+        #expect(names == [FinalAnswerTool.toolName])
+        #expect(response.isEmpty)
+    }
+
+    @Test func requiredTruncationNeverEmitsResponseText() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("What's the weather in Tokyo?"),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 1,
+                toolCallingMode: .required))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var response = ""
+        var sawIncompleteOutput = false
+        for try await event in stream {
+            if case .appendText(let text, _, .response) = event { response += text }
+            if case .updateMetadata(let metadata, _) = event {
+                sawIncompleteOutput = (metadata["incompleteOutput"] as? Bool) == true
+            }
+        }
+
+        #expect(response.isEmpty)
+        #expect(sawIncompleteOutput)
     }
 }
 
