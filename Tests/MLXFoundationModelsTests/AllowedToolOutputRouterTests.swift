@@ -149,6 +149,62 @@ struct AllowedToolOutputRouterTests {
         #expect(router.process(#"<|python_tag|>{"name":"delete_everything","arguments":{}}"#).isEmpty)
         #expect(router.finish().isEmpty)
     }
+
+    @Test func splitCallTextCallEventsPreserveSourceOrder() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(router.process(#"<tool_call>{"name":"get_weather","arguments":{"#).isEmpty)
+
+        let events = router.process(
+            #"}}</tool_call>between<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#)
+        #expect(events.count == 3)
+        guard case .toolCall = events[0] else {
+            Issue.record("Expected the completed split call first")
+            return
+        }
+        #expect(events[1] == .response("between"))
+        guard case .toolCall = events[2] else {
+            Issue.record("Expected the second call after intervening text")
+            return
+        }
+    }
+
+    @Test func strayClosingMarkerNeverLeaksAsResponseText() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        let events = router.process(
+            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call></tool_call>"#)
+        #expect(events.count == 1)
+        guard case .toolCall = events[0] else {
+            Issue.record("Expected only the valid call")
+            return
+        }
+    }
+
+    @Test func ordinaryTagLikeTextRemainsAResponse() {
+        var jsonRouter = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(jsonRouter.process("Use <table> for layout") == [.response("Use <table> for layout")])
+
+        var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
+        #expect(mistralRouter.process("[Today] is sunny") == [.response("[Today] is sunny")])
+    }
+
+    @Test func malformedProtocolSuppressesOnlyTheMarkerSpan() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(router.process("before <tool_callx> after") == [.response("before  after")])
+    }
+
+    @Test func eosRecoversLFM2NestedArrayAndStringBracketArguments() {
+        var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
+        #expect(router.process(#"<|tool_call_start|>[get_weather(location=["Paris", "]"])]after"#).isEmpty)
+
+        let events = router.finish()
+        #expect(events.count == 2)
+        guard case .toolCall(let call) = events[0] else {
+            Issue.record("Expected the balanced LFM2 call first")
+            return
+        }
+        #expect(call.function.name == "get_weather")
+        #expect(events[1] == .response("after"))
+    }
 }
 
 #endif
