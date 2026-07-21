@@ -119,6 +119,25 @@ struct AllowedToolOutputRouterTests {
         #expect(call.function.name == "get_weather")
     }
 
+    @Test func splitLlamaCallIgnoresBracesInsideJSONString() {
+        var router = AllowedToolOutputRouter(format: .llama3, tools: tools)
+        #expect(
+            router.process(
+                #"<|python_tag|>{"name":"get_weather","arguments":{"query":"}}""#
+            ).isEmpty)
+
+        let events = router.process("}}")
+        #expect(events.count == 1)
+        guard events.count == 1 else { return }
+        guard case .toolCall(let call) = events[0] else {
+            Issue.record("Expected one Llama call without response or protocol text")
+            return
+        }
+        #expect(call.function.name == "get_weather")
+        #expect(call.function.arguments["query"] == .string("}}"))
+        #expect(router.finish().isEmpty)
+    }
+
     @Test func malformedTaggedToolSyntaxNeverLeaksAsResponseText() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(router.process(#"<tool_call>{"name":}</tool_call>"#).isEmpty)

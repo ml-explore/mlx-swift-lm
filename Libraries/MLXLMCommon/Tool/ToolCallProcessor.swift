@@ -196,8 +196,8 @@ public class ToolCallProcessor {
 
     /// Process chunk for inline formats (no wrapper tags).
     ///
-    /// Uses brace counting to detect when output looks like a JSON tool call.
-    /// While braces are unbalanced the content is buffered (returns `nil`)
+    /// Uses quote-aware JSON object scanning to detect when output looks like a JSON tool call.
+    /// While the object is incomplete the content is buffered (returns `nil`)
     /// so partial JSON is never leaked to the UI.
     private func processInlineChunk(_ chunk: String) -> String? {
         switch state {
@@ -217,9 +217,9 @@ public class ToolCallProcessor {
                     return leading.isEmpty ? nil : leading
                 }
 
-                // Still collecting — check if braces are balanced (would mean parse
+                // Still collecting — check if the first JSON object is complete (would mean parse
                 // failed on complete JSON, so it's not a tool call)
-                if jsonBracesBalanced(toolCallBuffer) {
+                if jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) != nil {
                     state = .normal
                     let buffer = toolCallBuffer
                     toolCallBuffer = ""
@@ -228,7 +228,7 @@ public class ToolCallProcessor {
                     return response
                 }
 
-                recordResponse(leading)
+                recordResponse(sanitizingProtocol: leading)
                 return leading.isEmpty ? nil : leading
             }
 
@@ -246,8 +246,8 @@ public class ToolCallProcessor {
                 return nil
             }
 
-            // If braces are balanced but parse failed, this isn't a tool call — flush
-            if jsonBracesBalanced(toolCallBuffer) {
+            // If the object is complete but parse failed, this isn't a tool call — flush
+            if jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) != nil {
                 state = .normal
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
@@ -438,15 +438,6 @@ public class ToolCallProcessor {
             }
         }
         return nil
-    }
-
-    /// Check whether open/close braces are balanced in the string.
-    private func jsonBracesBalanced(_ text: String) -> Bool {
-        var depth = 0
-        for ch in text {
-            if ch == "{" { depth += 1 } else if ch == "}" { depth -= 1 }
-        }
-        return depth == 0
     }
 
     /// Process chunk for tagged formats.
