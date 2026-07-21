@@ -91,11 +91,9 @@ public class ToolCallProcessor {
         return processTaggedChunk(chunk)
     }
 
-    /// Drain queued tool calls in parse order.
-    ///
-    /// This is useful for streaming consumers that need deterministic FIFO dispatch
-    /// of all complete calls discovered while processing a token chunk.
-    func drainToolCalls() -> [ToolCall] {
+    /// Removes and returns every parsed call in parse order.
+    /// A second call returns an empty array until more chunks are processed.
+    public func drainToolCalls() -> [ToolCall] {
         guard !toolCalls.isEmpty else { return [] }
         let drained = toolCalls
         toolCalls.removeAll(keepingCapacity: true)
