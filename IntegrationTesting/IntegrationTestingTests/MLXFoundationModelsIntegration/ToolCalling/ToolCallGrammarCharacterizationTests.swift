@@ -11,8 +11,8 @@ import Testing
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-/// The on/off choice the model fills in for the flashlight tool. A `@Generable`
-/// enum becomes a fixed set of choices in the argument schema.
+/// The fixed `on` state the model fills in for this characterization tool.
+/// A one-case `@Generable` enum bounds the generated argument.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
 private enum CharacterizationFlashlightState: String {
@@ -22,25 +22,23 @@ private enum CharacterizationFlashlightState: String {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
 private struct CharacterizationFlashlightArguments {
-    @Guide(description: "Whether to turn the flashlight on or off.")
+    @Guide(description: "The fixed on state for this characterization.")
     var state: CharacterizationFlashlightState
 }
 
-/// Characterizes the tool-call grammar/tokenizer boundary on a real model.
+/// Characterizes the explicit `.required` guided tool-call grammar/tokenizer
+/// boundary on real models.
 ///
-/// This is a diagnostic probe, not a behavioral guarantee. It drives the real
-/// executor tool path on each target model on a fresh turn, captures what
-/// actually happens at the grammar/tokenizer boundary through
+/// This drives the real executor's required guided path on each target model on
+/// a fresh turn and captures the grammar/tokenizer boundary through
 /// `GuidedGenerationDiagnosticSink` (token IDs, whether the grammar terminated,
 /// the exact buffer handed to the parser, and whether that buffer parses),
-/// records all of it for the token-level trace, and pins one stable invariant
-/// per model: whether the buffer parses as a tool call.
+/// recording a token-level trace while pinning valid parsing as the stable
+/// invariant.
 ///
-/// Rows are data-driven. Gemma-4 E2B is the motivating bug: its native
-/// tool-call dialect is not the Qwen/bare-JSON shape the grammar enforces and
-/// the mask appears inert, so the buffer does not parse. Qwen-3 is the control:
-/// the grammar targets its dialect, so the buffer parses. When a similar
-/// boundary bug surfaces on another model, add a row; the harness is reused.
+/// Both Gemma-4 E2B and Qwen-3 are expected to terminate the guided grammar and
+/// hand the parser a valid developer tool call. Add rows when another model
+/// needs this same required-mode boundary coverage.
 @Suite(.serialized, .timeLimit(.minutes(5)))
 struct ToolCallGrammarCharacterizationTests {
 
@@ -53,16 +51,9 @@ struct ToolCallGrammarCharacterizationTests {
     }
 
     static let cases: [Case] = [
-        // Gemma-4 E2B was the motivating bug: its tool-call buffer failed to
-        // parse because the structural-tag grammar embedded a single
-        // `{name, arguments}` json_schema whose property order xgrammar did
-        // not hard-enforce, so greedy decoding could skip the `name` key.
-        // Forcing `name` first via per-tool tag prefixes
-        // (`SchemaConverter.encodeToolCallingGrammar`) fixed it: gemma now
-        // emits a clean `{"name": "set_flashlight", "arguments": {...}}` that
-        // parses. Pinned `true` alongside the qwen control.
+        // Required guided grammar must terminate and parse a developer tool for
+        // each supported family.
         Case(modelID: TestFixtures.gemma4ModelID, expectsValidToolCall: true),
-        // Control: the grammar targets Qwen's dialect, so the buffer parses.
         Case(modelID: TestFixtures.qwen3ModelID, expectsValidToolCall: true),
     ]
 
@@ -78,7 +69,7 @@ struct ToolCallGrammarCharacterizationTests {
     private func flashlightTool() -> Transcript.ToolDefinition {
         Transcript.ToolDefinition(
             name: Self.toolName,
-            description: "Turn the device flashlight (torch) on or off.",
+            description: "Turn the device flashlight (torch) on.",
             parameters: CharacterizationFlashlightArguments.generationSchema)
     }
 
@@ -92,7 +83,7 @@ struct ToolCallGrammarCharacterizationTests {
                 .text(
                     Transcript.TextSegment(
                         content:
-                            "You control the device flashlight. When the user asks, call the flashlight tool to turn the light on or off."
+                            "You control the device flashlight. Call the flashlight tool to turn the light on."
                     ))
             ],
             toolDefinitions: [flashlightTool()])
@@ -130,8 +121,7 @@ struct ToolCallGrammarCharacterizationTests {
             context.tokenizer.decode(tokenIds: sink.sampledTokenIDs)
         }
 
-        // Record everything (never fails): this block is the token-level trace
-        // used to scope the later fix-plan tasks.
+        // Record the token-level trace without affecting the assertions below.
         print(
             """
             [ToolCallCharacterization][\(testCase.modelID)]
@@ -155,19 +145,15 @@ struct ToolCallGrammarCharacterizationTests {
             sink.finalBuffer != nil,
             "Tool path never handed a buffer to the parser (\(testCase.modelID))")
 
-        // Pinned invariant: whether the buffer parses as a tool call. Robust
-        // across both leak signatures (comma-less JSON and pure native syntax),
-        // since both fail the parse.
+        // Pinned invariant: required guided output must parse as a tool call.
         #expect(
             sink.parsedAsToolCall == testCase.expectsValidToolCall,
             """
             Parse verdict for \(testCase.modelID) was \
             \(String(describing: sink.parsedAsToolCall)), expected \
             \(testCase.expectsValidToolCall). Buffer: \
-            \(String(describing: sink.finalBuffer)). A flip here is a finding: \
-            for the characterized-bug row it likely means the fix landed (update \
-            expectsValidToolCall to true); for the control row it means the \
-            grammar path regressed.
+            \(String(describing: sink.finalBuffer)). A false verdict is a \
+            grammar-path regression.
             """)
     }
 }
