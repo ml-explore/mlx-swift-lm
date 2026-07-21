@@ -189,19 +189,37 @@ struct ToolCallingReasoningTests {
     /// crashing the serialized suite.
     @Test func cancellationDuringReasoningUnwinds() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let model = makeTestModel(Models.qwen3)
+        let model = makeReasoningTestModel(Models.qwen3)
         let executor = try makeMLXExecutor(for: model)
         let request = makeExecutorRequest(
             transcript: weatherTranscript(),
             enabledTools: [Self.weatherTool()],
             generationOptions: GenerationOptions(maximumResponseTokens: 1024))
-        let stream = try await executeResponse(executor, request: request, model: model)
-        var events = 0
-        for try await _ in stream {
-            events += 1
-            if events >= 2 { break }  // early break → respond is cancelled mid-flight
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            cancelProducerWhen: { event in
+                if case .appendText(let text, _, .reasoning) = event {
+                    return !text.isEmpty
+                }
+                return false
+            })
+        var iterator = stream.makeAsyncIterator()
+        var sawReasoning = false
+        var sawCancellation = false
+        do {
+            while let event = try await iterator.next() {
+                if case .appendText(let text, _, .reasoning) = event, !text.isEmpty {
+                    sawReasoning = true
+                }
+            }
+        } catch is CancellationError {
+            sawCancellation = true
         }
-        #expect(events >= 1)
+        await stream.cancelAndWait()
+        #expect(sawReasoning, "must cancel from inside native allowed reasoning")
+        #expect(sawCancellation, "native generation must terminate by cancellation, not EOS")
     }
 }
 

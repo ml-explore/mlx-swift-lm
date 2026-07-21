@@ -1582,6 +1582,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     entryID: reasoningEntryID,
                                     destination: .reasoning,
                                     into: channel)
+                                try Task.checkCancellation()
                             }
                         }
                     case .info(let info):

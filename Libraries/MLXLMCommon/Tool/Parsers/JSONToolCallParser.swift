@@ -53,7 +53,7 @@ public struct JSONToolCallParser: ToolCallParser, Sendable {
     }
 
     /// Some Qwen chat templates emit an EOS-delimited JSON call with a
-    /// redundant leading brace and one or two redundant closing braces.
+    /// redundant leading brace and two redundant closing braces.
     /// Recover only that exact shape and only when the enclosed prefix is one
     /// complete, valid tool-call object followed solely by those braces.
     private func parseRedundantOuterBraces(from text: String) -> ToolCall? {
@@ -63,7 +63,7 @@ public struct JSONToolCallParser: ToolCallParser, Sendable {
             return nil
         }
         let trailing = split.trailing.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (1 ... 2).contains(trailing.count), trailing.allSatisfy({ $0 == "}" }) else {
+        guard trailing == "}}" else {
             return nil
         }
         return parseToolCall(from: split.object)

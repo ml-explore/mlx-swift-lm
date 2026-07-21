@@ -188,9 +188,8 @@ func makeExecutorRequest(
 /// collector task that drains and discards the channel's opaque events (just
 /// enough to keep `respond()`'s sends from stalling). Our stream's
 /// continuation is finished once both tasks settle, so `for try await`
-/// terminates naturally. Early break from iteration cancels both tasks via
-/// `deinit`, so tests that stop reading mid-generation don't waste GPU
-/// compute on tokens nobody wants.
+/// terminates naturally. Tests that must prove cancellation can call
+/// `cancelAndWait()`; ordinary early breaks still cancel both tasks via `deinit`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class TestResponseStream: AsyncSequence, @unchecked Sendable {
     typealias Element = MLXLanguageModel.Executor.GenerationEvent
@@ -203,7 +202,8 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
     init(
         executor: MLXLanguageModel.Executor,
         request: LanguageModelExecutorGenerationRequest,
-        model: MLXLanguageModel
+        model: MLXLanguageModel,
+        cancelProducerWhen: (@Sendable (Element) -> Bool)? = nil
     ) {
         let channel = LanguageModelExecutorGenerationChannel()
         let (stream, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
@@ -230,6 +230,9 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
             defer { collector.cancel() }
             await MLXLanguageModel.Executor.$generationObserver.withValue({ event in
                 continuation.yield(event)
+                if cancelProducerWhen?(event) == true {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
             }) {
                 do {
                     try await executor.respond(
@@ -250,6 +253,16 @@ final class TestResponseStream: AsyncSequence, @unchecked Sendable {
     func makeAsyncIterator() -> AsyncIterator {
         stream.makeAsyncIterator()
     }
+
+    /// Cancels an in-flight response and waits until both the producer and its
+    /// channel collector have unwound. The stream continuation is finished by
+    /// the producer with the cancellation error from `respond()`.
+    func cancelAndWait() async {
+        producerTask.cancel()
+        await producerTask.value
+        collectorTask.cancel()
+        await collectorTask.value
+    }
 }
 
 /// Starts executor.respond(...) on a background task and returns a wrapper that
@@ -261,6 +274,22 @@ func executeResponse(
     model: MLXLanguageModel
 ) async throws -> TestResponseStream {
     TestResponseStream(executor: executor, request: request, model: model)
+}
+
+/// Test-only variant that synchronously cancels the producer from its event
+/// observer, allowing cancellation tests to avoid racing buffered output.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func executeResponse(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel,
+    cancelProducerWhen: @escaping @Sendable (MLXLanguageModel.Executor.GenerationEvent) -> Bool
+) async throws -> TestResponseStream {
+    TestResponseStream(
+        executor: executor,
+        request: request,
+        model: model,
+        cancelProducerWhen: cancelProducerWhen)
 }
 
 // MARK: - GPU Memory Management
