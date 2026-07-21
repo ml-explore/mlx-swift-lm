@@ -358,6 +358,21 @@ struct AllowedToolOutputRouterTests {
             return
         }
     }
+
+    @Test func eosEmitsLFM2PrefixBeforeUnfinishedSecondCallExactlyOnce() {
+        var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
+        #expect(router.process(
+            "<|tool_call_start|>[get_weather()]between <|tool_call_start|>[get_weather(").isEmpty)
+
+        let events = router.finish()
+        #expect(events.count == 2)
+        guard events.count == 2 else { return }
+        guard case .toolCall = events[0] else {
+            Issue.record("Expected the completed first LFM2 call")
+            return
+        }
+        #expect(events[1] == .response("between "))
+    }
 }
 
 #endif

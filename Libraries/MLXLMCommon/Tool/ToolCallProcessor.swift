@@ -390,12 +390,13 @@ public class ToolCallProcessor {
         var outputs: [Output] = []
 
         while let startRange = remaining.range(of: startTag) {
-            appendResponse(String(remaining[..<startRange.lowerBound]), to: &outputs)
+            let responsePrefix = String(remaining[..<startRange.lowerBound])
             let callStart = startRange.upperBound
             guard let callEnd = balancedBracketEnd(in: remaining, from: callStart) else { break }
 
             let callText = String(remaining[startRange.lowerBound...callEnd])
             guard let call = parser.parse(content: callText, tools: tools) else { break }
+            appendResponse(responsePrefix, to: &outputs)
             appendToolCall(call)
             outputs.append(.toolCall(toolCalls.removeLast()))
             remaining = String(remaining[remaining.index(after: callEnd)...])
