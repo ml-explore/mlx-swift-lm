@@ -373,6 +373,25 @@ struct AllowedToolOutputRouterTests {
         }
         #expect(events[1] == .response("between "))
     }
+
+    @Test func eosSanitizesLFM2InterCallResponsePrefix() {
+        var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
+        #expect(router.process(
+            "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after <|tool_call_start|>[get_weather()]").isEmpty)
+
+        let events = router.finish()
+        #expect(events.count == 3)
+        guard events.count == 3 else { return }
+        guard case .toolCall = events[0] else {
+            Issue.record("Expected the first LFM2 call")
+            return
+        }
+        #expect(events[1] == .response("before  after "))
+        guard case .toolCall = events[2] else {
+            Issue.record("Expected the second LFM2 call")
+            return
+        }
+    }
 }
 
 #endif

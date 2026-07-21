@@ -396,7 +396,7 @@ public class ToolCallProcessor {
 
             let callText = String(remaining[startRange.lowerBound...callEnd])
             guard let call = parser.parse(content: callText, tools: tools) else { break }
-            appendResponse(responsePrefix, to: &outputs)
+            appendResponse(stripProtocolSpans(from: responsePrefix), to: &outputs)
             appendToolCall(call)
             outputs.append(.toolCall(toolCalls.removeLast()))
             remaining = String(remaining[remaining.index(after: callEnd)...])
