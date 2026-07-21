@@ -186,7 +186,7 @@ public class ToolCallProcessor {
         let outputCount = orderedOutputQueue.count
         let visible = processEOS(returnBufferedText: true)
         if orderedOutputQueue.count == outputCount, let visible {
-            recordResponse(sanitizingProtocol: visible)
+            recordEOSResidual(visible)
         }
         _ = drainToolCalls()
         return drainOrderedOutputs()
@@ -274,6 +274,10 @@ public class ToolCallProcessor {
         recordResponse(stripProtocolSpans(from: text))
     }
 
+    private func recordEOSResidual(_ text: String) {
+        recordResponse(sanitizeEOSResidual(text))
+    }
+
     private func drainOrderedOutputs() -> [Output] {
         let outputs = orderedOutputQueue
         orderedOutputQueue.removeAll(keepingCapacity: true)
@@ -319,6 +323,24 @@ public class ToolCallProcessor {
         return result
     }
 
+    private func sanitizeEOSResidual(_ text: String) -> String {
+        guard let startTag = parser.startTag else {
+            return stripProtocolSpans(from: text)
+        }
+
+        var searchStart = text.startIndex
+        while let startRange = text.range(of: startTag, range: searchStart..<text.endIndex) {
+            guard
+                let endTag = parser.endTag,
+                let endRange = text.range(of: endTag, range: startRange.upperBound..<text.endIndex)
+            else {
+                return stripProtocolSpans(from: String(text[..<startRange.lowerBound]))
+            }
+            searchStart = endRange.upperBound
+        }
+        return stripProtocolSpans(from: text)
+    }
+
     private func nearCompleteMatchLength(for tag: String) -> Int {
         max(tag.count - 2, 1)
     }
@@ -351,7 +373,7 @@ public class ToolCallProcessor {
         state = .normal
 
         if !remaining.isEmpty {
-            appendResponse(stripProtocolSpans(from: remaining), to: &outputs)
+            appendResponse(sanitizeEOSResidual(remaining), to: &outputs)
         }
         return outputs
     }
@@ -383,7 +405,7 @@ public class ToolCallProcessor {
         state = .normal
 
         if !remaining.isEmpty {
-            appendResponse(stripProtocolSpans(from: remaining), to: &outputs)
+            appendResponse(sanitizeEOSResidual(remaining), to: &outputs)
         }
         return outputs
     }
@@ -597,6 +619,7 @@ public class ToolCallProcessor {
 
         guard let split = jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) else {
             // Continue buffering until a complete top-level JSON object is available.
+            recordResponse(leadingToken ?? "")
             return leadingToken?.isEmpty ?? true ? nil : leadingToken
         }
 

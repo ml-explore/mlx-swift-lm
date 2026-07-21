@@ -322,6 +322,42 @@ struct AllowedToolOutputRouterTests {
         #expect(call.function.name == "get_weather")
         #expect(events[1] == .response("after"))
     }
+
+    @Test func eosSuppressesUnclosedExactProtocolTails() {
+        var jsonRouter = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(jsonRouter.process(#"before <tool_call>{"name":"#) == [.response("before ")])
+        #expect(jsonRouter.finish().isEmpty)
+
+        var lfmRouter = AllowedToolOutputRouter(format: .lfm2, tools: tools)
+        #expect(lfmRouter.process("before <|tool_call_start|>[get_weather(")
+            == [.response("before ")])
+        #expect(lfmRouter.finish().isEmpty)
+
+        var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
+        #expect(mistralRouter.process("before [TOOL_CALLS]get_weather[ARGS]{")
+            == [.response("before ")])
+        #expect(mistralRouter.finish().isEmpty)
+    }
+
+    @Test func responseBeforeIncompleteBareJSONSecondCallIsOrdered() {
+        var router = AllowedToolOutputRouter(format: .json, tools: tools)
+        let initial = router.process(
+            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between {"name":"get_weather","arguments":{"#)
+        #expect(initial.count == 2)
+        guard initial.count == 2 else { return }
+        guard case .toolCall = initial[0] else {
+            Issue.record("Expected the complete tagged call first")
+            return
+        }
+        #expect(initial[1] == .response("between "))
+
+        let completed = router.process(#"}}"#)
+        #expect(completed.count == 1)
+        guard case .toolCall = completed[0] else {
+            Issue.record("Expected the buffered bare JSON call")
+            return
+        }
+    }
 }
 
 #endif
