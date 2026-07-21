@@ -233,7 +233,7 @@ public class ToolCallProcessor {
             }
 
             // No brace seen — pass through as regular text
-            recordResponse(chunk)
+            recordResponse(sanitizingProtocol: chunk)
             return chunk
 
         case .potentialToolCall, .collectingToolCall, .collectingJSONToolCall:
@@ -306,7 +306,7 @@ public class ToolCallProcessor {
                 }
                 let suffix = result[index...]
                 let matchCount = zip(suffix, tag).prefix { $0 == $1 }.count
-                guard matchCount >= min(4, tag.count) else {
+                guard matchCount >= nearCompleteMatchLength(for: tag) else {
                     index = result.index(after: index)
                     continue
                 }
@@ -319,29 +319,8 @@ public class ToolCallProcessor {
         return result
     }
 
-    private func containsToolProtocol(_ text: String) -> Bool {
-        var tags = [parser.startTag, parser.endTag].compactMap { $0 }
-        if format == .llama3 {
-            tags.append("<|python_tag|>")
-        }
-        return tags.contains { containsCompleteOrPartialTag($0, in: text) }
-    }
-
-    private func containsCompleteOrPartialTag(_ tag: String, in text: String) -> Bool {
-        guard let first = tag.first else { return false }
-        let minimumMatch = min(4, tag.count)
-
-        for index in text.indices where text[index] == first {
-            var matched = 0
-            for (textCharacter, tagCharacter) in zip(text[index...], tag) {
-                guard textCharacter == tagCharacter else { break }
-                matched += 1
-            }
-            if matched >= minimumMatch {
-                return true
-            }
-        }
-        return false
+    private func nearCompleteMatchLength(for tag: String) -> Int {
+        max(tag.count - 2, 1)
     }
 
     private func processMistralEOSOutputs() -> [Output]? {
@@ -371,8 +350,8 @@ public class ToolCallProcessor {
         toolCallBuffer = ""
         state = .normal
 
-        if !remaining.isEmpty, !containsToolProtocol(remaining) {
-            outputs.append(.response(remaining))
+        if !remaining.isEmpty {
+            appendResponse(stripProtocolSpans(from: remaining), to: &outputs)
         }
         return outputs
     }
@@ -403,31 +382,31 @@ public class ToolCallProcessor {
         toolCallBuffer = ""
         state = .normal
 
-        if !remaining.isEmpty, !containsToolProtocol(remaining) {
-            outputs.append(.response(remaining))
+        if !remaining.isEmpty {
+            appendResponse(stripProtocolSpans(from: remaining), to: &outputs)
         }
         return outputs
     }
 
     private func balancedBracketEnd(in text: String, from start: String.Index) -> String.Index? {
         var depth = 0
-        var inString = false
+        var stringQuote: Character?
         var escaped = false
 
         for index in text.indices[start...] {
             let character = text[index]
-            if inString {
+            if let quote = stringQuote {
                 if escaped {
                     escaped = false
                 } else if character == "\\" {
                     escaped = true
-                } else if character == "\"" {
-                    inString = false
+                } else if character == quote {
+                    stringQuote = nil
                 }
                 continue
             }
             switch character {
-            case "\"": inString = true
+            case "\"", "'": stringQuote = character
             case "[": depth += 1
             case "]":
                 depth -= 1
@@ -466,6 +445,7 @@ public class ToolCallProcessor {
 
         toolCallBuffer += chunk
         var leadingToken: String?
+        var leadingTokenWasRecorded = false
 
         switch state {
         case .normal:
@@ -502,8 +482,12 @@ public class ToolCallProcessor {
             if partialMatch(buffer: toolCallBuffer, tag: startTag) {
                 if toolCallBuffer.starts(with: startTag) {
                     state = .collectingToolCall
+                    recordResponse(leadingToken ?? "")
+                    leadingTokenWasRecorded = true
                     fallthrough
                 } else {
+                    recordResponse(leadingToken ?? "")
+                    leadingTokenWasRecorded = true
                     return nil
                 }
             } else {
@@ -511,7 +495,9 @@ public class ToolCallProcessor {
                 state = .normal
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
-                return (leadingToken ?? "") + buffer
+                let response = (leadingToken ?? "") + buffer
+                recordResponse(sanitizingProtocol: response)
+                return response
             }
 
         case .collectingToolCall:
@@ -528,7 +514,9 @@ public class ToolCallProcessor {
 
                 // Parse the tool call using the parser.
                 if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
-                    recordResponse(leadingToken ?? "")
+                    if !leadingTokenWasRecorded {
+                        recordResponse(leadingToken ?? "")
+                    }
                     appendToolCall(toolCall)
                     state = .normal
                     toolCallBuffer = ""
@@ -549,7 +537,9 @@ public class ToolCallProcessor {
                 // Preserve unparsed tagged payload as plain text, then continue scanning.
                 state = .normal
                 toolCallBuffer = ""
-                recordResponse(leadingToken ?? "")
+                if !leadingTokenWasRecorded {
+                    recordResponse(leadingToken ?? "")
+                }
                 if let trailingToken,
                     tokenCouldContainToolStart(trailingToken, startChar: startChar)
                 {
