@@ -120,6 +120,30 @@ struct AllowedToolOutputRouterTests {
         #expect(events[1] == .response("done"))
     }
 
+    @Test func eosPreservesTextAfterRecoveredLFM2Call() {
+        var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
+        #expect(router.process("<|tool_call_start|>[get_weather()]after").isEmpty)
+
+        let events = router.finish()
+        #expect(events.count == 2)
+        guard case .toolCall(let call) = events[0] else {
+            Issue.record("Expected the recovered LFM2 call first")
+            return
+        }
+        #expect(call.function.name == "get_weather")
+        #expect(events[1] == .response("after"))
+    }
+
+    @Test func partialOrMismatchedProtocolAtEOSNeverLeaksAsResponseText() {
+        var partialRouter = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(partialRouter.process("<tool_cal").isEmpty)
+        #expect(partialRouter.finish().isEmpty)
+
+        var mismatchedRouter = AllowedToolOutputRouter(format: .json, tools: tools)
+        #expect(mismatchedRouter.process("<tool_callx>").isEmpty)
+        #expect(mismatchedRouter.finish().isEmpty)
+    }
+
     @Test func callsOutsideEnabledToolDefinitionsAreSuppressed() {
         var router = AllowedToolOutputRouter(format: .llama3, tools: tools)
         #expect(router.process(#"<|python_tag|>{"name":"delete_everything","arguments":{}}"#).isEmpty)

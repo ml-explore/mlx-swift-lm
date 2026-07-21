@@ -167,6 +167,9 @@ public class ToolCallProcessor {
         if format == .mistral, let outputs = processMistralEOSOutputs() {
             return outputs
         }
+        if format == .lfm2, let outputs = processLFM2EOSOutputs() {
+            return outputs
+        }
 
         let visible = processEOS(returnBufferedText: true)
         let calls = drainToolCalls()
@@ -328,10 +331,28 @@ public class ToolCallProcessor {
     }
 
     private func containsToolProtocol(_ text: String) -> Bool {
-        if format == .llama3, text.contains("<|python_tag|>") {
-            return true
+        var tags = [parser.startTag, parser.endTag].compactMap { $0 }
+        if format == .llama3 {
+            tags.append("<|python_tag|>")
         }
-        return parser.startTag.map(text.contains) ?? false
+        return tags.contains { containsCompleteOrPartialTag($0, in: text) }
+    }
+
+    private func containsCompleteOrPartialTag(_ tag: String, in text: String) -> Bool {
+        guard let first = tag.first else { return false }
+        let minimumMatch = min(2, tag.count)
+
+        for index in text.indices where text[index] == first {
+            var matched = 0
+            for (textCharacter, tagCharacter) in zip(text[index...], tag) {
+                guard textCharacter == tagCharacter else { break }
+                matched += 1
+            }
+            if matched >= minimumMatch {
+                return true
+            }
+        }
+        return false
     }
 
     private func processMistralEOSOutputs() -> [Output]? {
@@ -356,6 +377,38 @@ public class ToolCallProcessor {
             appendToolCall(call)
             outputs.append(.toolCall(toolCalls.removeLast()))
             remaining = split.trailing
+        }
+
+        toolCallBuffer = ""
+        state = .normal
+
+        if !remaining.isEmpty, !containsToolProtocol(remaining) {
+            outputs.append(.response(remaining))
+        }
+        return outputs
+    }
+
+    private func processLFM2EOSOutputs() -> [Output]? {
+        guard
+            state == .collectingToolCall || state == .potentialToolCall
+                || state == .collectingJSONToolCall,
+            !toolCallBuffer.isEmpty,
+            let startTag = parser.startTag
+        else { return nil }
+
+        var remaining = toolCallBuffer
+        var outputs: [Output] = []
+
+        while let startRange = remaining.range(of: startTag) {
+            appendResponse(String(remaining[..<startRange.lowerBound]), to: &outputs)
+            let callStart = startRange.upperBound
+            guard let callEnd = remaining[callStart...].firstIndex(of: "]") else { break }
+
+            let callText = String(remaining[startRange.lowerBound...callEnd])
+            guard let call = parser.parse(content: callText, tools: tools) else { break }
+            appendToolCall(call)
+            outputs.append(.toolCall(toolCalls.removeLast()))
+            remaining = String(remaining[remaining.index(after: callEnd)...])
         }
 
         toolCallBuffer = ""
