@@ -183,6 +183,31 @@ struct MultiTurnToolCallingTests {
     }
 
     @Test(arguments: MultiTurnToolCallingTests.models)
+    func requiredContinuationCallsAnotherRealTool(modelID: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let (model, reasoningLevel) = makeMultiTurnModel(modelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: try continuationTranscript(),
+            enabledTools: [flashlightTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required),
+            contextOptions: ContextOptions(reasoningLevel: reasoningLevel))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var names: [String] = []
+        var response = ""
+        for try await event in stream {
+            if case .toolCall(_, let name, _) = event { names.append(name) }
+            if case .appendText(let text, _, .response) = event { response += text }
+        }
+
+        #expect(names == [Self.toolName])
+        #expect(response.isEmpty)
+    }
+
+    @Test(arguments: MultiTurnToolCallingTests.models)
     func continuationPromptContainsToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

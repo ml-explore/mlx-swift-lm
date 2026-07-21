@@ -26,6 +26,24 @@ private struct WeatherArgs {
 @Suite(.serialized, .timeLimit(.minutes(5)))
 struct FoundationModelsToolCallingTests {
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func weatherTool() -> Transcript.ToolDefinition {
+        Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get the current weather in a given location.",
+            parameters: WeatherArgs.generationSchema)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func singlePromptTranscript(_ text: String) -> Transcript {
+        Transcript(entries: [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: text))],
+                    responseFormat: nil))
+        ])
+    }
+
     @Test("Setup: release GPU state from prior suites")
     func clearGPUBeforeToolCalling() async {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -43,23 +61,9 @@ struct FoundationModelsToolCallingTests {
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
 
-        let weatherTool = Transcript.ToolDefinition(
-            name: "get_weather",
-            description: "Get the current weather in a given location.",
-            parameters: WeatherArgs.generationSchema
-        )
-
-        let transcript = Transcript(entries: [
-            .prompt(
-                Transcript.Prompt(
-                    segments: [
-                        .text(Transcript.TextSegment(content: "What's the weather in Tokyo?"))
-                    ], responseFormat: nil))
-        ])
-
         let request = makeExecutorRequest(
-            transcript: transcript,
-            enabledTools: [weatherTool]
+            transcript: singlePromptTranscript("What's the weather in Tokyo?"),
+            enabledTools: [weatherTool()]
         )
 
         let stream = try await executeResponse(executor, request: request, model: model)
@@ -114,26 +118,9 @@ struct FoundationModelsToolCallingTests {
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
 
-        let weatherTool = Transcript.ToolDefinition(
-            name: "get_weather",
-            description:
-                "Get the current weather in a given location. Use this whenever the user asks about weather, temperature, or conditions anywhere.",
-            parameters: WeatherArgs.generationSchema
-        )
-
-        let transcript = Transcript(entries: [
-            .prompt(
-                Transcript.Prompt(
-                    segments: [
-                        .text(
-                            Transcript.TextSegment(
-                                content: "What's the current weather in Tokyo, Japan?"))
-                    ], responseFormat: nil))
-        ])
-
         let request = makeExecutorRequest(
-            transcript: transcript,
-            enabledTools: [weatherTool]
+            transcript: singlePromptTranscript("What's the current weather in Tokyo, Japan?"),
+            enabledTools: [weatherTool()]
         )
 
         let stream = try await executeResponse(executor, request: request, model: model)
@@ -164,6 +151,52 @@ struct FoundationModelsToolCallingTests {
                 "get_weather arguments should have a string 'location' field (stricter content checks deferred)"
             )
         }
+    }
+
+    @Test func requiredCannotAnswerWithoutCallingARealTool() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("Say hello without using a tool."),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 128,
+                toolCallingMode: .required))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var names: [String] = []
+        var response = ""
+        for try await event in stream {
+            if case .toolCall(_, let name, _) = event { names.append(name) }
+            if case .appendText(let text, _, .response) = event { response += text }
+        }
+
+        #expect(names == ["get_weather"])
+        #expect(response.isEmpty)
+    }
+
+    @Test func disallowedIgnoresManuallyEnabledTools() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: singlePromptTranscript("Say hello in one sentence."),
+            enabledTools: [weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 64,
+                toolCallingMode: .disallowed))
+
+        let stream = try await executeResponse(executor, request: request, model: model)
+        var sawToolCall = false
+        var response = ""
+        for try await event in stream {
+            if case .toolCall = event { sawToolCall = true }
+            if case .appendText(let text, _, .response) = event { response += text }
+        }
+
+        #expect(!sawToolCall)
+        #expect(!response.isEmpty)
     }
 }
 

@@ -970,6 +970,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     ))
             }
 
+            let toolCallingMode = ToolCallingModeResolution.resolve(
+                request.generationOptions.toolCallingMode)
+            let enabledToolDefinitions = try ToolCallingModeResolution.enabledToolDefinitions(
+                for: toolCallingMode,
+                from: request.enabledToolDefinitions)
+
             let container = try await model.loadContainer()
 
             // Encode schema to JSON if present
@@ -1079,7 +1085,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // (`toolAwareContext`) -- thinking on with the think-then-call
                     // phase when reasoning is declared, forced off otherwise.
                     let mayRunReasoningPath =
-                        request.enabledToolDefinitions.isEmpty
+                        enabledToolDefinitions.isEmpty
                         && request.schema == nil
 
                     // When .reasoning is OMITTED on the unconstrained path,
@@ -1129,29 +1135,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let effectiveInput = suppressedInput ?? input
 
                     // Tool path, entered on every round while tools are enabled
-                    // -- fresh turns and continuations alike. Offering the tools
-                    // plus the synthetic FinalAnswer escape lets the model chain
-                    // another tool or answer from the replayed result. The turn
-                    // ends (model-driven, uncapped, matching LanguageModelSession
-                    // and ChatSession) when the model picks FinalAnswer, which we
-                    // emit as a response rather than a tool call.
-                    if !request.enabledToolDefinitions.isEmpty {
+                    // -- fresh turns and continuations alike. Allowed mode also
+                    // offers the synthetic FinalAnswer escape; required mode
+                    // constrains generation to real developer tools only.
+                    if !enabledToolDefinitions.isEmpty {
                         // Tool-calling path. Force the model to emit a JSON
-                        // object matching one of the declared tools --
-                        // including a synthetic "final answer" tool whose
-                        // arguments carry the free-text response. After
-                        // generation, parse the output to route to either a
-                        // toolCallDelta (real tool) or textDelta (final
+                        // object matching one of the declared generation tools.
+                        // Allowed mode also includes a synthetic "final answer"
+                        // tool whose arguments carry the free-text response.
+                        // After generation, parse the output to route to either
+                        // a toolCallDelta (real tool) or textDelta (final
                         // answer) event.
                         //
                         // Buffers the full output before emitting; streaming
                         // within the final-answer path (reparse-each-delta) is
                         // not yet implemented.
-                        let finalAnswerDef = FinalAnswerTool.makeToolDefinition(
-                            responseSchema: request.schema
-                        )
-                        let allTools =
-                            Array(request.enabledToolDefinitions) + [finalAnswerDef]
+                        let generationTools = try ToolCallingModeResolution.guidedToolDefinitions(
+                            for: toolCallingMode,
+                            from: request.enabledToolDefinitions,
+                            responseSchema: request.schema)
 
                         // Re-render using the model's native tool-aware chat
                         // template (Qwen/Llama/Phi/Gemma all ship one in their
@@ -1160,7 +1162,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // grammar constraint below only enforces the *shape* of
                         // whatever tool call it emits.
                         let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                            from: allTools)
+                            from: generationTools)
 
                         // Think-then-call is gated to the enable_thinking
                         // family (Qwen3/QwQ): their template both renders the tool
@@ -1224,7 +1226,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         let toolCallingGrammar =
                             try SchemaConverter.encodeToolCallingGrammar(
-                                tools: allTools
+                                tools: generationTools
                             )
                         // The inner JSON envelope is still needed separately to
                         // seed `CompletionReserve` -- the wrapper tokens
@@ -1233,7 +1235,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // tokenized size adds noise rather than accuracy.
                         let toolCallingEnvelopeJSON =
                             try SchemaConverter.encodeToolCallingEnvelopeJSON(
-                                tools: allTools
+                                tools: generationTools
                             )
 
                         let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(

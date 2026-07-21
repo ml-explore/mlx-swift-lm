@@ -61,6 +61,24 @@ struct ToolCallingModeResolutionTests {
         #expect(!ToolCallingModeResolution.usesAllowedBehavior(.required))
         #expect(!ToolCallingModeResolution.usesAllowedBehavior(.disallowed))
     }
+
+    @Test func requiredGuidedDefinitionsExcludeTheResponseEscape() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let definitions = try ToolCallingModeResolution.guidedToolDefinitions(
+            for: .required,
+            from: [tool(named: "real")],
+            responseSchema: nil)
+        #expect(definitions.map(\.name) == ["real"])
+    }
+
+    @Test func allowedTemporarilyRetainsTheResponseEscape() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let definitions = try ToolCallingModeResolution.guidedToolDefinitions(
+            for: .allowed,
+            from: [tool(named: "real")],
+            responseSchema: nil)
+        #expect(definitions.map(\.name) == ["real", FinalAnswerTool.toolName])
+    }
 }
 
 #endif
