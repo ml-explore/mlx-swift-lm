@@ -14,9 +14,17 @@ import MLXLMCommon
 /// `unlimited_ocr`). Same JSON schema as DeepSeek-OCR plus R-SWA window fields.
 public typealias UnlimitedOCRConfiguration = DeepseekOCRConfiguration
 
-/// Processor for Unlimited-OCR. Python `processing_unlimitedocr.py` subclasses
-/// DeepseekOCRProcessor with torch-free `from_pretrained` and
-/// `sft_format="unlimitedocr"`; Swift already shares the inference tokenize path.
+/// Processor for Unlimited-OCR.
+///
+/// Python `processing_unlimitedocr.py` subclasses DeepseekOCRProcessor with
+/// torch-free `from_pretrained`, default `sft_format="unlimitedocr"`,
+/// `max_num=32` tiling, and multipage single-`<image>` support. Those do **not**
+/// change single-page inference templates: mlx-vlm still tokenizes the caller
+/// prompt plus the image lattice, which ``DeepseekOCRProcessor`` already matches
+/// (TASK-023 audit). Keep this alias until multipage fused prepare (TASK-022)
+/// needs a distinct type.
+///
+/// Audit: coordination-hub `docs/guides/unlimited-ocr-processor-audit.md`.
 public typealias UnlimitedOCRProcessorConfiguration = DeepseekOCRProcessorConfiguration
 public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 
