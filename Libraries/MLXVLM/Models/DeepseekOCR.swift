@@ -198,6 +198,22 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
 }
 
 public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
+    public struct CandidateResolution: Decodable, Sendable {
+        public let width: Int
+        public let height: Int
+
+        public init(width: Int, height: Int) {
+            self.width = width
+            self.height = height
+        }
+
+        public init(from decoder: any Decoder) throws {
+            var container = try decoder.unkeyedContainer()
+            self.width = try container.decode(Int.self)
+            self.height = try container.decode(Int.self)
+        }
+    }
+
     public struct Size: Decodable, Sendable {
         private let _shortestEdge: Int?
         private let _longestEdge: Int?
@@ -218,10 +234,16 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
 
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
+    public let candidateResolutions: [CandidateResolution]
+    public let patchSize: Int
+    public let downsampleRatio: Int
+    public let imageToken: String
     public let size: Size
     private let _imageSeqLength: Int?
 
     public var imageSeqLength: Int { _imageSeqLength ?? 576 }
+    public var baseSize: Int { candidateResolutions.first?.width ?? size.longestEdge }
+    public var localImageSize: Int { min(size.shortestEdge, 640) }
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
         (imageMean[0], imageMean[1], imageMean[2])
     }
@@ -232,6 +254,10 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case imageMean = "image_mean"
         case imageStd = "image_std"
+        case candidateResolutions = "candidate_resolutions"
+        case patchSize = "patch_size"
+        case downsampleRatio = "downsample_ratio"
+        case imageToken = "image_token"
         case size
         case _imageSeqLength = "image_seq_length"
     }
@@ -242,6 +268,14 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
             try container.decodeIfPresent([CGFloat].self, forKey: .imageMean) ?? [0.5, 0.5, 0.5]
         self.imageStd =
             try container.decodeIfPresent([CGFloat].self, forKey: .imageStd) ?? [0.5, 0.5, 0.5]
+        self.candidateResolutions =
+            try container.decodeIfPresent([CandidateResolution].self, forKey: .candidateResolutions)
+            ?? [.init(width: 1024, height: 1024)]
+        self.patchSize = try container.decodeIfPresent(Int.self, forKey: .patchSize) ?? 16
+        self.downsampleRatio =
+            try container.decodeIfPresent(Int.self, forKey: .downsampleRatio) ?? 4
+        self.imageToken =
+            try container.decodeIfPresent(String.self, forKey: .imageToken) ?? "<image>"
         self.size = try container.decodeIfPresent(Size.self, forKey: .size) ?? Size()
         self._imageSeqLength = try container.decodeIfPresent(Int.self, forKey: ._imageSeqLength)
     }
@@ -249,12 +283,35 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
     public init() {
         self.imageMean = [0.5, 0.5, 0.5]
         self.imageStd = [0.5, 0.5, 0.5]
+        self.candidateResolutions = [.init(width: 1024, height: 1024)]
+        self.patchSize = 16
+        self.downsampleRatio = 4
+        self.imageToken = "<image>"
         self.size = Size()
         self._imageSeqLength = nil
     }
 }
 
 public struct DeepseekOCRProcessor: UserInputProcessor {
+    public enum Mode: String, Sendable {
+        case gundam
+        case base
+    }
+
+    @_spi(Testing)
+    public struct PreparedImageInputs: @unchecked Sendable {
+        public let inputIds: MLXArray
+        public let pixelValues: MLXArray
+        public let localCrops: MLXArray
+        public let imagesSeqMask: MLXArray
+        public let imagesSpatialCrop: MLXArray
+        public let mode: Mode
+    }
+
+    /// `UserInput.additionalContext["deepseekocr_mode"]` may override the default
+    /// `gundam` crop path with the smaller single-view `base` path for tests/scripts.
+    public static let modeContextKey = "deepseekocr_mode"
+
     private let config: DeepseekOCRProcessorConfiguration
     private let tokenizer: any Tokenizer
 
@@ -263,52 +320,251 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    private func preprocess(image: CIImage) -> MLXArray {
+    private func preprocess(image: CIImage, side: Int) -> MLXArray {
         image
             .toSRGB()
             .paddingToSquare(backgroundColor: .init(red: 0.5, green: 0.5, blue: 0.5))
             .resampled(
                 to: .init(
-                    width: config.size.longestEdge,
-                    height: config.size.longestEdge),
+                    width: side,
+                    height: side),
                 method: .bicubic
             )
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
             .asMLXArray()
+            .asType(.bfloat16)
     }
 
-    private func imagePromptTokens() -> [Int] {
-        tokenizer.encode(text: Array(repeating: "<image>", count: config.imageSeqLength).joined())
+    private func imageTokenId() -> Int {
+        tokenizer.convertTokenToId(config.imageToken) ?? DeepseekOCR.defaultImageTokenId
     }
 
-    public func prepare(input: UserInput) async throws -> LMInput {
+    private func promptMode(from input: UserInput) -> Mode {
+        guard
+            let rawMode = input.additionalContext?[Self.modeContextKey] as? String,
+            let mode = Mode(rawValue: rawMode)
+        else {
+            return .gundam
+        }
+        return mode
+    }
+
+    private func numQueries(for side: Int) -> Int {
+        Int(ceil((Double(side) / Double(config.patchSize)) / Double(config.downsampleRatio)))
+    }
+
+    private func makeImageTokenGrid(width: Int, height: Int) -> [Int] {
+        let token = imageTokenId()
+        var tokens = [Int]()
+        for _ in 0 ..< height {
+            tokens.append(contentsOf: Array(repeating: token, count: width))
+            tokens.append(token)
+        }
+        tokens.append(token)
+        return tokens
+    }
+
+    private func makeImagePromptTokens(mode: Mode, cropWidth: Int, cropHeight: Int) -> [Int] {
+        switch mode {
+        case .gundam:
+            let baseQueries = numQueries(for: config.baseSize)
+            var tokens = makeImageTokenGrid(width: baseQueries, height: baseQueries)
+            if cropWidth > 1 || cropHeight > 1 {
+                let localQueries = numQueries(for: config.localImageSize)
+                tokens.append(
+                    contentsOf: makeImageTokenGrid(
+                        width: localQueries * cropWidth,
+                        height: localQueries * cropHeight))
+            }
+            return tokens
+        case .base:
+            let queries = numQueries(for: config.localImageSize)
+            return makeImageTokenGrid(width: queries, height: queries)
+        }
+    }
+
+    private func closestAspectRatio(
+        for aspectRatio: CGFloat,
+        candidateRatios: [(Int, Int)],
+        imageWidth: CGFloat,
+        imageHeight: CGFloat,
+        tileSize: Int
+    ) -> (Int, Int) {
+        var bestRatio = (1, 1)
+        var bestDifference = CGFloat.greatestFiniteMagnitude
+        let area = imageWidth * imageHeight
+
+        for ratio in candidateRatios {
+            let targetAspectRatio = CGFloat(ratio.0) / CGFloat(ratio.1)
+            let difference = abs(aspectRatio - targetAspectRatio)
+            if difference < bestDifference {
+                bestDifference = difference
+                bestRatio = ratio
+            } else if difference == bestDifference {
+                let threshold = 0.5 * CGFloat(tileSize * tileSize * ratio.0 * ratio.1)
+                if area > threshold {
+                    bestRatio = ratio
+                }
+            }
+        }
+
+        return bestRatio
+    }
+
+    private func dynamicPreprocess(image: CIImage) -> ([MLXArray], Int, Int) {
+        let tileSize = config.localImageSize
+        let width = image.extent.width
+        let height = image.extent.height
+        let aspectRatio = width / height
+
+        var targetRatios = [(Int, Int)]()
+        for n in 2 ... 9 {
+            for i in 1 ... n {
+                for j in 1 ... n where i * j <= 9 && i * j >= 2 {
+                    let candidate = (i, j)
+                    if !targetRatios.contains(where: { $0.0 == candidate.0 && $0.1 == candidate.1 })
+                    {
+                        targetRatios.append(candidate)
+                    }
+                }
+            }
+        }
+
+        let sortedRatios = targetRatios.sorted { lhs, rhs in
+            (lhs.0 * lhs.1, lhs.0, lhs.1) < (rhs.0 * rhs.1, rhs.0, rhs.1)
+        }
+        let (tilesWide, tilesHigh) = closestAspectRatio(
+            for: aspectRatio,
+            candidateRatios: sortedRatios,
+            imageWidth: width,
+            imageHeight: height,
+            tileSize: tileSize)
+
+        let targetWidth = tileSize * tilesWide
+        let targetHeight = tileSize * tilesHigh
+        let resized =
+            image
+            .toSRGB()
+            .resampled(to: .init(width: targetWidth, height: targetHeight), method: .bicubic)
+
+        var processed = [MLXArray]()
+        for block in 0 ..< (tilesWide * tilesHigh) {
+            let x = (block % tilesWide) * tileSize
+            let y = (block / tilesWide) * tileSize
+            let cropRect = CGRect(x: x, y: y, width: tileSize, height: tileSize)
+            let crop =
+                resized
+                .cropped(to: cropRect)
+                .transformed(by: .init(translationX: -cropRect.minX, y: -cropRect.minY))
+            processed.append(
+                crop
+                    .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
+                    .asMLXArray()
+                    .asType(.bfloat16))
+        }
+
+        return (processed, tilesWide, tilesHigh)
+    }
+
+    private func assemblePromptTokens(_ promptTokens: [Int], imageTokens: [Int]) -> [Int] {
+        let imageToken = imageTokenId()
+        guard let placeholderIndex = promptTokens.firstIndex(of: imageToken) else {
+            return promptTokens + imageTokens
+        }
+
+        var combined = promptTokens
+        combined.replaceSubrange(placeholderIndex ... placeholderIndex, with: imageTokens)
+        return combined
+    }
+
+    private func emptyLocalCrops() -> MLXArray {
+        zeros([1, 3, config.baseSize, config.baseSize], type: Float.self).asType(.bfloat16)
+    }
+
+    @_spi(Testing)
+    public func prepareForTesting(input: UserInput) async throws -> PreparedImageInputs {
         let messages = DeepseekOCRMessageGenerator().generate(from: input)
-        var promptTokens = try tokenizer.applyChatTemplate(
+        let promptTokens = try tokenizer.applyChatTemplate(
             messages: messages,
             tools: input.tools,
             additionalContext: input.additionalContext)
 
-        if input.images.isEmpty {
-            return LMInput(tokens: MLXArray(promptTokens))
+        guard !input.images.isEmpty else {
+            return .init(
+                inputIds: MLXArray(promptTokens.map(Int32.init)).reshaped(1, promptTokens.count),
+                pixelValues: zeros([1, 3, config.baseSize, config.baseSize], type: Float.self),
+                localCrops: emptyLocalCrops(),
+                imagesSeqMask: zeros([1, promptTokens.count], type: Bool.self),
+                imagesSpatialCrop: zeros([1, 2], type: Int32.self),
+                mode: promptMode(from: input))
         }
 
         guard input.images.count == 1 else {
             throw VLMError.singleImageAllowed
         }
 
-        if !promptTokens.contains(where: { $0 == DeepseekOCR.defaultImageTokenId }) {
-            promptTokens.append(contentsOf: imagePromptTokens())
-        }
-
+        let mode = promptMode(from: input)
         let image = MediaProcessing.apply(
             try input.images[0].asCIImage(), processing: input.processing)
-        let pixels = preprocess(image: image)
-        let tokens = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: tokens).asType(.int8)
+
+        let pixelValues: MLXArray
+        let localCrops: MLXArray
+        let cropWidth: Int
+        let cropHeight: Int
+
+        switch mode {
+        case .gundam:
+            pixelValues = preprocess(image: image, side: config.baseSize)
+            if image.extent.width <= CGFloat(config.localImageSize)
+                && image.extent.height <= CGFloat(config.localImageSize)
+            {
+                cropWidth = 1
+                cropHeight = 1
+                localCrops = emptyLocalCrops()
+            } else {
+                let (crops, widthTiles, heightTiles) = dynamicPreprocess(image: image)
+                cropWidth = widthTiles
+                cropHeight = heightTiles
+                localCrops = concatenated(crops, axis: 0).asType(.bfloat16)
+            }
+        case .base:
+            pixelValues = preprocess(image: image, side: config.localImageSize)
+            cropWidth = 1
+            cropHeight = 1
+            localCrops = emptyLocalCrops()
+        }
+
+        let imagePromptTokens = makeImagePromptTokens(
+            mode: mode, cropWidth: cropWidth, cropHeight: cropHeight)
+        let fullPromptTokens = assemblePromptTokens(promptTokens, imageTokens: imagePromptTokens)
+        let prefixCount = fullPromptTokens.count - imagePromptTokens.count
+        let sequenceMask =
+            Array(repeating: false, count: max(prefixCount, 0))
+            + Array(repeating: true, count: imagePromptTokens.count)
+
+        return .init(
+            inputIds: MLXArray(fullPromptTokens.map(Int32.init)).reshaped(
+                1, fullPromptTokens.count),
+            pixelValues: pixelValues,
+            localCrops: localCrops,
+            imagesSeqMask: MLXArray(sequenceMask).reshaped(1, sequenceMask.count),
+            imagesSpatialCrop: MLXArray([Int32(cropWidth), Int32(cropHeight)]).reshaped(1, 2),
+            mode: mode)
+    }
+
+    public func prepare(input: UserInput) async throws -> LMInput {
+        let prepared = try await prepareForTesting(input: input)
+        let mask = ones(like: prepared.inputIds).asType(.int8)
         return LMInput(
-            text: .init(tokens: tokens, mask: mask),
+            text: .init(tokens: prepared.inputIds, mask: mask),
             image: .init(
-                pixels: pixels, frames: [THW(1, config.size.longestEdge, config.size.longestEdge)])
+                pixels: prepared.pixelValues,
+                frames: [
+                    THW(
+                        1,
+                        prepared.pixelValues.dim(2),
+                        prepared.pixelValues.dim(3))
+                ])
         )
     }
 }
