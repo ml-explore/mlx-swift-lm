@@ -33,6 +33,19 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
     }
 
+    /// Pixels for the default 1,280 vision-token budget (`1280 * factor²`),
+    /// clamped to `ceiling`. Overflow-safe: a pathological config (an absurd
+    /// `patch_size`/`merge_size`) yields `ceiling` instead of trapping on the
+    /// unchecked multiply, so bad model metadata degrades to the config ceiling
+    /// rather than crashing preprocess.
+    private static func defaultVisionTokenBudgetPixels(factor: Int, ceiling: Int) -> Int {
+        let (squared, squaredOverflow) = factor.multipliedReportingOverflow(by: factor)
+        guard !squaredOverflow else { return ceiling }
+        let (budget, budgetOverflow) = squared.multipliedReportingOverflow(by: 1280)
+        guard !budgetOverflow else { return ceiling }
+        return min(ceiling, budget)
+    }
+
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
@@ -43,16 +56,39 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         }
 
         let extent = first.extent.size
+        // The qwen3_5 ViT runs *global* O(patches²) attention with no windowing,
+        // so an uncapped full-resolution screenshot can allocate a tens-of-GB
+        // score matrix (a 7.74 MP screenshot → 30,240 patches → a 29 GB matrix).
+        // Several published configs ship a ~16 MP `longest_edge` that never
+        // clamps, so default each image to a 1,280 vision-token budget
+        // (1280 * factor² pixels ⇒ 1,280 tokens after the spatial merge, since
+        // tokens = pixels / factor²), mirroring the sibling Qwen25VL. An
+        // explicit `processing.maxPixels` overrides it.
+        let factor = config.patchSize * config.mergeSize
+        let maxPixels =
+            processing?.maxPixels
+            ?? Self.defaultVisionTokenBudgetPixels(factor: factor, ceiling: config.maxPixels)
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(extent.height),
             width: Int(extent.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels,
-            maxPixels: config.size.maxPixels)
+            factor: factor,
+            minPixels: processing?.minPixels ?? config.minPixels,
+            maxPixels: maxPixels)
 
         let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
 
-        let resampled = processed.map { MediaProcessing.resampleBicubic($0, to: targetSize) }
+        // The sRGB tone-curve step must precede resample/normalize: CoreImage
+        // filters run in a *linear-light* working space and `asMLXArray`
+        // renders with a nil colorSpace (raw working-space values), so without
+        // it the model receives linearized values instead of the gamma-encoded
+        // bytes the HF reference preprocesses — crushing dark-region contrast
+        // ~12× (near-black text becomes invisible to the model). The sibling
+        // Qwen25VL/Qwen2VL image paths and this file's own video path apply
+        // the same step.
+        let resampled = processed.map {
+            MediaProcessing.resampleBicubic(
+                MediaProcessing.inSRGBToneCurveSpace($0), to: targetSize)
+        }
 
         let normalized =
             resampled
@@ -112,19 +148,29 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                 let sequence = try await MediaProcessing.asProcessedSequence(
                     video, targetFPS: { _ in Double(2) }
                 ) { frame in
-                    let processed = MediaProcessing.apply(frame.frame, processing: input.processing)
+                    let processed = MediaProcessing.apply(
+                        try frame.image.asCIImage(), processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
+                        // Same per-frame vision-token budget cap as the image
+                        // path: the global ViT is just as O(patches²) on a
+                        // video frame. Override-able via
+                        // `processing.maxPixels`.
+                        let factor = config.patchSize * config.mergeSize
+                        let maxPixels =
+                            input.processing.maxPixels
+                            ?? Self.defaultVisionTokenBudgetPixels(
+                                factor: factor, ceiling: config.maxPixels)
                         let (height, width) = try QwenVL.targetSize(
                             height: Int(size.height),
                             width: Int(size.width),
-                            factor: config.patchSize * config.mergeSize,
-                            minPixels: config.minPixels,
-                            maxPixels: config.maxPixels)
+                            factor: factor,
+                            minPixels: input.processing.minPixels ?? config.minPixels,
+                            maxPixels: maxPixels)
                         resizedSize = CGSize(width: width, height: height)
                     }
                     let finalImage = preprocess(image: processed, resizedSize: resizedSize)
-                    return VideoFrame(frame: finalImage, timeStamp: frame.timeStamp)
+                    return VideoFrame(image: .ciImage(finalImage), timeStamp: frame.timeStamp)
                 }
                 accumulatedFrames.append(sequence.frames)
             }
@@ -162,6 +208,8 @@ public struct Qwen3VLProcessor: UserInputProcessor {
 
 public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
 
+    /// The synthesized min/max-pixel budget the processor consumes. Always
+    /// resolved (non-optional) — see `var size`.
     public struct Size: Codable, Sendable {
         public let maxPixels: Int
         public let minPixels: Int
@@ -172,17 +220,47 @@ public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
         }
     }
 
+    /// The raw JSON `"size"` block. Newer Qwen3-VL configs (e.g. Qwen3.6-27B
+    /// PARO) ship *only* `{longest_edge, shortest_edge}` — pixel-area budgets
+    /// under the HF convention `shortest_edge → min_pixels`,
+    /// `longest_edge → max_pixels` (same direct mapping GlmOcr uses); older
+    /// configs ship `{min_pixels, max_pixels}`. Every field is optional so a
+    /// config that omits any one still decodes: the processor loader swallows
+    /// decode throws into a silent text-only fallback, so a hard requirement
+    /// would make vision disappear instead of erroring.
+    public struct SizeBudget: Codable, Sendable {
+        public let maxPixels: Int?
+        public let minPixels: Int?
+        public let longestEdge: Int?
+        public let shortestEdge: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case maxPixels = "max_pixels"
+            case minPixels = "min_pixels"
+            case longestEdge = "longest_edge"
+            case shortestEdge = "shortest_edge"
+        }
+    }
+
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
     private let _minPixels: Int?
     private let _maxPixels: Int?
+    private let _size: SizeBudget?
     public let mergeSize: Int
     public let patchSize: Int
     public let temporalPatchSize: Int
     public let imageProcessorType: String
 
-    public var minPixels: Int { _minPixels ?? 4 * 28 * 28 }  // 3,136
-    public var maxPixels: Int { _maxPixels ?? 16384 * 28 * 28 }  // 12,845,056
+    // Budget resolution order: explicit top-level legacy keys, then the
+    // `size` block's legacy keys, then its new-style edges, then defaults.
+    // The defaults are only reached when the config carries no budget at all.
+    public var minPixels: Int {
+        _minPixels ?? _size?.minPixels ?? _size?.shortestEdge ?? 4 * 28 * 28
+    }  // default 3,136
+    public var maxPixels: Int {
+        _maxPixels ?? _size?.maxPixels ?? _size?.longestEdge ?? 16384 * 28 * 28
+    }  // default 12,845,056
 
     public var size: Size { .init(maxPixels: maxPixels, minPixels: minPixels) }
 
@@ -199,6 +277,7 @@ public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
         case imageStd = "image_std"
         case _minPixels = "min_pixels"
         case _maxPixels = "max_pixels"
+        case _size = "size"
         case mergeSize = "merge_size"
         case patchSize = "patch_size"
         case temporalPatchSize = "temporal_patch_size"
@@ -935,37 +1014,26 @@ enum Qwen3VLLanguage {
     final class RotaryEmbedding {
 
         private let invFreq: MLXArray
-        private let mropeSection: [Int]
+        private let mropeIndices: MLXArray
 
         init(headDim: Int, base: Double, ropeScaling: Qwen3VLConfiguration.RoPEScaling?) {
             var freq = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
             freq = freq / Float(headDim)
             let baseArray = MLXArray(Float(base))
             self.invFreq = 1.0 / pow(baseArray, freq)
-            self.mropeSection = ropeScaling?.mropeSection ?? [24, 20, 20]
+            let sections = ropeScaling?.mropeSection ?? [24, 20, 20]
+            var indices = [Int32](repeating: 0, count: freq.dim(0))
+            for (dimension, offset) in [(1, 1), (2, 2)] {
+                let end = min(sections[dimension] * 3, indices.count)
+                for index in stride(from: offset, to: end, by: 3) {
+                    indices[index] = Int32(dimension)
+                }
+            }
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let freqs_t = freqs[0, 0..., 0..., 0...]  // (bs, seq_len, head_dim // 2)
-
-            let dims = freqs_t.dim(-1)
-            var slices: [MLXArray] = []
-
-            for idx in 0 ..< dims {
-                var slice = freqs_t[0..., 0..., idx]
-
-                for (dimIndex, offset) in [(1, 1), (2, 2)] {
-                    let end = min(mropeSection[dimIndex] * 3, dims)
-                    if idx >= offset && idx < end && (idx - offset) % 3 == 0 {
-                        slice = freqs[dimIndex, 0..., 0..., idx]
-                        break
-                    }
-                }
-
-                slices.append(slice)
-            }
-
-            return stacked(slices, axis: -1)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(positionIds: MLXArray, dtype: MLX.DType) -> (MLXArray, MLXArray) {
@@ -1356,6 +1424,15 @@ enum Qwen3VLLanguage {
 
 extension Qwen3VLLanguage {
 
+    /// - Parameter positionOffset: the absolute M-RoPE position the first
+    ///   token should occupy. Zero (the default) starts the index at absolute
+    ///   zero — correct for a cold full prefill. A warm continuation that
+    ///   resumes a cached prefix passes the **Position Anchor** (cache offset +
+    ///   the rope delta accumulated by the cached images), so a *new* image in
+    ///   the remainder gets its diverging temporal/height/width positions
+    ///   computed *from* the anchor instead of resetting to zero. The returned
+    ///   delta is shifted with the positions, so it remains
+    ///   `maxPositionId + 1 − tokenCount` in the offset frame.
     static func getRopeIndex(
         inputIds: MLXArray,
         imageGridTHW: [THW]?,
@@ -1364,7 +1441,8 @@ extension Qwen3VLLanguage {
         imageTokenId: Int,
         videoTokenId: Int,
         visionStartTokenId: Int,
-        attentionMask: MLXArray? = nil
+        attentionMask: MLXArray? = nil,
+        positionOffset: Int = 0
     ) -> (MLXArray, MLXArray) {
 
         let (batchSize, seqLength) = (inputIds.dim(0), inputIds.dim(1))
@@ -1373,10 +1451,15 @@ extension Qwen3VLLanguage {
         positionIds = broadcast(positionIds[.newAxis, 0...], to: [batchSize, seqLength])
 
         guard inputIds.ndim > 0, imageGridTHW != nil || videoGridTHW != nil else {
-            let positionIds3D = broadcast(
+            var positionIds3D = broadcast(
                 positionIds[.newAxis, 0..., 0...], to: [3, batchSize, seqLength])
-            let zeros = MLXArray.zeros([batchSize], dtype: .int32)
-            return (positionIds3D, zeros)
+            if positionOffset != 0 {
+                positionIds3D = positionIds3D + MLXArray(Int32(positionOffset))
+            }
+            // Text-only positions are `arange + positionOffset`, so the delta
+            // (`maxPos + 1 − tokenCount`) collapses to `positionOffset`.
+            let deltas = MLXArray(Array(repeating: Int32(positionOffset), count: batchSize))
+            return (positionIds3D, deltas)
         }
 
         positionIds = ones(like: inputIds).asType(.int32)
@@ -1512,7 +1595,14 @@ extension Qwen3VLLanguage {
 
             // Concatenate all position IDs for this batch item
             if !llmPosIdsList.isEmpty {
-                let llmPositions = concatenated(llmPosIdsList, axis: 1)  // [3, seq]
+                var llmPositions = concatenated(llmPosIdsList, axis: 1)  // [3, seq]
+                // Shift the whole batch item into the anchor frame. Applied to
+                // `llmPositions` (not just the final array) so `maxPosId` below
+                // — and therefore the returned delta — is computed in the same
+                // offset frame the positions live in.
+                if positionOffset != 0 {
+                    llmPositions = llmPositions + MLXArray(Int32(positionOffset))
+                }
 
                 // Update position_ids for this batch
                 let expandedMask = broadcast(
@@ -1637,6 +1727,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
+        state _: LMOutput.State?,
         windowSize _: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens

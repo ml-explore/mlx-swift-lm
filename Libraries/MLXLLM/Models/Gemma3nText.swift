@@ -583,7 +583,7 @@ class Gemma3nDecoderLayer: Module {
         var finalMask = mask
         if isSliding, case .array(let maskArray) = mask {
             let effectiveSeqLen = max(cachePosition?.dim(0) ?? 0, slidingWindow)
-            let minDtype = MLXArray(Float.leastNormalMagnitude, dtype: maskArray.dtype)
+            let minDtype = MLXArray.maskFill(for: maskArray.dtype)
 
             let slidingWindowMask = tril(
                 MLXArray.ones(maskArray.shape, dtype: .bool),
@@ -1020,7 +1020,8 @@ public class Gemma3nTextModel: Module, LLMModel {
 
     /// Handles prompt processing for sequences
     public func prepare(
-        _ input: LMInput, cache: [KVCache], windowSize: Int? = nil
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
+        windowSize: Int? = nil
     ) throws -> PrepareResult {
         let promptTokens = input.text.tokens
         let promptCount = promptTokens.dim(0)

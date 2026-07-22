@@ -979,7 +979,9 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         return result
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let dtype = visionModel.embeddings.patchEmbedding.weight.dtype

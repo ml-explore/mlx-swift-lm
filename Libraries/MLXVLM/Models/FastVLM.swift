@@ -1127,7 +1127,9 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
         return embeddings.expandedDimensions(axis: 0)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let embeddings = getInputEmbeddings(

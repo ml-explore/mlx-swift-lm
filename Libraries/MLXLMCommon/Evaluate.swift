@@ -53,8 +53,9 @@ public protocol LogitProcessor {
 /// for the `TokenIterator`.
 public struct GenerateParameters: Sendable {
 
-    /// Step size for processing the prompt
-    public var prefillStepSize: Int
+    /// Step size for processing the prompt. `nil` lets each model pick its own prefill
+    /// chunk (the Gemma 3 text path uses a smaller chunk than the generic 512 default).
+    public var prefillStepSize: Int?
 
     /// Maximum tokens to generate
     public var maxTokens: Int?
@@ -73,8 +74,21 @@ public struct GenerateParameters: Sendable {
     public var quantizedKVStart: Int
 
     /// KV cache compression scheme. Overrides kvBits when set.
-    /// Built-in: "affine4", "affine8" (equivalent to kvBits 4/8).
-    /// Extensible for custom schemes (e.g. WHT-based compression).
+    ///
+    /// Built-in affine: "affine4", "affine8" (equivalent to kvBits 4/8).
+    ///
+    /// TurboQuant schemes (`turbo<K>v<V>`, keys × values). Start light,
+    /// verify quality on your model, then ratchet V:
+    /// - "turbo0v4"  FP16 K + 4-bit V, the safest start
+    /// - "turbo0v3"/"turbo0v2"  FP16 K, more aggressive V
+    /// - "turbo8v4"  8-bit affine K + 4-bit V, conservative asymmetric
+    /// - "turbo8v3"  recommended default (near-lossless K, compressed V)
+    /// - "turbo8v2"  aggressive V (boundary-layer protection auto-engages)
+    /// - "turbo4"/"turbo4v2"/"turbo3"/"turbo2"  turbo-quantized keys:
+    ///   maximum compression; K sensitivity varies by model family, so
+    ///   validate on your model (asym is the recommended starting point).
+    ///
+    /// Unrecognized schemes are ignored. See `resolveTurboScheme`.
     public var kvScheme: String?
 
     /// Sampling temperature
@@ -131,7 +145,7 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512,
+        prefillStepSize: Int? = nil,
         seed: UInt64? = nil
     ) {
         self.maxTokens = maxTokens
@@ -554,7 +568,13 @@ extension TokenIteratorProtocol {
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
 public struct TokenIterator: TokenIteratorProtocol {
     let model: any LanguageModel
-    var state: LMOutput.State?
+
+    /// Per-call model state (e.g. M-RoPE rope deltas), seeded from the
+    /// initializer's `state`, replaced by prefill, then threaded through
+    /// every decode step. A caller continuing this cache later (as
+    /// ``ChatSession`` does across turns) reads it back after
+    /// initialization and seeds the next iterator with it.
+    public internal(set) var state: LMOutput.State?
 
     var y: LMInput.Text
     var cache: [KVCache]
@@ -574,7 +594,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     public var promptPrefillTime: TimeInterval = 0.0
 
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
-    /// replaced with ``init(input:model:cache:parameters:)``.
+    /// replaced with ``init(input:model:cache:state:parameters:)``.
     ///
     /// - Parameters:
     ///   - prompt: the prompt tokens
@@ -607,7 +627,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:)``
+    /// ``init(input:model:cache:state:processor:sampler:prefillStepSize:maxTokens:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///
@@ -615,12 +635,16 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - parameters: the generation parameters
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+        state: LMOutput.State? = nil,
         parameters: GenerateParameters
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: parameters)
 
@@ -644,16 +668,20 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - input: language model input
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
+    ///   - state: optional per-call model state carried over from earlier
+    ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - processor: the logit processor
     ///   - sampler: the logit sampler
     ///   - prefillStepSize: optional prefill step size
     ///   - maxTokens: maximum number of tokens to generate
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
-        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int = 512,
+        state: LMOutput.State? = nil,
+        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int? = nil,
         maxTokens: Int? = nil
     ) throws {
         self.model = model
+        self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: nil)
 
@@ -675,7 +703,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
         processor?.prompt(input.text.tokens)
 
-        switch try model.prepare(input, cache: cache, windowSize: windowSize) {
+        switch try model.prepare(input, cache: cache, state: state, windowSize: windowSize) {
         case .tokens(let tokens):
             y = tokens
 
@@ -685,6 +713,8 @@ public struct TokenIterator: TokenIteratorProtocol {
             asyncEval(y.tokens)
 
         case .logits(let result):
+            // carry the prefill state into decode, as step(previous:) does for later steps
+            self.state = result.state
             y = .init(tokens: convertToToken(logits: result.logits))
             asyncEval(y.tokens)
 
@@ -729,17 +759,35 @@ public struct TokenIterator: TokenIteratorProtocol {
             return nil
         }
 
-        // save current value -- this will be returned
-        let previousY = y
+        // Drain autoreleased MLX temporaries every step: a full model forward
+        // produces hundreds of autoreleased wrapper objects, and the token
+        // loop never returns to a pool boundary on its own; without this,
+        // long generations grow host memory without bound.
+        return autoreleasepool {
+            // save current value -- this will be returned
+            let previousY = y
 
-        // compute the next state and async eval the next token
-        let token = step(previous: previousY)
-        y = .init(tokens: token)
-        asyncEval(token)
+            // compute the next state and async eval the next token
+            let token = step(previous: previousY)
+            y = .init(tokens: token)
+            // Evaluate the cache state together with the token: caches update
+            // through functional ops (concatenation, slice assignment), and an
+            // unevaluated chain of those updates keeps every prior step's
+            // intermediates alive. Python mlx-lm settles cache state the same
+            // way in its generation loop.
+            asyncEval([token] + cache.flatMap { $0.state })
 
-        tokenCount += 1
+            tokenCount += 1
 
-        return previousY.tokens.item(Int.self)
+            // Periodically return freed buffers that cannot be reused (odd or
+            // monotonically growing sizes accumulate in the pool otherwise).
+            // Matches mlx-lm's clear cadence.
+            if tokenCount % 256 == 0 {
+                MLX.Memory.clearCache()
+            }
+
+            return previousY.tokens.item(Int.self)
+        }
     }
 }
 
@@ -844,7 +892,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 cache: &cache,
                 kvBits: parameters.kvBits,
                 kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
+                quantizedKVStart: parameters.quantizedKVStart,
+                kvScheme: parameters.kvScheme
             )
         }
 
@@ -858,7 +907,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.prompt(input.text.tokens)
 
         // Prefill main model
-        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        switch try mainModel.prepare(
+            input, cache: mainCache, state: mainState, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             y = tokens
         case .logits(let result):
@@ -871,7 +922,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
-        switch try draftModel.prepare(input, cache: draftCache, windowSize: windowSize) {
+        switch try draftModel.prepare(input, cache: draftCache, state: nil, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             draftY = tokens
         case .logits(let result):
@@ -998,10 +1050,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return token
         }
 
-        // Run a new speculation round
+        // Run a new speculation round. Pooled: a round runs draft + verify
+        // forwards whose autoreleased MLX temporaries otherwise accumulate
+        // across the whole generation.
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
             return nil
@@ -1148,7 +1202,7 @@ private func runSynchronousGenerationLoop(
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
-    while let token = iterator.next() {
+    while let token = autoreleasepool(invoking: { iterator.next() }) {
         // Compute the timing for the prompt.
         if promptTime == 0 {
             let now = Date.timeIntervalSinceReferenceDate
@@ -1841,12 +1895,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: while let token = iterator.next() {
-                // Check for cancellation on every loop iteration.
-                if Task.isCancelled {
-                    stopReason = .cancelled
-                    break
-                }
+            // Check cancellation BEFORE iterator.next(): next() calls asyncEval() to
+            // pipeline the next GPU evaluation, so checking after it (the previous
+            // `while let token = iterator.next()` form) allowed one extra asyncEval to be
+            // submitted post-cancellation, which faults if the app has backgrounded
+            // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
+            // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+            // settles any in-flight evaluation at the end of the task body.
+            tokenLoop: while !Task.isCancelled {
+                guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
 
                 if promptTime == 0 {
                     let now = Date.timeIntervalSinceReferenceDate

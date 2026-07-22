@@ -102,4 +102,49 @@ final class Qwen35SanitizeTests: XCTestCase {
                 "bare model.* key leaked through sanitize: \(key)")
         }
     }
+
+    /// A pre-converted MLX checkpoint (conv1d already sanitized, trailing dim
+    /// == 1, no MTP tensors) already stores RMSNorm weights in the shifted
+    /// convention. Sanitize must NOT add the `+1` again: double-shifting every
+    /// layernorm decoheres the whole model and produces garbage tokens. This is
+    /// the VLM/LLM sanitize divergence — the LLM path gated the shift, the VLM
+    /// path did not.
+    func testPreConvertedNormWeightsAreNotShifted() throws {
+        let config = try makeMinimalConfig()
+        let model = Qwen35(config)
+
+        let weights: [String: MLXArray] = [
+            // Sanitized conv1d (trailing dim == 1) marks an already-converted
+            // checkpoint, so the norm shift must be suppressed.
+            "language_model.model.layers.0.linear_attn.conv1d.weight": MLXArray.zeros([8, 4, 1]),
+            "language_model.model.norm.weight": MLXArray.zeros([8]),
+        ]
+
+        let sanitized = model.sanitize(weights: weights)
+
+        let norm = try XCTUnwrap(sanitized["language_model.model.norm.weight"])
+        XCTAssertEqual(
+            norm.sum().item(Float.self), 0.0, accuracy: 1e-6,
+            "pre-converted norm weight must not be +1 shifted (double-shift => garbage)")
+    }
+
+    /// A raw HF checkpoint (unsanitized conv1d, trailing dim != 1) stores
+    /// RMSNorm weights un-shifted, so sanitize must add the `+1`.
+    func testRawCheckpointNormWeightsAreShifted() throws {
+        let config = try makeMinimalConfig()
+        let model = Qwen35(config)
+
+        let weights: [String: MLXArray] = [
+            // Unsanitized conv1d (trailing dim != 1) marks a raw checkpoint.
+            "language_model.model.layers.0.linear_attn.conv1d.weight": MLXArray.zeros([8, 1, 4]),
+            "language_model.model.norm.weight": MLXArray.zeros([8]),
+        ]
+
+        let sanitized = model.sanitize(weights: weights)
+
+        let norm = try XCTUnwrap(sanitized["language_model.model.norm.weight"])
+        XCTAssertEqual(
+            norm.sum().item(Float.self), 8.0, accuracy: 1e-6,
+            "raw-checkpoint norm weight must be +1 shifted (8 zeros => sum 8)")
+    }
 }

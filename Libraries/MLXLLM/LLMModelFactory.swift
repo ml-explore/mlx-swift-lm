@@ -573,7 +573,7 @@ public final class LLMModelFactory: GenericModelFactory {
         }
 
         // Load EOS token IDs from config.json, with optional override from generation_config.json
-        var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+        var eosTokenIds = baseConfig.effectiveEOSTokenIds
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         let generationConfig: GenerationConfigFile? =
             if let generationData = try? Data(contentsOf: generationConfigURL) {
@@ -592,6 +592,13 @@ public final class LLMModelFactory: GenericModelFactory {
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
                 from: baseConfig.modelType, configData: configData)
+        }
+        // Reasoning protocol: registry override wins; otherwise infer from
+        // model_type + repo id. `modelId` is load-bearing — R1-Distill reports a
+        // base model_type (qwen2/llama) and is only recognizable by id.
+        if mutableConfiguration.reasoningConfig == nil {
+            mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
+                from: baseConfig.modelType, modelId: configuration.name, configData: configData)
         }
 
         // Load tokenizer and weights in parallel
@@ -623,7 +630,8 @@ public final class LLMModelFactory: GenericModelFactory {
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            reasoningConfig: mutableConfiguration.reasoningConfig)
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,
