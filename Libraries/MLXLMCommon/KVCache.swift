@@ -462,10 +462,13 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         return trimmed
     }
 
-    /// Convert to quantized cache for maximum efficiency
+    /// Convert to a quantized cache for maximum efficiency.
     ///
     /// Use `updateQuantized()` and `quantizedScaledDotProductAttention()` for zero-overhead operation.
-    public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
+    ///
+    /// - Throws: If neither the requested group size nor another supported group size can
+    ///   represent both the key and value head dimensions.
+    public func toQuantized(groupSize: Int = 64, bits: Int = 4) throws -> QuantizedKVCache {
         if let keys = self.keys, let values = self.values {
             // Quantize the current keys and values
             let currentKeys = keys[.ellipsis, ..<offset, 0...]
@@ -477,8 +480,9 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
                     valueHeadDim: currentValues.dim(3)
                 )
             else {
-                fatalError(
-                    "KV cache quantization requires head dimensions divisible by one of the supported group sizes (32, 64, 128). Requested group size: \(groupSize). Key head dim: \(currentKeys.dim(3)). Value head dim: \(currentValues.dim(3))."
+                throw KVCacheError(
+                    message:
+                        "KV cache quantization requires head dimensions divisible by one of the supported group sizes (32, 64, 128). Requested group size: \(groupSize). Key head dim: \(currentKeys.dim(3)). Value head dim: \(currentValues.dim(3))."
                 )
             }
             let quantizedCache = QuantizedKVCache(groupSize: effectiveGroupSize, bits: bits)
@@ -806,20 +810,18 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return new
     }
 
-    /// Convert to quantized cache
-    /// Note: This is complex due to the rotating nature and temporal ordering
-    public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
-        // For now, throw an error like the Python version does
-        // A full implementation would need to handle the temporal ordering correctly
-        fatalError(
-            "RotatingKVCache quantization not yet implemented - temporal ordering makes this complex"
+    /// Convert to a quantized cache.
+    ///
+    /// Rotating-cache quantization needs a representation that preserves temporal ordering and
+    /// rotation metadata. Until that representation exists, callers can recover by retaining the
+    /// full-precision rotating cache.
+    ///
+    /// - Throws: Always, because rotating-cache quantization is not implemented.
+    public func toQuantized(groupSize: Int = 64, bits: Int = 4) throws -> QuantizedKVCache {
+        throw KVCacheError(
+            message:
+                "RotatingKVCache quantization is not implemented because its temporal ordering requires dedicated handling."
         )
-
-        // Future implementation would need to:
-        // 1. Put keys/values in temporal order using temporalOrder()
-        // 2. Quantize the temporally ordered arrays
-        // 3. Store metadata about rotation state
-        // 4. Implement corresponding dequantization with rotation restoration
     }
 }
 
@@ -1605,8 +1607,10 @@ public class CacheList: BaseKVCache {
 
 // MARK: - Error Types
 
-struct KVCacheError: Error {
+struct KVCacheError: Error, LocalizedError {
     let message: String
+
+    var errorDescription: String? { message }
 }
 
 // MARK: - Utility Functions
@@ -1682,9 +1686,6 @@ public func loadPromptCache(
 ) throws -> ([KVCache], [String: String]) {
     let (arrays, metadata) = try loadArraysAndMetadata(url: url)
 
-    // Unflatten arrays using tree_unflatten compatible logic
-    let cacheData = unflattenArrays(arrays)
-
     // Unflatten metadata using tree_unflatten compatible logic
     let unflattenedMetadata = unflattenMetadata(metadata)
 
@@ -1698,9 +1699,12 @@ public func loadPromptCache(
     let userMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
     let cacheClasses = unflattenedMetadata[2] as? [String] ?? []
 
-    guard cacheData.count == cacheInfo.count && cacheData.count == cacheClasses.count else {
+    guard cacheInfo.count == cacheClasses.count else {
         throw KVCacheError(message: "Mismatch in cache counts")
     }
+
+    // Metadata carries the cache count even when one or more valid caches have no arrays.
+    let cacheData = try unflattenArrays(arrays, cacheCount: cacheClasses.count)
 
     // Reconstruct cache instances
     var caches: [KVCache] = []
@@ -1727,39 +1731,71 @@ private func restoreCacheFromMetaState(
 ) throws -> KVCache {
     switch className {
     case "KVCache", "KVCacheSimple":
+        try validatePromptCache(
+            className: "KVCacheSimple", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [1])
+        guard metaState == [""] else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: KVCacheSimple metadata must contain its single empty placeholder."
+            )
+        }
         let cache = KVCacheSimple()
-        cache.state = state
-        cache.metaState = metaState
+        if !state.isEmpty {
+            cache.state = state
+        }
         return cache
 
     case "RotatingKVCache":
-        guard metaState.count >= 5 else {
-            throw KVCacheError(
-                message: "Invalid RotatingKVCache metaState - expected 5 values")
-        }
-        if metaState[1] == "None" {
+        try validatePromptCache(
+            className: className, state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [5, 6])
+        let values = try promptCacheIntegers(metaState.prefix(5), className: className)
+        if metaState.count == 6,
+            RotatingKVCache.CapacityOrigin(rawValue: metaState[5]) == nil
+        {
             throw KVCacheError(
                 message:
-                    "RotatingKVCache with maxSize=None is not supported.")
+                    "Corrupt prompt cache: invalid RotatingKVCache capacity origin '\(metaState[5])'."
+            )
         }
-        guard let maxSize = Int(metaState[1]) else {
-            throw KVCacheError(
-                message: "Failed to parse RotatingKVCache maxSize from: \(metaState[1])")
+
+        let cache = RotatingKVCache(maxSize: values[1])
+        if !state.isEmpty {
+            cache.state = state
         }
-        let cache = RotatingKVCache(maxSize: maxSize)
-        cache.state = state
         cache.metaState = metaState
         return cache
 
     case "QuantizedKVCache":
-        let cache = QuantizedKVCache()
-        cache.state = state
+        try validatePromptCache(
+            className: className, state: state, stateCounts: [0, 4, 6],
+            metadata: metaState, metadataCounts: [4])
+        let values = try promptCacheIntegers(metaState, className: className)
+        let cache = QuantizedKVCache(groupSize: values[2], bits: values[3])
+        if !state.isEmpty {
+            cache.state = state
+        }
         cache.metaState = metaState
         return cache
 
     case "ChunkedKVCache":
-        let cache = ChunkedKVCache()
-        cache.state = state
+        try validatePromptCache(
+            className: className, state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [2])
+
+        let chunkSize: Int? =
+            if metaState[0] == "None" {
+                nil
+            } else {
+                try promptCacheInteger(metaState[0], className: className)
+            }
+        _ = try promptCacheInteger(metaState[1], className: className)
+
+        let cache = ChunkedKVCache(chunkSize: chunkSize)
+        if !state.isEmpty {
+            cache.state = state
+        }
         cache.metaState = metaState
         return cache
 
@@ -1797,44 +1833,74 @@ private func restoreCacheFromMetaState(
     }
 }
 
+private func validatePromptCache(
+    className: String,
+    state: [MLXArray],
+    stateCounts: Set<Int>,
+    metadata: [String],
+    metadataCounts: Set<Int>
+) throws {
+    guard stateCounts.contains(state.count), metadataCounts.contains(metadata.count),
+        state.allSatisfy({ $0.ndim == 4 })
+    else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: invalid \(className) state or metadata shape."
+        )
+    }
+}
+
+private func promptCacheInteger(_ value: String, className: String) throws -> Int {
+    guard let value = Int(value) else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: \(className) metadata must contain integers."
+        )
+    }
+    return value
+}
+
+private func promptCacheIntegers(
+    _ metadata: some Collection<String>, className: String
+) throws -> [Int] {
+    try metadata.map { try promptCacheInteger($0, className: className) }
+}
+
 /// Unflatten arrays from tree_flatten format (e.g., "0.1", "1.0") to nested structure
-private func unflattenArrays(_ flatArrays: [String: MLXArray]) -> [[MLXArray]] {
+private func unflattenArrays(
+    _ flatArrays: [String: MLXArray],
+    cacheCount: Int
+) throws -> [[MLXArray]] {
     var arrayMap: [Int: [Int: MLXArray]] = [:]
 
     // Parse all keys and organize by indices
     for (key, array) in flatArrays {
         let components = key.split(separator: ".")
-        if components.count >= 2,
+        guard components.count == 2,
             let i = Int(components[0]),
-            let j = Int(components[1])
-        {
-            if arrayMap[i] == nil {
-                arrayMap[i] = [:]
-            }
-            arrayMap[i]![j] = array
+            let j = Int(components[1]),
+            (0 ..< cacheCount).contains(i),
+            j >= 0
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid array key '\(key)'.")
         }
+        arrayMap[i, default: [:]][j] = array
     }
 
-    // Convert to ordered array structure
-    var result: [[MLXArray]] = []
-    let maxI = arrayMap.keys.max() ?? -1
-
-    for i in 0 ... maxI {
-        if let innerMap = arrayMap[i] {
-            let maxJ = innerMap.keys.max() ?? -1
-            var innerArray: [MLXArray] = []
-            for j in 0 ... maxJ {
-                if let array = innerMap[j] {
-                    innerArray.append(array)
-                }
+    return try (0 ..< cacheCount).map { cacheIndex in
+        guard let arrays = arrayMap[cacheIndex], !arrays.isEmpty else { return [] }
+        var result: [MLXArray] = []
+        result.reserveCapacity(arrays.count)
+        for arrayIndex in 0 ..< arrays.count {
+            guard let array = arrays[arrayIndex] else {
+                throw KVCacheError(
+                    message:
+                        "Corrupt prompt cache: cache \(cacheIndex) has non-contiguous array indices."
+                )
             }
-            result.append(innerArray)
-        } else {
-            result.append([])
+            result.append(array)
         }
+        return result
     }
-
-    return result
 }
 
 /// Unflatten metadata from tree_flatten format to nested structure
@@ -2103,21 +2169,10 @@ func maybeAffineQuantizeKVCache(
             return simple
         }
 
-        let state = simple.state
-        if state.count == 2 {
-            let keyHeadDim = state[0].dim(3)
-            let valueHeadDim = state[1].dim(3)
-            guard
-                resolvedKVQuantizationGroupSize(
-                    requested: groupSize,
-                    keyHeadDim: keyHeadDim,
-                    valueHeadDim: valueHeadDim
-                ) != nil
-            else {
-                return simple
-            }
+        guard let quantized = try? simple.toQuantized(groupSize: groupSize, bits: bits) else {
+            return simple
         }
-        return simple.toQuantized(groupSize: groupSize, bits: bits)
+        return quantized
     }
     return !awaitsCompressionStart
 }

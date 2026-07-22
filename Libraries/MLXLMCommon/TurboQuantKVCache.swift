@@ -1719,15 +1719,12 @@ public func maybeTurboQuantizeKVCache(
         if protectedPaths.contains(leaf.path) {
             // Boundary layers use 8-bit affine instead of the turbo scheme:
             // near-lossless protection for the quantization-sensitive first
-            // and last layers at a quarter of the fp16 cost. Skip the
-            // conversion (leave fp16) rather than crash when neither head
-            // dimension divides one of the supported affine group sizes.
-            guard
-                let headDims,
-                resolvedKVQuantizationGroupSize(
-                    requested: 64, keyHeadDim: headDims.key, valueHeadDim: headDims.value) != nil
-            else { return simple }
-            return simple.toQuantized(groupSize: 64, bits: 8)
+            // and last layers at a quarter of the fp16 cost. An unsupported
+            // realized shape remains in full precision.
+            guard let quantized = try? simple.toQuantized(groupSize: 64, bits: 8) else {
+                return simple
+            }
+            return quantized
         }
 
         // Affine-K mode (keyBits == 8) quantizes keys in groups, resolve the
