@@ -63,8 +63,8 @@ final class DeepseekOCRVisionTests: XCTestCase {
 
         let sanitized = model.sanitize(weights: weights)
 
-        XCTAssertEqual(sanitized["clip_model.embeddings.class_embedding"]?.shape, [1024])
-        XCTAssertEqual(sanitized["clip_model.pre_layrnorm.weight"]?.shape, [1024])
+        XCTAssertEqual(sanitized["vision_model.embeddings.classEmbedding"]?.shape, [1024])
+        XCTAssertEqual(sanitized["vision_model.pre_layrnorm.weight"]?.shape, [1024])
         XCTAssertEqual(sanitized["projector.layers.weight"]?.shape, [1280, 2048])
         XCTAssertEqual(sanitized["projector.layers.bias"]?.shape, [1280])
     }
