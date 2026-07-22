@@ -23,9 +23,11 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(prepared.localCrops.shape, [2, 3, 640, 640])
         XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [2, 1])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 483)
-        // Image lattice first, then raw user text tokens (no chat-template prefix).
+        // BOS + image lattice + raw user text (matches Python tokenize_with_images).
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
-        XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 483)
+        XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
+        XCTAssertEqual(prepared.imagesSeqMask[0, 0].item(Bool.self), false)
+        XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 484)
 
         let globalPixels = prepared.pixelValues.asType(.float32)
         let localPixels = prepared.localCrops.asType(.float32)
@@ -48,7 +50,8 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(prepared.localCrops.shape, [1, 3, 1024, 1024])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 111)
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
-        XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 111)
+        XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
+        XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 112)
     }
 
     private func makeProcessor() throws -> DeepseekOCRProcessor {

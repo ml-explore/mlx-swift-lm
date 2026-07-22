@@ -11,7 +11,7 @@ enum DeepseekOCRSmoke {
         let env = ProcessInfo.processInfo.environment
         let modelID = env["MODEL_ID"] ?? "majentik/Unlimited-OCR-MLX-6bit"
         let modelDir = env["MODEL_DIR"]
-        let prompt = env["PROMPT"] ?? "document parsing."
+        let prompt = env["PROMPT"] ?? "document parsing. "
         let maxTokens = Int(env["MAX_TOKENS"] ?? "2048") ?? 2048
         let mode = env["MODE"] ?? "gundam"
 
