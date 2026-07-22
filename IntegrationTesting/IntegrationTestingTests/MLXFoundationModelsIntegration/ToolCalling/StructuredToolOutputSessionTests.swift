@@ -77,9 +77,10 @@ private struct StructuredToolOutputProfile: LanguageModelSession.DynamicProfile 
 }
 
 /// Opt-in live Foundation Models tool round trip. The two model rows load
-/// multi-GB checkpoints, so default sweeps skip this suite. Set
-/// `MLX_RUN_FM_TOOL_INTEGRATION=1` on macOS, or
-/// `TEST_RUNNER_MLX_RUN_FM_TOOL_INTEGRATION=1` for an iOS device test runner.
+/// multi-GB checkpoints, so default sweeps skip this suite. When launching
+/// through `xcodebuild`, set `TEST_RUNNER_MLX_RUN_FM_TOOL_INTEGRATION=1` on
+/// macOS or iOS; Xcode strips the `TEST_RUNNER_` prefix before launching the
+/// test process.
 @Suite(
     .serialized,
     .timeLimit(.minutes(10)),
