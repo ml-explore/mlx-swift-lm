@@ -825,31 +825,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
-        /// Mode-only projection retained until Task 3 threads the complete configuration
-        /// through every sampler-backed generation helper.
-        static func samplingMode(
-            from samplingMode: GenerationOptions.SamplingMode?
-        ) -> MLXSamplingMode? {
-            samplingConfiguration(from: samplingMode)?.mode
-        }
-
-        /// Build the `GenerateParameters` for a generation pass, threading the
-        /// caller's temperature and sampling mode through the shared resolver so
-        /// every real-sampler path (unconstrained, reasoning, tool-call
-        /// reasoning) honors `samplingMode` identically. `maxTokens` is the
-        /// already-resolved budget -- callers keep their own default/budget
-        /// arithmetic, so this helper owns only temperature + sampling resolution.
+        /// Build `GenerateParameters` for a sampler-backed generation pass. The shared
+        /// resolver owns temperature and mode precedence; this helper preserves the
+        /// optional seed directly on the backend request.
         static func makeParameters(
             maxTokens: Int,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?
+            samplingConfiguration: MLXSamplingConfiguration?
         ) -> GenerateParameters {
-            var params = GenerateParameters(maxTokens: maxTokens)
+            var parameters = GenerateParameters(maxTokens: maxTokens)
             resolveSamplingParameters(
-                mode: samplingMode,
+                mode: samplingConfiguration?.mode,
                 clampedTemperature: clampedTemperature(requestedTemperature)
-            ).apply(to: &params)
-            return params
+            ).apply(to: &parameters)
+            parameters.seed = samplingConfiguration?.seed
+            return parameters
         }
 
         /// Map xgrammar errors to typed `LanguageModelError` cases where the
@@ -996,7 +986,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Translate the SDK sampling mode once, here where generationOptions
             // is in scope; thread the bridge-local value down to every
             // real-sampler path so they honor it identically.
-            let requestedSamplingMode = Self.samplingMode(
+            let requestedSamplingConfiguration = Self.samplingConfiguration(
                 from: request.generationOptions.samplingMode)
             // Per SKILL.md: response and tool-calls entries each need a fresh
             // UUID — they live in separate transcript entries. We preserve the
@@ -1229,7 +1219,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 reasoning: reasoning,
                                 requestedMaxTokens: requestedMaxTokens,
                                 requestedTemperature: request.generationOptions.temperature,
-                                samplingMode: requestedSamplingMode,
+                                samplingConfiguration: requestedSamplingConfiguration,
                                 reasoningEntryID: reasoningEntryID,
                                 context: context,
                                 channel: channel)
@@ -1351,7 +1341,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 primedInside: primedInside, maxTokens: maxTokens,
                                 requestedTemperature: request.generationOptions
                                     .temperature,
-                                samplingMode: requestedSamplingMode,
+                                samplingConfiguration: requestedSamplingConfiguration,
                                 reasoningEntryID: reasoningEntryID,
                                 responseEntryID: entryID,
                                 context: context, channel: channel)
@@ -1454,7 +1444,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             fallbackInput: effectiveInput,
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
-                            samplingMode: requestedSamplingMode,
+                            samplingConfiguration: requestedSamplingConfiguration,
                             responseEntryID: entryID,
                             reasoningEntryID: reasoningEntryID,
                             context: context,
@@ -1496,7 +1486,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             reasoning: (config: ReasoningConfig, primedInside: Bool)?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?,
+            samplingConfiguration: MLXSamplingConfiguration?,
             reasoningEntryID: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
@@ -1504,7 +1494,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let params = Self.makeParameters(
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
-                samplingMode: samplingMode)
+                samplingConfiguration: samplingConfiguration)
             var router = AllowedToolOutputRouter(
                 format: context.configuration.toolCallFormat ?? .json,
                 tools: toolSpecs,
@@ -1695,7 +1685,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?,
+            samplingConfiguration: MLXSamplingConfiguration?,
             entryID: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
@@ -1705,7 +1695,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let params = Self.makeParameters(
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
-                samplingMode: samplingMode
+                samplingConfiguration: samplingConfiguration
             )
 
             for await generation in try generate(
@@ -1742,7 +1732,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             fallbackInput: LMInput,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?,
+            samplingConfiguration: MLXSamplingConfiguration?,
             responseEntryID: String,
             reasoningEntryID: String,
             context: ModelContext,
@@ -1755,7 +1745,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     primedInside: reasoning.primedInside,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
-                    samplingMode: samplingMode,
+                    samplingConfiguration: samplingConfiguration,
                     responseEntryID: responseEntryID,
                     reasoningEntryID: reasoningEntryID,
                     context: context,
@@ -1765,7 +1755,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     input: fallbackInput,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
-                    samplingMode: samplingMode,
+                    samplingConfiguration: samplingConfiguration,
                     entryID: responseEntryID,
                     context: context,
                     channel: channel)
@@ -1786,7 +1776,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             primedInside: Bool,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?,
+            samplingConfiguration: MLXSamplingConfiguration?,
             responseEntryID: String,
             reasoningEntryID: String,
             context: ModelContext,
@@ -1795,7 +1785,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let params = Self.makeParameters(
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
-                samplingMode: samplingMode
+                samplingConfiguration: samplingConfiguration
             )
 
             var emitter = ReasoningEventEmitter(
@@ -1978,7 +1968,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             primedInside: Bool,
             maxTokens: Int,
             requestedTemperature: Double?,
-            samplingMode: MLXSamplingMode?,
+            samplingConfiguration: MLXSamplingConfiguration?,
             reasoningEntryID: String,
             responseEntryID: String,
             context: ModelContext,
@@ -1987,7 +1977,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let params = Self.makeParameters(
                 maxTokens: maxTokens,
                 requestedTemperature: requestedTemperature,
-                samplingMode: samplingMode
+                samplingConfiguration: samplingConfiguration
             )
             var collector = ReasoningTokenCollector(
                 config: config, primedInside: primedInside, tokenizer: context.tokenizer
