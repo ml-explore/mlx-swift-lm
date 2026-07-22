@@ -110,6 +110,7 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             case rmsNormEps = "rms_norm_eps"
             case ropeTheta = "rope_theta"
             case tieWordEmbeddings = "tie_word_embeddings"
+            case lmHead = "lm_head"
             case nRoutedExperts = "n_routed_experts"
             case nSharedExperts = "n_shared_experts"
             case numExpertsPerTok = "num_experts_per_tok"
@@ -139,8 +140,14 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
                 try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32_768
             self.rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
             self.ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000
-            self.tieWordEmbeddings =
-                try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+            // Unlimited packs omit tie_word_embeddings but set lm_head=true when untied.
+            if let tie = try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) {
+                self.tieWordEmbeddings = tie
+            } else if let hasLmHead = try container.decodeIfPresent(Bool.self, forKey: .lmHead) {
+                self.tieWordEmbeddings = !hasLmHead
+            } else {
+                self.tieWordEmbeddings = true
+            }
             self.nRoutedExperts = try container.decodeIfPresent(Int.self, forKey: .nRoutedExperts)
             self.nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts)
             self.numExpertsPerTok = try container.decodeIfPresent(
@@ -353,29 +360,39 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         Int(ceil((Double(side) / Double(config.patchSize)) / Double(config.downsampleRatio)))
     }
 
-    private func makeImageTokenGrid(width: Int, height: Int) -> [Int] {
+    private func makeImageTokenGrid(width: Int, height: Int, includeSeparator: Bool = true)
+        -> [Int]
+    {
         let token = imageTokenId()
         var tokens = [Int]()
         for _ in 0 ..< height {
             tokens.append(contentsOf: Array(repeating: token, count: width))
             tokens.append(token)
         }
-        tokens.append(token)
+        if includeSeparator {
+            tokens.append(token)
+        }
         return tokens
     }
 
     private func makeImagePromptTokens(mode: Mode, cropWidth: Int, cropHeight: Int) -> [Int] {
         switch mode {
         case .gundam:
+            // Match Python unlimited_ocr: local crops (if any), then global, then one separator.
             let baseQueries = numQueries(for: config.baseSize)
-            var tokens = makeImageTokenGrid(width: baseQueries, height: baseQueries)
+            var tokens = [Int]()
             if cropWidth > 1 || cropHeight > 1 {
                 let localQueries = numQueries(for: config.localImageSize)
                 tokens.append(
                     contentsOf: makeImageTokenGrid(
                         width: localQueries * cropWidth,
-                        height: localQueries * cropHeight))
+                        height: localQueries * cropHeight,
+                        includeSeparator: false))
             }
+            tokens.append(
+                contentsOf: makeImageTokenGrid(
+                    width: baseQueries, height: baseQueries, includeSeparator: false))
+            tokens.append(imageTokenId())
             return tokens
         case .base:
             let queries = numQueries(for: config.localImageSize)
@@ -466,15 +483,27 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         return (processed, tilesWide, tilesHigh)
     }
 
-    private func assemblePromptTokens(_ promptTokens: [Int], imageTokens: [Int]) -> [Int] {
-        let imageToken = imageTokenId()
-        guard let placeholderIndex = promptTokens.firstIndex(of: imageToken) else {
-            return promptTokens + imageTokens
+    private func userPromptText(from input: UserInput) -> String {
+        switch input.prompt {
+        case .text(let text):
+            return text
+        case .chat(let messages):
+            return messages.last(where: { $0.role == .user })?.content
+                ?? messages.last?.content
+                ?? ""
+        case .messages(let messages):
+            for message in messages.reversed() {
+                if let role = message["role"] as? String, role != "user" { continue }
+                if let content = message["content"] as? String {
+                    return content
+                }
+                if let parts = message["content"] as? [[String: any Sendable]] {
+                    let text = parts.compactMap { $0["text"] as? String }.joined()
+                    if !text.isEmpty { return text }
+                }
+            }
+            return ""
         }
-
-        var combined = promptTokens
-        combined.replaceSubrange(placeholderIndex ... placeholderIndex, with: imageTokens)
-        return combined
     }
 
     private func emptyLocalCrops() -> MLXArray {
@@ -483,13 +512,9 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
 
     @_spi(Testing)
     public func prepareForTesting(input: UserInput) async throws -> PreparedImageInputs {
-        let messages = DeepseekOCRMessageGenerator().generate(from: input)
-        let promptTokens = try tokenizer.applyChatTemplate(
-            messages: messages,
-            tools: input.tools,
-            additionalContext: input.additionalContext)
-
         guard !input.images.isEmpty else {
+            let promptTokens = tokenizer.encode(
+                text: userPromptText(from: input), addSpecialTokens: true)
             return .init(
                 inputIds: MLXArray(promptTokens.map(Int32.init)).reshaped(1, promptTokens.count),
                 pixelValues: zeros([1, 3, config.baseSize, config.baseSize], type: Float.self),
@@ -534,13 +559,16 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             localCrops = emptyLocalCrops()
         }
 
+        // Match mlx-vlm unlimited_ocr: image lattice first, then raw user text
+        // (chat-template prefixes before <image> break OCR conditioning).
         let imagePromptTokens = makeImagePromptTokens(
             mode: mode, cropWidth: cropWidth, cropHeight: cropHeight)
-        let fullPromptTokens = assemblePromptTokens(promptTokens, imageTokens: imagePromptTokens)
-        let prefixCount = fullPromptTokens.count - imagePromptTokens.count
+        let textTokens = tokenizer.encode(
+            text: userPromptText(from: input), addSpecialTokens: false)
+        let fullPromptTokens = imagePromptTokens + textTokens
         let sequenceMask =
-            Array(repeating: false, count: max(prefixCount, 0))
-            + Array(repeating: true, count: imagePromptTokens.count)
+            Array(repeating: true, count: imagePromptTokens.count)
+            + Array(repeating: false, count: textTokens.count)
 
         return .init(
             inputIds: MLXArray(fullPromptTokens.map(Int32.init)).reshaped(
@@ -555,17 +583,30 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let prepared = try await prepareForTesting(input: input)
         let mask = ones(like: prepared.inputIds).asType(.int8)
+        let cropWidth = prepared.imagesSpatialCrop[0, 0].item(Int.self)
+        let cropHeight = prepared.imagesSpatialCrop[0, 1].item(Int.self)
+        let hasLocalCrops = cropWidth > 1 || cropHeight > 1
+
+        // Pack gundam locals through `video` and spatial crop through `positionIds`
+        // so DeepseekOCR.prepare can assemble features without extending LMInput.
         return LMInput(
             text: .init(tokens: prepared.inputIds, mask: mask),
             image: .init(
                 pixels: prepared.pixelValues,
+                positionIds: prepared.imagesSpatialCrop,
                 frames: [
                     THW(
                         1,
                         prepared.pixelValues.dim(2),
                         prepared.pixelValues.dim(3))
-                ])
-        )
+                ]),
+            video: hasLocalCrops
+                ? .init(
+                    pixels: prepared.localCrops,
+                    frames: [
+                        THW(prepared.localCrops.dim(0), cropWidth, cropHeight)
+                    ])
+                : nil)
     }
 }
 
@@ -627,7 +668,17 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         let pixels = input.image?.pixels.asType(samModel.patchEmbed.proj.weight.dtype)
         let embeddings: MLXArray
         if let pixels {
-            let imageFeatures = getImageFeatures(pixels)
+            // Processor / MediaProcessing emit NCHW [B,C,H,W]; MLX Conv2d wants NHWC.
+            let globalPixels = nchwToNhwc(pixels)
+            let localPixels = input.video.map { nchwToNhwc($0.pixels.asType(pixels.dtype)) }
+            let spatial = input.image?.positionIds
+            let cropWidth = spatial.map { $0[0, 0].item(Int.self) } ?? 1
+            let cropHeight = spatial.map { $0[0, 1].item(Int.self) } ?? 1
+            let imageFeatures = getImageFeatures(
+                globalPixels: globalPixels,
+                localPixels: localPixels,
+                cropWidth: cropWidth,
+                cropHeight: cropHeight)
             embeddings = mergeInputIdsWithImageFeatures(
                 inputIds: input.text.tokens, imageFeatures: imageFeatures)
         } else {
@@ -647,21 +698,53 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var newWeights = weights
+        // Normalize Unlimited-OCR pack keys onto the DeepseekOCR module tree:
+        // language_model.model.* → model.*, root sam/vision/projector → model.*,
+        // view_separator / image_newline → camelCase Module parameters.
+        var newWeights = [String: MLXArray]()
+        for (key, value) in weights {
+            var normalized = key
+            if normalized.hasPrefix("language_model.model.") {
+                normalized =
+                    "model." + String(normalized.dropFirst("language_model.model.".count))
+            } else if normalized.hasPrefix("language_model.lm_head.") {
+                normalized =
+                    "lm_head." + String(normalized.dropFirst("language_model.lm_head.".count))
+            } else if normalized == "view_separator" || normalized == "view_seperator"
+                || normalized.hasSuffix(".view_separator")
+                || normalized.hasSuffix(".view_seperator")
+            {
+                normalized = "viewSeparator"
+            } else if normalized == "image_newline" || normalized.hasSuffix(".image_newline") {
+                normalized = "imageNewline"
+            } else if normalized.hasPrefix("sam_model.") || normalized.hasPrefix("vision_model.")
+                || normalized.hasPrefix("projector.")
+            {
+                normalized = "model." + normalized
+            }
+            newWeights[normalized] = value
+        }
 
         for layer in 0 ..< config.textConfiguration.numHiddenLayers {
             let prefix = "model.layers.\(layer)"
             for proj in ["gate_proj", "down_proj", "up_proj"] {
                 for key in ["weight", "scales", "biases", "bias"] {
                     let firstKey = "\(prefix).mlp.experts.0.\(proj).\(key)"
-                    guard weights[firstKey] != nil else { continue }
+                    guard newWeights[firstKey] != nil else { continue }
                     let expertCount = config.textConfiguration.nRoutedExperts ?? 1
                     let stackedExperts = (0 ..< expertCount).compactMap {
-                        weights["\(prefix).mlp.experts.\($0).\(proj).\(key)"]
+                        newWeights["\(prefix).mlp.experts.\($0).\(proj).\(key)"]
                     }
                     guard !stackedExperts.isEmpty else { continue }
                     newWeights["\(prefix).mlp.switch_mlp.\(proj).\(key)"] = stacked(stackedExperts)
                 }
+            }
+
+            // Unlimited / some DeepSeek packs omit MoE gate correction bias; zeros are a no-op.
+            let gateWeightKey = "\(prefix).mlp.gate.weight"
+            let gateBiasKey = "\(prefix).mlp.gate.e_score_correction_bias"
+            if newWeights[gateBiasKey] == nil, let gateWeight = newWeights[gateWeightKey] {
+                newWeights[gateBiasKey] = zeros([gateWeight.dim(0)])
             }
         }
 
@@ -670,10 +753,15 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             var newKey: String?
             var adjusted = value
 
-            if key == "model.projector.layers.weight" || key == "projector.layers.weight" {
+            if key == "viewSeparator" || key == "imageNewline" {
+                newKey = key
+            } else if key == "model.projector.layers.weight" || key == "projector.layers.weight" {
                 newKey = "projector.layers.weight"
             } else if key == "model.projector.layers.bias" || key == "projector.layers.bias" {
                 newKey = "projector.layers.bias"
+            } else if key.hasPrefix("model.projector.") {
+                // Quantized projector extras (scales/biases) under Unlimited packs.
+                newKey = "projector." + String(key.dropFirst("model.projector.".count))
             } else if key.hasPrefix("lm_head.") {
                 newKey = key
             } else if key.hasPrefix("model.sam_model.") {
@@ -690,25 +778,61 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
                 suffix = suffix.replacingOccurrences(of: "blocks.", with: "layers.")
                 newKey = "sam_model.\(suffix)"
             } else if key.hasPrefix("model.vision_model.") {
-                newKey = "clip_model.\(key.dropFirst("model.vision_model.".count))"
+                // ModuleInfo key is vision_model (property is clipModel).
+                newKey = "vision_model.\(key.dropFirst("model.vision_model.".count))"
             } else if key.hasPrefix("model.") {
                 guard !key.contains("projector") else { continue }
                 guard !key.contains("sam_model") else { continue }
                 guard !key.contains("vision_model") else { continue }
-                guard !key.contains("image_newline") else { continue }
-                guard !key.contains("view_seperator") else { continue }
                 newKey = String(key)
             }
 
             guard let finalKey = newKey, !finalKey.contains("rotary_emb.inv_freq") else { continue }
             if finalKey.contains("proj.weight") || finalKey.contains("conv")
-                || finalKey.contains("patch_embed")
+                || finalKey.contains("patch_embed") || finalKey.contains("patch_embedding")
             {
+                // PyTorch Conv2d is [O,I,H,W]; MLX is [O,H,W,I]. Unlimited MLX packs
+                // already ship OHWI — only transpose when the layout still looks OIHW.
                 if value.ndim == 4 {
-                    adjusted = value.transposed(0, 2, 3, 1)
+                    let channelOrSpatial = value.dim(1)
+                    let spatialA = value.dim(2)
+                    let spatialB = value.dim(3)
+                    let looksLikePyTorchOIHW =
+                        spatialA == spatialB && channelOrSpatial != spatialA
+                    if looksLikePyTorchOIHW {
+                        adjusted = value.transposed(0, 2, 3, 1)
+                    }
                 }
             }
-            result[finalKey] = adjusted
+
+            // Bare MLXArray Module properties use camelCase paths (no @ModuleInfo key).
+            var resolvedKey = finalKey
+            let leafRemaps = [
+                "pos_embed": "posEmbed",
+                "rel_pos_h": "relPosH",
+                "rel_pos_w": "relPosW",
+                "class_embedding": "classEmbedding",
+            ]
+            for (snake, camel) in leafRemaps {
+                if resolvedKey.hasSuffix(".\(snake)") {
+                    resolvedKey =
+                        String(resolvedKey.dropLast(snake.count)) + camel
+                } else if resolvedKey == snake {
+                    resolvedKey = camel
+                }
+            }
+            // HF packs store CLIP position embeddings as Embedding.weight [N, D];
+            // ClipVisionEmbeddings.positionEmbedding is [1, N, D].
+            if resolvedKey.hasSuffix(".position_embedding.weight") {
+                resolvedKey =
+                    String(resolvedKey.dropLast(".position_embedding.weight".count))
+                    + ".positionEmbedding"
+                if adjusted.ndim == 2 {
+                    adjusted = adjusted.reshaped(1, adjusted.dim(0), adjusted.dim(1))
+                }
+            }
+
+            result[resolvedKey] = adjusted
         }
 
         if config.textConfiguration.tieWordEmbeddings {
@@ -718,6 +842,13 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         return result
     }
 
+    private func nchwToNhwc(_ pixels: MLXArray) -> MLXArray {
+        if pixels.ndim == 4 && pixels.dim(1) <= 4 && pixels.dim(1) < pixels.dim(2) {
+            return pixels.transposed(0, 2, 3, 1)
+        }
+        return pixels
+    }
+
     private func computeLogits(_ hiddenStates: MLXArray) -> MLXArray {
         if let lmHead {
             return lmHead(hiddenStates)
@@ -725,24 +856,52 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         return languageModel.embedTokens.asLinear(hiddenStates)
     }
 
-    private func getImageFeatures(_ pixelValues: MLXArray) -> MLXArray {
-        let projectedFeatures = projectedImageFeatures(pixelValues)
-        let batchSize = projectedFeatures.dim(0)
-        var features = projectedFeatures
+    /// Append per-row `imageNewline` tokens to a [H, W, D] feature map and flatten.
+    private func appendImageNewlines(_ featuresHW: MLXArray) -> MLXArray {
+        let height = featuresHW.dim(0)
+        let hiddenSize = featuresHW.dim(2)
+        let newline = imageNewline[.newAxis, .newAxis, 0...]
+        let newlineBroadcast = broadcast(newline, to: [height, 1, hiddenSize])
+        return concatenated([featuresHW, newlineBroadcast], axis: 1).reshaped(-1, hiddenSize)
+    }
 
-        let tokenCount = features.dim(1)
-        let gridSize = Int(sqrt(Double(tokenCount)))
-        let hiddenSize = features.dim(2)
-        features = features.reshaped(batchSize, gridSize, gridSize, hiddenSize)
+    private func getImageFeatures(
+        globalPixels: MLXArray,
+        localPixels: MLXArray?,
+        cropWidth: Int,
+        cropHeight: Int
+    ) -> MLXArray {
+        let hasLocal =
+            (cropWidth > 1 || cropHeight > 1)
+            && localPixels != nil
+            && (localPixels?.dim(0) ?? 0) > 0
 
-        let newline = imageNewline[.newAxis, .newAxis, .newAxis, 0...]
-        let newlineBroadcast = broadcast(newline, to: [batchSize, gridSize, 1, hiddenSize])
-        features = concatenated([features, newlineBroadcast], axis: 2)
-        features = features.reshaped(batchSize, -1, hiddenSize)
+        let globalProjected = projectedImageFeatures(globalPixels)[0]
+        let globalHW = globalProjected.dim(0)
+        let hiddenSize = globalProjected.dim(1)
+        let globalSide = Int(sqrt(Double(globalHW)))
+        let globalFeatures = appendImageNewlines(
+            globalProjected.reshaped(globalSide, globalSide, hiddenSize))
 
-        let separator = viewSeparator[.newAxis, .newAxis, 0...]
-        let separatorBroadcast = broadcast(separator, to: [batchSize, 1, hiddenSize])
-        return concatenated([features, separatorBroadcast], axis: 1)
+        if hasLocal, let localPixels {
+            let localProjected = projectedImageFeatures(localPixels)
+            // [N, hw, D] → tile grid [cropH, cropW, h, w, D] → [cropH*h, cropW*w, D]
+            let tileTokens = localProjected.dim(1)
+            let tileSide = Int(sqrt(Double(tileTokens)))
+            let tiled = localProjected.reshaped(
+                cropHeight, cropWidth, tileSide, tileSide, hiddenSize
+            )
+            .transposed(0, 2, 1, 3, 4)
+            .reshaped(cropHeight * tileSide, cropWidth * tileSide, hiddenSize)
+            let localFeatures = appendImageNewlines(tiled)
+            let separator = viewSeparator[.newAxis, 0...]
+            let merged = concatenated([localFeatures, globalFeatures, separator], axis: 0)
+            return merged.reshaped(1, merged.dim(0), hiddenSize)
+        }
+
+        let separator = viewSeparator[.newAxis, 0...]
+        let merged = concatenated([globalFeatures, separator], axis: 0)
+        return merged.reshaped(1, merged.dim(0), hiddenSize)
     }
 
     private func fusedVisionFeatures(_ pixelValues: MLXArray) -> MLXArray {
