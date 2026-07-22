@@ -17,6 +17,24 @@ final class DeepseekOCRVisionTests: XCTestCase {
         XCTAssertEqual(features.shape, [1, 16, 16, 1024])
     }
 
+    func testClipFusionProducesExpectedPreProjectorShape() throws {
+        let model = try makeModel()
+        let pixels = zeros([1, 1024, 1024, 3], type: Float.self)
+
+        let features = model.fusedVisionFeaturesForTesting(pixels)
+
+        XCTAssertEqual(features.shape, [1, 256, 2048])
+    }
+
+    func testProjectorOutputsLanguageHiddenSize() throws {
+        let model = try makeModel()
+        let pixels = zeros([1, 1024, 1024, 3], type: Float.self)
+
+        let features = model.projectedImageFeaturesForTesting(pixels)
+
+        XCTAssertEqual(features.shape, [1, 256, 1280])
+    }
+
     func testSanitizeRemapsSAMWeightsAndPreservesShapes() throws {
         let model = try makeModel()
         let weights: [String: MLXArray] = [
@@ -32,6 +50,23 @@ final class DeepseekOCRVisionTests: XCTestCase {
         XCTAssertEqual(sanitized["sam_model.layers.0.attn.qkv.weight"]?.shape, [2304, 768])
         XCTAssertEqual(sanitized["sam_model.neck.conv1.weight"]?.shape, [256, 1, 1, 768])
         XCTAssertEqual(sanitized["sam_model.neck.conv2.weight"]?.shape, [256, 3, 3, 256])
+    }
+
+    func testSanitizeRemapsClipAndProjectorWeights() throws {
+        let model = try makeModel()
+        let weights: [String: MLXArray] = [
+            "model.vision_model.embeddings.class_embedding": zeros([1024], type: Float.self),
+            "model.vision_model.pre_layrnorm.weight": zeros([1024], type: Float.self),
+            "model.projector.layers.weight": zeros([1280, 2048], type: Float.self),
+            "model.projector.layers.bias": zeros([1280], type: Float.self),
+        ]
+
+        let sanitized = model.sanitize(weights: weights)
+
+        XCTAssertEqual(sanitized["clip_model.embeddings.class_embedding"]?.shape, [1024])
+        XCTAssertEqual(sanitized["clip_model.pre_layrnorm.weight"]?.shape, [1024])
+        XCTAssertEqual(sanitized["projector.layers.weight"]?.shape, [1280, 2048])
+        XCTAssertEqual(sanitized["projector.layers.bias"]?.shape, [1280])
     }
 
     private func makeModel() throws -> DeepseekOCR {

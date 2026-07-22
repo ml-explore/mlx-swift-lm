@@ -470,16 +470,9 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     private func getImageFeatures(_ pixelValues: MLXArray) -> MLXArray {
-        let samFeatures = samModel(pixelValues)
-        let batchSize = samFeatures.dim(0)
-        let samH = samFeatures.dim(1)
-        let samW = samFeatures.dim(2)
-        let samChannels = samFeatures.dim(3)
-        let samFlat = samFeatures.reshaped(batchSize, samH * samW, samChannels)
-
-        let clipFeatures = clipModel(pixelValues, patchEmbeds: samFeatures)
-        let clipWithoutCls = clipFeatures[0..., 1..., 0...]
-        var features = projector(concatenated([clipWithoutCls, samFlat], axis: -1))
+        let projectedFeatures = projectedImageFeatures(pixelValues)
+        let batchSize = projectedFeatures.dim(0)
+        var features = projectedFeatures
 
         let tokenCount = features.dim(1)
         let gridSize = Int(sqrt(Double(tokenCount)))
@@ -494,6 +487,23 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         let separator = viewSeparator[.newAxis, .newAxis, 0...]
         let separatorBroadcast = broadcast(separator, to: [batchSize, 1, hiddenSize])
         return concatenated([features, separatorBroadcast], axis: 1)
+    }
+
+    private func fusedVisionFeatures(_ pixelValues: MLXArray) -> MLXArray {
+        let samFeatures = samModel(pixelValues)
+        let batchSize = samFeatures.dim(0)
+        let samH = samFeatures.dim(1)
+        let samW = samFeatures.dim(2)
+        let samChannels = samFeatures.dim(3)
+        let samFlat = samFeatures.reshaped(batchSize, samH * samW, samChannels)
+
+        let clipFeatures = clipModel(pixelValues, patchEmbeds: samFeatures)
+        let clipWithoutCls = clipFeatures[0..., 1..., 0...]
+        return concatenated([clipWithoutCls, samFlat], axis: -1)
+    }
+
+    private func projectedImageFeatures(_ pixelValues: MLXArray) -> MLXArray {
+        projector(fusedVisionFeatures(pixelValues))
     }
 
     private func mergeInputIdsWithImageFeatures(inputIds: MLXArray, imageFeatures: MLXArray)
@@ -521,6 +531,16 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     @_spi(Testing)
     public func samFeaturesForTesting(_ pixelValues: MLXArray) -> MLXArray {
         samModel(pixelValues)
+    }
+
+    @_spi(Testing)
+    public func fusedVisionFeaturesForTesting(_ pixelValues: MLXArray) -> MLXArray {
+        fusedVisionFeatures(pixelValues)
+    }
+
+    @_spi(Testing)
+    public func projectedImageFeaturesForTesting(_ pixelValues: MLXArray) -> MLXArray {
+        projectedImageFeatures(pixelValues)
     }
 }
 
