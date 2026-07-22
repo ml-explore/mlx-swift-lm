@@ -80,6 +80,26 @@ Currently supported model types are:
 - smolvlm
 - deepseekocr
 
+Tried DeepSeek-OCR Hub packs:
+
+- `mlx-community/DeepSeek-OCR-5bit` (`VLMRegistry.deepseekOCR5bit`)
+
+```swift
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+let text = try await ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam)
+).respond(to: "Free OCR.", image: .url(pageURL))
+```
+
+Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
+(`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1` or cached DeepSeek-OCR-5bit).
+
 ### DeepSeek-OCR processor modes
 
 `DeepseekOCRProcessor.Mode`:
