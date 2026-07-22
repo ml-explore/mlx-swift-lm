@@ -1030,6 +1030,10 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
 
+        // Nanbeige models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "nanbeige") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "NANBEIGE") == .xmlFunction)
+
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)

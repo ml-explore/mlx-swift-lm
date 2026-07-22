@@ -17,6 +17,14 @@ struct ReasoningConfigTests {
         #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
     }
 
+    @Test func inferNanbeige() {
+        let config = ReasoningConfig.infer(
+            from: "nanbeige", modelId: "Nanbeige/Nanbeige4.2-3B")
+        #expect(config?.startDelimiter == "<think>")
+        #expect(config?.endDelimiter == "</think>")
+        #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
+    }
+
     @Test func inferDeepSeekV3IsAlwaysOn() {
         let config = ReasoningConfig.infer(
             from: "deepseek_v3", modelId: "mlx-community/DeepSeek-R1-4bit")
