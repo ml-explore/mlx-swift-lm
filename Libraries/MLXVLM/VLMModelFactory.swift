@@ -376,10 +376,16 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // Honor `_orig_model_type` (Unlimited under DeepSeek shim) unless the
+        // smoke/app harness sets REMAP_UNLIMITED=0 for DeepSeek-only loads.
+        let honorOrigModelType =
+            ProcessInfo.processInfo.environment["REMAP_UNLIMITED"] != "0"
+        let modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
+
         let model: LanguageModel
         do {
             model = try await typeRegistry.createModel(
-                configuration: configData, modelType: baseConfig.modelType)
+                configuration: configData, modelType: modelType)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -404,7 +410,7 @@ public final class VLMModelFactory: GenericModelFactory {
 
         // Auto-detect tool call format from model type if not explicitly set
         if mutableConfiguration.toolCallFormat == nil {
-            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
+            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: modelType)
         }
 
         // Load tokenizer from model directory (or alternate tokenizer repo),
@@ -446,7 +452,7 @@ public final class VLMModelFactory: GenericModelFactory {
             "unlimited_ocr": "UnlimitedOCRProcessor",
         ]
         let processorType =
-            processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
+            processorTypeOverrides[modelType] ?? baseProcessorConfig.processorClass
 
         let processor = try await processorRegistry.createModel(
             configuration: processorConfigData,
