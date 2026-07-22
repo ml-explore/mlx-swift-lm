@@ -1995,7 +1995,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, Suppresse
     /// Multimodal placeholder token IDs that must never be sampled as text.
     /// Seeded from the model configuration; the model factory merges
     /// `suppress_tokens` from `generation_config.json` on top.
-    /// See ``SuppressedTokensProviding``.
+    /// See `SuppressedTokensProviding` in MLXLMCommon.
     public var suppressedTokenIds: Set<Int>
 
     public init(_ config: Gemma4Configuration) {
@@ -2377,7 +2377,7 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
     /// Multimodal placeholder token IDs that must never be sampled as text.
     /// Seeded from the model configuration; the model factory merges
     /// `suppress_tokens` from `generation_config.json` on top.
-    /// See ``SuppressedTokensProviding``.
+    /// See `SuppressedTokensProviding` in MLXLMCommon.
     public var suppressedTokenIds: Set<Int>
 
     public init(_ config: Gemma4UnifiedConfiguration) {
