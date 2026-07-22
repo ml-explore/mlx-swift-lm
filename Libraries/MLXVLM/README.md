@@ -89,6 +89,13 @@ Currently supported model types are:
 
 See the fork README section “DeepSeek-OCR crop modes”.
 
+### DeepSeek-OCR grounding tokens
+
+`DeepseekOCRSpecialTokens` exposes `<|grounding|>`, `<|ref|>`/`<|/ref|>`,
+`<|det|>`/`<|/det|>` with tokenizer ID resolution and prompt helpers. Decode with
+`skipSpecialTokens: false`. Full structured layout-tree parsing is deferred;
+`parseDetections(from:)` covers bbox extraction. See the fork README.
+
 See [llm-tool](../../Tools/llm-tool)
 
 # Adding a Model

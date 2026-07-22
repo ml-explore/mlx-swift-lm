@@ -303,6 +303,105 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
     }
 }
 
+/// DeepSeek-OCR grounding / localization special tokens (mlx-vlm + HF packs).
+///
+/// These strings are registered in the Hub tokenizer (`added_tokens_decoder`);
+/// resolve IDs via ``id(of:tokenizer:)`` rather than hard-coding in hot paths.
+/// Prompt helpers match Python / mlx-vlm DeepSeek-OCR README usage.
+///
+/// **Layout decode deferral:** this surface exposes tokens + prompt builders and a
+/// minimal `<|det|>[[x1,y1,x2,y2]]` extractor. Building a full structured layout
+/// tree from interleaved `<|ref|>…<|/ref|><|det|>…` markdown is intentionally
+/// deferred — callers should keep `skipSpecialTokens: false` on decode and parse
+/// what they need (or consume raw grounding markdown).
+public enum DeepseekOCRSpecialTokens: String, Sendable, CaseIterable {
+    case grounding = "<|grounding|>"
+    case refOpen = "<|ref|>"
+    case refClose = "<|/ref|>"
+    case detOpen = "<|det|>"
+    case detClose = "<|/det|>"
+
+    /// Fallback IDs from deepseek-ai / mlx-community / majentik tokenizer packs
+    /// (`<image>` is 128815; grounding family follows contiguously).
+    public var defaultId: Int {
+        switch self {
+        case .refOpen: return 128_816
+        case .refClose: return 128_817
+        case .detOpen: return 128_818
+        case .detClose: return 128_819
+        case .grounding: return 128_820
+        }
+    }
+
+    /// Prefer tokenizer lookup; fall back to ``defaultId`` for known HF packs.
+    public static func id(of token: DeepseekOCRSpecialTokens, tokenizer: any Tokenizer) -> Int {
+        tokenizer.convertTokenToId(token.rawValue) ?? token.defaultId
+    }
+
+    /// All grounding-family strings (openers + closers), in stable CaseIterable order.
+    public static var allStrings: [String] { allCases.map(\.rawValue) }
+
+    /// Resolve every grounding-family token through the tokenizer (with defaults).
+    public static func resolveIds(tokenizer: any Tokenizer) -> [DeepseekOCRSpecialTokens: Int] {
+        Dictionary(uniqueKeysWithValues: allCases.map { ($0, id(of: $0, tokenizer: tokenizer)) })
+    }
+
+    // MARK: Prompt builders (match mlx-vlm DeepSeek-OCR README)
+
+    /// Structured OCR / layout prompt, e.g. `"<|grounding|>OCR this image."`.
+    public static func groundingPrompt(_ instruction: String = "OCR this image.") -> String {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = trimmed.hasSuffix(".") ? trimmed : trimmed + "."
+        return "\(Self.grounding.rawValue)\(body)"
+    }
+
+    /// Document → markdown with layout tags.
+    public static func groundingMarkdownPrompt(
+        _ instruction: String = "Convert the document to markdown."
+    ) -> String {
+        groundingPrompt(instruction)
+    }
+
+    /// Text localization: `"Locate <|ref|>…<|/ref|> in the image."`.
+    public static func locatePrompt(_ text: String) -> String {
+        "Locate \(Self.refOpen.rawValue)\(text)\(Self.refClose.rawValue) in the image."
+    }
+
+    /// Normalized 0–1000 axis-aligned box from a `<|det|>[[x1, y1, x2, y2]]` span.
+    public struct Detection: Equatable, Sendable {
+        public let x1: Int
+        public let y1: Int
+        public let x2: Int
+        public let y2: Int
+
+        public init(x1: Int, y1: Int, x2: Int, y2: Int) {
+            self.x1 = x1
+            self.y1 = y1
+            self.x2 = x2
+            self.y2 = y2
+        }
+    }
+
+    /// Extract `[[x1,y1,x2,y2]]` boxes from model output that still contains special tokens.
+    /// Does **not** rebuild a layout tree — see type-level deferral note.
+    public static func parseDetections(from text: String) -> [Detection] {
+        // Match [[a, b, c, d]] (as emitted inside <|det|>…<|/det|>).
+        let pattern =
+            #"\[\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges == 5 else { return nil }
+            let ints = (1 ... 4).compactMap { i -> Int? in
+                Int(ns.substring(with: match.range(at: i)))
+            }
+            guard ints.count == 4 else { return nil }
+            return Detection(x1: ints[0], y1: ints[1], x2: ints[2], y2: ints[3])
+        }
+    }
+}
+
 public struct DeepseekOCRProcessor: UserInputProcessor {
     /// Image crop modes matching Python `DeepseekOCRProcessor.tokenize_with_images`.
     ///

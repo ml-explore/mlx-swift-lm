@@ -83,6 +83,23 @@ let session = ChatSession(
 
 Smoke: `MODE=base ./scripts/swift_smoke.sh` (or `MODE=gundam`, the default).
 
+### DeepSeek-OCR grounding / ref / det tokens
+
+Hub tokenizers ship `<|grounding|>`, `<|ref|>` / `<|/ref|>`, `<|det|>` / `<|/det|>`
+(IDs 128816–128820 on deepseek-ai / mlx-community / majentik packs). Use
+`DeepseekOCRSpecialTokens` to resolve IDs through the tokenizer and build prompts:
+
+| Task | Prompt helper |
+|------|----------------|
+| Structured OCR | `DeepseekOCRSpecialTokens.groundingPrompt()` → `<\|grounding\|>OCR this image.` |
+| Doc → markdown | `DeepseekOCRSpecialTokens.groundingMarkdownPrompt()` |
+| Locate text | `DeepseekOCRSpecialTokens.locatePrompt("Total assets")` |
+
+Decode with `skipSpecialTokens: false` so layout tags survive. Coordinates in
+`<|det|>[[x1,y1,x2,y2]]` are normalized 0–1000; `parseDetections(from:)` extracts
+boxes. **Full layout-tree decode is deferred** — consume grounding markdown or
+parse detections as needed (see `DeepseekOCRSpecialTokens` doc comment).
+
 ---
 
 > [!IMPORTANT]
