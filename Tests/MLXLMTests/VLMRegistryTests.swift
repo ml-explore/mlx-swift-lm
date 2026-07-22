@@ -55,6 +55,35 @@ final class VLMRegistryTests: XCTestCase {
         }
     }
 
+    func testUnlimitedOCRModelTypesLoadPinnedHFConfig() async throws {
+        for modelType in ["unlimited-ocr", "unlimited_ocr"] {
+            let contains = await VLMTypeRegistry.shared.contains(modelType)
+            XCTAssertTrue(contains, modelType)
+            let model = try await VLMTypeRegistry.shared.createModel(
+                configuration: Self.unlimitedOCRConfig.data(using: .utf8)!,
+                modelType: modelType)
+            XCTAssertTrue(model is UnlimitedOCR, modelType)
+            let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
+            XCTAssertEqual(unlimited.config.resolvedSlidingWindowSize, 128)
+            let caches = unlimited.newCache(parameters: nil)
+            XCTAssertEqual(caches.count, 12)
+            for cache in caches {
+                let ring = try XCTUnwrap(cache as? RingSlidingKVCache)
+                XCTAssertEqual(ring.windowSize, 128)
+            }
+        }
+        XCTAssertEqual(VLMRegistry.unlimitedOCR6bit.name, "majentik/Unlimited-OCR-MLX-6bit")
+    }
+
+    func testUnlimitedOCRProcessorAliasLoadsPinnedHFConfig() async throws {
+        let processor = try await VLMProcessorTypeRegistry.shared.createModel(
+            configuration: Self.unlimitedOCRProcessorConfig.data(using: .utf8)!,
+            processorType: "UnlimitedOCRProcessor",
+            tokenizer: StubTokenizer())
+        XCTAssertTrue(processor is UnlimitedOCRProcessor)
+        XCTAssertTrue(processor is DeepseekOCRProcessor)
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("VLMRegistryTests-\(UUID().uuidString)", isDirectory: true)
@@ -211,6 +240,101 @@ extension VLMRegistryTests {
          "patch_size": 16,
          "processor_class": "DeepseekVLV2Processor",
          "sft_format": "deepseek"
+        }
+        """#
+
+    /// Native Unlimited-OCR pack shape (majentik shim remapped to model_type=unlimited-ocr).
+    fileprivate static let unlimitedOCRConfig = #"""
+        {
+         "architectures": [
+          "UnlimitedOCRForCausalLM"
+         ],
+         "bos_token_id": 0,
+         "candidate_resolutions": [[1024, 1024]],
+         "eos_token_id": 1,
+         "first_k_dense_replace": 1,
+         "language_config": {
+          "architectures": ["DeepseekV2ForCausalLM"],
+          "bos_token_id": 0,
+          "eos_token_id": 1,
+          "first_k_dense_replace": 1,
+          "hidden_size": 1280,
+          "intermediate_size": 6848,
+          "lm_head": true,
+          "max_position_embeddings": 8192,
+          "moe_intermediate_size": 896,
+          "n_group": 1,
+          "n_routed_experts": 64,
+          "n_shared_experts": 2,
+          "num_attention_heads": 10,
+          "num_experts_per_tok": 6,
+          "num_hidden_layers": 12,
+          "num_key_value_heads": 10,
+          "sliding_window_size": 128,
+          "topk_group": 1,
+          "topk_method": "greedy",
+          "vocab_size": 129280
+         },
+         "lm_head": true,
+         "max_position_embeddings": 8192,
+         "model_type": "unlimited-ocr",
+         "sliding_window": 128,
+         "sliding_window_size": 128,
+         "moe_intermediate_size": 896,
+         "n_group": 1,
+         "n_routed_experts": 64,
+         "n_shared_experts": 2,
+         "num_attention_heads": 10,
+         "num_experts_per_tok": 6,
+         "num_hidden_layers": 12,
+         "num_key_value_heads": 10,
+         "projector_config": {
+          "input_dim": 2048,
+          "model_type": "mlp_projector",
+          "n_embed": 1280,
+          "projector_type": "linear"
+         },
+         "vision_config": {
+          "image_size": 1024,
+          "mlp_ratio": 3.7362,
+          "model_name": "deeplip_b_l",
+          "model_type": "vision",
+          "width": {
+           "clip-l-14-224": {
+            "heads": 16,
+            "image_size": 224,
+            "layers": 24,
+            "patch_size": 14,
+            "width": 1024
+           },
+           "sam_vit_b": {
+            "downsample_channels": [512, 1024],
+            "global_attn_indexes": [2, 5, 8, 11],
+            "heads": 12,
+            "layers": 12,
+            "width": 768
+           }
+          }
+         },
+         "vocab_size": 129280
+        }
+        """#
+
+    fileprivate static let unlimitedOCRProcessorConfig = #"""
+        {
+         "add_special_token": false,
+         "candidate_resolutions": [[1024, 1024]],
+         "downsample_ratio": 4,
+         "ignore_id": -100,
+         "image_mean": [0.5, 0.5, 0.5],
+         "image_std": [0.5, 0.5, 0.5],
+         "image_token": " ",
+         "mask_prompt": false,
+         "normalize": true,
+         "pad_token": "<｜▁pad▁｜>",
+         "patch_size": 16,
+         "processor_class": "UnlimitedOCRProcessor",
+         "sft_format": "unlimitedocr"
         }
         """#
 }

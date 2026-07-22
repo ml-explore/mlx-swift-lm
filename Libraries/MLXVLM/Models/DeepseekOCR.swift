@@ -101,6 +101,10 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
         /// Python `TextConfig.topk_method` default is `"greedy"`; `"noaux_tc"` enables
         /// bias-corrected grouped routing.
         public let topkMethod: String?
+        /// Unlimited-OCR R-SWA window (`sliding_window_size`); nil → unbounded KV.
+        public let slidingWindowSize: Int?
+        /// Alternate HF key `sliding_window` (same semantics when size is absent).
+        public let slidingWindow: Int?
 
         enum CodingKeys: String, CodingKey {
             case vocabSize = "vocab_size"
@@ -125,6 +129,8 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             case routedScalingFactor = "routed_scaling_factor"
             case scoringFunc = "scoring_func"
             case topkMethod = "topk_method"
+            case slidingWindowSize = "sliding_window_size"
+            case slidingWindow = "sliding_window"
         }
 
         public init(from decoder: any Decoder) throws {
@@ -166,6 +172,9 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
                 try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor)
             self.scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc)
             self.topkMethod = try container.decodeIfPresent(String.self, forKey: .topkMethod)
+            self.slidingWindowSize = try container.decodeIfPresent(
+                Int.self, forKey: .slidingWindowSize)
+            self.slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow)
         }
     }
 
@@ -185,12 +194,26 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
     public let baseConfiguration: BaseConfiguration
     private let _imageSeqLength: Int?
     public var imageSeqLength: Int { _imageSeqLength ?? 576 }
+    /// Top-level HF `sliding_window_size` / `sliding_window` (Unlimited-OCR packs).
+    private let _topLevelSlidingWindowSize: Int?
+    private let _topLevelSlidingWindow: Int?
+
+    /// Resolved R-SWA window: language/text config first, then top-level keys.
+    /// Matches Python `LanguageModel.make_cache` (`sliding_window_size or sliding_window`).
+    public var resolvedSlidingWindowSize: Int? {
+        textConfiguration.slidingWindowSize
+            ?? textConfiguration.slidingWindow
+            ?? _topLevelSlidingWindowSize
+            ?? _topLevelSlidingWindow
+    }
 
     enum CodingKeys: String, CodingKey {
         case visionConfiguration = "vision_config"
         case textConfiguration = "text_config"
         case languageConfiguration = "language_config"
         case _imageSeqLength = "image_seq_length"
+        case _topLevelSlidingWindowSize = "sliding_window_size"
+        case _topLevelSlidingWindow = "sliding_window"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -207,6 +230,10 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
         }
         self.baseConfiguration = try BaseConfiguration(from: decoder)
         self._imageSeqLength = try container.decodeIfPresent(Int.self, forKey: ._imageSeqLength)
+        self._topLevelSlidingWindowSize = try container.decodeIfPresent(
+            Int.self, forKey: ._topLevelSlidingWindowSize)
+        self._topLevelSlidingWindow = try container.decodeIfPresent(
+            Int.self, forKey: ._topLevelSlidingWindow)
     }
 }
 
@@ -816,7 +843,7 @@ public struct DeepseekOCRMessageGenerator: MessageGenerator {
     }
 }
 
-public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
+public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     static let defaultImageTokenId = 128_815
 
     @ModuleInfo(key: "sam_model") private var samModel: VisionEncoder
@@ -849,6 +876,15 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         let std = Float(1.0 / sqrt(Double(config.textConfiguration.hiddenSize)))
         self.imageNewline = MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
         self.viewSeparator = MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
+    }
+
+    /// When `sliding_window_size` is set (Unlimited-OCR packs), use R-SWA
+    /// ``RingSlidingKVCache``; otherwise unbounded ``KVCacheSimple``.
+    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        _ = parameters
+        return makeCaches(
+            numLayers: kvHeads.count,
+            slidingWindowSize: config.resolvedSlidingWindowSize)
     }
 
     public func prepare(
