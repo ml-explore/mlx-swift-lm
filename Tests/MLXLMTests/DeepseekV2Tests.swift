@@ -55,6 +55,29 @@ final class DeepseekV2Tests: XCTestCase {
         XCTAssertEqual(logits.shape, [1, 3, 32])
     }
 
+    /// Attention must update the KV cache exactly once per forward pass.
+    ///
+    /// The attention path builds `keys`/`values` and hands them to
+    /// `attentionWithCacheUpdate`, which performs the cache update itself. An
+    /// additional explicit `cache.update(...)` beforehand appended the returned
+    /// history a second time, so a prompt of L tokens left the cache at 2L and
+    /// every subsequent token attended over duplicated keys.
+    func testForwardPassUpdatesCacheExactlyOnce() throws {
+        let model = DeepseekV2Model(try makeConfig())
+        let cache = model.newCache(parameters: nil)
+        let tokenCount = 5
+        let inputs = MLXArray(Array(Int32(1) ... Int32(tokenCount))).reshaped(1, tokenCount)
+
+        let logits = model(inputs, cache: cache)
+        eval(logits)
+
+        for (i, layerCache) in cache.enumerated() {
+            XCTAssertEqual(
+                layerCache.offset, tokenCount,
+                "layer \(i) cache advanced by \(layerCache.offset) for \(tokenCount) tokens")
+        }
+    }
+
     func testGroupLimitedGreedyMasksLosingGroup() throws {
         let gate = DeepseekV2MoEGate(config: try makeConfig())
 

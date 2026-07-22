@@ -23,7 +23,7 @@ public struct DeepseekV2Configuration: Codable, Sendable {
     var qkRopeHeadDim: Int = 64
     var vHeadDim: Int = 128
     var qkNopeHeadDim: Int = 128
-    var topkMethod: String = "gready"
+    var topkMethod: String = "greedy"
     var nGroup: Int?
     var topkGroup: Int?
     var numExpertsPerTok: Int?
@@ -83,7 +83,7 @@ public struct DeepseekV2Configuration: Codable, Sendable {
         self.qkRopeHeadDim = try c.decodeIfPresent(Int.self, forKey: .qkRopeHeadDim) ?? 64
         self.vHeadDim = try c.decodeIfPresent(Int.self, forKey: .vHeadDim) ?? 128
         self.qkNopeHeadDim = try c.decodeIfPresent(Int.self, forKey: .qkNopeHeadDim) ?? 128
-        self.topkMethod = try c.decodeIfPresent(String.self, forKey: .topkMethod) ?? "gready"
+        self.topkMethod = try c.decodeIfPresent(String.self, forKey: .topkMethod) ?? "greedy"
         self.nGroup = try c.decodeIfPresent(Int.self, forKey: .nGroup)
         self.topkGroup = try c.decodeIfPresent(Int.self, forKey: .topkGroup)
         self.numExpertsPerTok = try c.decodeIfPresent(Int.self, forKey: .numExpertsPerTok)
@@ -190,21 +190,14 @@ class DeepseekV2Attention: Module {
         kv = kv.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
         let splitKv2 = split(kv, indices: [qkNopeHeadDim], axis: -1)
         let kNope = splitKv2[0]
-        var values = splitKv2[1]
+        let values = splitKv2[1]
 
         let offset = cache?.ropeOffset
         qPe = applyRotaryPosition(rope, to: qPe, offset: offset)
         kPe = applyRotaryPosition(rope, to: kPe, offset: offset)
         kPe = repeated(kPe, count: numHeads, axis: 1)
 
-        var keys: MLXArray
-        if let cache = cache {
-            (keys, values) = cache.update(
-                keys: concatenated([kNope, kPe], axis: -1), values: values)
-        } else {
-            keys = concatenated([kNope, kPe], axis: -1)
-        }
-
+        let keys = concatenated([kNope, kPe], axis: -1)
         let queries = concatenated([qNope, qPe], axis: -1)
 
         let output = attentionWithCacheUpdate(
