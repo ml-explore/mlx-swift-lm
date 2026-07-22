@@ -447,9 +447,16 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     private func makeImagePromptTokens(mode: Mode, cropWidth: Int, cropHeight: Int) -> [Int] {
         switch mode {
         case .gundam:
-            // Match Python unlimited_ocr: local crops (if any), then global, then one separator.
+            // Match Python unlimited_ocr tokenize_with_images placeholder order:
+            // global grid, one separator, then local crops (if any).
+            // Feature merge stays local→global→view_separator (see getImageFeatures);
+            // that intentional token/feature order mismatch is how the model was trained.
             let baseQueries = numQueries(for: config.baseSize)
             var tokens = [Int]()
+            tokens.append(
+                contentsOf: makeImageTokenGrid(
+                    width: baseQueries, height: baseQueries, includeSeparator: false))
+            tokens.append(imageTokenId())
             if cropWidth > 1 || cropHeight > 1 {
                 let localQueries = numQueries(for: config.localImageSize)
                 tokens.append(
@@ -458,10 +465,6 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                         height: localQueries * cropHeight,
                         includeSeparator: false))
             }
-            tokens.append(
-                contentsOf: makeImageTokenGrid(
-                    width: baseQueries, height: baseQueries, includeSeparator: false))
-            tokens.append(imageTokenId())
             return tokens
         case .base:
             let queries = numQueries(for: config.localImageSize)
