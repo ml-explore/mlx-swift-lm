@@ -21,6 +21,13 @@ xcodebuild test \
   -scheme IntegrationTesting \
   -destination 'platform=macOS' \
   -only-testing:IntegrationTestingTests/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
+
+# DeepSeek-OCR (deepseekocr) — cache-gated, or force Hub download
+MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1 xcodebuild test \
+  -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting \
+  -destination 'platform=macOS' \
+  -only-testing:IntegrationTestingTests/DeepseekOCRIntegrationTests
 ```
 
 These tests do not run in CI.

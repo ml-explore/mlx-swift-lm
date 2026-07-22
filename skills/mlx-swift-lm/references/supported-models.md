@@ -131,6 +131,28 @@ VLMRegistry.gemma3_27B_qat_4bit   // mlx-community/gemma-3-27b-it-qat-4bit
 VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 ```
 
+### DeepSeek-OCR
+
+```swift
+// model_type: "deepseekocr"
+VLMRegistry.deepseekOCR5bit  // mlx-community/DeepSeek-OCR-5bit
+
+// Load + OCR (gundam crop mode; keep processing resize nil for native tiling)
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+let session = ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam))
+let text = try await session.respond(to: "Free OCR.", image: .url(pageURL))
+```
+
+IntegrationTesting: `DeepseekOCRIntegrationTests` (cache-gated or
+`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`). See fork README “Supported VLM: DeepSeek-OCR”.
+
 ### Other VLM Types
 
 | model_type | Description |
@@ -141,6 +163,7 @@ VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 | `pixtral` | Pixtral |
 | `mistral3` | Mistral 3 VLM |
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
+| `deepseekocr` | DeepSeek-OCR (see section above) |
 
 ## Loading Any Model
 

@@ -64,6 +64,39 @@ After upstream merge, switch to a release tag:
 
 See the coordination hub guides: `docs/guides/mlx-swift-lm-port.md`, `docs/guides/git-workflow.md`.
 
+### Supported VLM: DeepSeek-OCR
+
+DeepSeek-OCR is a first-class MLXVLM (`model_type`: `deepseekocr`). Use
+`VLMRegistry.deepseekOCR5bit` (`mlx-community/DeepSeek-OCR-5bit`)
+for the upstream DeepSeek path (closes [#15](https://github.com/ml-explore/mlx-swift-lm/issues/15)):
+
+```swift
+import HuggingFace
+import MLXHuggingFace
+import MLXLMCommon
+import MLXVLM
+import Tokenizers
+
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+
+let session = ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),  // keep native resolution for gundam/base tiling
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam))
+
+let text = try await session.respond(
+    to: "Free OCR.",
+    image: .url(URL(fileURLWithPath: "page.png")))
+print(text)
+```
+
+Opt-in IntegrationTesting example (cache-gated / `MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`):
+`IntegrationTesting/IntegrationTestingTests/DeepseekOCRIntegrationTests.swift`.
+
 ### DeepSeek-OCR crop modes
 
 `DeepseekOCRProcessor` supports two first-class modes,
