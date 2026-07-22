@@ -48,9 +48,16 @@ enum SchemaConverter {
     ///       }
     ///     },
     ///     ...
-    ///   ]
+    ///   ],
+    ///   "$defs": { "<tool name>__<def name>": ... }
     /// }
     /// ```
+    ///
+    /// If a tool's parameters schema carries `$defs` (named sub-schemas such
+    /// as nested `@Generable` types), they are hoisted to the envelope root
+    /// under per-tool namespaced keys, with that tool's `$ref`s rewritten to
+    /// match — JSON Pointers resolve from the document root, so defs left
+    /// nested inside `arguments` would leave every ref dangling.
     ///
     /// This is the *inner* schema -- it describes one tool call JSON object.
     /// For end-to-end grammar generation that also encodes the model's native
@@ -176,12 +183,36 @@ enum SchemaConverter {
         }
 
         let encoder = JSONEncoder()
+        // `GenerationSchema` serializes named sub-schemas (e.g. a nested
+        // `@Generable` type, or a named `DynamicGenerationSchema`) as
+        // root-level `$defs` plus root-anchored `"$ref": "#/$defs/..."`
+        // pointers. Embedding a tool's schema as a nested object under
+        // `oneOf[i].properties.arguments` buries its `$defs` inside
+        // `arguments` while the refs stay anchored to the document root —
+        // and xgrammar resolves JSON Pointers from the document root, so
+        // every ref dangles and grammar compilation hard-fails
+        // ("Cannot find field $defs in {\"oneOf\": ...",
+        // json_schema_converter.cc). Hoist each tool's `$defs` to the
+        // envelope root instead, namespacing keys per tool
+        // (`<tool>__<def>`) so same-named defs across tools cannot collide.
+        var hoistedDefs: [String: Any] = [:]
         let oneOf: [[String: Any]] = try tools.map { tool in
             // Round-trip the tool's parameters through JSONSerialization so we
             // can embed it as a nested object in the envelope we assemble via
             // JSONSerialization.data(withJSONObject:). Cheap: schemas are small.
             let paramsData = try encoder.encode(tool.parameters)
-            let paramsAny = try JSONSerialization.jsonObject(with: paramsData)
+            var paramsAny = rewriteDefsRefs(
+                in: try JSONSerialization.jsonObject(with: paramsData),
+                toolName: tool.name
+            )
+            if var paramsObj = paramsAny as? [String: Any] {
+                if let defs = paramsObj.removeValue(forKey: "$defs") as? [String: Any] {
+                    for (key, value) in defs {
+                        hoistedDefs["\(tool.name)__\(key)"] = value
+                    }
+                }
+                paramsAny = paramsObj
+            }
             return [
                 "type": "object",
                 "required": ["name", "arguments"],
@@ -192,7 +223,40 @@ enum SchemaConverter {
                 ],
             ]
         }
-        return ["oneOf": oneOf]
+        var envelope: [String: Any] = ["oneOf": oneOf]
+        if !hoistedDefs.isEmpty {
+            envelope["$defs"] = hoistedDefs
+        }
+        return envelope
+    }
+
+    /// Rewrites every `"$ref": "#/$defs/<name>"` in a parsed schema tree to
+    /// the per-tool namespaced key (`#/$defs/<tool>__<name>`).
+    ///
+    /// The rewrite is structure-aware: only the string value directly under a
+    /// `$ref` key is touched, so other strings that merely mention the
+    /// pointer text — a `description`, `const`, `enum` entry, `default`, or
+    /// `pattern` containing "#/$defs/" — survive verbatim. Runs before the
+    /// `$defs` are hoisted out, and recurses through the whole tree because
+    /// refs can appear anywhere, including inside other `$defs` bodies.
+    private static func rewriteDefsRefs(in value: Any, toolName: String) -> Any {
+        switch value {
+        case let object as [String: Any]:
+            var result: [String: Any] = [:]
+            result.reserveCapacity(object.count)
+            for (key, nested) in object {
+                if key == "$ref", let ref = nested as? String, ref.hasPrefix("#/$defs/") {
+                    result[key] = "#/$defs/\(toolName)__" + ref.dropFirst("#/$defs/".count)
+                } else {
+                    result[key] = rewriteDefsRefs(in: nested, toolName: toolName)
+                }
+            }
+            return result
+        case let array as [Any]:
+            return array.map { rewriteDefsRefs(in: $0, toolName: toolName) }
+        default:
+            return value
+        }
     }
 
     enum SchemaConversionError: Error {
