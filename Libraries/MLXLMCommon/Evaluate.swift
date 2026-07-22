@@ -64,6 +64,13 @@ public struct GenerateParameters: Sendable {
     /// When set, uses ``RotatingKVCache`` instead of ``KVCacheSimple``
     public var maxKVSize: Int?
 
+    /// Typed key-value cache configuration.
+    ///
+    /// When set, this is the canonical cache configuration. Do not combine it
+    /// with `maxKVSize`, `kvBits`, `kvGroupSize`, `quantizedKVStart`, or
+    /// `kvScheme`.
+    public var kvCache: KVCacheConfiguration?
+
     /// Number of bits to use for KV cache quantization. nil implies no cache quantization.
     public var kvBits: Int?
 
@@ -88,7 +95,8 @@ public struct GenerateParameters: Sendable {
     ///   maximum compression; K sensitivity varies by model family, so
     ///   validate on your model (asym is the recommended starting point).
     ///
-    /// Unrecognized schemes are ignored. See `resolveTurboScheme`.
+    /// Unrecognized schemes are rejected when generation starts. Prefer
+    /// ``kvCache`` for compile-time-safe configuration.
     public var kvScheme: String?
 
     /// Sampling temperature
@@ -131,6 +139,7 @@ public struct GenerateParameters: Sendable {
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
+        kvCache: KVCacheConfiguration? = nil,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
@@ -150,6 +159,7 @@ public struct GenerateParameters: Sendable {
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
+        self.kvCache = kvCache
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
@@ -577,18 +587,18 @@ public struct TokenIterator: TokenIteratorProtocol {
     public internal(set) var state: LMOutput.State?
 
     var y: LMInput.Text
-    var cache: [KVCache]
+    let cacheStorage: KVCacheStorage
+    var cache: [KVCache] {
+        get { cacheStorage.cache }
+        set { cacheStorage.replace(with: newValue) }
+    }
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
     public var tokenCount = 0
     public let maxTokens: Int?
 
-    // Cache quantization parameters
-    let kvBits: Int?
-    let kvGroupSize: Int
-    let quantizedKVStart: Int
-    let kvScheme: String?
+    var kvCachePlan: KVCachePlan { cacheStorage.plan }
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -606,22 +616,12 @@ public struct TokenIterator: TokenIteratorProtocol {
         prompt: MLXArray, model: any LanguageModel, cache: [KVCache]? = nil,
         parameters: GenerateParameters
     ) throws {
-        self.model = model
-        self.y = .init(tokens: prompt)
-        self.cache = cache ?? model.newCache(parameters: parameters)
-
-        self.processor = parameters.processor()
-        self.sampler = parameters.sampler()
-        self.maxTokens = parameters.maxTokens
-
-        self.kvBits = parameters.kvBits
-        self.kvGroupSize = parameters.kvGroupSize
-        self.quantizedKVStart = parameters.quantizedKVStart
-        self.kvScheme = parameters.kvScheme
-
-        self.promptPrefillTime = try measure {
-            try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
-        }
+        let plan = try parameters.kvCachePlan()
+        try self.init(
+            input: .init(text: .init(tokens: prompt)), model: model,
+            cacheStorage: KVCacheStorage(
+                cache ?? model.newCache(parameters: parameters), plan: plan),
+            parameters: parameters)
     }
 
     /// Initialize a `TokenIterator` with the given input.
@@ -643,19 +643,31 @@ public struct TokenIterator: TokenIteratorProtocol {
         state: LMOutput.State? = nil,
         parameters: GenerateParameters
     ) throws {
+        let plan = try parameters.kvCachePlan()
+        try self.init(
+            input: input, model: model,
+            cacheStorage: KVCacheStorage(
+                cache ?? model.newCache(parameters: parameters), plan: plan),
+            state: state, parameters: parameters)
+    }
+
+    package init(
+        input: LMInput, model: any LanguageModel,
+        cacheStorage: KVCacheStorage,
+        state: LMOutput.State? = nil,
+        parameters: GenerateParameters
+    ) throws {
+        let kvCachePlan = cacheStorage.plan
+        let cacheStorage = try kvCachePlan.validated(cacheStorage)
+
         self.model = model
         self.state = state
         self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: parameters)
+        self.cacheStorage = cacheStorage
 
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
-
-        self.kvBits = parameters.kvBits
-        self.kvGroupSize = parameters.kvGroupSize
-        self.quantizedKVStart = parameters.quantizedKVStart
-        self.kvScheme = parameters.kvScheme
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -683,17 +695,12 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.model = model
         self.state = state
         self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: nil)
+        self.cacheStorage = KVCacheStorage(
+            cache ?? model.newCache(parameters: nil), plan: .disabled)
 
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
-
-        // No cache quantization for this direct initialization
-        self.kvBits = nil
-        self.kvGroupSize = 64
-        self.quantizedKVStart = 0
-        self.kvScheme = nil
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -720,6 +727,8 @@ public struct TokenIterator: TokenIteratorProtocol {
 
             break
         }
+
+        try kvCachePlan.applyAndValidate(to: cacheStorage)
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {
@@ -743,13 +752,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.state = result.state
 
         // Apply dynamic cache quantization after each step
-        maybeQuantizeKVCache(
-            cache: &cache,
-            kvBits: kvBits,
-            kvGroupSize: kvGroupSize,
-            quantizedKVStart: quantizedKVStart,
-            kvScheme: kvScheme
-        )
+        kvCachePlan.apply(to: cacheStorage)
 
         return convertToToken(logits: result.logits)
     }
@@ -825,9 +828,17 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     let draftModel: any LanguageModel
 
     var mainState: LMOutput.State?
-    var mainCache: [KVCache]
-    var draftCache: [KVCache]
-    let quantizeKVCache: (inout [KVCache]) -> Void
+    let mainCacheStorage: KVCacheStorage
+    let draftCacheStorage: KVCacheStorage
+    var mainCache: [KVCache] {
+        get { mainCacheStorage.cache }
+        set { mainCacheStorage.replace(with: newValue) }
+    }
+    var draftCache: [KVCache] {
+        get { draftCacheStorage.cache }
+        set { draftCacheStorage.replace(with: newValue) }
+    }
+    var kvCachePlan: KVCachePlan { mainCacheStorage.plan }
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
@@ -870,32 +881,51 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         numDraftTokens: Int
     ) throws {
+        let plan = try parameters.kvCachePlan()
+        try self.init(
+            input: input, mainModel: mainModel, draftModel: draftModel,
+            mainCacheStorage: KVCacheStorage(
+                mainCache ?? mainModel.newCache(parameters: parameters), plan: plan),
+            draftCacheStorage: KVCacheStorage(
+                draftCache ?? draftModel.newCache(parameters: parameters), plan: plan),
+            parameters: parameters, numDraftTokens: numDraftTokens)
+    }
+
+    package init(
+        input: LMInput,
+        mainModel: any LanguageModel,
+        draftModel: any LanguageModel,
+        mainCacheStorage: KVCacheStorage,
+        draftCacheStorage: KVCacheStorage,
+        parameters: GenerateParameters,
+        numDraftTokens: Int
+    ) throws {
+        let kvCachePlan = mainCacheStorage.plan
+        precondition(
+            draftCacheStorage.plan == kvCachePlan,
+            "Speculative caches must use the same KV-cache plan")
+        let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
+        let draftCacheStorage = try kvCachePlan.validated(draftCacheStorage)
+        guard
+            canTrimPromptCache(mainCacheStorage.cache),
+            canTrimPromptCache(draftCacheStorage.cache)
+        else {
+            throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
+        }
+
         self.y = input.text
         self.draftY = input.text
         self.mainModel = mainModel
         self.draftModel = draftModel
 
-        self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
-        self.draftCache = draftCache ?? draftModel.newCache(parameters: parameters)
-        guard canTrimPromptCache(self.mainCache), canTrimPromptCache(self.draftCache) else {
-            throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
-        }
+        self.mainCacheStorage = mainCacheStorage
+        self.draftCacheStorage = draftCacheStorage
 
         self.sampler = parameters.sampler()
         self.processor = parameters.processor()
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
-
-        self.quantizeKVCache = { cache in
-            maybeQuantizeKVCache(
-                cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart,
-                kvScheme: parameters.kvScheme
-            )
-        }
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -933,6 +963,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             draftY = .init(tokens: token)
             asyncEval(draftY.tokens)
         }
+
+        try kvCachePlan.applyAndValidate(to: mainCacheStorage)
+        try kvCachePlan.applyAndValidate(to: draftCacheStorage)
     }
 
     /// Run one round of speculative decoding: draft, verify, accept/reject
@@ -1018,8 +1051,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         trimPromptCache(draftCache, numTokens: Swift.max(numDraft - accepted - 1, 0))
 
         // Apply dynamic cache quantization after rewind
-        quantizeKVCache(&mainCache)
-        quantizeKVCache(&draftCache)
+        kvCachePlan.apply(to: mainCacheStorage)
+        kvCachePlan.apply(to: draftCacheStorage)
 
         // Set y/draftY for the next round
         y = .init(tokens: finalToken)

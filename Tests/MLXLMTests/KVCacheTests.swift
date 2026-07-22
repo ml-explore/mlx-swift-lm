@@ -21,6 +21,42 @@ private func tempURL() -> URL {
         .appendingPathExtension("safetensors")
 }
 
+private struct SerializedCacheFixture {
+    let className: String
+    let arrayCount: Int
+    let metadata: [String]
+    var arrayShape = [1, 1, 1, 1]
+}
+
+private func writePromptCacheFixture(_ fixture: SerializedCacheFixture) throws -> URL {
+    let url = tempURL()
+    let arrays: [String: MLXArray] = Dictionary(
+        uniqueKeysWithValues: (0 ..< fixture.arrayCount).map { index in
+            (
+                "0.\(index)",
+                MLXArray.zeros(fixture.arrayShape, dtype: .float32, stream: .cpu)
+            )
+        })
+    var metadata: [String: String] = Dictionary(
+        uniqueKeysWithValues: fixture.metadata.enumerated().map {
+            ("0.0.\($0.offset)", $0.element)
+        })
+    metadata["2.0"] = fixture.className
+    try save(arrays: arrays, metadata: metadata, url: url, stream: .cpu)
+    return url
+}
+
+private func expectPromptCacheLoadToFail(_ fixtures: [SerializedCacheFixture]) throws {
+    for fixture in fixtures {
+        let url = try writePromptCacheFixture(fixture)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            _ = try loadPromptCache(url: url)
+        }
+    }
+}
+
 /// Assert two arrays of MLXArray are element-wise close
 private func assertArraysClose(_ lhs: [MLXArray], _ rhs: [MLXArray], label: String = "") {
     #expect(lhs.count == rhs.count, "state count mismatch \(label)")
@@ -134,16 +170,114 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(copied.metaState == cache.metaState)
 }
 
-@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() {
+@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() throws {
     let cache = KVCacheSimple()
     cache.offset = 7
 
-    let quantized = cache.toQuantized(groupSize: 128, bits: 4)
+    let quantized = try cache.toQuantized(groupSize: 128, bits: 4)
 
     #expect(quantized.offset == 7)
     #expect(quantized.groupSize == 128)
     #expect(quantized.bits == 4)
     #expect(quantized.metaState == ["256", "7", "128", "4"])
+}
+
+@Test func testDirectKVCacheQuantizationFailuresAreRecoverable() throws {
+    let incompatible = KVCacheSimple()
+    incompatible.state = [
+        MLXArray.zeros([1, 2, 4, 5], dtype: .float32, stream: .cpu),
+        MLXArray.zeros([1, 2, 4, 5], dtype: .float32, stream: .cpu),
+    ]
+
+    #expect(throws: KVCacheError.self) {
+        _ = try incompatible.toQuantized(groupSize: 64, bits: 4)
+    }
+    #expect(throws: KVCacheError.self) {
+        _ = try RotatingKVCache(maxSize: 32).toQuantized()
+    }
+}
+
+@Test func testPromptCacheRestorationRejectsIncompleteState() throws {
+    try expectPromptCacheLoadToFail([
+        .init(className: "KVCacheSimple", arrayCount: 1, metadata: [""]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 1,
+            metadata: ["0", "32", "256", "0", "0", "modelNative"]),
+        .init(
+            className: "QuantizedKVCache", arrayCount: 3,
+            metadata: ["256", "0", "64", "4"]),
+        .init(className: "ChunkedKVCache", arrayCount: 1, metadata: ["None", "0"]),
+    ])
+}
+
+@Test func testPromptCacheRestorationRejectsInvalidMetadata() throws {
+    try expectPromptCacheLoadToFail([
+        .init(className: "KVCacheSimple", arrayCount: 0, metadata: ["unexpected"]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 0,
+            metadata: ["0", "32", "invalid", "0", "0", "modelNative"]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 0,
+            metadata: ["0", "32", "256", "0", "0", "invalid-origin"]),
+        .init(
+            className: "QuantizedKVCache", arrayCount: 0,
+            metadata: ["256", "invalid", "64", "4"]),
+        .init(className: "ChunkedKVCache", arrayCount: 0, metadata: ["invalid", "0"]),
+    ])
+}
+
+@Test func testPromptCacheRestorationRejectsInvalidStateRank() throws {
+    try expectPromptCacheLoadToFail([
+        .init(
+            className: "KVCacheSimple", arrayCount: 2, metadata: [""],
+            arrayShape: [1, 1])
+    ])
+}
+
+@Test func testPromptCacheRestorationAcceptsLegacyRotatingMetadata() throws {
+    let fixture = SerializedCacheFixture(
+        className: "RotatingKVCache",
+        arrayCount: 2,
+        metadata: ["0", "32", "256", "1", "1"])
+    let url = try writePromptCacheFixture(fixture)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let (restored, _) = try loadPromptCache(url: url)
+    let rotating = try #require(restored.first as? RotatingKVCache)
+
+    #expect(rotating.capacityOrigin == .modelNative)
+    #expect(rotating.metaState == ["0", "32", "256", "1", "1", "modelNative"])
+}
+
+@Test func testPromptCacheRoundTripPreservesEmptyCaches() throws {
+    let populated = KVCacheSimple()
+    populated.state = [
+        MLXArray.ones([1, 1, 1, 32], stream: .cpu),
+        MLXArray.ones([1, 1, 1, 32], stream: .cpu),
+    ]
+    let caches: [KVCache] = [
+        KVCacheSimple(),
+        populated,
+        RotatingKVCache(maxSize: 32),
+        QuantizedKVCache(),
+        ChunkedKVCache(chunkSize: 16),
+    ]
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: caches)
+    let (restored, _) = try loadPromptCache(url: url)
+
+    #expect(restored.count == caches.count)
+    #expect(restored[0] is KVCacheSimple)
+    #expect(restored[0].state.isEmpty)
+    #expect(restored[1].state.count == 2)
+    #expect(restored[2] is RotatingKVCache)
+    #expect(restored[2].state.isEmpty)
+    #expect(restored[3] is QuantizedKVCache)
+    #expect(restored[3].state.isEmpty)
+    #expect(restored[4] is ChunkedKVCache)
+    #expect(restored[4].state.isEmpty)
 }
 
 // MARK: - ArraysCache sparse slot round-trip

@@ -1647,7 +1647,7 @@ private enum RotatingSkipNotice {
 }
 
 /// Log, at most once per set of `RotatingKVCache` instances, that a
-/// requested TurboQuant kvScheme is leaving sliding-window layers at fp16.
+/// requested TurboQuant strategy is leaving sliding-window layers at fp16.
 ///
 /// TurboQuant only compresses `KVCacheSimple` layers (see
 /// `maybeTurboQuantizeKVCache` below); `RotatingKVCache` (Gemma-style
@@ -1656,9 +1656,12 @@ private enum RotatingSkipNotice {
 /// sequential-append compression path, so they are intentionally left
 /// untouched. The notice tells a user which layers kept fp16 rotating
 /// caches so a partially engaged scheme is visible.
-private func logRotatingKVCacheSkipOnce(cache: [KVCache]) {
-    let rotatingIndices = cache.indices.filter { cache[$0] is RotatingKVCache }
-    guard !rotatingIndices.isEmpty else { return }
+private func logRotatingKVCacheSkipOnce(leaves: [KVCacheLeaf]) {
+    let paths = leaves.compactMap { leaf -> [Int]? in
+        guard case .rotating = leaf.kind else { return nil }
+        return leaf.path
+    }
+    guard !paths.isEmpty else { return }
 
     RotatingSkipNotice.lock.lock()
     defer { RotatingSkipNotice.lock.unlock() }
@@ -1666,9 +1669,10 @@ private func logRotatingKVCacheSkipOnce(cache: [KVCache]) {
     guard !RotatingSkipNotice.logged else { return }
     RotatingSkipNotice.logged = true
 
-    let indexList = rotatingIndices.map(String.init).joined(separator: ", ")
+    let indexList = paths.map { $0.map(String.init).joined(separator: ".") }
+        .joined(separator: ", ")
     print(
-        "[TurboQuant] kvScheme requested KV compression, but layer(s) at index \(indexList) "
+        "[TurboQuant] KV compression was requested, but layer(s) at index \(indexList) "
             + "use RotatingKVCache (sliding-window) and will stay fp16. TurboQuant only "
             + "compresses non-rotating (global) KV cache layers."
     )
@@ -1682,54 +1686,45 @@ private func logRotatingKVCacheSkipOnce(cache: [KVCache]) {
 /// their window size and their rotating storage layout does not fit the
 /// sequential-append compression path. Called from `maybeQuantizeKVCache`
 /// when `kvScheme` names a TurboQuant scheme.
+@discardableResult
 public func maybeTurboQuantizeKVCache(
     cache: inout [KVCache],
     keyBits: Int,
     valueBits: Int,
     quantizedKVStart: Int
-) {
-    logRotatingKVCacheSkipOnce(cache: cache)
-
-    guard
-        cache.contains(where: { $0 is KVCacheSimple && $0.offset > quantizedKVStart })
-    else { return }
+) -> Bool {
+    let leaves = KVCacheTree.leaves(in: cache)
+    logRotatingKVCacheSkipOnce(leaves: leaves)
 
     // Boundary layer protection: the first and last attention layers are
     // disproportionately sensitive to KV quantization, keeping 2 on each
     // end at FP16 recovers 37-91% of the quality gap at minimal
     // compression cost. Non-attention layers (Mamba/wrapper caches) are
     // excluded from the rank count so hybrids protect the right layers.
-    let kvLayerIndices = cache.indices.filter { cache[$0] is KVCacheSimple }
-    // Only engage when the scheme is actually fragile: turbo-quantized keys
-    // (keyBits 2-4) or 2-bit values. Raw/affine-8 keys with >=3-bit values
-    // are near-lossless everywhere and protection just costs compression.
-    let fragile = (keyBits > 0 && keyBits < 8) || valueBits <= 2
-    let boundaryLayers = fragile ? min(2, kvLayerIndices.count / 2) : 0
-    let protected = Set(
-        kvLayerIndices.prefix(boundaryLayers) + kvLayerIndices.suffix(boundaryLayers))
+    let protectedPaths = KVCacheTree.turboQuantProtectedPaths(
+        in: leaves, keyBits: keyBits, valueBits: valueBits)
 
-    for i in 0 ..< cache.count {
-        guard let simple = cache[i] as? KVCacheSimple, cache[i].offset > quantizedKVStart,
-            !(cache[i] is TurboQuantKVCache)
-        else { continue }
+    var awaitsCompressionStart = false
+    KVCacheTree.rewrite(&cache) { leaf in
+        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard simple.offset > quantizedKVStart else {
+            awaitsCompressionStart = true
+            return simple
+        }
 
-        let state = cache[i].innerState()
+        let state = simple.innerState()
         let headDims: (key: Int, value: Int)? =
             state.count >= 2 ? (state[0].dim(3), state[1].dim(3)) : nil
 
-        if protected.contains(i) {
+        if protectedPaths.contains(leaf.path) {
             // Boundary layers use 8-bit affine instead of the turbo scheme:
             // near-lossless protection for the quantization-sensitive first
-            // and last layers at a quarter of the fp16 cost. Skip the
-            // conversion (leave fp16) rather than crash when neither head
-            // dimension divides one of the supported affine group sizes.
-            guard
-                let headDims,
-                resolvedKVQuantizationGroupSize(
-                    requested: 64, keyHeadDim: headDims.key, valueHeadDim: headDims.value) != nil
-            else { continue }
-            cache[i] = simple.toQuantized(groupSize: 64, bits: 8)
-            continue
+            // and last layers at a quarter of the fp16 cost. An unsupported
+            // realized shape remains in full precision.
+            guard let quantized = try? simple.toQuantized(groupSize: 64, bits: 8) else {
+                return simple
+            }
+            return quantized
         }
 
         // Affine-K mode (keyBits == 8) quantizes keys in groups, resolve the
@@ -1745,7 +1740,7 @@ public func maybeTurboQuantizeKVCache(
                 let headDims,
                 let resolved = resolvedKVQuantizationGroupSize(
                     requested: 64, keyHeadDim: headDims.key, valueHeadDim: headDims.value)
-            else { continue }
+            else { return simple }
             resolvedKeyGroupSize = resolved
         }
 
@@ -1754,12 +1749,13 @@ public func maybeTurboQuantizeKVCache(
             keyGroupSize: resolvedKeyGroupSize)
         // Transfer existing KV data, trimmed to the live offset (the simple
         // cache over-allocates in steps).
-        let offset = cache[i].offset
+        let offset = simple.offset
         if state.count >= 2, offset > 0 {
             let keys = state[0][.ellipsis, ..<offset, 0...]
             let values = state[1][.ellipsis, ..<offset, 0...]
             _ = turbo.update(keys: keys, values: values)
         }
-        cache[i] = turbo
+        return turbo
     }
+    return !awaitsCompressionStart
 }

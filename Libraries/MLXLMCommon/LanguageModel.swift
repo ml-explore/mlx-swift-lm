@@ -290,10 +290,10 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
 
-        // Follow Python logic: use RotatingKVCache if maxKVSize is provided
-        if let maxKVSize = parameters?.maxKVSize {
+        // Follow Python logic: use RotatingKVCache if a capacity is provided.
+        if let capacity = parameters?.effectiveKVCacheCapacity {
             return (0 ..< numLayers).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                capacity.makeRotatingCache()
             }
         } else {
             return (0 ..< numLayers).map { _ in KVCacheSimple() }
