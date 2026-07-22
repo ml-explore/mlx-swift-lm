@@ -64,6 +64,25 @@ After upstream merge, switch to a release tag:
 
 See the coordination hub guides: `docs/guides/mlx-swift-lm-port.md`, `docs/guides/git-workflow.md`.
 
+### DeepSeek-OCR crop modes
+
+`DeepseekOCRProcessor` supports two first-class modes,
+selected via `ChatSession` / `UserInput` additional context:
+
+| Mode | Context | Behavior (matches Python) |
+|------|---------|---------------------------|
+| `gundam` (default) | omit or `DeepseekOCRProcessor.modeContext(.gundam)` | 1024² global + 640² local tiles when page > 640×640 (`cropping=True`) |
+| `base` | `DeepseekOCRProcessor.modeContext(.base)` | Single 640² padded view, no local tiles (`cropping=False`) |
+
+```swift
+let session = ChatSession(
+    container,
+    processing: .init(),  // keep native resolution for gundam tiling
+    additionalContext: DeepseekOCRProcessor.modeContext(.base))
+```
+
+Smoke: `MODE=base ./scripts/swift_smoke.sh` (or `MODE=gundam`, the default).
+
 ---
 
 > [!IMPORTANT]

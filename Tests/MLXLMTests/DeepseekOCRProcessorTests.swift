@@ -40,7 +40,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         let input = UserInput(
             prompt: "Describe this page.",
             images: [.ciImage(makeSolidImage(width: 800, height: 400, color: .red))],
-            additionalContext: [DeepseekOCRProcessor.modeContextKey: "base"])
+            additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
         let prepared = try await processor.prepareForTesting(input: input)
 
@@ -52,6 +52,47 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
         XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
         XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 112)
+    }
+
+    func testPrepareBaseModeOmitsLocalCropsFromLMInput() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "document parsing. ",
+            images: [.ciImage(makeSolidImage(width: 800, height: 400, color: .red))],
+            additionalContext: DeepseekOCRProcessor.modeContext(.base))
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertEqual(lmInput.image?.pixels.shape, [1, 3, 640, 640])
+        XCTAssertEqual(lmInput.image?.positionIds?.asArray(Int32.self), [1, 1])
+        XCTAssertNil(lmInput.video, "base mode must not pack gundam local crops into video")
+    }
+
+    func testPrepareGundamModePacksLocalCropsIntoVideo() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "document parsing. ",
+            images: [.ciImage(makeSolidImage(width: 800, height: 400, color: .red))])
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertEqual(lmInput.image?.pixels.shape, [1, 3, 1024, 1024])
+        XCTAssertEqual(lmInput.image?.positionIds?.asArray(Int32.self), [2, 1])
+        XCTAssertEqual(lmInput.video?.pixels.shape, [2, 3, 640, 640])
+    }
+
+    func testModeContextHelpers() {
+        XCTAssertEqual(
+            DeepseekOCRProcessor.mode(from: DeepseekOCRProcessor.modeContext(.base)), .base)
+        XCTAssertEqual(
+            DeepseekOCRProcessor.mode(from: DeepseekOCRProcessor.modeContext(.gundam)), .gundam)
+        XCTAssertEqual(DeepseekOCRProcessor.mode(from: nil), .gundam)
+        XCTAssertEqual(
+            DeepseekOCRProcessor.mode(from: [DeepseekOCRProcessor.modeContextKey: "nope"]),
+            .gundam)
+        XCTAssertEqual(
+            Set(DeepseekOCRProcessor.Mode.allCases.map(\.rawValue)),
+            Set(["gundam", "base"]))
     }
 
     private func makeProcessor() throws -> DeepseekOCRProcessor {

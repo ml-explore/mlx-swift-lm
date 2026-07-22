@@ -78,6 +78,16 @@ Currently supported model types are:
 - idefics3
 - gemma3
 - smolvlm
+- deepseekocr
+
+### DeepSeek-OCR processor modes
+
+`DeepseekOCRProcessor.Mode`:
+
+- **`gundam`** (default) — 1024 global + optional 640 local tiles
+- **`base`** — single 640 view; pass `DeepseekOCRProcessor.modeContext(.base)` into `ChatSession`
+
+See the fork README section “DeepSeek-OCR crop modes”.
 
 See [llm-tool](../../Tools/llm-tool)
 
