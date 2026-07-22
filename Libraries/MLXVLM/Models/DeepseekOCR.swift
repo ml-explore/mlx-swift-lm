@@ -517,6 +517,11 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
 
         return which(imageMask[.ellipsis, .newAxis], paddedImageFeatures, textEmbeddings)
     }
+
+    @_spi(Testing)
+    public func samFeaturesForTesting(_ pixelValues: MLXArray) -> MLXArray {
+        samModel(pixelValues)
+    }
 }
 
 private final class TextAttention: Module {
