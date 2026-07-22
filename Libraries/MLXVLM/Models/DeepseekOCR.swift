@@ -542,6 +542,15 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     public func projectedImageFeaturesForTesting(_ pixelValues: MLXArray) -> MLXArray {
         projectedImageFeatures(pixelValues)
     }
+
+    @_spi(Testing)
+    public func routeLayerForTesting(_ hiddenStates: MLXArray, layerIndex: Int) -> (
+        MLXArray, MLXArray
+    )? {
+        guard layerIndex >= 0, layerIndex < languageModel.layers.count else { return nil }
+        guard let sparseMoE = languageModel.layers[layerIndex].mlp as? SparseMoE else { return nil }
+        return sparseMoE.gate(hiddenStates)
+    }
 }
 
 private final class TextAttention: Module {
@@ -621,27 +630,57 @@ private final class MoEGate: Module {
     let topK: Int
     let normTopkProb: Bool
     let routedScalingFactor: Float
+    let nGroup: Int
+    let topkGroup: Int?
 
     @ModuleInfo(key: "weight") var weight: MLXArray
+    @ModuleInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray
 
     init(_ config: DeepseekOCRConfiguration.TextConfiguration) {
         let expertCount = config.nRoutedExperts ?? 1
         self.topK = config.numExpertsPerTok ?? 1
         self.normTopkProb = config.normTopkProb ?? false
         self.routedScalingFactor = config.routedScalingFactor ?? 1.0
+        self.nGroup = config.nGroup ?? 1
+        self.topkGroup = config.topkGroup
         self._weight.wrappedValue = zeros([expertCount, config.hiddenSize])
+        self._eScoreCorrectionBias.wrappedValue = zeros([expertCount])
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        let logits = matmul(x.asType(.float32), weight.T.asType(.float32)).asType(x.dtype)
-        let scores = softmax(logits, axis: -1)
-        let kth = scores.dim(-1) - topK
-        let indices = argPartition(scores, kth: kth, axis: -1)[.ellipsis, kth...]
+        let (batchSize, sequenceLength, _) = (x.dim(0), x.dim(1), x.dim(2))
+        var scores = sigmoid(matmul(x.asType(.float32), weight.T.asType(.float32)))
+        let scoresForChoice = scores + eScoreCorrectionBias
+
+        if nGroup > 1 {
+            let expertCount = weight.dim(0)
+            let expertsPerGroup = expertCount / nGroup
+            var groupScores = scoresForChoice.reshaped(
+                batchSize, sequenceLength, nGroup, expertsPerGroup)
+            let topPerGroup = top(groupScores, k: min(2, expertsPerGroup), axis: -1)
+                .sum(axis: -1, keepDims: true)
+            let droppedGroups = max(0, nGroup - (topkGroup ?? 1))
+            if droppedGroups > 0 {
+                var maskedGroupIndices = argPartition(
+                    topPerGroup, kth: droppedGroups - 1, axis: -2)[
+                        .ellipsis, ..<droppedGroups, 0...
+                    ]
+                maskedGroupIndices = broadcast(
+                    maskedGroupIndices,
+                    to: [batchSize, sequenceLength, droppedGroups, expertsPerGroup])
+                groupScores = putAlong(
+                    groupScores, stopGradient(maskedGroupIndices), values: MLXArray(0.0), axis: -2)
+                scores = flattened(groupScores, start: -2, end: -1)
+            }
+        }
+
+        let indices = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         var selected = takeAlong(scores, indices, axis: -1)
         if normTopkProb {
             selected = selected / (selected.sum(axis: -1, keepDims: true) + MLXArray(1e-20))
+            selected = selected * routedScalingFactor
         }
-        return (indices, selected * routedScalingFactor)
+        return (indices, selected.asType(x.dtype))
     }
 }
 
@@ -657,7 +696,8 @@ private final class SparseMoE: Module, UnaryLayer {
         self._switchMLP.wrappedValue = SwitchGLU(
             inputDims: hiddenSize,
             hiddenDims: intermediate,
-            numExperts: expertCount)
+            numExperts: expertCount,
+            activation: clippedSilu)
         self._gate.wrappedValue = MoEGate(config)
         if let shared = config.nSharedExperts {
             self._sharedExperts.wrappedValue = TextMLP(
@@ -1070,6 +1110,10 @@ private struct ClipVisionConfig {
 
 private func quickGelu(_ x: MLXArray) -> MLXArray {
     x * sigmoid(1.702 * x)
+}
+
+private func clippedSilu(_ x: MLXArray) -> MLXArray {
+    clip(x * sigmoid(x), min: -100, max: 100)
 }
 
 private final class ClipVisionEmbeddings: Module {
