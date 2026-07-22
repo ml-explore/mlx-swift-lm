@@ -304,8 +304,16 @@ public struct DeepseekOCRProcessorConfiguration: Decodable, Sendable {
 }
 
 public struct DeepseekOCRProcessor: UserInputProcessor {
-    public enum Mode: String, Sendable {
+    /// Image crop modes matching Python `DeepseekOCRProcessor.tokenize_with_images`.
+    ///
+    /// Select via ``modeContext(_:)`` on `ChatSession` / `UserInput.additionalContext`,
+    /// or the `MODE` env var in `DeepseekOCRSmoke` / `scripts/swift_smoke.sh`.
+    public enum Mode: String, Sendable, CaseIterable {
+        /// Multi-resolution OCR: 1024² global view + 640² local tiles when the page
+        /// exceeds 640×640 (Python `cropping=True`, `base_size=1024`). Default.
         case gundam
+        /// Single 640² padded view, no local tiles (Python `cropping=False`).
+        /// Cheaper / shorter context; required for multipage fusion prompts.
         case base
     }
 
@@ -319,9 +327,24 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         public let mode: Mode
     }
 
-    /// `UserInput.additionalContext["deepseekocr_mode"]` may override the default
-    /// `gundam` crop path with the smaller single-view `base` path for tests/scripts.
+    /// `UserInput.additionalContext` / `ChatSession.additionalContext` key for ``Mode``.
+    /// Value must be the mode's `rawValue` (`"gundam"` or `"base"`).
     public static let modeContextKey = "deepseekocr_mode"
+
+    /// Context dictionary selecting ``Mode`` for `ChatSession` or `UserInput`.
+    public static func modeContext(_ mode: Mode) -> [String: any Sendable] {
+        [modeContextKey: mode.rawValue]
+    }
+
+    /// Resolves ``Mode`` from additional context; unknown or missing → ``Mode/gundam``.
+    public static func mode(from additionalContext: [String: any Sendable]?) -> Mode {
+        guard let raw = additionalContext?[modeContextKey] as? String,
+            let mode = Mode(rawValue: raw)
+        else {
+            return .gundam
+        }
+        return mode
+    }
 
     private let config: DeepseekOCRProcessorConfiguration
     private let tokenizer: any Tokenizer
@@ -416,13 +439,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     private func promptMode(from input: UserInput) -> Mode {
-        guard
-            let rawMode = input.additionalContext?[Self.modeContextKey] as? String,
-            let mode = Mode(rawValue: rawMode)
-        else {
-            return .gundam
-        }
-        return mode
+        Self.mode(from: input.additionalContext)
     }
 
     private func numQueries(for side: Int) -> Int {
