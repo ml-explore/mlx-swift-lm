@@ -97,6 +97,8 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
         public let nGroup: Int?
         public let topkGroup: Int?
         public let routedScalingFactor: Float?
+        /// Python `TextConfig.scoring_func` default is `"softmax"` (Unlimited / DeepSeek-OCR).
+        public let scoringFunc: String?
 
         enum CodingKeys: String, CodingKey {
             case vocabSize = "vocab_size"
@@ -120,6 +122,7 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             case nGroup = "n_group"
             case topkGroup = "topk_group"
             case routedScalingFactor = "routed_scaling_factor"
+            case scoringFunc = "scoring_func"
         }
 
         public init(from decoder: any Decoder) throws {
@@ -160,6 +163,7 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             self.topkGroup = try container.decodeIfPresent(Int.self, forKey: .topkGroup)
             self.routedScalingFactor =
                 try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor)
+            self.scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc)
         }
     }
 
@@ -328,18 +332,83 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     private func preprocess(image: CIImage, side: Int) -> MLXArray {
-        image
-            .toSRGB()
-            .paddingToSquare(backgroundColor: .init(red: 0.5, green: 0.5, blue: 0.5))
-            .resampled(
-                to: .init(
-                    width: side,
-                    height: side),
-                method: .bicubic
-            )
+        // Match PIL ImageOps.pad(image, (side, side)): contain-resize then pad.
+        // Match PIL ImageOps.pad — no extra tone-curve convert (PIL keeps sRGB code values).
+        let srgb = image
+        let extent = srgb.extent.integral
+        let width = extent.width
+        let height = extent.height
+        let targetSide = CGFloat(side)
+        let contained: CGSize
+        let imRatio = width / height
+        if imRatio > 1 {
+            let newHeight = (height / width * targetSide).rounded()
+            contained = CGSize(width: targetSide, height: newHeight)
+        } else if imRatio < 1 {
+            let newWidth = (width / height * targetSide).rounded()
+            contained = CGSize(width: newWidth, height: targetSide)
+        } else {
+            contained = CGSize(width: targetSide, height: targetSide)
+        }
+
+        // Clamp before scale so bicubic edge taps don't sample empty (→ washed borders).
+        let resized = resampleClamped(srgb, to: contained)
+        // PIL ImageOps.pad uses color=tuple(int(mean*255) for mean in ...)
+        // i.e. 127/255 for mean 0.5 — not exact 0.5 (normalize residual ~-0.00392).
+        func pilMeanByte(_ mean: CGFloat) -> CGFloat {
+            CGFloat(Int(mean * 255)) / 255.0
+        }
+        // Core Image's default render emits linear light while Python/PIL keep
+        // sRGB code values. Compensate mid-gray: specify sRGB-encoded value so
+        // linear output equals the PIL byte-quantized mean.
+        func srgbEncode(_ linear: CGFloat) -> CGFloat {
+            if linear <= 0.0031308 { return linear * 12.92 }
+            return 1.055 * pow(linear, 1.0 / 2.4) - 0.055
+        }
+        let padLinear = (
+            pilMeanByte(config.imageMean[0]),
+            pilMeanByte(config.imageMean[1]),
+            pilMeanByte(config.imageMean[2])
+        )
+        let padColor = CIColor(
+            red: srgbEncode(padLinear.0),
+            green: srgbEncode(padLinear.1),
+            blue: srgbEncode(padLinear.2))
+        let canvas = CIImage(color: padColor).cropped(
+            to: CGRect(x: 0, y: 0, width: targetSide, height: targetSide))
+        let dx = ((targetSide - contained.width) * 0.5).rounded() - resized.extent.origin.x
+        let dy = ((targetSide - contained.height) * 0.5).rounded() - resized.extent.origin.y
+        let placed = resized.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+
+        // Normalize with the same byte-quantized mean PIL effectively uses in the
+        // pad region; content uses config mean (identical for 0.5 → still 0.5 after
+        // int path only affects pads). Match Python: mean/std from processor config.
+        return placed.composited(over: canvas)
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
             .asMLXArray()
             .asType(.bfloat16)
+    }
+
+    /// Bicubic resize with edge clamp — CI's default samples empty outside the
+    /// extent, which washes tile borders (local crop corners were ~0.70 not 1.0).
+    private func resampleClamped(_ image: CIImage, to size: CGSize) -> CIImage {
+        let extent = image.extent
+        let yScale = size.height / extent.height
+        let xScale = size.width / extent.width
+        let filter = CIFilter.bicubicScaleTransform()
+        filter.inputImage = image.clampedToExtent()
+        filter.scale = Float(yScale)
+        filter.aspectRatio = Float(xScale / yScale)
+        let scaled = filter.outputImage!
+        let target = CGRect(
+            x: extent.origin.x * xScale,
+            y: extent.origin.y * yScale,
+            width: size.width,
+            height: size.height)
+        return
+            scaled
+            .cropped(to: target)
+            .transformed(by: CGAffineTransform(translationX: -target.minX, y: -target.minY))
     }
 
     private func imageTokenId() -> Int {
@@ -459,10 +528,8 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
 
         let targetWidth = tileSize * tilesWide
         let targetHeight = tileSize * tilesHigh
-        let resized =
-            image
-            .toSRGB()
-            .resampled(to: .init(width: targetWidth, height: targetHeight), method: .bicubic)
+        let resized = resampleClamped(
+            image, to: .init(width: targetWidth, height: targetHeight))
 
         var processed = [MLXArray]()
         for block in 0 ..< (tilesWide * tilesHigh) {
@@ -559,15 +626,19 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             localCrops = emptyLocalCrops()
         }
 
-        // Match mlx-vlm unlimited_ocr: image lattice first, then raw user text
-        // (chat-template prefixes before <image> break OCR conditioning).
+        // Match mlx-vlm unlimited_ocr tokenize_with_images:
+        //   [bos] + image lattice + raw user text
+        // (no chat-template wrappers — prefixes before <image> break OCR).
+        let bosId =
+            tokenizer.bosToken.flatMap { tokenizer.convertTokenToId($0) } ?? 0
         let imagePromptTokens = makeImagePromptTokens(
             mode: mode, cropWidth: cropWidth, cropHeight: cropHeight)
         let textTokens = tokenizer.encode(
             text: userPromptText(from: input), addSpecialTokens: false)
-        let fullPromptTokens = imagePromptTokens + textTokens
+        let fullPromptTokens = [bosId] + imagePromptTokens + textTokens
         let sequenceMask =
-            Array(repeating: true, count: imagePromptTokens.count)
+            [false]
+            + Array(repeating: true, count: imagePromptTokens.count)
             + Array(repeating: false, count: textTokens.count)
 
         return .init(
@@ -1047,6 +1118,7 @@ private final class MoEGate: Module {
     let routedScalingFactor: Float
     let nGroup: Int
     let topkGroup: Int?
+    let scoringFunc: String
 
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray
@@ -1058,13 +1130,23 @@ private final class MoEGate: Module {
         self.routedScalingFactor = config.routedScalingFactor ?? 1.0
         self.nGroup = config.nGroup ?? 1
         self.topkGroup = config.topkGroup
+        // Match Python TextConfig default (`softmax`) used by Unlimited-OCR.
+        self.scoringFunc = config.scoringFunc ?? "softmax"
         self._weight.wrappedValue = zeros([expertCount, config.hiddenSize])
         self._eScoreCorrectionBias.wrappedValue = zeros([expertCount])
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
         let (batchSize, sequenceLength, _) = (x.dim(0), x.dim(1), x.dim(2))
-        var scores = sigmoid(matmul(x.asType(.float32), weight.T.asType(.float32)))
+        let gates = matmul(x.asType(.float32), weight.T.asType(.float32))
+        var scores: MLXArray
+        switch scoringFunc {
+        case "sigmoid":
+            scores = sigmoid(gates)
+        default:
+            // "softmax" (Python default) and any unrecognized value.
+            scores = MLX.softmax(gates, axis: -1, precise: true)
+        }
         let scoresForChoice = scores + eScoreCorrectionBias
 
         if nGroup > 1 {
@@ -1093,8 +1175,9 @@ private final class MoEGate: Module {
         var selected = takeAlong(scores, indices, axis: -1)
         if normTopkProb {
             selected = selected / (selected.sum(axis: -1, keepDims: true) + MLXArray(1e-20))
-            selected = selected * routedScalingFactor
         }
+        // Python MoEGate always scales selected scores by routed_scaling_factor.
+        selected = selected * routedScalingFactor
         return (indices, selected.asType(x.dtype))
     }
 }
@@ -1111,8 +1194,8 @@ private final class SparseMoE: Module, UnaryLayer {
         self._switchMLP.wrappedValue = SwitchGLU(
             inputDims: hiddenSize,
             hiddenDims: intermediate,
-            numExperts: expertCount,
-            activation: clippedSilu)
+            numExperts: expertCount)
+        // Default SwitchGLU uses silu — matches Python mlx_vlm SwitchGLU/SwiGLU.
         self._gate.wrappedValue = MoEGate(config)
         if let shared = config.nSharedExperts {
             self._sharedExperts.wrappedValue = TextMLP(
@@ -1605,7 +1688,8 @@ private final class ClipFeedForward: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        fc2(quickGelu(fc1(x)))
+        // mlx-vlm deepseekocr Vision MLP uses nn.GELU (not OpenAI QuickGELU).
+        fc2(gelu(fc1(x)))
     }
 }
 
