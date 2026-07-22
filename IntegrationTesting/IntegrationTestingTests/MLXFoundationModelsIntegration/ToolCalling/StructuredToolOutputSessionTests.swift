@@ -134,7 +134,8 @@ struct StructuredToolOutputSessionTests {
 
         #expect(
             response.content.contains(structuredToolOutputSentinel),
-            "The live \(modelID) response must use the token available only in the structured tool output. Got: \(response.content)")
+            "The live \(modelID) response must use the token available only in the structured tool output. Got: \(response.content)"
+        )
     }
 }
 
