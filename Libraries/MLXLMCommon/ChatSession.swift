@@ -1,14 +1,17 @@
 // Copyright © 2025 Apple Inc.
 
-import CoreGraphics
 import Foundation
 import MLX
+
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 /// Configuration for speculative decoding in a `ChatSession`.
 ///
 /// Speculative decoding uses a small draft model to propose candidate tokens
 /// that the main model then verifies in a single forward pass, providing a
-/// ~2–3× generation speedup with no quality degradation.
+/// speedup with no quality degradation when both models fit comfortably in memory.
 ///
 /// Both models must share the same tokenizer vocabulary.
 ///
@@ -22,18 +25,99 @@ import MLX
 ///     speculativeDecoding: SpeculativeDecodingConfig(draftModel: draft, numDraftTokens: 5)
 /// )
 /// ```
+///
+/// To avoid loading a draft model that would exceed a memory policy, pass a
+/// byte estimate and a loader closure:
+///
+/// ```swift
+/// let session = ChatSession(
+///     main,
+///     speculativeDecoding: SpeculativeDecodingConfig(
+///         draftModelBytes: estimatedDraftBytes,
+///         memoryPolicy: .recommendedWorkingSet
+///     ) {
+///         try await LLMModelFactory.shared.loadContainer(configuration: draftConfig)
+///     }
+/// )
+/// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
-    /// The lightweight model used to propose candidate tokens.
-    public let draftModel: ModelContainer
+    package enum DraftModelSource: Sendable {
+        case loaded(ModelContainer)
+        case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
+    }
+
+    package let draftModelSource: DraftModelSource
+
+    /// The lightweight model used to propose candidate tokens, when it was provided eagerly.
+    ///
+    /// Configurations initialized with a loader closure return `nil` because the
+    /// draft model is loaded asynchronously by ``ChatSession`` only when speculation
+    /// is admitted by the memory policy.
+    public var draftModel: ModelContainer? {
+        if case .loaded(let draftModel) = draftModelSource {
+            return draftModel
+        }
+        return nil
+    }
 
     /// Number of tokens proposed by the draft model per verification cycle.
     /// The default value of 5 offers a good balance between speed and accuracy.
     public let numDraftTokens: Int
 
-    public init(draftModel: ModelContainer, numDraftTokens: Int = 5) {
-        self.draftModel = draftModel
+    /// Optional memory policy used to decide whether auxiliary-model speculation should run.
+    /// Pass `.recommendedWorkingSet` to fall back to regular generation when
+    /// the combined main and draft model parameters exceed the recommended
+    /// working set.
+    public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
+
+    public init(
+        draftModel: ModelContainer,
+        numDraftTokens: Int = 5,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+    ) {
+        self.draftModelSource = .loaded(draftModel)
         self.numDraftTokens = numDraftTokens
+        self.memoryPolicy = memoryPolicy
+    }
+
+    /// Initialize speculative decoding with a draft model loader.
+    ///
+    /// When a memory policy is present, `draftModelBytes` lets `ChatSession`
+    /// decide whether to use speculative decoding before it loads the draft
+    /// model. This is the preferred initializer when the draft model may not fit
+    /// comfortably beside the main model.
+    ///
+    /// - Parameters:
+    ///   - draftModelBytes: estimated resident parameter bytes for the draft model
+    ///   - numDraftTokens: number of tokens proposed by the draft model per verification cycle
+    ///   - memoryPolicy: optional memory policy used before loading the draft model
+    ///   - loadDraftModel: closure that loads the draft model only if speculation is admitted
+    public init(
+        draftModelBytes: Int,
+        numDraftTokens: Int = 5,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        loadDraftModel: @escaping @Sendable () async throws -> ModelContainer
+    ) {
+        self.draftModelSource = .deferred(bytes: max(0, draftModelBytes), loadDraftModel)
+        self.numDraftTokens = numDraftTokens
+        self.memoryPolicy = memoryPolicy
+    }
+
+    package var estimatedDraftModelBytes: Int? {
+        guard case .deferred(let bytes, _) = draftModelSource else {
+            return nil
+        }
+        return bytes
+    }
+
+    package func loadDraftModel() async throws -> ModelContainer {
+        switch draftModelSource {
+        case .loaded(let draftModel):
+            draftModel
+        case .deferred(_, let load):
+            try await load()
+        }
     }
 }
 
@@ -64,14 +148,19 @@ public struct SpeculativeDecodingConfig: Sendable {
 public final class ChatSession {
 
     enum Cache {
+        /// `state` is the per-call model state (e.g. M-RoPE rope deltas)
+        /// from the last prefill against this cache. It must survive across
+        /// turns: without it, a model that anchors positions on carried
+        /// state re-derives them from a cold start on the next turn.
         case empty
-        case kvcache([KVCache], draftKVCache: [KVCache]?)
+        case kvcache([KVCache], draftKVCache: [KVCache]?, state: LMOutput.State?)
         case history([Chat.Message])
     }
 
     private let model: ModelContainer
     public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
+    private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
     public var additionalContext: [String: any Sendable]?
@@ -105,6 +194,7 @@ public final class ChatSession {
         self.model = model
         self.instructions = instructions
         self.cache = .init(.empty)
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -137,6 +227,7 @@ public final class ChatSession {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
         self.cache = .init(.empty)
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -173,6 +264,7 @@ public final class ChatSession {
         self.model = model
         self.instructions = instructions
         self.cache = .init(.history(history))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -209,6 +301,7 @@ public final class ChatSession {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
         self.cache = .init(.history(history))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -253,7 +346,8 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -298,7 +392,8 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
         self.tools = tools
@@ -490,7 +585,7 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, generateParameters, speculativeDecoding
+                additionalContext, cache, loadedDraftModel, generateParameters, speculativeDecoding
             ] in
             do {
                 try await cache.update { cache in
@@ -524,19 +619,24 @@ public final class ChatSession {
 
                     var kvCache: [KVCache]
                     var draftKVCache: [KVCache]?
+                    // Per-call model state (e.g. M-RoPE rope deltas) carried
+                    // across turns alongside the KV cache; updated after each
+                    // prefill and stored back at the end of the turn.
+                    var lmState: LMOutput.State?
                     switch cache {
                     case .empty:
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
 
-                    case .kvcache(let array, let storedDraftCache):
+                    case .kvcache(let array, let storedDraftCache, let storedState):
                         kvCache = array
                         draftKVCache = storedDraftCache
+                        lmState = storedState
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
                         kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil)
+                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
                         messages.append(contentsOf: history)
                     }
 
@@ -554,52 +654,121 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         let (genStream, genTask): (AsyncStream<Generation>, Task<Void, Never>)
-
-                        if let speculativeDecoding {
-                            // Extract the draft model from its container (same pattern as the main model).
-                            let draftModel = await speculativeDecoding.draftModel.perform {
-                                context in
-                                SendableBox(context.model)
-                            }.consume()
-
-                            // Allocate the draft KV cache once and reuse it across turns,
-                            // exactly like the main model's KV cache.
-                            if draftKVCache == nil {
-                                draftKVCache = draftModel.newCache(parameters: generateParameters)
-                                cache = .kvcache(kvCache, draftKVCache: draftKVCache)
-                            }
-                            let draftCache = draftKVCache!
-
-                            let iterator = try SpeculativeTokenIterator(
-                                input: input,
-                                mainModel: model,
-                                draftModel: draftModel,
-                                mainCache: kvCache,
-                                draftCache: draftCache,
-                                parameters: generateParameters,
-                                numDraftTokens: speculativeDecoding.numDraftTokens
-                            )
-
-                            (genStream, genTask) = MLXLMCommon.generateTask(
-                                promptTokenCount: input.text.tokens.size,
-                                modelConfiguration: modelConfiguration,
-                                tokenizer: tokenizer,
-                                iterator: iterator,
-                                tools: tools
-                            )
-                        } else {
-                            // Standard path with no speculative decoding.
+                        func defaultGeneration() throws -> (
+                            AsyncStream<Generation>, Task<Void, Never>
+                        ) {
+                            // Seed the iterator with the carried state; read
+                            // back the post-prefill state (prefill runs in the
+                            // iterator's init, and the rope delta does not
+                            // change during decode) so the next turn — or the
+                            // next tool restart — anchors correctly.
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
+                                state: lmState,
                                 parameters: generateParameters)
+                            lmState = iterator.state
 
-                            (genStream, genTask) = MLXLMCommon.generateTask(
+                            return MLXLMCommon.generateTask(
                                 promptTokenCount: input.text.tokens.size,
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
                                 iterator: iterator,
                                 tools: tools
                             )
+                        }
+
+                        if let speculativeDecoding {
+                            var shouldFallBackBeforeLoadingDraft = false
+                            if let memoryPolicy = speculativeDecoding.memoryPolicy,
+                                let draftModelBytes =
+                                    speculativeDecoding.estimatedDraftModelBytes
+                            {
+                                let memoryEvaluation = memoryPolicy.evaluate(
+                                    mainModelBytes:
+                                        SpeculativeDecodingMemoryPolicy
+                                        .modelWeightBytes(model),
+                                    draftModelBytes: draftModelBytes
+                                )
+                                if !memoryEvaluation.shouldUseSpeculativeDecoding {
+                                    if memoryEvaluation.action == .fail {
+                                        throw SpeculativeDecodingMemoryError(
+                                            evaluation: memoryEvaluation)
+                                    }
+
+                                    shouldFallBackBeforeLoadingDraft = true
+                                }
+                            }
+
+                            if shouldFallBackBeforeLoadingDraft {
+                                (genStream, genTask) = try defaultGeneration()
+                            } else {
+                                let cachedDraftContainer = await loadedDraftModel.read { $0 }
+                                let draftContainer: ModelContainer
+                                if let cachedDraftContainer {
+                                    draftContainer = cachedDraftContainer
+                                } else {
+                                    draftContainer = try await speculativeDecoding.loadDraftModel()
+                                }
+
+                                // Extract the draft model from its container (same pattern as the main model).
+                                let draftModel = await draftContainer.perform { context in
+                                    SendableBox(context.model)
+                                }.consume()
+
+                                let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
+                                    mainModel: model,
+                                    draftModel: draftModel
+                                )
+                                if let memoryEvaluation,
+                                    !memoryEvaluation.shouldUseSpeculativeDecoding
+                                {
+                                    if memoryEvaluation.action == .fail {
+                                        throw SpeculativeDecodingMemoryError(
+                                            evaluation: memoryEvaluation)
+                                    }
+
+                                    (genStream, genTask) = try defaultGeneration()
+                                } else {
+                                    if cachedDraftContainer == nil {
+                                        await loadedDraftModel.update { storedDraftModel in
+                                            if storedDraftModel == nil {
+                                                storedDraftModel = draftContainer
+                                            }
+                                        }
+                                    }
+
+                                    // Allocate the draft KV cache once and reuse it across turns,
+                                    // exactly like the main model's KV cache.
+                                    if draftKVCache == nil {
+                                        draftKVCache = draftModel.newCache(
+                                            parameters: generateParameters)
+                                        cache = .kvcache(
+                                            kvCache, draftKVCache: draftKVCache, state: lmState)
+                                    }
+                                    let draftCache = draftKVCache!
+
+                                    let iterator = try SpeculativeTokenIterator(
+                                        input: input,
+                                        mainModel: model,
+                                        draftModel: draftModel,
+                                        mainCache: kvCache,
+                                        draftCache: draftCache,
+                                        parameters: generateParameters,
+                                        numDraftTokens: speculativeDecoding.numDraftTokens
+                                    )
+
+                                    (genStream, genTask) = MLXLMCommon.generateTask(
+                                        promptTokenCount: input.text.tokens.size,
+                                        modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer,
+                                        iterator: iterator,
+                                        tools: tools
+                                    )
+                                }
+                            }
+                        } else {
+                            // Standard path with no speculative decoding.
+                            (genStream, genTask) = try defaultGeneration()
                         }
 
                         var pendingToolCalls: [ToolCall] = []
@@ -612,9 +781,22 @@ public final class ChatSession {
                                 pendingToolCalls.append(toolCall)
                             } else if let value = transform(item) {
                                 if case .terminated = continuation.yield(value) {
+                                    genTask.cancel()
                                     break
                                 }
                             }
+                        }
+
+                        // The generation task is unstructured, so cancellation of
+                        // this task (stream onTermination) does not propagate to
+                        // it. Without an explicit cancel, `await genTask.value`
+                        // would wait for the FULL generation while holding the
+                        // cache lock — deadlocking the session's next call (e.g.
+                        // a caller that cancels mid-stream and immediately asks
+                        // again). The generate loop checks Task.isCancelled per
+                        // token, so this stops it promptly.
+                        if Task.isCancelled {
+                            genTask.cancel()
                         }
 
                         // wait for the task to complete -- this is important in
@@ -626,13 +808,18 @@ public final class ChatSession {
                         if let toolDispatch, !pendingToolCalls.isEmpty,
                             !Task.isCancelled
                         {
+                            messages.append(.assistant("", toolCalls: pendingToolCalls))
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
-                                messages.append(.tool(toolResult))
+                                messages.append(.tool(toolResult, id: toolCall.id))
                             }
                             continue restart
                         }
                     }
+
+                    // Store the carried state back alongside the KV cache so
+                    // the next turn resumes with correct position anchoring.
+                    cache = .kvcache(kvCache, draftKVCache: draftKVCache, state: lmState)
 
                     continuation.finish()
                 }
@@ -693,7 +880,7 @@ public final class ChatSession {
     {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 return try await body(cache)
             default:
                 return try await body(nil)
@@ -712,7 +899,7 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _):
+            case .kvcache(let cache, _, _):
                 try savePromptCache(url: url, cache: cache)
             default:
                 throw ChatSessionError.noCacheAvailable

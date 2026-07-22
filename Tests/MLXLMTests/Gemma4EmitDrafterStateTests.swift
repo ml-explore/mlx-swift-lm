@@ -98,13 +98,43 @@ func testGemma4TextEmitDisabledIsBitIdenticalRegressionBySynthetic() {
     )
 }
 
+// MARK: - KV-shared layer module-tree shape (E-series load regression)
+
+/// The last `num_kv_shared_layers` decoder layers reuse an earlier layer's K/V
+/// and own no `k_proj`/`v_proj`/`k_norm`/`v_norm`; the published checkpoints ship
+/// none. The module tree must therefore declare none on those layers, else
+/// `loadWeights` fails `keyNotFound self_attn.k_proj.weight` on the shared tail —
+/// the bug that blocked loading the E-series targets (E2B layer 15, E4B layer 24)
+/// through `VLMModelFactory`. Pins the module-tree shape with no checkpoint.
+@Test
+func testGemma4TextSharedLayersDeclareNoKProj() {
+    // 4 layers, last 2 KV-shared ⇒ layers 0,1 own k_proj; layers 2,3 must not.
+    let model = makeSyntheticGemma4TextLanguageModel(
+        layerTypes: Array(repeating: "full_attention", count: 4),
+        numKvSharedLayers: 2)
+
+    let kProjLayers = Set(
+        model.parameters().flattened().compactMap { key, _ -> Int? in
+            guard key.contains("self_attn.k_proj"),
+                let r = key.range(of: "layers.")
+            else { return nil }
+            let digits = key[r.upperBound...].prefix { $0.isNumber }
+            return Int(digits)
+        })
+
+    #expect(
+        kProjLayers == [0, 1],
+        "only KV-owning layers may declare k_proj; got \(kProjLayers.sorted())")
+}
+
 // MARK: - Helpers
 
-/// Build a small 2-layer Gemma4TextLanguageModel with random-initialized
-/// weights. Sufficient for emit-hook plumbing tests; not a correctness
-/// reference for the model itself.
+/// Build a small Gemma4TextLanguageModel with random-initialized weights.
+/// Sufficient for emit-hook plumbing and module-tree shape tests; not a
+/// correctness reference for the model itself.
 private func makeSyntheticGemma4TextLanguageModel(
-    layerTypes: [String]
+    layerTypes: [String],
+    numKvSharedLayers: Int = 0
 ) -> Gemma4TextLanguageModel {
     let layersJSON = layerTypes.map { "\"\($0)\"" }.joined(separator: ", ")
     let textJSON =
@@ -118,7 +148,7 @@ private func makeSyntheticGemma4TextLanguageModel(
           "head_dim": 2,
           "global_head_dim": 2,
           "vocab_size": 10,
-          "num_kv_shared_layers": 0,
+          "num_kv_shared_layers": \(numKvSharedLayers),
           "hidden_size_per_layer_input": 0,
           "sliding_window": 4,
           "sliding_window_pattern": 1,

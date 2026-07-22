@@ -72,8 +72,10 @@ public struct ResolvedModelConfiguration: Sendable {
     public var name: String
     public var defaultPrompt: String
     public var extraEOSTokens: Set<String>
+    public var stopStrings: Set<String>
     public var eosTokenIds: Set<Int>
     public var toolCallFormat: ToolCallFormat?
+    public var reasoningConfig: ReasoningConfig?
 
     public init(
         modelDirectory: URL,
@@ -81,16 +83,20 @@ public struct ResolvedModelConfiguration: Sendable {
         name: String,
         defaultPrompt: String,
         extraEOSTokens: Set<String>,
+        stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int>,
-        toolCallFormat: ToolCallFormat?
+        toolCallFormat: ToolCallFormat?,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
         self.name = name
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings ?? extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 }
 
@@ -104,7 +110,9 @@ extension ResolvedModelConfiguration {
                 + directory.lastPathComponent,
             defaultPrompt: "",
             extraEOSTokens: [],
+            stopStrings: [],
             eosTokenIds: [],
-            toolCallFormat: nil)
+            toolCallFormat: nil,
+            reasoningConfig: nil)
     }
 }

@@ -42,9 +42,13 @@ public struct MistralToolCallParser: ToolCallParser, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let argsPart = String(text[argsRange.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        var callID: String?
 
         // Handle optional [CALL_ID] between name and [ARGS]
         if let callIdRange = namePart.range(of: "[CALL_ID]") {
+            let parsedCallID = String(namePart[callIdRange.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            callID = parsedCallID.isEmpty ? nil : parsedCallID
             namePart = String(namePart[..<callIdRange.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -57,7 +61,8 @@ public struct MistralToolCallParser: ToolCallParser, Sendable {
         }
 
         return ToolCall(
-            function: ToolCall.Function(name: namePart, arguments: argsDict)
+            function: ToolCall.Function(name: namePart, arguments: argsDict),
+            id: callID
         )
     }
 }

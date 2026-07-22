@@ -2,13 +2,16 @@
 // Integration packages inject their own Downloader and TokenizerLoader, then call
 // these functions which run the test and throw on failure.
 
-import CoreImage
 import Foundation
 import MLX
 import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
+
+#if canImport(CoreImage)
+import CoreImage
+#endif
 
 // Both MLXLMCommon and MLXEmbedders define ModelContainer.
 public typealias LLModelContainer = MLXLMCommon.ModelContainer
@@ -128,6 +131,15 @@ public actor IntegrationTestModels {
     }
 }
 
+// MARK: - Vision Test Images
+
+/// A solid-color square image for vision smoke tests.
+public enum VisionTestImages {
+    public static func solidColor(_ color: CIColor, size: CGFloat = 100) -> CIImage {
+        CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
+    }
+}
+
 // MARK: - ChatSession Tests
 
 private let generateParameters = GenerateParameters(maxTokens: 200, temperature: 0)
@@ -176,9 +188,9 @@ public enum ChatSessionTests {
     }
 
     public static func visionModel(container: LLModelContainer) async throws {
+        #if canImport(CoreImage)
         let session = ChatSession(container, generateParameters: generateParameters)
-        let redImage = CIImage(color: .red).cropped(
-            to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let redImage = VisionTestImages.solidColor(.red)
 
         let result = try await streamAndCollect(
             session.streamResponse(
@@ -188,6 +200,10 @@ public enum ChatSessionTests {
             result.lowercased().contains("red"),
             "Expected 'red' in response, got: \(result)"
         )
+        #else
+        fatalError(
+            "Vision model test requires CoreImage, which is not available on this platform.")
+        #endif
     }
 
     public static func streamDetailsWithTools(container: LLModelContainer) async throws {
@@ -864,6 +880,48 @@ private let timeToolSchema: ToolSpec = [
 
 private let multiToolSchemas: [ToolSpec] = [weatherToolSchema, timeToolSchema]
 
+// MARK: - Hugging Face cache locations
+
+/// Returns the root directory for Hugging Face caches (`~/.cache/huggingface`).
+///
+/// `FileManager.homeDirectoryForCurrentUser` is unavailable on iOS, so this helper
+/// falls back to `NSHomeDirectory()`. On macOS that resolves to the real user home
+/// (matching the `huggingface_hub` Python client's default cache layout); on iOS it
+/// resolves to the app sandbox home, where these integration tests do not normally run
+/// but where the path is at least addressable for callers that pre-populate caches.
+public func hfCacheDir() -> URL {
+    URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        .appendingPathComponent(".cache/huggingface", isDirectory: true)
+}
+
+/// Returns the local snapshot directory for `modelId` inside the Hugging Face hub cache,
+/// following the `models--{owner}--{name}/snapshots/{rev}` layout written by `huggingface_hub`.
+/// When `revision` is `nil` (the default) picks the first entry under `snapshots/` — sufficient
+/// for the usual single-revision case.
+/// When `revision` is non-nil, returns that specific snapshot directory if it exists.
+/// Returns `nil` when the model (or the requested revision) is not present in the cache.
+public func hfSnapshotDir(modelId: String, revision: String? = nil) -> URL? {
+    let folderName = "models--" + modelId.replacingOccurrences(of: "/", with: "--")
+    let snapshots = hfCacheDir()
+        .appendingPathComponent("hub", isDirectory: true)
+        .appendingPathComponent(folderName, isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+    if let revision {
+        let pinned = snapshots.appendingPathComponent(revision, isDirectory: true)
+        var isDir: ObjCBool = false
+        guard
+            FileManager.default.fileExists(atPath: pinned.path, isDirectory: &isDir),
+            isDir.boolValue
+        else { return nil }
+        return pinned
+    }
+    guard
+        let entries = try? FileManager.default.contentsOfDirectory(
+            at: snapshots, includingPropertiesForKeys: nil)
+    else { return nil }
+    return entries.first
+}
+
 // MARK: - Dataset download
 
 public enum IntegrationTestDatasetError: LocalizedError {
@@ -905,9 +963,8 @@ public func downloadDataset(
     revision: String,
     matching patterns: [String] = []
 ) async throws -> URL {
-    let cacheRoot = FileManager.default
-        .homeDirectoryForCurrentUser
-        .appendingPathComponent(".cache/huggingface/integration-test-datasets", isDirectory: true)
+    let cacheRoot = hfCacheDir()
+        .appendingPathComponent("integration-test-datasets", isDirectory: true)
     let snapshotDir =
         cacheRoot
         .appendingPathComponent(repo, isDirectory: true)

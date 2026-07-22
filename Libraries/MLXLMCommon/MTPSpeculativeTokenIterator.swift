@@ -44,7 +44,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
-    public var tokenCount = 0
+    public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
     /// Total tokens proposed per round (`blockSize - 1` drafted, plus the
     /// bonus token from the previous verify). Mirrors mlx-vlm's
@@ -74,6 +74,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     private var lastRoundAccepted: Int? = nil
 
     public var promptPrefillTime: TimeInterval = 0.0
+    private var telemetry = SpeculativeDecodingTelemetry()
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
+        telemetry.roundCount > 0 ? telemetry : nil
+    }
+
+    public mutating func discardGeneratedToken() {
+        telemetry.discardGeneratedToken()
+    }
 
     // Optional instrumentation used by acceptance-rate floor tests.
     // Public read-only so test cases can compute `acceptedCount /
@@ -136,11 +144,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         var prefillState = LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
-        // Note: `prepare(_:cache:windowSize:)` does not currently thread
-        // state through. To prime drafter state we run an explicit follow-up
-        // forward call after prefill (one position, the bonus token).
+        // Note: the drafter is primed via an explicit follow-up forward call
+        // after prefill (one position, the bonus token) rather than by
+        // passing `prefillState` into `prepare` — the emit flag is meant for
+        // exactly one position, not the whole prompt.
 
-        switch try mainModel.prepare(input, cache: mainCache, windowSize: windowSize) {
+        switch try mainModel.prepare(input, cache: mainCache, state: nil, windowSize: windowSize)
+        {
         case .tokens(let tokens):
             y = tokens
             // Final prompt position not yet evaluated -- run one forward to
@@ -205,10 +215,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     mutating func speculateRound() {
         guard !passthrough else { return }
 
-        // Cap drafting by maxTokens.
-        let remaining = maxTokens.map { $0 - tokenCount } ?? (blockSize - 1)
-        let numDraft = Swift.min(remaining, blockSize - 1)
-        guard numDraft > 0 else { return }
+        // A speculative round can emit up to `numDraft + 1` tokens: the
+        // accepted draft prefix plus the verifier's correction/bonus token.
+        // Keep the whole pending buffer within the remaining output budget.
+        let numDraft: Int
+        if let maxTokens {
+            let remaining = maxTokens - tokenCount
+            guard remaining > 0 else { return }
+
+            let draftBudget = Swift.min(remaining - 1, blockSize - 1)
+            guard draftBudget > 0 else {
+                if let token = passthroughStep() {
+                    pendingTokens.append(token)
+                }
+                return
+            }
+            numDraft = draftBudget
+        } else {
+            numDraft = blockSize - 1
+        }
 
         guard
             let state = mainState,
@@ -316,6 +341,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         proposedCount += numDraft
         acceptedCount += accepted
         lastRoundAccepted = accepted
+        telemetry.recordRound(
+            drafted: numDraft,
+            accepted: accepted,
+            targetVerified: numDraft + 1,
+            draftModelCalls: 1
+        )
 
         // Rewind the main cache and the emitted sharedKV snapshot by the
         // rejected count, in lockstep. The drafter has no cache of its own,
@@ -375,7 +406,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         if passthrough {
             if let token = passthroughStep() {
-                tokenCount += 1
+                telemetry.recordGeneratedToken()
                 return token
             }
             return nil
@@ -385,20 +416,20 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         if pendingIndex < pendingTokens.count {
             let token = pendingTokens[pendingIndex]
             pendingIndex += 1
-            tokenCount += 1
+            telemetry.recordGeneratedToken()
             return token
         }
 
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
             // speculateRound chose passthrough -- fall through.
             if passthrough {
                 if let token = passthroughStep() {
-                    tokenCount += 1
+                    telemetry.recordGeneratedToken()
                     return token
                 }
             }
@@ -407,7 +438,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
-        tokenCount += 1
+        telemetry.recordGeneratedToken()
         return token
     }
 }

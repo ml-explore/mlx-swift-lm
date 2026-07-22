@@ -222,36 +222,27 @@ enum Qwen35Language {
 
     final class RotaryEmbedding {
         private let invFreq: MLXArray
-        private let mropeSection: [Int]
+        private let mropeIndices: MLXArray
 
         init(dim: Int, base: Float, mropeSection: [Int]) {
             let safeDim = max(1, dim)
             var freq = MLXArray(stride(from: 0, to: safeDim, by: 2)).asType(.float32)
             freq = freq / Float(safeDim)
             self.invFreq = 1.0 / pow(MLXArray(base), freq)
-            self.mropeSection =
-                mropeSection.count >= 3 ? mropeSection : [11, 11, 10]
+
+            let sections = mropeSection.count >= 3 ? mropeSection : [11, 11, 10]
+            var indices = [Int32](repeating: 0, count: freq.dim(0))
+            for (dimension, offset) in [(1, 1), (2, 2)] {
+                let end = min(sections[dimension] * 3, indices.count)
+                for index in stride(from: offset, to: end, by: 3) {
+                    indices[index] = Int32(dimension)
+                }
+            }
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let freqsT = freqs[0, 0..., 0..., 0...]
-            let dims = freqsT.dim(-1)
-            var slices: [MLXArray] = []
-            slices.reserveCapacity(dims)
-
-            for idx in 0 ..< dims {
-                var slice = freqsT[0..., 0..., idx]
-                for (dim, offset) in [(1, 1), (2, 2)] {
-                    let length = min(mropeSection[dim] * 3, dims)
-                    if idx >= offset && idx < length && ((idx - offset) % 3 == 0) {
-                        slice = freqs[dim, 0..., 0..., idx]
-                        break
-                    }
-                }
-                slices.append(slice)
-            }
-
-            return stacked(slices, axis: -1)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(x: MLXArray, positionIds: MLXArray) -> (MLXArray, MLXArray) {
@@ -538,7 +529,7 @@ enum Qwen35Language {
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
             if let cache, convKernelSize > 1 {
-                cache[0] = convInput[0..., (-(convKernelSize - 1))...]
+                cache[0] = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
             }
 
             let convOut = silu(conv1d(convInput))
@@ -572,6 +563,7 @@ enum Qwen35Language {
 
             if let cache {
                 cache[1] = state
+                cache.advance(S)
             }
 
             out = norm(out, gate: z)
@@ -978,13 +970,14 @@ public class Qwen35: Module, VLMModel {
         return frames
     }
 
-    public func prepare(
-        _ input: LMInput,
-        cache: [any KVCache],
-        windowSize _: Int?
-    ) throws -> PrepareResult {
-        let inputIds = input.text.tokens
-
+    /// Vision tower + image→token merge over the input, shared by `prepare`
+    /// and `prepareContinuation` (mirrors `Qwen25VL.inputEmbeddings`).
+    private func visionInputEmbeddings(
+        _ input: LMInput
+    ) throws -> (
+        pixelValues: MLXArray?, imageFrames: [THW]?, videoFrames: [THW]?,
+        inputEmbeddings: MLXArray?
+    ) {
         var pixelValues: MLXArray?
         var imageFrames: [THW]?
         var videoFrames: [THW]?
@@ -1010,6 +1003,7 @@ public class Qwen35: Module, VLMModel {
             let frames = combinedFrames(imageFrames: imageFrames, videoFrames: videoFrames)
                 .nilIfEmpty
         {
+            let inputIds = input.text.tokens
             let textEmbeds = languageModel.model.embedTokens(inputIds)
             let (visionHidden, _) = visionModel(pixelValues, gridTHW: frames)
             let visionFeatures = visionHidden.asType(textEmbeds.dtype)
@@ -1024,20 +1018,166 @@ public class Qwen35: Module, VLMModel {
             inputEmbeddings = mergedEmbeds
         }
 
+        return (pixelValues, imageFrames, videoFrames, inputEmbeddings)
+    }
+
+    public func prepare(
+        _ input: LMInput,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        windowSize: Int?
+    ) throws -> PrepareResult {
+        let inputIds = input.text.tokens
+
+        // Windowed (chunked) prefill — the remaining #344 deferred item for
+        // Qwen3.5 — with the same default as the sibling chunked prefills
+        // (Gemma3/LLMModel: `windowSize ?? 512`). The windowed forward also
+        // owns every warm continuation (multi-turn chat, tool restart,
+        // restored prompt cache): a cold cache is just a continuation
+        // anchored at offset 0, and a warm one anchors M-RoPE positions at
+        // the cache offset plus the rope delta carried in `state` — never
+        // back at zero. The windowed forward is single-sequence; batched
+        // inputs keep the single-shot path below.
+        let window = windowSize ?? 512
+        if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
+            faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
+        {
+            return try prepareContinuation(
+                input, cache: cache, state: state, windowSize: window)
+        }
+
+        let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
+            try visionInputEmbeddings(input)
+
         let typedCache = castCache(cache)
-        let output = languageModel(
-            inputIds,
-            inputsEmbeds: inputEmbeddings,
-            cache: typedCache,
-            state: nil,
-            mask: input.text.mask,
-            positionIds: nil,
-            pixelValues: pixelValues,
-            imageGridTHW: imageFrames,
-            videoGridTHW: videoFrames
-        )
+        let output = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
+            languageModel(
+                inputIds,
+                inputsEmbeds: inputEmbeddings,
+                cache: typedCache,
+                state: state,
+                mask: input.text.mask,
+                positionIds: nil,
+                pixelValues: pixelValues,
+                imageGridTHW: imageFrames,
+                videoGridTHW: videoFrames
+            )
+        }
 
         return .logits(output)
+    }
+
+    /// Offset of the first full-attention layer's cache — the model's notion
+    /// of "how many tokens are already cached".
+    private func faCacheOffset(_ cache: [any KVCache]) -> Int {
+        let faIdx = languageModel.model.faIdx
+        return cache.indices.contains(faIdx) ? cache[faIdx].offset : 0
+    }
+
+    /// Warm, windowed continuation through an image-bearing remainder — the
+    /// windowed forward that `prepare` also delegates to for long prompts.
+    ///
+    /// It runs the vision tower and the image→token merge **once** over the
+    /// remainder, computes the new image's M-RoPE positions **once** from the
+    /// seeded **Position Anchor** (so the image's diverging t/h/w indices
+    /// start at the anchor, not zero), then drives the language-model forward
+    /// in chunks of `windowSize`. The full-attention scratch is bounded to
+    /// `[heads, chunk, L]` instead of `[heads, L, L]`, so it cannot crash on
+    /// a long prefix or a large image.
+    ///
+    /// `cache` must already be warmed to the restore offset `P` (a fresh cache
+    /// means `P = 0`, a crash-safe cold prefill). `state` carries the anchor's
+    /// rope delta in the `qwen35.ropeDeltas` slot (zero / absent for an
+    /// image-free prefix). The returned state carries the rope delta the
+    /// post-image text tail resumes with (`getRopeIndex` delta − `P`), so a
+    /// caller threading state end-to-end continues that tail with the ordinary
+    /// flat-continuation branch. Decode stays caller-owned.
+    private func prepareContinuation(
+        _ input: LMInput,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        windowSize: Int
+    ) throws -> PrepareResult {
+        let inputIds = input.text.tokens
+        let remainderLength = inputIds.dim(-1)
+        precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
+
+        // The Position Anchor: token offset already in the cache (P) plus the
+        // rope delta the cached images accumulated, carried in `state`.
+        let cacheOffset = faCacheOffset(cache)
+        var anchorRopeDelta = 0
+        if let seeded = state?[ropeDeltasKey] {
+            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
+        }
+        let positionOffset = cacheOffset + anchorRopeDelta
+
+        // Vision tower + image→token merge — once, over the whole remainder;
+        // chunks slice the merged embeddings below.
+        let (_, imageFrames, videoFrames, inputEmbeddings) =
+            try visionInputEmbeddings(input)
+
+        // Offset-aware M-RoPE positions for the whole remainder — once. The new
+        // image's t/h/w indices diverge from the anchor; the returned delta is
+        // in the same offset frame.
+        let (positionIds, ropeDeltas) = Qwen3VLLanguage.getRopeIndex(
+            inputIds: inputIds,
+            imageGridTHW: imageFrames,
+            videoGridTHW: videoFrames,
+            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
+            imageTokenId: config.imageTokenId,
+            videoTokenId: config.videoTokenId,
+            visionStartTokenId: config.visionStartTokenId,
+            attentionMask: input.text.mask,
+            positionOffset: positionOffset
+        )
+
+        // Chunk the forward. Each window forwards `chunk` query tokens against
+        // the growing cache, so the full-attention scratch stays `[heads,
+        // chunk, L]`. Intermediate logits are dropped un-evaluated (only the
+        // cache is realized between windows), so `lm_head` never materializes a
+        // `[1, L, vocab]` tensor. `asyncEval` bounds the un-evaluated graph
+        // while letting the GPU run window i as the CPU builds window i+1
+        // (same shape as the sibling chunked prefills, e.g. Gemma3).
+        let typedCache = castCache(cache)
+        let step = max(1, windowSize)
+        var lastLogits: MLXArray
+        var start = 0
+        repeat {
+            try Task.checkCancellation()
+            let end = min(start + step, remainderLength)
+            let chunkInputs = inputIds[0..., start ..< end]
+            let chunkEmbeds = inputEmbeddings.map { $0[0..., start ..< end, 0...] }
+            let chunkPositions = positionIds[0..., 0..., start ..< end]
+            let output = languageModel(
+                chunkInputs,
+                inputsEmbeds: chunkEmbeds,
+                cache: typedCache,
+                state: nil,
+                mask: nil,
+                positionIds: chunkPositions,
+                pixelValues: nil,
+                imageGridTHW: nil,
+                videoGridTHW: nil
+            )
+            lastLogits = output.logits
+            if let typedCache {
+                asyncEval(typedCache)
+            }
+            start = end
+        } while start < remainderLength
+        if let typedCache {
+            eval(typedCache)
+        }
+
+        // Seed the post-image text tail's anchor. The vendor's flat-continuation
+        // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
+        // after this remainder `tailCacheOffset = P + remainderLength`, so the
+        // delta the tail needs is the offset-frame `getRopeIndex` delta minus
+        // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
+        var resumeState = LMOutput.State()
+        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
+
+        return .logits(LMOutput(logits: lastLogits, state: resumeState))
     }
 
     public func callAsFunction(
@@ -1068,6 +1208,19 @@ public class Qwen35: Module, VLMModel {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
+        // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
+        // so the VLM and text paths agree: a pre-converted MLX checkpoint
+        // (conv1d already sanitized, no MTP tensors) has already been shifted at
+        // conversion time and must NOT be shifted again — doing so double-shifts
+        // every layernorm and produces garbage tokens. Computed on the incoming
+        // weights, before the `mtp.` filter below.
+        let hasMTPWeights = weights.keys.contains { $0.contains("mtp.") }
+        let hasUnsanitizedConv1d = weights.contains { key, value in
+            key.contains("conv1d.weight") && value.dim(-1) != 1
+        }
+        let shouldShiftNormWeights = hasMTPWeights || hasUnsanitizedConv1d
+
         var weights = weights.filter { !$0.key.contains("mtp.") }
 
         if config.textConfiguration.tieWordEmbeddings {
@@ -1108,7 +1261,9 @@ public class Qwen35: Module, VLMModel {
             if key.contains("conv1d.weight") && value.dim(-1) != 1 {
                 value = value.movedAxis(source: 2, destination: 1)
             }
-            if normKeys.contains(where: { key.hasSuffix($0) }) && value.ndim == 1 {
+            if shouldShiftNormWeights
+                && normKeys.contains(where: { key.hasSuffix($0) }) && value.ndim == 1
+            {
                 value = value + MLXArray(1, dtype: value.dtype)
             }
 

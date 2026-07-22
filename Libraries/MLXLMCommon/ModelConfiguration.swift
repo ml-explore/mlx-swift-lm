@@ -101,24 +101,44 @@ public struct ModelConfiguration: Sendable {
     /// Additional tokens to use for end of string (specified as strings, converted to IDs at runtime)
     public var extraEOSTokens: Set<String>
 
+    /// Text sequences that stop decoded generation when encountered.
+    ///
+    /// If this is `nil`, decoded stop strings fall back to ``extraEOSTokens``.
+    /// Set this explicitly, including to an empty set, to override that fallback.
+    public var stopStrings: Set<String>?
+
+    /// Text sequences to use for decoded stop-string matching.
+    public var effectiveStopStrings: Set<String> {
+        stopStrings ?? extraEOSTokens
+    }
+
     /// EOS token IDs loaded from config.json/generation_config.json
     public var eosTokenIds: Set<Int> = []
 
     /// Tool call format for this model (nil = default JSON format)
     public var toolCallFormat: ToolCallFormat?
 
+    /// Reasoning (chain-of-thought) protocol for this model (nil = non-reasoning model)
+    public var reasoningConfig: ReasoningConfig? = nil
+
     public init(
         id: String, revision: String = "main",
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        stopStrings: Set<String>? = nil,
+        eosTokenIds: Set<Int> = [],
+        toolCallFormat: ToolCallFormat? = nil,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings
+        self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 
     public init(
@@ -126,15 +146,19 @@ public struct ModelConfiguration: Sendable {
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
+        stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -151,8 +175,10 @@ public struct ModelConfiguration: Sendable {
             name: name,
             defaultPrompt: defaultPrompt,
             extraEOSTokens: extraEOSTokens,
+            stopStrings: stopStrings,
             eosTokenIds: eosTokenIds,
-            toolCallFormat: toolCallFormat)
+            toolCallFormat: toolCallFormat,
+            reasoningConfig: reasoningConfig)
     }
 
 }

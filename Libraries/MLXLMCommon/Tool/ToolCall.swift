@@ -20,13 +20,21 @@ public struct ToolCall: Hashable, Codable, Sendable {
             self.name = name
             self.arguments = arguments.mapValues { JSONValue.from($0) }
         }
+
+        var argumentsObject: [String: any Sendable] {
+            arguments.mapValues { $0.sendableValue }
+        }
     }
 
     /// The function to be called
     public let function: Function
 
-    public init(function: Function) {
+    /// Optional id used to correlate a tool call with its tool result.
+    public let id: String?
+
+    public init(function: Function, id: String? = nil) {
         self.function = function
+        self.id = id
     }
 }
 

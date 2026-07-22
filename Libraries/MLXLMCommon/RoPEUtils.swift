@@ -9,6 +9,80 @@ import Foundation
 import MLX
 import MLXNN
 
+private let yarnTypes: Set<String> = ["yarn", "deepseek_yarn", "telechat3-yarn"]
+private let supportedRoPETypes: Set<String> = Set([
+    "default", "linear", "proportional", "llama3", "longrope", "mrope",
+]).union(yarnTypes)
+
+private func ropeType(in scalingConfig: [String: StringOrNumber]?) -> String? {
+    guard let value = scalingConfig?["type"] ?? scalingConfig?["rope_type"] else { return nil }
+    guard case .string(let ropeType) = value else { return nil }
+    return ropeType
+}
+
+private func invalidRoPEConfiguration(_ context: String, _ message: String) -> ModelFactoryError {
+    .invalidConfiguration("\(context): \(message)")
+}
+
+public func validateRoPEConfiguration(
+    _ scalingConfig: [String: StringOrNumber]?,
+    context: String = "rope_scaling",
+    supportedTypes: Set<String>? = nil
+) throws {
+    guard let scalingConfig else { return }
+    let supportedTypes = supportedTypes ?? supportedRoPETypes
+
+    if let typeValue = scalingConfig["type"] ?? scalingConfig["rope_type"] {
+        guard case .string(let ropeType) = typeValue else {
+            throw invalidRoPEConfiguration(context, "type must be a string")
+        }
+        guard supportedTypes.contains(ropeType) else {
+            throw invalidRoPEConfiguration(context, "unsupported type '\(ropeType)'")
+        }
+    }
+
+    if let factor = scalingConfig["factor"], factor.asFloat() == nil {
+        throw invalidRoPEConfiguration(context, "factor must be numeric")
+    }
+
+    switch ropeType(in: scalingConfig) {
+    case "llama3":
+        for key in ["low_freq_factor", "high_freq_factor", "original_max_position_embeddings"] {
+            if let value = scalingConfig[key], value.asFloat() == nil {
+                throw invalidRoPEConfiguration(context, "\(key) must be numeric")
+            }
+        }
+    case "longrope":
+        guard scalingConfig["original_max_position_embeddings"]?.asInt() != nil else {
+            throw invalidRoPEConfiguration(
+                context, "longrope requires original_max_position_embeddings")
+        }
+        guard scalingConfig["short_factor"]?.asFloats() != nil else {
+            throw invalidRoPEConfiguration(context, "longrope requires numeric short_factor")
+        }
+        guard scalingConfig["long_factor"]?.asFloats() != nil else {
+            throw invalidRoPEConfiguration(context, "longrope requires numeric long_factor")
+        }
+    case "mrope":
+        try validateMROPESection(scalingConfig, context: context)
+    default:
+        break
+    }
+}
+
+public func validateMROPESection(
+    _ scalingConfig: [String: StringOrNumber]?,
+    context: String = "rope_scaling"
+) throws {
+    guard let section = scalingConfig?["mrope_section"]?.asInts() else {
+        throw invalidRoPEConfiguration(context, "mrope_section must be an array of integers")
+    }
+    guard section.count == 3, section.allSatisfy({ $0 > 0 }) else {
+        throw invalidRoPEConfiguration(
+            context, "mrope_section must contain three positive integers")
+    }
+}
+
 public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dims: Int
     let maxPositionEmbeddings: Int
@@ -365,9 +439,6 @@ public class DynamicNTKAlphaRoPE: Module, OffsetLayer, ArrayOffsetLayer {
             offset: offset, freqs: _freqs)
     }
 }
-
-private let yarnTypes: Set = ["yarn", "deepseek_yarn", "telechat3-yarn"]
-
 public typealias RoPELayer = OffsetLayer & ArrayOffsetLayer
 
 public func initializeRope(

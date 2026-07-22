@@ -1,35 +1,30 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import HuggingFace
+import IntegrationTestHelpers
+import MLXHuggingFace
 import MLXLMCommon
 import MLXVLM
 import Testing
 
-// MARK: - Factory load (gated on checkpoint presence)
+// MARK: - Factory load (auto-downloads the checkpoint if not cached)
+
+/// Pinned checkpoint revision matching the weights that were live when the
+/// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
+/// `MTPRung4TokenParityTests`.
+private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 
 @Test
 func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws {
-    // Look for the 31B-assistant-bf16 checkpoint in the HF cache; skip
-    // gracefully when absent.
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let hub = home.appendingPathComponent(".cache/huggingface/hub")
-    let folder = hub.appendingPathComponent(
-        "models--mlx-community--gemma-4-31B-it-assistant-bf16/snapshots"
-    )
-    guard
-        let entries = try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil),
-        let snapshot = entries.first
-    else {
-        Issue.record("31B-assistant-bf16 checkpoint not in HF cache; skipping factory load test")
-        return
-    }
-
     await Gemma4AssistantRegistration.register()
     let factory = MTPDrafterModelFactory.shared
 
     let container = try await factory.loadContainer(
-        from: snapshot, using: NoOpTokenizerLoader()
+        from: #hubDownloader(),
+        using: NoOpTokenizerLoader(),
+        configuration: .init(
+            id: "mlx-community/gemma-4-31B-it-assistant-bf16", revision: drafter31BRevision)
     )
     let isDrafter = await container.perform { ctx in
         ctx.model is Gemma4AssistantDraftModel

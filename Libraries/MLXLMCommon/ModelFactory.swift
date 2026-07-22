@@ -11,6 +11,7 @@ public enum ModelFactoryError: LocalizedError {
     case unsupportedProcessorType(String)
     case configurationFileError(String, String, Error)
     case configurationDecodingError(String, String, DecodingError)
+    case invalidConfiguration(String)
     case noModelFactoryAvailable
 
     public var errorDescription: String? {
@@ -21,6 +22,8 @@ public enum ModelFactoryError: LocalizedError {
             return "Unsupported processor type: \(type)"
         case .configurationFileError(let file, let modelName, let error):
             return "Error reading '\(file)' for model '\(modelName)': \(error.localizedDescription)"
+        case .invalidConfiguration(let message):
+            return "Invalid model configuration: \(message)"
         case .noModelFactoryAvailable:
             return "No model factory available via ModelFactoryRegistry"
         case .configurationDecodingError(let file, let modelName, let decodingError):
@@ -51,6 +54,10 @@ public enum ModelFactoryError: LocalizedError {
             return error.localizedDescription
         }
     }
+}
+
+public protocol ModelConfigurationValidating {
+    func validateModelConfiguration() throws
 }
 
 /// Context of types that work together to provide a ``LanguageModel``.

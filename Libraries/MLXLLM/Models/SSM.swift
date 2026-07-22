@@ -263,7 +263,8 @@ public func ssmUpdate(
     state: MLXArray? = nil,
     timeStepLimit: (Float, Float) = (0.001, 100.0),
     mask: MLXArray? = nil,
-    lengths: MLXArray? = nil
+    lengths: MLXArray? = nil,
+    step: Int = 256
 ) -> (MLXArray, MLXArray) {
     let seqLen = hiddenStates.dim(1)
 
@@ -294,7 +295,8 @@ public func ssmUpdate(
             state: state,
             timeStepLimit: timeStepLimit,
             mask: mask,
-            lengths: lengths
+            lengths: lengths,
+            step: step
         )
     }
 }

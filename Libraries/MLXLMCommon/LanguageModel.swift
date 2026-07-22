@@ -17,6 +17,14 @@ public protocol BaseLanguageModel: Module {
     func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
 }
 
+/// Optional metadata a model wants written into converted safetensors.
+///
+/// Model-specific metadata lets future loaders distinguish transformed MLX-native
+/// checkpoints from original upstream checkpoints without relying only on tensor shapes.
+public protocol ModelConversionMetadataProvider {
+    var modelConversionMetadata: [String: String] { get }
+}
+
 extension BaseLanguageModel {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights
@@ -88,6 +96,15 @@ public struct LMInput {
         ) -> Text {
             Text(tokens: tokens[indices, stream: stream], mask: mask)
         }
+
+        /// Per-batch sequence lengths derived from the optional attention mask.
+        public var sequenceLengths: [Int]? {
+            if let mask {
+                return mask.asType(.int32).sum(axis: -1).asArray(Int.self)
+            }
+            guard tokens.ndim == 2 else { return nil }
+            return Array(repeating: tokens.dim(1), count: tokens.dim(0))
+        }
     }
 
     /// Representation of prepared input image(s).
@@ -95,13 +112,16 @@ public struct LMInput {
 
         /// Concatenated pixels from one or more images
         public let pixels: MLXArray
+        /// Optional per-patch position ids for encoder-free vision embedders.
+        public let positionIds: MLXArray?
         /// Time, height, and width of the images
         public let frames: [THW]?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
         ) {
             self.pixels = pixels
+            self.positionIds = positionIds
             self.frames = frames
         }
     }
@@ -111,25 +131,30 @@ public struct LMInput {
     public struct ProcessedVideo {
 
         public let pixels: MLXArray
+        public let positionIds: MLXArray?
         public let frames: [THW]?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
         ) {
             self.pixels = pixels
+            self.positionIds = positionIds
             self.frames = frames
         }
     }
 
-    /// Representation of prepared input audio(s).
+    /// Representation of prepared audio features.
     public struct ProcessedAudio {
+        public let features: MLXArray
+        public let mask: MLXArray?
 
-        public let samples: MLXArray
+        public init(features: MLXArray, mask: MLXArray? = nil) {
+            self.features = features
+            self.mask = mask
+        }
 
-        public init(
-            samples: MLXArray
-        ) {
-            self.samples = samples
+        public init(samples: MLXArray) {
+            self.init(features: samples)
         }
     }
 
@@ -193,7 +218,7 @@ public struct LMOutput {
     }
 }
 
-/// The result of the call to ``LanguageModel/prepare(_:cache:windowSize:)``
+/// The result of the call to ``LanguageModel/prepare(_:cache:state:windowSize:)``
 public enum PrepareResult {
     /// tokens to process by the ``TokenIterator``
     case tokens(LMInput.Text)
@@ -207,17 +232,26 @@ public enum PrepareResult {
 /// The language model is typically called by the ``TokenIterator`` and it:
 ///
 /// - consumes the ``LMInput``
-/// - calls ``prepare(_:cache:windowSize:)`` to initialize the KVCache and consume the prompt
+/// - calls ``prepare(_:cache:state:windowSize:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel {
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
+    /// `state` is the ``LMOutput/state`` a caller carried over from earlier
+    /// evaluation against the same `cache` — present when `cache` is already
+    /// warm (a multi-turn chat, a tool-call restart, a restored prompt
+    /// cache). Models that keep per-call positional state (e.g. the M-RoPE
+    /// `ropeDeltas` of the Qwen VLM families) use it to anchor the new
+    /// tokens' positions at the cache offset; models without such state can
+    /// ignore it. In the typical cold call it is `nil`.
+    ///
     /// This can return:
     /// - ``PrepareResult/tokens(_:)`` if the caller should evaluate the (remaining) tokens normally
     /// - ``PrepareResult/logits(_:)`` to produce the next token from the prompt
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult
+    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?)
+        throws -> PrepareResult
 
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)

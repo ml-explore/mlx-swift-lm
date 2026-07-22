@@ -1016,7 +1016,9 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         return (merged, positionIds, ropeDeltas)
     }
 
-    public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+    ) throws
         -> PrepareResult
     {
         let dtype = visionModel.patchEmbed.proj.weight.dtype
@@ -1255,7 +1257,7 @@ public struct GlmOcrMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        [
+        var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": [
                 ["type": "text", "text": message.content]
@@ -1264,5 +1266,7 @@ public struct GlmOcrMessageGenerator: MessageGenerator {
                     ["type": "image"]
                 },
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }

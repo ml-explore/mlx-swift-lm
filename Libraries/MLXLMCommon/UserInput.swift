@@ -1,9 +1,14 @@
 // Copyright © 2024 Apple Inc.
 
-@preconcurrency import AVFoundation
-import CoreImage
 import Foundation
 import MLX
+
+#if canImport(AVFoundation)
+@preconcurrency import AVFoundation
+#endif
+#if canImport(CoreImage)
+import CoreImage
+#endif
 
 public typealias Message = [String: any Sendable]
 
@@ -40,22 +45,46 @@ public struct UserInput {
     }
 
     public struct VideoFrame {
-        public let frame: CIImage
+        public let image: Image
         public let timeStamp: CMTime
 
-        public init(frame: CIImage, timeStamp: CMTime) {
-            self.frame = frame
+        public init(image: Image, timeStamp: CMTime) {
+            self.image = image
             self.timeStamp = timeStamp
         }
+
+        #if canImport(CoreImage)
+
+        @available(
+            *, deprecated,
+            message: "Use init(image:, timeStamp:) instead"
+        )
+        public init(frame: CIImage, timeStamp: CMTime) {
+            self.image = .ciImage(frame)
+            self.timeStamp = timeStamp
+        }
+
+        @available(
+            *, deprecated,
+            message: "Use image.asCIImage()"
+        )
+        public var frame: CIImage {
+            return try! image.asCIImage()
+        }
+
+        #endif
     }
 
     /// Representation of a video resource.
     public enum Video {
+        #if canImport(AVFoundation)
         case avAsset(AVAsset)
+        #endif
         case url(URL)
         /// Useful for decoded frames held in memory
         case frames([VideoFrame])
 
+        #if canImport(AVFoundation)
         @available(
             *, deprecated,
             message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
@@ -72,14 +101,18 @@ public struct UserInput {
                 )
             }
         }
+        #endif
     }
 
     /// Representation of an image resource.
     public enum Image {
+        #if canImport(CoreImage)
         case ciImage(CIImage)
+        #endif
         case url(URL)
         case array(MLXArray)
 
+        #if canImport(CoreImage)
         public func asCIImage() throws -> CIImage {
             switch self {
             case .ciImage(let image):
@@ -93,7 +126,8 @@ public struct UserInput {
 
             case .array(let array):
                 guard array.ndim == 3 else {
-                    throw UserInputError.arrayError("array must have 3 dimensions: \(array.ndim)")
+                    throw UserInputError.arrayError(
+                        "array must have 3 dimensions: \(array.ndim)")
                 }
 
                 var array = array
@@ -135,6 +169,7 @@ public struct UserInput {
                     format: .RGBA8, colorSpace: cs)
             }
         }
+        #endif
     }
 
     /// Representation of an audio resource.
@@ -143,6 +178,11 @@ public struct UserInput {
         case array(MLXArray)
 
         // See also UserInput+Audio
+    }
+
+    /// Representation of the audio format.
+    public enum AudioFormat: Sendable {
+        case linearPCM
     }
 
     /// Representation of processing to apply to media.
@@ -174,8 +214,8 @@ public struct UserInput {
         /// Number of channels of audio.  If 1, convert to mono
         public var channels = 1
 
-        /// audio format
-        public var audioFormat: AudioFormatID = kAudioFormatLinearPCM
+        /// Audio format
+        public var audioFormat: AudioFormat = .linearPCM
 
         public init() {
         }

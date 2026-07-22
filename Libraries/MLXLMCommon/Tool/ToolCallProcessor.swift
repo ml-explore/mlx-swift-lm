@@ -26,6 +26,7 @@ public class ToolCallProcessor {
 
     // MARK: - Properties
 
+    private let format: ToolCallFormat
     private let parser: any ToolCallParser
     private let tools: [[String: any Sendable]]?
     private let supportsBareJSONFallback: Bool
@@ -33,6 +34,7 @@ public class ToolCallProcessor {
     private let jsonObjectScanner = JSONLeadingObjectScanner(startCharacter: "{")
     private var state = State.normal
     private var toolCallBuffer = ""
+    private var emittedToolCallIDs: Set<String> = []
 
     /// The tool calls extracted during processing.
     public var toolCalls: [ToolCall] = []
@@ -59,6 +61,7 @@ public class ToolCallProcessor {
     ///   - format: The tool call format to use (defaults to `.json` for standard JSON format)
     ///   - tools: Optional tool schemas for type-aware parsing
     public init(format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) {
+        self.format = format
         self.parser = format.createParser()
         self.tools = tools
         self.supportsBareJSONFallback = format == .json
@@ -134,7 +137,7 @@ public class ToolCallProcessor {
 
         let buffered = toolCallBuffer
         let parsedCalls = parser.parseEOS(buffered, tools: tools)
-        toolCalls.append(contentsOf: parsedCalls)
+        appendToolCalls(parsedCalls)
 
         toolCallBuffer = ""
         state = .normal
@@ -160,7 +163,7 @@ public class ToolCallProcessor {
                 state = .collectingToolCall
 
                 if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
-                    toolCalls.append(toolCall)
+                    appendToolCall(toolCall)
                     toolCallBuffer = ""
                     state = .normal
                     return leading.isEmpty ? nil : leading
@@ -185,7 +188,7 @@ public class ToolCallProcessor {
             toolCallBuffer += chunk
 
             if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
-                toolCalls.append(toolCall)
+                appendToolCall(toolCall)
                 toolCallBuffer = ""
                 state = .normal
                 return nil
@@ -293,7 +296,7 @@ public class ToolCallProcessor {
 
                 // Parse the tool call using the parser.
                 if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
-                    toolCalls.append(toolCall)
+                    appendToolCall(toolCall)
                     state = .normal
                     toolCallBuffer = ""
 
@@ -370,7 +373,7 @@ public class ToolCallProcessor {
         let trailingToken = split.trailing
 
         if let toolCall = parser.parse(content: jsonCandidate, tools: tools) {
-            toolCalls.append(toolCall)
+            appendToolCall(toolCall)
 
             state = .normal
             toolCallBuffer = ""
@@ -435,6 +438,33 @@ public class ToolCallProcessor {
     private func combine(_ first: String?, _ second: String?) -> String? {
         let merged = (first ?? "") + (second ?? "")
         return merged.isEmpty ? nil : merged
+    }
+
+    private func appendToolCalls(_ calls: [ToolCall]) {
+        for call in calls {
+            appendToolCall(call)
+        }
+    }
+
+    private func appendToolCall(_ call: ToolCall) {
+        toolCalls.append(normalizedToolCall(call))
+    }
+
+    private func normalizedToolCall(_ call: ToolCall) -> ToolCall {
+        if let id = call.id, !id.isEmpty, emittedToolCallIDs.insert(id).inserted {
+            return call
+        }
+
+        return ToolCall(function: call.function, id: generateToolCallID())
+    }
+
+    private func generateToolCallID() -> String {
+        while true {
+            let id = format.generateToolCallID()
+            if emittedToolCallIDs.insert(id).inserted {
+                return id
+            }
+        }
     }
 
     /// Separates a token from a string buffer based on a separator

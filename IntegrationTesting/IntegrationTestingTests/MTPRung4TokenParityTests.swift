@@ -1,8 +1,10 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import HuggingFace
 import IntegrationTestHelpers
 import MLX
+import MLXHuggingFace
 import MLXLMCommon
 import MLXVLM
 import Testing
@@ -24,18 +26,6 @@ private func mtpFixturesDirOrSkip(name: String) async -> URL? {
         )
         return nil
     }
-}
-
-private func hfSnapshotDir(modelId: String) -> URL? {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let hub = home.appendingPathComponent(".cache/huggingface/hub")
-    let folderName = "models--" + modelId.replacingOccurrences(of: "/", with: "--")
-    let snapshots = hub.appendingPathComponent(folderName).appendingPathComponent("snapshots")
-    guard
-        let entries = try? FileManager.default.contentsOfDirectory(
-            at: snapshots, includingPropertiesForKeys: nil)
-    else { return nil }
-    return entries.first
 }
 
 // MARK: - Shared bound drafter
@@ -61,9 +51,9 @@ private struct Rung4BoundDrafter {
     let target: Gemma4
 }
 
-nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter?, Error>?
+nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter, Error>?
 
-private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
+private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
     if let cached = _rung4Cache {
         switch cached {
         case .success(let value): return value
@@ -71,7 +61,7 @@ private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
         }
     }
     do {
-        let result = try loadRung4Drafter()
+        let result = try await loadRung4Drafter()
         _rung4Cache = .success(result)
         return result
     } catch {
@@ -80,15 +70,28 @@ private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
     }
 }
 
-private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
-    guard let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-    else {
-        return nil
-    }
-    guard let targetDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit")
-    else {
-        return nil
-    }
+private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
+private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
+
+/// Pinned checkpoint revisions matching the weights that were live when the
+/// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
+/// parity assertions reproducible as the published checkpoints move.
+private let rung4DrafterRevision = "28e92270316e89288579ec59c17939541d9ca433"
+private let rung4TargetRevision = "fe92291011fc698452920c0b558b52f790dff711"
+
+/// Shared downloader for the Rung 4 target+drafter pair. Fetches to the
+/// local HF cache on first use; subsequent tests and runs reuse the cache.
+private let downloader: any Downloader = #hubDownloader()
+
+private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
+    let drafterDir = try await downloader.download(
+        id: rung4DrafterModelId, revision: rung4DrafterRevision,
+        matching: ["*.safetensors", "*.json"],
+        useLatest: false, progressHandler: { _ in })
+    let targetDir = try await downloader.download(
+        id: rung4TargetModelId, revision: rung4TargetRevision,
+        matching: ["*.safetensors", "*.json"],
+        useLatest: false, progressHandler: { _ in })
 
     // Drafter — bf16, no quantization.
     let drafterCfg = try JSONDecoder().decode(
@@ -149,12 +152,7 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
     guard let fixturesDir = await mtpFixturesDirOrSkip(name: name) else {
         return
     }
-    guard let bound = try sharedBoundDrafter() else {
-        Issue.record(
-            "required checkpoint not in HF cache (drafter or 31B 8-bit target); skipping Rung 4 \(name)"
-        )
-        return
-    }
+    let bound = try await sharedBoundDrafter()
     let model = bound.drafter
     let target = bound.target
 

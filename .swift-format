@@ -4,4 +4,5 @@
         "spaces": 4
     },
     "spacesAroundRangeFormationOperators": true,
+    "indentConditionalCompilationBlocks": false,
 }
