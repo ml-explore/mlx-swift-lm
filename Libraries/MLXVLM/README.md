@@ -116,6 +116,21 @@ See the fork README section “DeepSeek-OCR crop modes”.
 `skipSpecialTokens: false`. Full structured layout-tree parsing is deferred;
 `parseDetections(from:)` covers bbox extraction. See the fork README.
 
+### Optional sliding-window no-repeat n-gram
+
+`SlidingWindowNoRepeatNGramProcessor` ports the DeepSeek / Unlimited-OCR
+repetition guard. It is **opt-in** (mlx-vlm / Unlimited defaults leave it off):
+
+```swift
+var parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
+parameters.noRepeatNgramSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRNgramSize // 35
+parameters.noRepeatNgramWindowSize =
+    SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImageWindow // 128
+// Multi-page/PDF examples often use unlimitedOCRMultiPageWindow (1024).
+```
+
+See `UnlimitedOCR` model docs and `GenerateParameters.noRepeatNgramSize`.
+
 See [llm-tool](../../Tools/llm-tool)
 
 # Adding a Model
