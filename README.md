@@ -49,16 +49,35 @@ selected via `ChatSession` / `UserInput` additional context:
 | Mode | Context | Behavior (matches Python) |
 |------|---------|---------------------------|
 | `gundam` (default) | omit or `DeepseekOCRProcessor.modeContext(.gundam)` | 1024² global + 640² local tiles when page > 640×640 (`cropping=True`) |
-| `base` | `DeepseekOCRProcessor.modeContext(.base)` | Single 640² padded view, no local tiles (`cropping=False`) |
+| `base` | `DeepseekOCRProcessor.modeContext(.base)` | Single-page: 640² padded view. Multipage (`images.count > 1`): 1024² per page (Unlimited PDF/`infer_multi`). No local tiles (`cropping=False`). |
 
 ```swift
 let session = ChatSession(
     container,
     processing: .init(),  // keep native resolution for gundam tiling
     additionalContext: DeepseekOCRProcessor.modeContext(.base))
+
+// Fused multipage (Python Unlimited: prompt + N pages @ 1024 base, one generation)
+var parameters = GenerateParameters(maxTokens: 8192, temperature: 0)
+parameters.noRepeatNgramSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRNgramSize
+parameters.noRepeatNgramWindowSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRMultiPageWindow
+let text = try await ChatSession(
+    container,
+    generateParameters: parameters,
+    processing: .init(),
+    additionalContext: DeepseekOCRProcessor.modeContext(.base)
+).respond(
+    to: "Multi page parsing.",
+    images: pageURLs.map { .url($0) },
+    videos: [],
+    audios: [])
 ```
 
-Smoke: `MODE=base swift run DeepseekOCRSmoke` (or `MODE=gundam`, the default).
+Optional Unlimited gundam tiling ceiling (`max_num=32`):
+`DeepseekOCRProcessor.unlimitedContext(.gundam)` or smoke `UNLIMITED_MAX_NUM=1`.
+
+Smoke: `MODE=base swift run DeepseekOCRSmoke` (single-page 640; `MODE=gundam` is the
+default). Multipage 1024 base: pass a comma-separated `IMAGES` list to the same tool.
 
 ### DeepSeek-OCR grounding / ref / det tokens
 

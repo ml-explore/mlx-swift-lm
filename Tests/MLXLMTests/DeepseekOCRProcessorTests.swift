@@ -93,6 +93,62 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(
             Set(DeepseekOCRProcessor.Mode.allCases.map(\.rawValue)),
             Set(["gundam", "base"]))
+        XCTAssertEqual(DeepseekOCRProcessor.maxNumTiles(from: nil), 9)
+        XCTAssertEqual(
+            DeepseekOCRProcessor.maxNumTiles(from: [
+                DeepseekOCRProcessor.maxNumTilesContextKey: 32
+            ]), 32)
+        XCTAssertEqual(
+            DeepseekOCRProcessor.mode(from: DeepseekOCRProcessor.unlimitedContext(.base)), .base)
+        XCTAssertEqual(
+            DeepseekOCRProcessor.maxNumTiles(from: DeepseekOCRProcessor.unlimitedContext(.base)),
+            32)
+    }
+
+    func testMultipageFusedBasePrepareStacksPagesAndLattices() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "Multi page parsing.",
+            images: [
+                .ciImage(makeSolidImage(width: 800, height: 400, color: .red)),
+                .ciImage(makeSolidImage(width: 640, height: 480, color: .blue)),
+            ],
+            additionalContext: DeepseekOCRProcessor.modeContext(.base))
+
+        let prepared = try await processor.prepareForTesting(input: input)
+
+        XCTAssertEqual(prepared.mode, .base)
+        // Unlimited multipage base = 1024² (273 image tokens / page), not single-page 640.
+        XCTAssertEqual(prepared.pixelValues.shape, [2, 3, 1024, 1024])
+        XCTAssertEqual(prepared.imagesSpatialCrop.shape, [2, 2])
+        XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [1, 1, 1, 1])
+        XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 546)
+        XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
+        XCTAssertEqual(prepared.imagesSeqMask[0, 0].item(Bool.self), false)
+        XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 547)
+
+        let lmInput = try await processor.prepare(input: input)
+        XCTAssertEqual(lmInput.image?.pixels.shape, [2, 3, 1024, 1024])
+        XCTAssertEqual(lmInput.image?.positionIds?.shape, [2, 2])
+        XCTAssertNil(lmInput.video, "multipage base must not pack local crops")
+    }
+
+    func testMultipageRejectsMismatchedImageTokenCount() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "<image>page a<image>page b<image>extra",
+            images: [
+                .ciImage(makeSolidImage(width: 200, height: 200, color: .red)),
+                .ciImage(makeSolidImage(width: 200, height: 200, color: .blue)),
+            ],
+            additionalContext: DeepseekOCRProcessor.modeContext(.base))
+
+        do {
+            _ = try await processor.prepareForTesting(input: input)
+            XCTFail("expected VLMError.singleImageAllowed for mismatched <image> count")
+        } catch VLMError.singleImageAllowed {
+            // expected
+        }
     }
 
     func testGroundingSpecialTokenStringsAndDefaultIds() {

@@ -104,8 +104,9 @@ Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
 
 `DeepseekOCRProcessor.Mode`:
 
-- **`gundam`** (default) — 1024 global + optional 640 local tiles
+- **`gundam`** (default) — 1024 global + optional 640 local tiles (`max_num` 9, or 32 via `unlimitedContext`)
 - **`base`** — single 640 view; pass `DeepseekOCRProcessor.modeContext(.base)` into `ChatSession`
+- **Multipage fused** — multiple `UserInput.Image`s + `.base` + prompt `Multi page parsing.` (Python Unlimited `multi_image_single_token`)
 
 See the fork README section “DeepSeek-OCR crop modes”.
 

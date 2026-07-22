@@ -440,10 +440,23 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         /// Multi-resolution OCR: 1024² global view + 640² local tiles when the page
         /// exceeds 640×640 (Python `cropping=True`, `base_size=1024`). Default.
         case gundam
-        /// Single 640² padded view, no local tiles (Python `cropping=False`).
-        /// Cheaper / shorter context; required for multipage fusion prompts.
+        /// Global-view-only (Python `cropping=False`).
+        /// Single-page DeepSeek default pad is 640² (`localImageSize`).
+        /// Unlimited multipage / PDF uses 1024² (`baseSize`) — see prepare.
         case base
     }
+
+    /// Unlimited-OCR gundam tiling cap (`dynamic_preprocess` `max_num=32`).
+    /// DeepSeek-OCR Python uses `9`; Unlimited raises the ceiling for extreme
+    /// aspect ratios. Shared via ``UnlimitedOCRProcessor`` typealias.
+    public static let unlimitedMaxNumTiles = 32
+
+    /// DeepSeek-OCR default gundam tiling cap (`max_num=9`).
+    public static let deepseekMaxNumTiles = 9
+
+    /// `UserInput.additionalContext` key for gundam `max_num` (Int).
+    /// Missing → ``deepseekMaxNumTiles``; Unlimited multipage/smoke may set 32.
+    public static let maxNumTilesContextKey = "deepseekocr_max_num_tiles"
 
     @_spi(Testing)
     public struct PreparedImageInputs: @unchecked Sendable {
@@ -472,6 +485,24 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             return .gundam
         }
         return mode
+    }
+
+    /// Resolves gundam `max_num` from additional context (default DeepSeek 9).
+    public static func maxNumTiles(from additionalContext: [String: any Sendable]?) -> Int {
+        if let value = additionalContext?[maxNumTilesContextKey] as? Int, value >= 2 {
+            return value
+        }
+        if let raw = additionalContext?[maxNumTilesContextKey] as? String,
+            let value = Int(raw), value >= 2
+        {
+            return value
+        }
+        return deepseekMaxNumTiles
+    }
+
+    /// Context selecting Unlimited-OCR tiling (`max_num=32`) plus optional mode.
+    public static func unlimitedContext(_ mode: Mode = .gundam) -> [String: any Sendable] {
+        modeContext(mode).merging([maxNumTilesContextKey: unlimitedMaxNumTiles]) { _, new in new }
     }
 
     private let config: DeepseekOCRProcessorConfiguration
@@ -589,7 +620,11 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         return tokens
     }
 
-    private func makeImagePromptTokens(mode: Mode, cropWidth: Int, cropHeight: Int) -> [Int] {
+    private func makeImagePromptTokens(
+        mode: Mode, cropWidth: Int, cropHeight: Int, baseSide: Int? = nil
+    )
+        -> [Int]
+    {
         switch mode {
         case .gundam:
             // Match Python unlimited_ocr tokenize_with_images placeholder order:
@@ -612,7 +647,9 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             }
             return tokens
         case .base:
-            let queries = numQueries(for: config.localImageSize)
+            // Single-page DeepSeek base: 640. Unlimited multipage base: 1024.
+            let side = baseSide ?? config.localImageSize
+            let queries = numQueries(for: side)
             return makeImageTokenGrid(width: queries, height: queries)
         }
     }
@@ -645,16 +682,19 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         return bestRatio
     }
 
-    private func dynamicPreprocess(image: CIImage) -> ([MLXArray], Int, Int) {
+    private func dynamicPreprocess(image: CIImage, maxNum: Int = Self.deepseekMaxNumTiles) -> (
+        [MLXArray], Int, Int
+    ) {
         let tileSize = config.localImageSize
         let width = image.extent.width
         let height = image.extent.height
         let aspectRatio = width / height
+        let cappedMax = max(2, maxNum)
 
         var targetRatios = [(Int, Int)]()
-        for n in 2 ... 9 {
+        for n in 2 ... cappedMax {
             for i in 1 ... n {
-                for j in 1 ... n where i * j <= 9 && i * j >= 2 {
+                for j in 1 ... n where i * j <= cappedMax && i * j >= 2 {
                     let candidate = (i, j)
                     if !targetRatios.contains(where: { $0.0 == candidate.0 && $0.1 == candidate.1 })
                     {
@@ -725,6 +765,33 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         zeros([1, 3, config.baseSize, config.baseSize], type: Float.self).asType(.bfloat16)
     }
 
+    private func encodePage(
+        image: CIImage,
+        mode: Mode,
+        maxNumTiles: Int,
+        basePadSide: Int
+    ) throws -> (pixelValues: MLXArray, localCrops: [MLXArray], cropWidth: Int, cropHeight: Int) {
+        switch mode {
+        case .gundam:
+            let pixelValues = preprocess(image: image, side: config.baseSize)
+            if image.extent.width <= CGFloat(config.localImageSize)
+                && image.extent.height <= CGFloat(config.localImageSize)
+            {
+                return (pixelValues, [], 1, 1)
+            }
+            let (crops, widthTiles, heightTiles) = dynamicPreprocess(
+                image: image, maxNum: maxNumTiles)
+            return (pixelValues, crops, widthTiles, heightTiles)
+        case .base:
+            return (
+                preprocess(image: image, side: basePadSide),
+                [],
+                1,
+                1
+            )
+        }
+    }
+
     @_spi(Testing)
     public func prepareForTesting(input: UserInput) async throws -> PreparedImageInputs {
         guard !input.images.isEmpty else {
@@ -739,75 +806,124 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                 mode: promptMode(from: input))
         }
 
-        guard input.images.count == 1 else {
+        let mode = promptMode(from: input)
+        let maxNumTiles = Self.maxNumTiles(from: input.additionalContext)
+        // Unlimited multipage/PDF base mode pads each page to 1024² (273 tokens).
+        // Single-page DeepSeek `MODE=base` stays 640² for TASK-026 compatibility.
+        let basePadSide =
+            (mode == .base && input.images.count > 1)
+            ? config.baseSize
+            : config.localImageSize
+        let rawPrompt = userPromptText(from: input)
+        let imageToken = config.imageToken
+        let imageTokenCount = rawPrompt.components(separatedBy: imageToken).count - 1
+        // Fused multipage: 0 or 1 `<image>` with N pages (Python multi_image_single_token).
+        // One-to-one: N `<image>` tokens with N images.
+        guard imageTokenCount == 0 || imageTokenCount == 1 || imageTokenCount == input.images.count
+        else {
             throw VLMError.singleImageAllowed
         }
+        let multiImageSingleToken =
+            (imageTokenCount == 0 || imageTokenCount == 1) && input.images.count > 1
+        let textSplits = rawPrompt.components(separatedBy: imageToken)
 
-        let mode = promptMode(from: input)
-        let image = MediaProcessing.apply(
-            try input.images[0].asCIImage(), processing: input.processing)
+        var pixelList = [MLXArray]()
+        var localCropList = [MLXArray]()
+        var spatialPairs = [Int32]()
+        var tokenized = [Int]()
+        var sequenceMask = [Bool]()
 
-        let pixelValues: MLXArray
-        let localCrops: MLXArray
-        let cropWidth: Int
-        let cropHeight: Int
-
-        switch mode {
-        case .gundam:
-            pixelValues = preprocess(image: image, side: config.baseSize)
-            if image.extent.width <= CGFloat(config.localImageSize)
-                && image.extent.height <= CGFloat(config.localImageSize)
-            {
-                cropWidth = 1
-                cropHeight = 1
-                localCrops = emptyLocalCrops()
-            } else {
-                let (crops, widthTiles, heightTiles) = dynamicPreprocess(image: image)
-                cropWidth = widthTiles
-                cropHeight = heightTiles
-                localCrops = concatenated(crops, axis: 0).asType(.bfloat16)
-            }
-        case .base:
-            pixelValues = preprocess(image: image, side: config.localImageSize)
-            cropWidth = 1
-            cropHeight = 1
-            localCrops = emptyLocalCrops()
-        }
-
-        // Match mlx-vlm unlimited_ocr tokenize_with_images:
-        //   [bos] + image lattice + raw user text
-        // (no chat-template wrappers — prefixes before <image> break OCR).
         let bosId =
             tokenizer.bosToken.flatMap { tokenizer.convertTokenToId($0) } ?? 0
-        let imagePromptTokens = makeImagePromptTokens(
-            mode: mode, cropWidth: cropWidth, cropHeight: cropHeight)
-        let textTokens = tokenizer.encode(
-            text: userPromptText(from: input), addSpecialTokens: false)
-        let fullPromptTokens = [bosId] + imagePromptTokens + textTokens
-        let sequenceMask =
-            [false]
-            + Array(repeating: true, count: imagePromptTokens.count)
-            + Array(repeating: false, count: textTokens.count)
+        tokenized.append(bosId)
+        sequenceMask.append(false)
+
+        for (imageIdx, media) in input.images.enumerated() {
+            let textSep: String
+            if multiImageSingleToken {
+                textSep = imageIdx == 0 ? (imageTokenCount == 0 ? "" : textSplits[0]) : ""
+            } else if imageTokenCount == input.images.count {
+                textSep = textSplits[imageIdx]
+            } else {
+                // Single image, no/one placeholder — text goes after the lattice.
+                textSep = ""
+            }
+            if !textSep.isEmpty {
+                let sepTokens = tokenizer.encode(text: textSep, addSpecialTokens: false)
+                tokenized.append(contentsOf: sepTokens)
+                sequenceMask.append(contentsOf: Array(repeating: false, count: sepTokens.count))
+            }
+
+            let image = MediaProcessing.apply(try media.asCIImage(), processing: input.processing)
+            let encoded = try encodePage(
+                image: image, mode: mode, maxNumTiles: maxNumTiles, basePadSide: basePadSide)
+            pixelList.append(encoded.pixelValues)
+            localCropList.append(contentsOf: encoded.localCrops)
+            spatialPairs.append(contentsOf: [Int32(encoded.cropWidth), Int32(encoded.cropHeight)])
+
+            let imagePromptTokens = makeImagePromptTokens(
+                mode: mode,
+                cropWidth: encoded.cropWidth,
+                cropHeight: encoded.cropHeight,
+                baseSide: mode == .base ? basePadSide : nil)
+            tokenized.append(contentsOf: imagePromptTokens)
+            sequenceMask.append(contentsOf: Array(repeating: true, count: imagePromptTokens.count))
+        }
+
+        let trailingText: String
+        if multiImageSingleToken {
+            trailingText =
+                imageTokenCount == 0
+                ? rawPrompt
+                : (textSplits.count > 1 ? textSplits[textSplits.count - 1] : "")
+        } else if imageTokenCount == input.images.count {
+            trailingText = textSplits.last ?? ""
+        } else {
+            // Single-page ChatSession path: full prompt after lattice (no `<image>` strip).
+            trailingText = rawPrompt
+        }
+        if !trailingText.isEmpty {
+            let textTokens = tokenizer.encode(text: trailingText, addSpecialTokens: false)
+            tokenized.append(contentsOf: textTokens)
+            sequenceMask.append(contentsOf: Array(repeating: false, count: textTokens.count))
+        }
+
+        let localCrops =
+            localCropList.isEmpty
+            ? emptyLocalCrops()
+            : concatenated(localCropList, axis: 0).asType(.bfloat16)
+        let pixelValues =
+            pixelList.count == 1
+            ? pixelList[0]
+            : concatenated(pixelList, axis: 0)
+        let spatial = MLXArray(spatialPairs).reshaped(input.images.count, 2)
 
         return .init(
-            inputIds: MLXArray(fullPromptTokens.map(Int32.init)).reshaped(
-                1, fullPromptTokens.count),
+            inputIds: MLXArray(tokenized.map(Int32.init)).reshaped(1, tokenized.count),
             pixelValues: pixelValues,
             localCrops: localCrops,
             imagesSeqMask: MLXArray(sequenceMask).reshaped(1, sequenceMask.count),
-            imagesSpatialCrop: MLXArray([Int32(cropWidth), Int32(cropHeight)]).reshaped(1, 2),
+            imagesSpatialCrop: spatial,
             mode: mode)
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
         let prepared = try await prepareForTesting(input: input)
         let mask = ones(like: prepared.inputIds).asType(.int8)
-        let cropWidth = prepared.imagesSpatialCrop[0, 0].item(Int.self)
-        let cropHeight = prepared.imagesSpatialCrop[0, 1].item(Int.self)
-        let hasLocalCrops = cropWidth > 1 || cropHeight > 1
+        let spatial = prepared.imagesSpatialCrop
+        var hasLocalCrops = false
+        for page in 0 ..< spatial.dim(0) {
+            let cropWidth = spatial[page, 0].item(Int.self)
+            let cropHeight = spatial[page, 1].item(Int.self)
+            if cropWidth > 1 || cropHeight > 1 {
+                hasLocalCrops = true
+                break
+            }
+        }
 
         // Pack gundam locals through `video` and spatial crop through `positionIds`
         // so DeepseekOCR.prepare can assemble features without extending LMInput.
+        // Multipage: positionIds is [N, 2]; video pixels are concatenated locals.
         return LMInput(
             text: .init(tokens: prepared.inputIds, mask: mask),
             image: .init(
@@ -815,7 +931,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                 positionIds: prepared.imagesSpatialCrop,
                 frames: [
                     THW(
-                        1,
+                        prepared.pixelValues.dim(0),
                         prepared.pixelValues.dim(2),
                         prepared.pixelValues.dim(3))
                 ]),
@@ -823,7 +939,10 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                 ? .init(
                     pixels: prepared.localCrops,
                     frames: [
-                        THW(prepared.localCrops.dim(0), cropWidth, cropHeight)
+                        THW(
+                            prepared.localCrops.dim(0),
+                            spatial[0, 0].item(Int.self),
+                            spatial[0, 1].item(Int.self))
                     ])
                 : nil)
     }
@@ -899,14 +1018,13 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             // Processor / MediaProcessing emit NCHW [B,C,H,W]; MLX Conv2d wants NHWC.
             let globalPixels = nchwToNhwc(pixels)
             let localPixels = input.video.map { nchwToNhwc($0.pixels.asType(pixels.dtype)) }
-            let spatial = input.image?.positionIds
-            let cropWidth = spatial.map { $0[0, 0].item(Int.self) } ?? 1
-            let cropHeight = spatial.map { $0[0, 1].item(Int.self) } ?? 1
+            let spatial =
+                input.image?.positionIds
+                ?? MLXArray([Int32(1), Int32(1)]).reshaped(1, 2)
             let imageFeatures = getImageFeatures(
                 globalPixels: globalPixels,
                 localPixels: localPixels,
-                cropWidth: cropWidth,
-                cropHeight: cropHeight)
+                spatialCrops: spatial)
             embeddings = mergeInputIdsWithImageFeatures(
                 inputIds: input.text.tokens, imageFeatures: imageFeatures)
         } else {
@@ -1103,40 +1221,53 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     private func getImageFeatures(
         globalPixels: MLXArray,
         localPixels: MLXArray?,
-        cropWidth: Int,
-        cropHeight: Int
+        spatialCrops: MLXArray
     ) -> MLXArray {
-        let hasLocal =
-            (cropWidth > 1 || cropHeight > 1)
-            && localPixels != nil
-            && (localPixels?.dim(0) ?? 0) > 0
+        let numImages = max(globalPixels.dim(0), 1)
+        var pageFeatures = [MLXArray]()
+        var patchIdx = 0
 
-        let globalProjected = projectedImageFeatures(globalPixels)[0]
-        let globalHW = globalProjected.dim(0)
-        let hiddenSize = globalProjected.dim(1)
-        let globalSide = Int(sqrt(Double(globalHW)))
-        let globalFeatures = appendImageNewlines(
-            globalProjected.reshaped(globalSide, globalSide, hiddenSize))
+        for page in 0 ..< numImages {
+            let cropWidth =
+                page < spatialCrops.dim(0) ? spatialCrops[page, 0].item(Int.self) : 1
+            let cropHeight =
+                page < spatialCrops.dim(0) ? spatialCrops[page, 1].item(Int.self) : 1
+            let hasLocal =
+                (cropWidth > 1 || cropHeight > 1)
+                && localPixels != nil
+                && (localPixels?.dim(0) ?? 0) > patchIdx
 
-        if hasLocal, let localPixels {
-            let localProjected = projectedImageFeatures(localPixels)
-            // [N, hw, D] → tile grid [cropH, cropW, h, w, D] → [cropH*h, cropW*w, D]
-            let tileTokens = localProjected.dim(1)
-            let tileSide = Int(sqrt(Double(tileTokens)))
-            let tiled = localProjected.reshaped(
-                cropHeight, cropWidth, tileSide, tileSide, hiddenSize
-            )
-            .transposed(0, 2, 1, 3, 4)
-            .reshaped(cropHeight * tileSide, cropWidth * tileSide, hiddenSize)
-            let localFeatures = appendImageNewlines(tiled)
-            let separator = viewSeparator[.newAxis, 0...]
-            let merged = concatenated([localFeatures, globalFeatures, separator], axis: 0)
-            return merged.reshaped(1, merged.dim(0), hiddenSize)
+            let globalProjected = projectedImageFeatures(globalPixels[page ..< page + 1])[0]
+            let globalHW = globalProjected.dim(0)
+            let hiddenSize = globalProjected.dim(1)
+            let globalSide = Int(sqrt(Double(globalHW)))
+            let globalFeatures = appendImageNewlines(
+                globalProjected.reshaped(globalSide, globalSide, hiddenSize))
+
+            if hasLocal, let localPixels {
+                let numPatches = cropWidth * cropHeight
+                let patches = localPixels[patchIdx ..< patchIdx + numPatches]
+                patchIdx += numPatches
+                let localProjected = projectedImageFeatures(patches)
+                let tileTokens = localProjected.dim(1)
+                let tileSide = Int(sqrt(Double(tileTokens)))
+                let tiled = localProjected.reshaped(
+                    cropHeight, cropWidth, tileSide, tileSide, hiddenSize
+                )
+                .transposed(0, 2, 1, 3, 4)
+                .reshaped(cropHeight * tileSide, cropWidth * tileSide, hiddenSize)
+                let localFeatures = appendImageNewlines(tiled)
+                let separator = viewSeparator[.newAxis, 0...]
+                pageFeatures.append(
+                    concatenated([localFeatures, globalFeatures, separator], axis: 0))
+            } else {
+                let separator = viewSeparator[.newAxis, 0...]
+                pageFeatures.append(concatenated([globalFeatures, separator], axis: 0))
+            }
         }
 
-        let separator = viewSeparator[.newAxis, 0...]
-        let merged = concatenated([globalFeatures, separator], axis: 0)
-        return merged.reshaped(1, merged.dim(0), hiddenSize)
+        let merged = concatenated(pageFeatures, axis: 0)
+        return merged.reshaped(1, merged.dim(0), merged.dim(1))
     }
 
     private func fusedVisionFeatures(_ pixelValues: MLXArray) -> MLXArray {
