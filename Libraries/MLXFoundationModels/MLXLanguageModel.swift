@@ -805,27 +805,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return Float(max(0, value))
         }
 
-        /// Translate FoundationModels' `GenerationOptions.SamplingMode` into the
-        /// backend-local `MLXSamplingMode`, dropping the best-effort `seed`
-        /// (MLX's samplers expose no seed-injection hook). No mode set (`nil`)
-        /// and any future/unknown `Kind` both map to `nil` -- "use the provider
-        /// default" -- so an unrecognized case never traps and never reaches the
-        /// resolver. All value policy lives in `resolveSamplingParameters`; this
-        /// shim is a pure 1:1 case translation.
-        static func samplingMode(
+        /// Translate Foundation Models' `GenerationOptions.SamplingMode` into one
+        /// backend-local value that preserves both the sampling strategy and optional
+        /// `UInt64` seed. No mode set (`nil`) and any future/unknown `Kind` both map to
+        /// `nil`, selecting provider-default behavior without trapping or guessing.
+        static func samplingConfiguration(
             from samplingMode: GenerationOptions.SamplingMode?
-        ) -> MLXSamplingMode? {
+        ) -> MLXSamplingConfiguration? {
             guard let kind = samplingMode?.kind else { return nil }
             switch kind {
             case .greedy:
-                return .greedy
-            case .randomTopK(let k, _):
-                return .topK(k)
-            case .randomProbabilityThreshold(let threshold, _):
-                return .nucleus(threshold)
+                return MLXSamplingConfiguration(mode: .greedy, seed: nil)
+            case .randomTopK(let k, let seed):
+                return MLXSamplingConfiguration(mode: .topK(k), seed: seed)
+            case .randomProbabilityThreshold(let threshold, let seed):
+                return MLXSamplingConfiguration(mode: .nucleus(threshold), seed: seed)
             @unknown default:
                 return nil
             }
+        }
+
+        /// Mode-only projection retained until Task 3 threads the complete configuration
+        /// through every sampler-backed generation helper.
+        static func samplingMode(
+            from samplingMode: GenerationOptions.SamplingMode?
+        ) -> MLXSamplingMode? {
+            samplingConfiguration(from: samplingMode)?.mode
         }
 
         /// Build the `GenerateParameters` for a generation pass, threading the
