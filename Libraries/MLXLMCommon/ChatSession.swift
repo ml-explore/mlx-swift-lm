@@ -147,13 +147,41 @@ public struct SpeculativeDecodingConfig: Sendable {
 ///   model operations.
 public final class ChatSession {
 
+    struct RealizedCache {
+        let main: KVCacheStorage
+        var draft: KVCacheStorage? = nil
+        var state: LMOutput.State? = nil
+
+        init(
+            cache: consuming [KVCache], draft: consuming [KVCache]? = nil,
+            state: LMOutput.State? = nil, plan: KVCachePlan
+        ) {
+            self.main = KVCacheStorage(cache, plan: plan)
+            self.draft = draft.map { KVCacheStorage($0, plan: plan) }
+            self.state = state
+        }
+
+        init(main: KVCacheStorage, draft: KVCacheStorage? = nil, state: LMOutput.State? = nil) {
+            self.main = main
+            self.draft = draft
+            self.state = state
+        }
+
+        func requirePlan(_ requested: KVCachePlan) throws {
+            guard main.plan == requested else {
+                throw ChatSessionError.kvCacheConfigurationChanged(
+                    previous: main.plan.configuration, requested: requested.configuration)
+            }
+        }
+    }
+
     enum Cache {
         /// `state` is the per-call model state (e.g. M-RoPE rope deltas)
         /// from the last prefill against this cache. It must survive across
         /// turns: without it, a model that anchors positions on carried
         /// state re-derives them from a cold start on the next turn.
         case empty
-        case kvcache([KVCache], draftKVCache: [KVCache]?, state: LMOutput.State?)
+        case kvcache(RealizedCache)
         case history([Chat.Message])
     }
 
@@ -346,7 +374,11 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.cache = .init(
+            .kvcache(
+                .init(
+                    cache: cache,
+                    plan: (try? generateParameters.kvCachePlan()) ?? .disabled)))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -392,7 +424,11 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.cache = .init(
+            .kvcache(
+                .init(
+                    cache: cache,
+                    plan: (try? generateParameters.kvCachePlan()) ?? .disabled)))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -616,27 +652,33 @@ public final class ChatSession {
                     let model = await model.perform { context in
                         SendableBox(context.model)
                     }.consume()
+                    let kvCachePlan = try generateParameters.kvCachePlan()
 
-                    var kvCache: [KVCache]
-                    var draftKVCache: [KVCache]?
+                    let kvCache: KVCacheStorage
+                    var draftKVCache: KVCacheStorage?
                     // Per-call model state (e.g. M-RoPE rope deltas) carried
                     // across turns alongside the KV cache; updated after each
                     // prefill and stored back at the end of the turn.
                     var lmState: LMOutput.State?
                     switch cache {
                     case .empty:
-                        kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
+                        kvCache = KVCacheStorage(
+                            model.newCache(parameters: generateParameters), plan: kvCachePlan)
+                        cache = .kvcache(
+                            .init(main: kvCache))
 
-                    case .kvcache(let array, let storedDraftCache, let storedState):
-                        kvCache = array
-                        draftKVCache = storedDraftCache
-                        lmState = storedState
+                    case .kvcache(let stored):
+                        try stored.requirePlan(kvCachePlan)
+                        kvCache = stored.main
+                        draftKVCache = stored.draft
+                        lmState = stored.state
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
-                        kvCache = model.newCache(parameters: generateParameters)
-                        cache = .kvcache(kvCache, draftKVCache: nil, state: nil)
+                        kvCache = KVCacheStorage(
+                            model.newCache(parameters: generateParameters), plan: kvCachePlan)
+                        cache = .kvcache(
+                            .init(main: kvCache))
                         messages.append(contentsOf: history)
                     }
 
@@ -663,7 +705,7 @@ public final class ChatSession {
                             // change during decode) so the next turn — or the
                             // next tool restart — anchors correctly.
                             let iterator = try TokenIterator(
-                                input: input, model: model, cache: kvCache,
+                                input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
                                 parameters: generateParameters)
                             lmState = iterator.state
@@ -740,10 +782,13 @@ public final class ChatSession {
                                     // Allocate the draft KV cache once and reuse it across turns,
                                     // exactly like the main model's KV cache.
                                     if draftKVCache == nil {
-                                        draftKVCache = draftModel.newCache(
-                                            parameters: generateParameters)
+                                        draftKVCache = KVCacheStorage(
+                                            draftModel.newCache(parameters: generateParameters),
+                                            plan: kvCachePlan)
                                         cache = .kvcache(
-                                            kvCache, draftKVCache: draftKVCache, state: lmState)
+                                            .init(
+                                                main: kvCache, draft: draftKVCache,
+                                                state: lmState))
                                     }
                                     let draftCache = draftKVCache!
 
@@ -751,8 +796,8 @@ public final class ChatSession {
                                         input: input,
                                         mainModel: model,
                                         draftModel: draftModel,
-                                        mainCache: kvCache,
-                                        draftCache: draftCache,
+                                        mainCacheStorage: kvCache,
+                                        draftCacheStorage: draftCache,
                                         parameters: generateParameters,
                                         numDraftTokens: speculativeDecoding.numDraftTokens
                                     )
@@ -819,7 +864,9 @@ public final class ChatSession {
 
                     // Store the carried state back alongside the KV cache so
                     // the next turn resumes with correct position anchoring.
-                    cache = .kvcache(kvCache, draftKVCache: draftKVCache, state: lmState)
+                    cache = .kvcache(
+                        .init(
+                            main: kvCache, draft: draftKVCache, state: lmState))
 
                     continuation.finish()
                 }
@@ -872,6 +919,20 @@ public final class ChatSession {
         await cache.read { _ in }
     }
 
+    /// Return the effective per-layer state of the configured KV-cache strategy.
+    ///
+    /// The report is `nil` until a typed or legacy cache configuration exists,
+    /// or when the session currently stores history rather than a realized cache.
+    public func kvCacheRuntimeReport() async throws -> KVCacheRuntimeReport? {
+        let kvCachePlan = try generateParameters.kvCachePlan()
+        return try await cache.read { cache in
+            guard case .kvcache(let stored) = cache else { return nil }
+            try stored.requirePlan(kvCachePlan)
+            _ = try stored.main.plan.validated(stored.main.cache)
+            return stored.main.plan.report(for: stored.main.cache)
+        }
+    }
+
     /// Visit the current cache value, if realized as a `[KVCache]`.
     ///
     /// This method is meant for test support.
@@ -880,8 +941,8 @@ public final class ChatSession {
     {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _, _):
-                return try await body(cache)
+            case .kvcache(let stored):
+                return try await body(stored.main.cache)
             default:
                 return try await body(nil)
             }
@@ -899,8 +960,8 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _, _):
-                try savePromptCache(url: url, cache: cache)
+            case .kvcache(let stored):
+                try savePromptCache(url: url, cache: stored.main.cache)
             default:
                 throw ChatSessionError.noCacheAvailable
             }
@@ -912,8 +973,18 @@ public final class ChatSession {
 public enum ChatSessionError: LocalizedError {
     /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
     case noCacheAvailable
+    /// The cache was realized under a different KV-cache configuration.
+    case kvCacheConfigurationChanged(
+        previous: KVCacheConfiguration?,
+        requested: KVCacheConfiguration?
+    )
 
     public var errorDescription: String? {
-        "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+        switch self {
+        case .noCacheAvailable:
+            "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+        case .kvCacheConfigurationChanged:
+            "KV-cache configuration changed after the session cache was realized. Call clear() before continuing with the new configuration."
+        }
     }
 }

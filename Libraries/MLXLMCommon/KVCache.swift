@@ -520,12 +520,23 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
+    package enum CapacityOrigin: String {
+        case modelNative
+        case requested
+    }
+
     private var keep: Int
     private var keys: MLXArray?
     private var values: MLXArray?
     private var maxCacheSize: Int
     private var step: Int
     private var idx: Int = 0
+
+    /// Model-native sliding-window caches deliberately keep their architectural
+    /// window and do not participate in requested-capacity validation.
+    package var capacityOrigin = CapacityOrigin.modelNative
+
+    package var preservedPrefixTokens: Int { keep }
 
     public override var maxSize: Int? { maxCacheSize }
 
@@ -689,11 +700,14 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override var metaState: [String] {
         get {
-            return [String(keep), String(maxCacheSize), String(step), String(offset), String(idx)]
+            return [
+                String(keep), String(maxCacheSize), String(step), String(offset), String(idx),
+                capacityOrigin.rawValue,
+            ]
         }
         set {
-            guard newValue.count == 5 else {
-                fatalError("RotatingKVCache metaState must have exactly 5 values")
+            guard newValue.count == 5 || newValue.count == 6 else {
+                fatalError("RotatingKVCache metaState must have 5 or 6 values")
             }
             guard let keepVal = Int(newValue[0]),
                 let stepVal = Int(newValue[2]),
@@ -715,6 +729,14 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             self.step = stepVal
             self.offset = offsetVal
             self.idx = idxVal
+            if newValue.count == 6 {
+                guard let origin = CapacityOrigin(rawValue: newValue[5]) else {
+                    fatalError("Invalid RotatingKVCache capacity origin '\(newValue[5])'")
+                }
+                self.capacityOrigin = origin
+            } else {
+                self.capacityOrigin = .modelNative
+            }
         }
     }
 
@@ -1474,6 +1496,22 @@ public class CacheList: BaseKVCache {
         }
     }
 
+    /// Rewrite every non-composite child while preserving its stable tree path.
+    func rewriteLeaves(
+        path: [Int],
+        using transform: (KVCacheLeaf) -> KVCache
+    ) {
+        caches = caches.enumerated().map { index, child in
+            let childPath = path + [index]
+            if let list = child as? CacheList {
+                list.rewriteLeaves(path: childPath, using: transform)
+                return list
+            }
+            let leaf = KVCacheLeaf(path: childPath, cache: child)
+            return transform(leaf)
+        }
+    }
+
     public override func prepare(lengths: [Int]?) {
         caches.forEach { $0.prepare(lengths: lengths) }
     }
@@ -2035,76 +2073,51 @@ public func maybeQuantizeKVCache(
     quantizedKVStart: Int = 0,
     kvScheme: String? = nil
 ) {
-    // TurboQuant schemes convert eligible layers to TurboQuantKVCache
-    // (handled in TurboQuantKVCache.swift to keep this file scheme-agnostic).
-    if let scheme = kvScheme, let turbo = resolveTurboScheme(scheme) {
-        maybeTurboQuantizeKVCache(
-            cache: &cache,
-            keyBits: turbo.keyBits,
-            valueBits: turbo.valueBits,
-            quantizedKVStart: quantizedKVStart
-        )
+    if let kvScheme,
+        resolveAffineScheme(kvScheme) == nil,
+        resolveTurboScheme(kvScheme) == nil
+    {
         return
     }
+    let parameters = GenerateParameters(
+        kvBits: kvBits,
+        kvGroupSize: kvGroupSize,
+        quantizedKVStart: quantizedKVStart,
+        kvScheme: kvScheme)
+    guard let plan = try? parameters.kvCachePlan() else { return }
+    plan.apply(to: &cache)
+}
 
-    // Resolve effective bits: kvScheme overrides kvBits.
-    let effectiveBits: Int
-    let effectiveGroupSize: Int
-    if let scheme = kvScheme, let resolved = resolveAffineScheme(scheme) {
-        effectiveBits = resolved.bits
-        effectiveGroupSize = resolved.groupSize
-    } else if let kvBits {
-        effectiveBits = kvBits
-        effectiveGroupSize = kvGroupSize
-    } else {
-        return
-    }
-
-    /// Recursively decide whether a cache (or any of its children) is eligible for
-    /// quantization: it must be a plain ``KVCacheSimple`` that is not already
-    /// quantized and whose offset has crossed the requested start threshold.
-    func isQuantizable(_ cache: KVCache) -> Bool {
-        if let list = cache as? CacheList {
-            return list.children.contains(where: isQuantizable)
+@discardableResult
+func maybeAffineQuantizeKVCache(
+    cache: inout [KVCache],
+    bits: Int,
+    groupSize: Int,
+    compressionStart: Int
+) -> Bool {
+    var awaitsCompressionStart = false
+    KVCacheTree.rewrite(&cache) { leaf in
+        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard simple.offset > compressionStart else {
+            awaitsCompressionStart = true
+            return simple
         }
-        return cache is KVCacheSimple
-            && !(cache is QuantizedKVCache)
-            && cache.offset > quantizedKVStart
-    }
 
-    guard cache.contains(where: isQuantizable) else {
-        return
-    }
-
-    /// Attempt to convert a single cache to its quantized form. Returns the
-    /// original cache if conversion is not possible for this entry.
-    func quantize(_ cache: KVCacheSimple) -> KVCache {
-        let state = cache.state
+        let state = simple.state
         if state.count == 2 {
             let keyHeadDim = state[0].dim(3)
             let valueHeadDim = state[1].dim(3)
             guard
                 resolvedKVQuantizationGroupSize(
-                    requested: effectiveGroupSize,
+                    requested: groupSize,
                     keyHeadDim: keyHeadDim,
                     valueHeadDim: valueHeadDim
                 ) != nil
             else {
-                return cache
+                return simple
             }
         }
-        return cache.toQuantized(groupSize: effectiveGroupSize, bits: effectiveBits)
+        return simple.toQuantized(groupSize: groupSize, bits: bits)
     }
-
-    for i in 0 ..< cache.count {
-        if let list = cache[i] as? CacheList {
-            list.mapChildren { child in
-                guard let simpleCache = child as? KVCacheSimple else { return child }
-                return quantize(simpleCache)
-            }
-        } else if let simpleCache = cache[i] as? KVCacheSimple {
-            cache[i] = quantize(simpleCache)
-        }
-        // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-    }
+    return !awaitsCompressionStart
 }

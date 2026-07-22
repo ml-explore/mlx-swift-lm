@@ -514,6 +514,55 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    func testChangingKVCacheConfigurationRequiresClearingRealizedCache() async throws {
+        let initialConfiguration = KVCacheConfiguration(
+            strategy: .turboQuant(.qualityFirst))
+        let session = ChatSession(
+            model(),
+            cache: [KVCacheSimple()],
+            generateParameters: GenerateParameters(kvCache: initialConfiguration))
+
+        session.generateParameters.kvCache = KVCacheConfiguration(strategy: .fullPrecision)
+
+        do {
+            _ = try await session.kvCacheRuntimeReport()
+            XCTFail("Expected a realized cache to reject configuration changes")
+        } catch ChatSessionError.kvCacheConfigurationChanged(
+            let previous, let requested)
+        {
+            XCTAssertEqual(previous, initialConfiguration)
+            XCTAssertEqual(requested, KVCacheConfiguration(strategy: .fullPrecision))
+        }
+    }
+
+    func testSessionRetainsCacheReplacementTriggeredDuringDecode() async throws {
+        let affine = try AffineKVCacheConfiguration(
+            bits: 4, groupSize: 64, compressionStart: 8)
+        let session = ChatSession(
+            model(),
+            generateParameters: GenerateParameters(
+                maxTokens: 3,
+                kvCache: KVCacheConfiguration(
+                    strategy: .affine(affine), compatibility: .allowPartial)))
+
+        _ = try await session.respond(to: "hello")
+        let observedFirstOffset = try await session.withCache { cache in
+            let cache = try XCTUnwrap(cache)
+            let quantized = try XCTUnwrap(
+                cache.first { $0 is QuantizedKVCache } as? QuantizedKVCache)
+            return quantized.offset
+        }
+        let firstOffset = try XCTUnwrap(observedFirstOffset)
+
+        _ = try await session.respond(to: "hello again")
+        try await session.withCache { cache in
+            let cache = try XCTUnwrap(cache)
+            let quantized = try XCTUnwrap(
+                cache.first { $0 is QuantizedKVCache } as? QuantizedKVCache)
+            XCTAssertGreaterThan(quantized.offset, firstOffset)
+        }
+    }
+
     /// something that looks like a view model
     @MainActor class ChatModel {
         let session: ChatSession

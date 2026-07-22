@@ -714,8 +714,8 @@ private enum PixtralLanguage {
 
         func newCache(parameters: GenerateParameters?) -> [KVCache] {
             (0 ..< config.numHiddenLayers).map { _ in
-                if let maxKVSize = parameters?.maxKVSize {
-                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                if let capacity = parameters?.effectiveKVCacheCapacity {
+                    return capacity.makeRotatingCache()
                 } else {
                     return KVCacheSimple()
                 }

@@ -183,6 +183,28 @@ private final class CountingKVCache: KVCache {
 
 // MARK: - Smallest-unit-of-work smoke test
 
+@Suite("MTP KV-cache configuration")
+struct MTPKVCacheConfigurationTests {
+    @Test func legacyTurboSchemeUsesTypedDispatcher() throws {
+        let main = MockMainModel(nextLogitTokens: [0, 0, 7])
+        let drafter = MockDrafter(draftedTokenValue: 7)
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+        let iterator = try MTPSpeculativeTokenIterator(
+            input: input,
+            mainModel: main,
+            drafter: drafter,
+            parameters: GenerateParameters(kvScheme: "turbo0v4"),
+            blockSize: 2)
+        let simple = KVCacheSimple()
+        simple.offset = 1
+        var cache: [KVCache] = [simple]
+
+        iterator.kvCachePlan.apply(to: &cache)
+
+        #expect(cache[0] is TurboQuantKVCache)
+    }
+}
+
 @Test
 func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // Plan: prompt of 3 tokens [1, 2, 3], main model is rigged so that it

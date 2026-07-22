@@ -38,8 +38,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     let drafter: any MTPDrafterModel
 
     var mainState: LMOutput.State?
-    var mainCache: [KVCache]
-    let quantizeKVCache: (inout [KVCache]) -> Void
+    let mainCacheStorage: KVCacheStorage
+    var mainCache: [KVCache] {
+        get { mainCacheStorage.cache }
+        set { mainCacheStorage.replace(with: newValue) }
+    }
+    var kvCachePlan: KVCachePlan { mainCacheStorage.plan }
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
@@ -107,30 +111,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             blockSize >= 2,
             "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)")
 
+        let kvCachePlan = try parameters.kvCachePlan()
+        let mainCache = try kvCachePlan.validated(
+            mainCache ?? mainModel.newCache(parameters: parameters))
+        guard canTrimPromptCache(mainCache) else {
+            throw KVCacheError(
+                message: "MTP speculative decoding requires a trimmable main KV cache.")
+        }
+
         self.y = input.text
         self.mainModel = mainModel
         self.drafter = drafter
 
-        self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
-        guard canTrimPromptCache(self.mainCache) else {
-            throw KVCacheError(
-                message: "MTP speculative decoding requires a trimmable main KV cache.")
-        }
+        self.mainCacheStorage = KVCacheStorage(mainCache, plan: kvCachePlan)
 
         self.sampler = parameters.sampler()
         self.processor = parameters.processor()
 
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
-
-        self.quantizeKVCache = { cache in
-            maybeQuantizeKVCache(
-                cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
-            )
-        }
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -208,6 +207,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 pendingTokens.append(token.item(Int.self))
             }
         }
+
+        try kvCachePlan.applyAndValidate(to: mainCacheStorage)
     }
 
     /// Single round: draft `blockSize - 1` tokens, verify with main, accept
@@ -363,7 +364,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Dynamic cache quantization may convert `.regular` K/V to `.quantized`,
         // at which point the target's emit-hook returns sharedKV: nil and the
         // next round transitions to passthrough.
-        quantizeKVCache(&mainCache)
+        kvCachePlan.apply(to: mainCacheStorage)
 
         y = .init(tokens: finalToken)
     }
@@ -395,7 +396,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         eval(token)
         let tokenInt = token.item(Int.self)
         y = .init(tokens: token)
-        quantizeKVCache(&mainCache)
+        kvCachePlan.apply(to: mainCacheStorage)
         return tokenInt
     }
 

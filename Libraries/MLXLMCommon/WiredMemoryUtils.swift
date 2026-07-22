@@ -93,7 +93,8 @@ public enum WiredMemoryUtils {
         model: any LanguageModel,
         parameters: GenerateParameters
     ) throws -> [KVCache] {
-        var cache = model.newCache(parameters: parameters)
+        let kvCachePlan = try parameters.kvCachePlan()
+        var cache = try kvCachePlan.validated(model.newCache(parameters: parameters))
 
         switch try model.prepare(
             input, cache: cache, state: nil, windowSize: parameters.prefillStepSize)
@@ -104,22 +105,12 @@ public enum WiredMemoryUtils {
                 cache: cache.isEmpty ? nil : cache,
                 state: nil
             )
-            maybeQuantizeKVCache(
-                cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
-            )
             eval(result.logits)
         case .logits(let result):
-            maybeQuantizeKVCache(
-                cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
-            )
             eval(result.logits)
         }
+
+        try kvCachePlan.applyAndValidate(to: &cache)
 
         return cache
     }

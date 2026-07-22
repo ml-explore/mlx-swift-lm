@@ -5,26 +5,69 @@ key/value cache.
 
 ## Overview
 
-At long context lengths the KV cache, not the weights, dominates memory. Two
-mechanisms are available through ``GenerateParameters``:
+At long context lengths the KV cache, not the weights, dominates memory. Use
+``KVCacheConfiguration`` to select capacity, compression, and compatibility as
+one validated value:
 
-- **Affine quantization**: `kvBits`, `kvGroupSize`, and `quantizedKVStart`
-  quantize both K and V with MLX's affine scheme. The named schemes
-  `"affine4"` and `"affine8"` are shorthands for the same path.
-- **TurboQuant schemes via `kvScheme`**: vectors are rotated with a
-  Walsh-Hadamard transform and quantized against a Lloyd-Max codebook.
+```swift
+let parameters = GenerateParameters(
+    kvCache: KVCacheConfiguration(
+        strategy: .turboQuant(.balanced)))
+```
+
+The strategy is opaque so new cache implementations can be added without
+turning a public enum into an exhaustive client-side switch. The current
+strategies are:
+
+- **Affine quantization**: ``KVCacheConfiguration/Strategy/affine(_:)``
+  quantizes both K and V with MLX's affine scheme.
+- **TurboQuant**: ``KVCacheConfiguration/Strategy/turboQuant(_:)`` rotates
+  vectors with a Walsh-Hadamard transform and quantizes them against a
+  Lloyd-Max codebook.
   TurboQuant schemes are asymmetric. Keys and values can use different
   precision because attention quality is far more sensitive to key error
   (softmax amplifies it) than to value error (linear averaging smooths it).
 
-```swift
-var parameters = GenerateParameters()
-parameters.kvScheme = "turbo8v3"   // recommended default
-```
+The older `maxKVSize`, `kvBits`, `kvGroupSize`, `quantizedKVStart`, and
+`kvScheme` fields remain available as a compatibility adapter. Do not combine
+them with `kvCache`; unknown legacy scheme strings are rejected when generation
+starts.
+
+The standalone legacy ``maybeQuantizeKVCache(cache:kvBits:kvGroupSize:quantizedKVStart:kvScheme:)``
+hook leaves custom schemes unchanged; generation APIs reject them.
 
 Prefill is unaffected: the cache stores raw fp16 during prompt processing,
 compresses on the first decode step, and encodes each new token incrementally
 afterwards. Compressed caches round-trip through prompt-cache save/restore.
+
+## Capacity and compatibility
+
+A capacity creates rotating caches for model cache factories that support the
+generic bounded-cache path. Rotating caches are not compressible, so combining a
+capacity with compression can leave no eligible layers. Select the failure
+semantics explicitly. Typed configuration defaults to
+`.requireAtLeastOneLayer`, preventing a compression request from silently
+becoming an all-fp16 no-op:
+
+- `.allowPartial` compresses eligible global layers and retains rotating layers
+  as fp16.
+- `.requireAtLeastOneLayer` rejects an all-rotating no-op configuration.
+- `.requireAllLayers` rejects any uncompressed attention layer.
+
+Compatibility is checked again after prefill, so unsupported realized head
+shapes fail according to the selected policy.
+
+Applications that need a hard total-context cap and compression should omit
+cache capacity, use `.requireAtLeastOneLayer`, and enforce the total token budget
+before inference. A bounded compressed ring cache is not currently implemented.
+
+``ChatSession/kvCacheRuntimeReport()`` reports the requested configuration and
+each realized layer's state, resolved strategy, and skip reason. Its aggregate
+counts let an application display compressed, pending, and skipped layer counts
+without assuming that a request took effect.
+
+A realized `ChatSession` cache is bound to its configuration. Call
+``ChatSession/clear()`` before changing its capacity or strategy.
 
 ## Scheme reference
 
@@ -103,7 +146,7 @@ when exact fp16-parity decode matters more than footprint.
   actually grows, do compress, and a one-time notice lists the layers that
   kept fp16 rotating caches. Hybrid recurrent layers are likewise left
   untouched.
-- Unrecognized scheme strings are ignored.
+- A bounded compressed rotating cache is not implemented.
 - For memory estimation with wired limits see <doc:wired-memory>; effective
   bytes per element follow from the table above (for example `turbo8v3` is
   about 0.73 bytes per K/V element pair average against 4 for fp16).
