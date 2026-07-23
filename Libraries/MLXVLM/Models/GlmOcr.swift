@@ -275,6 +275,17 @@ private enum Language {
         fileprivate let norm: RMSNorm
         let rotaryEmb: GlmOcrRotaryEmbedding
 
+        // M-RoPE delta carried from prefill into every autoregressive step. GLM-OCR's image tokens
+        // pack many patches onto few M-RoPE positions, so the LM's *last* position after prefill is
+        // far below the token count (delta = maxPosition + 1 - tokenCount, a large NEGATIVE number
+        // for a full page). Generated tokens must continue from that last position — NOT from the
+        // raw KV-cache offset. mlx-vlm stores this on the model instance (`self._rope_deltas`); the
+        // Swift port only put it on the transient LMOutput.State, which the generate loop does not
+        // carry — so generation fell back to sequential cache-offset positions (0,1,2… → 4830,4831…
+        // for a large image), a catastrophic M-RoPE mismatch that degenerates into a repetition
+        // loop. Persisting it here restores parity with mlx-vlm. Set in `prepare(_:cache:windowSize:)`.
+        fileprivate var glmRopeDelta: Int32 = 0
+
         public init(_ args: GlmOcrConfiguration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
 
@@ -307,7 +318,7 @@ private enum Language {
             } else {
                 let offset = cache?.first?.offset ?? 0
                 let seqLen = h.dim(h.ndim - 2)
-                let positions = MLXArray(Int32(offset) ..< Int32(offset + seqLen))
+                let positions = MLXArray((Int32(offset) + glmRopeDelta) ..< (Int32(offset + seqLen) + glmRopeDelta))
                     .expandedDimensions(axis: 0)
                 posIds = tiled(positions, repetitions: [3, 1, 1])
             }
@@ -320,7 +331,6 @@ private enum Language {
                     h, mask: mask, cache: cache?[i],
                     positionEmbeddings: positionEmbeddings)
             }
-
             return norm(h)
         }
     }
@@ -1038,6 +1048,9 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         var state = LMOutput.State()
         state[precomputedPositionIdsKey] = positionIds
         state[ropeDeltasKey] = ropeDeltas
+        if let ropeDeltas {
+            languageModel.model.glmRopeDelta = ropeDeltas.asType(.int32).item(Int32.self)
+        }
 
         let result = languageModel(
             nil, cache: cache, state: state, inputEmbedding: inputEmbeddings)
