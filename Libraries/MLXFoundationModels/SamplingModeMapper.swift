@@ -6,9 +6,8 @@ import MLXLMCommon
 /// Sampling-strategy selection for the adapter, resolved to the
 /// `GenerateParameters` fields MLX's sampler consumes.
 ///
-/// The adapter translates the FoundationModels `GenerationOptions.SamplingMode`
-/// into this enum at dispatch (dropping the best-effort `seed`, which MLX's
-/// samplers cannot honor) and applies the result to `GenerateParameters` via
+/// The adapter keeps the Foundation Models seed alongside this mode in
+/// ``MLXSamplingConfiguration`` and applies mode policy through
 /// ``resolveSamplingParameters(mode:clampedTemperature:)``.
 public enum MLXSamplingMode: Sendable, Equatable {
     /// Deterministic decoding — always pick the most likely token.
@@ -22,6 +21,13 @@ public enum MLXSamplingMode: Sendable, Equatable {
     /// as greedy; `p >= 1` keeps the full distribution (MLX normalizes a `topP`
     /// outside `(0, 1)` to "no top-p filter").
     case nucleus(Double)
+}
+
+/// The adapter-local sampling request. Keeping mode and seed together prevents
+/// call sites from applying one while accidentally dropping the other.
+struct MLXSamplingConfiguration: Sendable, Equatable {
+    let mode: MLXSamplingMode
+    let seed: UInt64?
 }
 
 /// The sampling fields a resolved ``MLXSamplingMode`` contributes to

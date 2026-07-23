@@ -24,6 +24,12 @@ import Foundation
 /// ```
 public class ToolCallProcessor {
 
+    /// An ordered item emitted while processing generated output.
+    public enum Output: Sendable, Equatable {
+        case response(String)
+        case toolCall(ToolCall)
+    }
+
     // MARK: - Properties
 
     private let format: ToolCallFormat
@@ -35,6 +41,8 @@ public class ToolCallProcessor {
     private var state = State.normal
     private var toolCallBuffer = ""
     private var emittedToolCallIDs: Set<String> = []
+    private var orderedOutputQueue: [Output] = []
+    private var orderedOutputEnabled = false
 
     /// The tool calls extracted during processing.
     public var toolCalls: [ToolCall] = []
@@ -91,11 +99,26 @@ public class ToolCallProcessor {
         return processTaggedChunk(chunk)
     }
 
-    /// Drain queued tool calls in parse order.
+    /// Processes a generated chunk and removes its output in source order.
     ///
-    /// This is useful for streaming consumers that need deterministic FIFO dispatch
-    /// of all complete calls discovered while processing a token chunk.
-    func drainToolCalls() -> [ToolCall] {
+    /// Tool protocol syntax that does not parse as a call is not emitted as a
+    /// response. Use this streaming operation when tool calls and response text
+    /// must retain their relative order. Do not mix this API with `processChunk`,
+    /// `processEOS`, or `drainToolCalls()` on the same processor instance.
+    public func processChunkOutputs(_ chunk: String) -> [Output] {
+        orderedOutputEnabled = true
+        let outputCount = orderedOutputQueue.count
+        let visible = processChunk(chunk)
+        if orderedOutputQueue.count == outputCount, let visible {
+            recordResponse(sanitizingProtocol: visible)
+        }
+        _ = drainToolCalls()
+        return drainOrderedOutputs()
+    }
+
+    /// Removes and returns every parsed call in parse order.
+    /// A second call returns an empty array until more chunks are processed.
+    public func drainToolCalls() -> [ToolCall] {
         guard !toolCalls.isEmpty else { return [] }
         let drained = toolCalls
         toolCalls.removeAll(keepingCapacity: true)
@@ -145,12 +168,36 @@ public class ToolCallProcessor {
         return returnBufferedText && parsedCalls.isEmpty ? buffered : nil
     }
 
+    /// Finishes processing and removes residual output in source order.
+    ///
+    /// This preserves non-tool text following EOS-delimited calls. Do not mix
+    /// this API with the legacy processing and draining APIs.
+    public func processEOSOutputs() -> [Output] {
+        orderedOutputEnabled = true
+        if format == .mistral, let outputs = processMistralEOSOutputs() {
+            orderedOutputQueue.removeAll(keepingCapacity: true)
+            return outputs
+        }
+        if format == .lfm2, let outputs = processLFM2EOSOutputs() {
+            orderedOutputQueue.removeAll(keepingCapacity: true)
+            return outputs
+        }
+
+        let outputCount = orderedOutputQueue.count
+        let visible = processEOS(returnBufferedText: true)
+        if orderedOutputQueue.count == outputCount, let visible {
+            recordEOSResidual(visible)
+        }
+        _ = drainToolCalls()
+        return drainOrderedOutputs()
+    }
+
     // MARK: - Private Methods
 
     /// Process chunk for inline formats (no wrapper tags).
     ///
-    /// Uses brace counting to detect when output looks like a JSON tool call.
-    /// While braces are unbalanced the content is buffered (returns `nil`)
+    /// Uses quote-aware JSON object scanning to detect when output looks like a JSON tool call.
+    /// While the object is incomplete the content is buffered (returns `nil`)
     /// so partial JSON is never leaked to the UI.
     private func processInlineChunk(_ chunk: String) -> String? {
         switch state {
@@ -163,25 +210,30 @@ public class ToolCallProcessor {
                 state = .collectingToolCall
 
                 if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
+                    recordResponse(leading.replacingOccurrences(of: "<|python_tag|>", with: ""))
                     appendToolCall(toolCall)
                     toolCallBuffer = ""
                     state = .normal
                     return leading.isEmpty ? nil : leading
                 }
 
-                // Still collecting — check if braces are balanced (would mean parse
+                // Still collecting — check if the first JSON object is complete (would mean parse
                 // failed on complete JSON, so it's not a tool call)
-                if jsonBracesBalanced(toolCallBuffer) {
+                if jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) != nil {
                     state = .normal
                     let buffer = toolCallBuffer
                     toolCallBuffer = ""
-                    return leading + buffer
+                    let response = leading + buffer
+                    recordResponse(sanitizingProtocol: response)
+                    return response
                 }
 
+                recordResponse(sanitizingProtocol: leading)
                 return leading.isEmpty ? nil : leading
             }
 
             // No brace seen — pass through as regular text
+            recordResponse(sanitizingProtocol: chunk)
             return chunk
 
         case .potentialToolCall, .collectingToolCall, .collectingJSONToolCall:
@@ -194,11 +246,12 @@ public class ToolCallProcessor {
                 return nil
             }
 
-            // If braces are balanced but parse failed, this isn't a tool call — flush
-            if jsonBracesBalanced(toolCallBuffer) {
+            // If the object is complete but parse failed, this isn't a tool call — flush
+            if jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) != nil {
                 state = .normal
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
+                recordResponse(sanitizingProtocol: buffer)
                 return buffer
             }
 
@@ -207,13 +260,187 @@ public class ToolCallProcessor {
         }
     }
 
-    /// Check whether open/close braces are balanced in the string.
-    private func jsonBracesBalanced(_ text: String) -> Bool {
-        var depth = 0
-        for ch in text {
-            if ch == "{" { depth += 1 } else if ch == "}" { depth -= 1 }
+    private func appendResponse(_ text: String, to outputs: inout [Output]) {
+        guard !text.isEmpty else { return }
+        outputs.append(.response(text))
+    }
+
+    private func recordResponse(_ text: String) {
+        guard orderedOutputEnabled, !text.isEmpty else { return }
+        orderedOutputQueue.append(.response(text))
+    }
+
+    private func recordResponse(sanitizingProtocol text: String) {
+        recordResponse(stripProtocolSpans(from: text))
+    }
+
+    private func recordEOSResidual(_ text: String) {
+        recordResponse(sanitizeEOSResidual(text))
+    }
+
+    private func drainOrderedOutputs() -> [Output] {
+        let outputs = orderedOutputQueue
+        orderedOutputQueue.removeAll(keepingCapacity: true)
+        return outputs
+    }
+
+    private func stripProtocolSpans(from text: String) -> String {
+        var result = text
+        let tags =
+            [parser.startTag, parser.endTag].compactMap { $0 }
+            + (format == .llama3 ? ["<|python_tag|>"] : [])
+
+        for tag in tags {
+            while let range = result.range(of: tag) {
+                if tag == parser.startTag,
+                    let endTag = parser.endTag,
+                    let end = result.range(of: endTag, range: range.upperBound ..< result.endIndex)
+                {
+                    result.removeSubrange(range.lowerBound ..< end.upperBound)
+                } else {
+                    result.removeSubrange(range)
+                }
+            }
+
+            guard let first = tag.first else { continue }
+            var index = result.startIndex
+            while index < result.endIndex {
+                guard result[index] == first else {
+                    index = result.index(after: index)
+                    continue
+                }
+                let suffix = result[index...]
+                let matchCount = zip(suffix, tag).prefix { $0 == $1 }.count
+                guard matchCount >= nearCompleteMatchLength(for: tag) else {
+                    index = result.index(after: index)
+                    continue
+                }
+                let markerEnd =
+                    suffix.firstIndex(of: ">")
+                    ?? suffix.firstIndex(of: "]")
+                let removalEnd = markerEnd.map { result.index(after: $0) } ?? result.endIndex
+                result.removeSubrange(index ..< removalEnd)
+            }
         }
-        return depth == 0
+        return result
+    }
+
+    private func sanitizeEOSResidual(_ text: String) -> String {
+        guard let startTag = parser.startTag else {
+            return stripProtocolSpans(from: text)
+        }
+
+        var searchStart = text.startIndex
+        while let startRange = text.range(of: startTag, range: searchStart ..< text.endIndex) {
+            guard
+                let endTag = parser.endTag,
+                let endRange = text.range(
+                    of: endTag, range: startRange.upperBound ..< text.endIndex)
+            else {
+                return stripProtocolSpans(from: String(text[..<startRange.lowerBound]))
+            }
+            searchStart = endRange.upperBound
+        }
+        return stripProtocolSpans(from: text)
+    }
+
+    private func nearCompleteMatchLength(for tag: String) -> Int {
+        max(tag.count - 2, 1)
+    }
+
+    private func processMistralEOSOutputs() -> [Output]? {
+        guard
+            state == .collectingToolCall || state == .potentialToolCall
+                || state == .collectingJSONToolCall,
+            !toolCallBuffer.isEmpty
+        else { return nil }
+
+        let startTag = "[TOOL_CALLS]"
+        let argsTag = "[ARGS]"
+        var remaining = toolCallBuffer
+        var outputs: [Output] = []
+
+        while remaining.hasPrefix(startTag) {
+            guard let argsRange = remaining.range(of: argsTag) else { break }
+            let arguments = String(remaining[argsRange.upperBound...])
+            guard let split = jsonObjectScanner.splitLeadingObject(from: arguments) else { break }
+
+            let callText = String(remaining[..<argsRange.upperBound]) + split.object
+            guard let call = parser.parse(content: callText, tools: tools) else { break }
+            appendToolCall(call)
+            outputs.append(.toolCall(toolCalls.removeLast()))
+            remaining = split.trailing
+        }
+
+        toolCallBuffer = ""
+        state = .normal
+
+        if !remaining.isEmpty {
+            appendResponse(sanitizeEOSResidual(remaining), to: &outputs)
+        }
+        return outputs
+    }
+
+    private func processLFM2EOSOutputs() -> [Output]? {
+        guard
+            state == .collectingToolCall || state == .potentialToolCall
+                || state == .collectingJSONToolCall,
+            !toolCallBuffer.isEmpty,
+            let startTag = parser.startTag
+        else { return nil }
+
+        var remaining = toolCallBuffer
+        var outputs: [Output] = []
+
+        while let startRange = remaining.range(of: startTag) {
+            let responsePrefix = String(remaining[..<startRange.lowerBound])
+            let callStart = startRange.upperBound
+            guard let callEnd = balancedBracketEnd(in: remaining, from: callStart) else { break }
+
+            let callText = String(remaining[startRange.lowerBound ... callEnd])
+            guard let call = parser.parse(content: callText, tools: tools) else { break }
+            appendResponse(stripProtocolSpans(from: responsePrefix), to: &outputs)
+            appendToolCall(call)
+            outputs.append(.toolCall(toolCalls.removeLast()))
+            remaining = String(remaining[remaining.index(after: callEnd)...])
+        }
+
+        toolCallBuffer = ""
+        state = .normal
+
+        if !remaining.isEmpty {
+            appendResponse(sanitizeEOSResidual(remaining), to: &outputs)
+        }
+        return outputs
+    }
+
+    private func balancedBracketEnd(in text: String, from start: String.Index) -> String.Index? {
+        var depth = 0
+        var stringQuote: Character?
+        var escaped = false
+
+        for index in text.indices[start...] {
+            let character = text[index]
+            if let quote = stringQuote {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == quote {
+                    stringQuote = nil
+                }
+                continue
+            }
+            switch character {
+            case "\"", "'": stringQuote = character
+            case "[": depth += 1
+            case "]":
+                depth -= 1
+                if depth == 0 { return index }
+            default: break
+            }
+        }
+        return nil
     }
 
     /// Process chunk for tagged formats.
@@ -229,11 +456,13 @@ public class ToolCallProcessor {
             ? taggedStartMode(in: chunk, startChar: startChar)
             : .none
         guard startMode != .none || state != .normal else {
+            recordResponse(chunk)
             return chunk
         }
 
         toolCallBuffer += chunk
         var leadingToken: String?
+        var leadingTokenWasRecorded = false
 
         switch state {
         case .normal:
@@ -270,8 +499,12 @@ public class ToolCallProcessor {
             if partialMatch(buffer: toolCallBuffer, tag: startTag) {
                 if toolCallBuffer.starts(with: startTag) {
                     state = .collectingToolCall
+                    recordResponse(leadingToken ?? "")
+                    leadingTokenWasRecorded = true
                     fallthrough
                 } else {
+                    recordResponse(leadingToken ?? "")
+                    leadingTokenWasRecorded = true
                     return nil
                 }
             } else {
@@ -279,7 +512,9 @@ public class ToolCallProcessor {
                 state = .normal
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
-                return (leadingToken ?? "") + buffer
+                let response = (leadingToken ?? "") + buffer
+                recordResponse(sanitizingProtocol: response)
+                return response
             }
 
         case .collectingToolCall:
@@ -296,6 +531,9 @@ public class ToolCallProcessor {
 
                 // Parse the tool call using the parser.
                 if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
+                    if !leadingTokenWasRecorded {
+                        recordResponse(leadingToken ?? "")
+                    }
                     appendToolCall(toolCall)
                     state = .normal
                     toolCallBuffer = ""
@@ -309,12 +547,16 @@ public class ToolCallProcessor {
 
                     // Otherwise, return trailing text if non-empty.
                     let trailingText = trailingToken?.isEmpty ?? true ? nil : trailingToken
+                    if let trailingText { recordResponse(trailingText) }
                     return combine(leadingToken, trailingText)
                 }
 
                 // Preserve unparsed tagged payload as plain text, then continue scanning.
                 state = .normal
                 toolCallBuffer = ""
+                if !leadingTokenWasRecorded {
+                    recordResponse(leadingToken ?? "")
+                }
                 if let trailingToken,
                     tokenCouldContainToolStart(trailingToken, startChar: startChar)
                 {
@@ -323,6 +565,7 @@ public class ToolCallProcessor {
                         combine(bufferedToolCall, processChunk(trailingToken))
                     )
                 }
+                if let trailingToken { recordResponse(trailingToken) }
                 return combine(leadingToken, combine(bufferedToolCall, trailingToken))
             }
 
@@ -347,7 +590,9 @@ public class ToolCallProcessor {
             state = .normal
             let buffered = toolCallBuffer
             toolCallBuffer = ""
-            return combine(leadingToken, buffered)
+            let response = (leadingToken ?? "") + buffered
+            recordResponse(sanitizingProtocol: response)
+            return response
         }
 
         switch jsonObjectScanner.evaluatePrefix(in: toolCallBuffer) {
@@ -357,15 +602,19 @@ public class ToolCallProcessor {
             toolCallBuffer = ""
             // vLLM-style recovery: if a tagged tool call exists later, retry tagged parsing.
             if buffered.contains(startTag) {
+                recordResponse(leadingToken ?? "")
                 return combine(leadingToken, processChunk(buffered))
             }
-            return combine(leadingToken, buffered)
+            let response = (leadingToken ?? "") + buffered
+            recordResponse(sanitizingProtocol: response)
+            return response
         case .needsMore, .validObject:
             break
         }
 
         guard let split = jsonObjectScanner.splitLeadingObject(from: toolCallBuffer) else {
             // Continue buffering until a complete top-level JSON object is available.
+            recordResponse(leadingToken ?? "")
             return leadingToken?.isEmpty ?? true ? nil : leadingToken
         }
 
@@ -373,6 +622,7 @@ public class ToolCallProcessor {
         let trailingToken = split.trailing
 
         if let toolCall = parser.parse(content: jsonCandidate, tools: tools) {
+            recordResponse(leadingToken ?? "")
             appendToolCall(toolCall)
 
             state = .normal
@@ -386,6 +636,7 @@ public class ToolCallProcessor {
                 return combine(leadingToken, processChunk(trailingToken))
             }
 
+            recordResponse(trailingToken)
             return combine(leadingToken, trailingToken)
         }
 
@@ -394,9 +645,12 @@ public class ToolCallProcessor {
         state = .normal
         toolCallBuffer = ""
         if tokenCouldContainToolStart(trailingToken, startChar: startChar) {
+            recordResponse((leadingToken ?? "") + jsonCandidate)
             return combine(leadingToken, combine(jsonCandidate, processChunk(trailingToken)))
         }
-        return combine(leadingToken, combine(jsonCandidate, trailingToken))
+        let response = (leadingToken ?? "") + jsonCandidate + trailingToken
+        recordResponse(sanitizingProtocol: response)
+        return response
     }
 
     private func taggedStartMode(
@@ -447,7 +701,11 @@ public class ToolCallProcessor {
     }
 
     private func appendToolCall(_ call: ToolCall) {
-        toolCalls.append(normalizedToolCall(call))
+        let normalized = normalizedToolCall(call)
+        toolCalls.append(normalized)
+        if orderedOutputEnabled {
+            orderedOutputQueue.append(.toolCall(normalized))
+        }
     }
 
     private func normalizedToolCall(_ call: ToolCall) -> ToolCall {
@@ -501,7 +759,7 @@ public class ToolCallProcessor {
     }
 }
 
-private struct JSONLeadingObjectScanner {
+struct JSONLeadingObjectScanner {
     enum PrefixState {
         case needsMore
         case validObject

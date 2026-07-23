@@ -73,6 +73,37 @@ struct GuidedGenerationIntegrationTests {
     }
 
     @Test
+    func schemaGuidedCancellationPropagates() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let transcript = Transcript(entries: [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Return one integer."))],
+                    responseFormat: nil))
+        ])
+        let request = makeExecutorRequest(transcript: transcript, schema: Int.generationSchema)
+        let sink = GuidedGenerationDiagnosticSink(cancelAfterEmitCount: 1)
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            guidedGenerationSink: sink)
+
+        var sawCancellation = false
+        do {
+            for try await _ in stream {}
+        } catch is CancellationError {
+            sawCancellation = true
+        }
+        await stream.cancelAndWait()
+
+        #expect(sink.emitCount >= 1, "schema generation must reach its guided emit")
+        #expect(sawCancellation, "schema guided cancellation must not become normal EOS")
+    }
+
+    @Test
     func noSchemaUsesUnconstrainedPath() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
