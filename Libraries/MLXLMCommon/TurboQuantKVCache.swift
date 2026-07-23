@@ -1726,9 +1726,10 @@ public func maybeTurboQuantizeKVCache(
             guard
                 let headDims,
                 resolvedKVQuantizationGroupSize(
-                    requested: 64, keyHeadDim: headDims.key, valueHeadDim: headDims.value) != nil
+                    requested: 64, keyHeadDim: headDims.key, valueHeadDim: headDims.value) != nil,
+                let quantized = try? simple.toQuantized(groupSize: 64, bits: 8)
             else { continue }
-            cache[i] = simple.toQuantized(groupSize: 64, bits: 8)
+            cache[i] = quantized
             continue
         }
 

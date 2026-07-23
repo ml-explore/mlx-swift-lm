@@ -134,11 +134,11 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(copied.metaState == cache.metaState)
 }
 
-@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() {
+@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() throws {
     let cache = KVCacheSimple()
     cache.offset = 7
 
-    let quantized = cache.toQuantized(groupSize: 128, bits: 4)
+    let quantized = try cache.toQuantized(groupSize: 128, bits: 4)
 
     #expect(quantized.offset == 7)
     #expect(quantized.groupSize == 128)
@@ -777,4 +777,77 @@ private final class BatchOffsetProbeCache: BaseKVCache {
         return
     }
     #expect(offsets.asArray(Int32.self) == [10, 20])
+}
+
+// MARK: - Corrupt prompt cache recovery (throws, not fatalError)
+
+/// Writes a hand-crafted "prompt cache" file that claims to hold a `KVCacheSimple`
+/// but only has one array where the format requires exactly two (keys, values),
+/// simulating a truncated/corrupted cache file.
+private func writeCorruptSimpleCacheFile(className: String, arrayCount: Int, metaState: [String])
+    throws -> URL
+{
+    let url = tempURL()
+    var arrays: [String: MLXArray] = [:]
+    for i in 0 ..< arrayCount {
+        arrays["0.\(i)"] = MLXArray.zeros([1, 1, 1, 1], dtype: .float32)
+    }
+    var metadata: [String: String] = [:]
+    for (j, value) in metaState.enumerated() {
+        metadata["0.0.\(j)"] = value
+    }
+    metadata["2.0"] = className
+    try save(arrays: arrays, metadata: metadata, url: url)
+    return url
+}
+
+@Test func testLoadPromptCacheThrowsOnCorruptKVCacheSimpleStateInsteadOfCrashing() throws {
+    // KVCacheSimple requires exactly 2 arrays; provide only 1.
+    let url = try writeCorruptSimpleCacheFile(
+        className: "KVCacheSimple", arrayCount: 1, metaState: [""])
+
+    #expect(throws: KVCacheError.self) {
+        _ = try loadPromptCache(url: url)
+    }
+}
+
+@Test func testLoadPromptCacheThrowsOnCorruptQuantizedKVCacheMetaStateInsteadOfCrashing() throws {
+    // QuantizedKVCache requires exactly 4 metaState values; provide only 2.
+    let url = try writeCorruptSimpleCacheFile(
+        className: "QuantizedKVCache", arrayCount: 4, metaState: ["256", "0"])
+
+    #expect(throws: KVCacheError.self) {
+        _ = try loadPromptCache(url: url)
+    }
+}
+
+@Test func testLoadPromptCacheThrowsOnCorruptChunkedKVCacheMetaStateInsteadOfCrashing() throws {
+    // ChunkedKVCache requires exactly 2 metaState values; provide only 1.
+    let url = try writeCorruptSimpleCacheFile(
+        className: "ChunkedKVCache", arrayCount: 2, metaState: ["None"])
+
+    #expect(throws: KVCacheError.self) {
+        _ = try loadPromptCache(url: url)
+    }
+}
+
+@Test func testRotatingKVCacheToQuantizedThrowsInsteadOfCrashing() throws {
+    let cache = RotatingKVCache(maxSize: 32)
+
+    #expect(throws: KVCacheError.self) {
+        _ = try cache.toQuantized()
+    }
+}
+
+@Test func testKVCacheSimpleToQuantizedThrowsOnIncompatibleHeadDim() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.zeros([1, 2, 4, 5], dtype: .float32),
+        values: MLXArray.zeros([1, 2, 4, 5], dtype: .float32)
+    )
+
+    // Head dim 5 is not divisible by any of the supported group sizes (32, 64, 128).
+    #expect(throws: KVCacheError.self) {
+        _ = try cache.toQuantized(groupSize: 64, bits: 4)
+    }
 }
