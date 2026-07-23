@@ -231,7 +231,11 @@ public struct ArgMaxSampler: LogitSampler {
     public init() {}
 
     public func sample(logits: MLXArray) -> MLXArray {
-        argMax(logits, axis: -1)
+        // Cast to bfloat16 before argmax so ranking matches MLX Python models that
+        // keep decode logits in bf16. Float32 accumulation can invent a spurious
+        // ranking among tokens that are exact ties in bf16 (e.g. DeepseekOCR
+        // "4" vs "7" on the solid-red L3 fixture).
+        argMax(logits.asType(.bfloat16), axis: -1)
     }
 }
 

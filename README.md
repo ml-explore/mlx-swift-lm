@@ -2,6 +2,139 @@
 
 MLX Swift LM is a Swift package to build tools and applications with large language models (LLMs) and vision language models (VLMs) in [MLX Swift](https://github.com/ml-explore/mlx-swift).
 
+## Unlimited-OCR coordination fork
+
+This checkout is the **[jyauxi/mlx-swift-lm](https://github.com/jyauxi/mlx-swift-lm)** fork, vendored as a git submodule at `ports/mlx-swift-lm` in [mlx-swift-unlimited-ocr](https://github.com/jyauxi/mlx-swift-unlimited-ocr). Port work lands on long-lived fork branches before upstream PRs to [ml-explore/mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm):
+
+| Branch | Purpose |
+|--------|---------|
+| `feature/deepseek-ocr` | DeepSeek-OCR VLM + processor (closes upstream [#15](https://github.com/ml-explore/mlx-swift-lm/issues/15)) |
+| `feature/unlimited-ocr` | R-SWA + native `unlimited_ocr` registration (stacks on DeepSeek-OCR) |
+| `main` | Tracks `upstream/main` — do not land port commits here |
+
+### Fork setup
+
+```bash
+# From the coordination hub root (already done when cloning with --recurse-submodules)
+git submodule update --init --recursive
+cd ports/mlx-swift-lm
+git checkout feature/deepseek-ocr
+git remote add upstream https://github.com/ml-explore/mlx-swift-lm.git  # once
+```
+
+Local path alternative (single developer machine only — not for CI/agents):
+
+```bash
+# From coordination hub root
+rm -rf ports/mlx-swift-lm   # only if empty placeholder / unused submodule
+ln -s ~/Developer/mlx-swift-lm ports/mlx-swift-lm
+```
+
+### mzbac attribution policy
+
+DeepSeek-OCR Swift code is adapted from **[mzbac/deepseek-ocr.swift](https://github.com/mzbac/deepseek-ocr.swift)** (MIT), not a clean-room rewrite from Python alone.
+
+- Retain mzbac copyright / license notices in adapted file headers where substantial code is kept.
+- Note the seed in this README and in upstream PR descriptions.
+- Prefer refactoring toward mlx-swift-lm patterns (`GlmOcr.swift`, `DeepseekV3.swift`, `@ModuleInfo`, `UserInputProcessor`) over copying mzbac APIs wholesale.
+- Python [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) remains the behavioral oracle for parity.
+
+### Build (Apple Silicon)
+
+```bash
+cd ports/mlx-swift-lm
+swift build -c debug
+# or: xcodebuild -scheme mlx-swift-lm -destination 'platform=macOS' build
+```
+
+### Point the macOS tester at this checkout
+
+In `apps/UnlimitedOCRTester/Package.swift` use a **path** dependency while the port is in progress:
+
+```swift
+.package(path: "../../ports/mlx-swift-lm"),
+// products: MLXLMCommon, MLXVLM (and MLXHuggingFace when loading HF weights)
+```
+
+After upstream merge, switch to a release tag:
+
+```swift
+.package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "x.y.z"),
+```
+
+See the coordination hub guides: `docs/guides/mlx-swift-lm-port.md`, `docs/guides/git-workflow.md`.
+
+### Supported VLM: DeepSeek-OCR
+
+DeepSeek-OCR is a first-class MLXVLM (`model_type`: `deepseekocr`). Use
+`VLMRegistry.deepseekOCR5bit` (`mlx-community/DeepSeek-OCR-5bit`)
+for the upstream DeepSeek path (closes [#15](https://github.com/ml-explore/mlx-swift-lm/issues/15)):
+
+```swift
+import HuggingFace
+import MLXHuggingFace
+import MLXLMCommon
+import MLXVLM
+import Tokenizers
+
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+
+let session = ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),  // keep native resolution for gundam/base tiling
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam))
+
+let text = try await session.respond(
+    to: "Free OCR.",
+    image: .url(URL(fileURLWithPath: "page.png")))
+print(text)
+```
+
+Opt-in IntegrationTesting example (cache-gated / `MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`):
+`IntegrationTesting/IntegrationTestingTests/DeepseekOCRIntegrationTests.swift`.
+
+### DeepSeek-OCR crop modes
+
+`DeepseekOCRProcessor` supports two first-class modes,
+selected via `ChatSession` / `UserInput` additional context:
+
+| Mode | Context | Behavior (matches Python) |
+|------|---------|---------------------------|
+| `gundam` (default) | omit or `DeepseekOCRProcessor.modeContext(.gundam)` | 1024² global + 640² local tiles when page > 640×640 (`cropping=True`) |
+| `base` | `DeepseekOCRProcessor.modeContext(.base)` | Single 640² padded view, no local tiles (`cropping=False`) |
+
+```swift
+let session = ChatSession(
+    container,
+    processing: .init(),  // keep native resolution for gundam tiling
+    additionalContext: DeepseekOCRProcessor.modeContext(.base))
+```
+
+Smoke: `MODE=base ./scripts/swift_smoke.sh` (or `MODE=gundam`, the default).
+
+### DeepSeek-OCR grounding / ref / det tokens
+
+Hub tokenizers ship `<|grounding|>`, `<|ref|>` / `<|/ref|>`, `<|det|>` / `<|/det|>`
+(IDs 128816–128820 on deepseek-ai / mlx-community / majentik packs). Use
+`DeepseekOCRSpecialTokens` to resolve IDs through the tokenizer and build prompts:
+
+| Task | Prompt helper |
+|------|----------------|
+| Structured OCR | `DeepseekOCRSpecialTokens.groundingPrompt()` → `<\|grounding\|>OCR this image.` |
+| Doc → markdown | `DeepseekOCRSpecialTokens.groundingMarkdownPrompt()` |
+| Locate text | `DeepseekOCRSpecialTokens.locatePrompt("Total assets")` |
+
+Decode with `skipSpecialTokens: false` so layout tags survive. Coordinates in
+`<|det|>[[x1,y1,x2,y2]]` are normalized 0–1000; `parseDetections(from:)` extracts
+boxes. **Full layout-tree decode is deferred** — consume grounding markdown or
+parse detections as needed (see `DeepseekOCRSpecialTokens` doc comment).
+
+---
+
 > [!IMPORTANT]
 > The `main` branch is a _new_ major version number: 3.x.  In order
 > to decouple from tokenizer and downloader packages some breaking

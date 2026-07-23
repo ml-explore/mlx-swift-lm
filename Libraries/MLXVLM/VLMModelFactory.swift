@@ -87,6 +87,7 @@ public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
     public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+        "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
         "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
         "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
         "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
@@ -112,6 +113,10 @@ public enum VLMProcessorTypeRegistry {
 
     /// Shared instance with default processor types.
     public static let shared: ProcessorTypeRegistry = .init(creators: [
+        "DeepseekOCRProcessor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "DeepseekVLV2Processor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
         "PaliGemmaProcessor": create(
             PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
         "Qwen2VLProcessor": create(
@@ -268,8 +273,14 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let deepseekOCR5bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-OCR-5bit",
+        defaultPrompt: "Describe the image in English"
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
+            deepseekOCR5bit,
             paligemma3bMix448_8bit,
             qwen2VL2BInstruct4Bit,
             qwen2_5VL3BInstruct4Bit,
