@@ -83,11 +83,12 @@ private struct BookTripArgs {
 /// - `SchemaConverter.encodeToolCallingGrammar(tools:)` - the xgrammar
 ///   structural-tag JSON envelope of the form
 ///   `{type: "structural_tag", format: {type: "or", elements: [tag(...,
-///   json_schema), json_schema]}}`. The wrapped arm dispatches Qwen-style
-///   `<tool_call>...</tool_call>` delimiters; the bare arm accepts the
-///   raw envelope. Shape-only assertions here; real-tokenizer compilation
-///   is exercised by the integration suite (the byte-tokenizer used in
-///   these unit tests doesn't define Qwen's `<tool_call>` special tokens).
+///   per-tool-or), per-tool-or]}}`. Each per-tool tag fixes the name before
+///   opening the arguments schema. The wrapped arm dispatches Qwen-style
+///   `<tool_call>...</tool_call>` delimiters; the bare arm accepts the raw
+///   tool-call object. Shape-only assertions here; real-tokenizer compilation
+///   is exercised by the integration suite (the byte-tokenizer used in these
+///   unit tests doesn't define Qwen's `<tool_call>` special tokens).
 @Suite
 struct ToolCallingSchemaTests {
 
@@ -154,32 +155,6 @@ struct ToolCallingSchemaTests {
                 .flatMap { $0["const"] as? String }
         }
         #expect(names == ["get_weather", "add"])
-    }
-
-    @Test
-    func finalAnswerToolFitsInEnvelope() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
-        let tools = [
-            Transcript.ToolDefinition(
-                name: "get_weather",
-                description: "Get weather",
-                parameters: WeatherArgs.generationSchema
-            ),
-            finalAnswer,
-        ]
-
-        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: tools)
-        let parsed = try parseAsDictionary(json)
-        let oneOf = try #require(parsed["oneOf"] as? [[String: Any]])
-        #expect(oneOf.count == 2)
-
-        let names: [String] = oneOf.compactMap { entry in
-            (entry["properties"] as? [String: Any])
-                .flatMap { $0["name"] as? [String: Any] }
-                .flatMap { $0["const"] as? String }
-        }
-        #expect(names.contains(FinalAnswerTool.toolName))
     }
 
     // MARK: - $defs Hoisting
@@ -277,10 +252,9 @@ struct ToolCallingSchemaTests {
             description: "Books a trip",
             parameters: BookTripArgs.generationSchema
         )
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
 
         let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(
-            tools: [bookTrip, finalAnswer]
+            tools: [bookTrip]
         )
 
         let tokenizer = try makeByteTokenizer()
@@ -318,16 +292,13 @@ struct ToolCallingSchemaTests {
     @Test
     func envelopeCompilesWithXGrammar() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let finalAnswer = FinalAnswerTool.makeToolDefinition(responseSchema: nil)
         let weather = Transcript.ToolDefinition(
             name: "get_weather",
             description: "Get weather",
             parameters: WeatherArgs.generationSchema
         )
 
-        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(
-            tools: [weather, finalAnswer]
-        )
+        let json = try SchemaConverter.encodeToolCallingEnvelopeJSON(tools: [weather])
 
         // Build a minimal byte-fallback tokenizer and attempt to compile the
         // envelope as a grammar.
@@ -353,8 +324,13 @@ struct ToolCallingSchemaTests {
             description: "Get current weather",
             parameters: WeatherArgs.generationSchema
         )
+        let add = Transcript.ToolDefinition(
+            name: "add",
+            description: "Add two numbers",
+            parameters: AddArgs.generationSchema
+        )
 
-        let grammar = try SchemaConverter.encodeToolCallingGrammar(tools: [weather])
+        let grammar = try SchemaConverter.encodeToolCallingGrammar(tools: [weather, add])
         let parsed = try parseAsDictionary(grammar)
 
         #expect(parsed["type"] as? String == "structural_tag")
@@ -365,25 +341,30 @@ struct ToolCallingSchemaTests {
         let elements = try #require(format["elements"] as? [[String: Any]])
         #expect(elements.count == 2)
 
-        // Wrapped arm: tag(<tool_call>\n ... \n</tool_call>) embedding the envelope.
+        // Wrapped arm: tag(<tool_call>\n ... \n</tool_call>) around a per-tool dispatch.
         let wrapped = elements[0]
         #expect(wrapped["type"] as? String == "tag")
         #expect(wrapped["begin"] as? String == "<tool_call>\n")
         #expect(wrapped["end"] as? [String] == ["\n</tool_call>"])
 
         let wrappedContent = try #require(wrapped["content"] as? [String: Any])
-        #expect(wrappedContent["type"] as? String == "json_schema")
-        #expect(
-            wrappedContent["json_schema"] != nil, "wrapped arm must embed an envelope schema")
+        #expect(wrappedContent["type"] as? String == "or")
+        let wrappedToolTags = try #require(wrappedContent["elements"] as? [[String: Any]])
+        #expect(wrappedToolTags.count == 2)
+        try assertToolTag(wrappedToolTags[0], for: weather)
+        try assertToolTag(wrappedToolTags[1], for: add)
 
-        // Bare arm: json_schema embedding the same envelope.
+        // Bare arm: the same per-tool dispatch, without delimiters.
         let bare = elements[1]
-        #expect(bare["type"] as? String == "json_schema")
-        #expect(bare["json_schema"] != nil, "bare arm must embed an envelope schema")
+        #expect(bare["type"] as? String == "or")
+        let bareToolTags = try #require(bare["elements"] as? [[String: Any]])
+        #expect(bareToolTags.count == 2)
+        try assertToolTag(bareToolTags[0], for: weather)
+        try assertToolTag(bareToolTags[1], for: add)
     }
 
     @Test
-    func grammarEmbedsValidEnvelopeJSON() throws {
+    func grammarEmbedsValidToolParametersJSON() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let weather = Transcript.ToolDefinition(
             name: "get_weather",
@@ -397,17 +378,14 @@ struct ToolCallingSchemaTests {
         let elements = try #require(format["elements"] as? [[String: Any]])
         try #require(elements.count == 2)
 
-        // Wrapped arm: drill content.json_schema and assert envelope shape.
-        let wrappedSchema = try #require(
-            (elements[0]["content"] as? [String: Any])?["json_schema"] as? [String: Any]
-        )
-        let wrappedOneOf = try #require(wrappedSchema["oneOf"] as? [[String: Any]])
-        #expect(wrappedOneOf.count == 1, "single tool produces a single envelope entry")
+        // Each arm contains an equivalent per-tool tag whose JSON schema is
+        // the tool's parameters schema, not the old `{name, arguments}` envelope.
+        let wrappedDispatch = try #require(elements[0]["content"] as? [String: Any])
+        let wrappedTags = try #require(wrappedDispatch["elements"] as? [[String: Any]])
+        try assertToolTag(wrappedTags[0], for: weather)
 
-        // Bare arm: drill json_schema and assert the same envelope shape.
-        let bareSchema = try #require(elements[1]["json_schema"] as? [String: Any])
-        let bareOneOf = try #require(bareSchema["oneOf"] as? [[String: Any]])
-        #expect(bareOneOf.count == 1, "single tool produces a single envelope entry")
+        let bareTags = try #require(elements[1]["elements"] as? [[String: Any]])
+        try assertToolTag(bareTags[0], for: weather)
     }
 
     // MARK: - Helpers
@@ -451,6 +429,27 @@ struct ToolCallingSchemaTests {
         default:
             return []
         }
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func assertToolTag(
+        _ tag: [String: Any],
+        for tool: Transcript.ToolDefinition
+    ) throws {
+        #expect(tag["type"] as? String == "tag")
+        #expect(tag["begin"] as? String == "{\"name\": \"\(tool.name)\", \"arguments\": ")
+        #expect(tag["end"] as? [String] == ["}"])
+
+        let content = try #require(tag["content"] as? [String: Any])
+        #expect(content["type"] as? String == "json_schema")
+        let actualSchema = try #require(content["json_schema"] as? [String: Any])
+        let expectedData = try JSONEncoder().encode(tool.parameters)
+        let expectedSchema = try JSONSerialization.jsonObject(with: expectedData)
+        #expect(try canonicalJSON(actualSchema) == canonicalJSON(expectedSchema))
+    }
+
+    private func canonicalJSON(_ object: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
     private func makeByteTokenizer() throws -> GrammarTokenizer {

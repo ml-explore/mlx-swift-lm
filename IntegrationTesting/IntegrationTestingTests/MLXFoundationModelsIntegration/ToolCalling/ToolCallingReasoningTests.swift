@@ -8,6 +8,7 @@ import FoundationModels
 import Testing
 
 @testable import MLXFoundationModels
+@testable import MLXGuidedGeneration
 import MLXLMCommon
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -17,13 +18,12 @@ private struct WeatherArgs {
     var location: String
 }
 
-/// Think-then-call: a reasoning model given tools reasons unconstrained
-/// first, then emits a grammar-constrained tool call.
+/// Native allowed tool use: a reasoning model given tools can reason first,
+/// then either answer or emit a model-native tool call.
 ///
 /// Device-only (requires a device running iOS 27.0+): loads real models. v1 family scope is
 /// Qwen3/QwQ (template renders tools AND honors `enable_thinking`); R1-Distill is
-/// de-scoped (tool-blind template) and must fall through to the existing
-/// single-phase tool path unchanged.
+/// de-scoped (tool-blind template) and stays on its single-phase behavior.
 @Suite(.serialized, .timeLimit(.minutes(15)))
 struct ToolCallingReasoningTests {
 
@@ -190,19 +190,69 @@ struct ToolCallingReasoningTests {
     /// crashing the serialized suite.
     @Test func cancellationDuringReasoningUnwinds() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let model = makeTestModel(Models.qwen3)
+        let model = makeReasoningTestModel(Models.qwen3)
         let executor = try makeMLXExecutor(for: model)
         let request = makeExecutorRequest(
             transcript: weatherTranscript(),
             enabledTools: [Self.weatherTool()],
             generationOptions: GenerationOptions(maximumResponseTokens: 1024))
-        let stream = try await executeResponse(executor, request: request, model: model)
-        var events = 0
-        for try await _ in stream {
-            events += 1
-            if events >= 2 { break }  // early break → respond is cancelled mid-flight
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            cancelProducerWhen: { event in
+                if case .appendText(let text, _, .reasoning) = event {
+                    return !text.isEmpty
+                }
+                return false
+            })
+        var iterator = stream.makeAsyncIterator()
+        var sawReasoning = false
+        var sawCancellation = false
+        do {
+            while let event = try await iterator.next() {
+                if case .appendText(let text, _, .reasoning) = event, !text.isEmpty {
+                    sawReasoning = true
+                }
+            }
+        } catch is CancellationError {
+            sawCancellation = true
         }
-        #expect(events >= 1)
+        await stream.cancelAndWait()
+        #expect(sawReasoning, "must cancel from inside native allowed reasoning")
+        #expect(sawCancellation, "native generation must terminate by cancellation, not EOS")
+    }
+
+    /// Cancellation at the exact reasoning-close boundary must be observed
+    /// before required guided tool generation begins.
+    @Test func requiredCancellationAtReasoningClosePropagates() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeReasoningTestModel(Models.qwen3)
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(
+            transcript: weatherTranscript(),
+            enabledTools: [Self.weatherTool()],
+            generationOptions: GenerationOptions(
+                maximumResponseTokens: 1024,
+                toolCallingMode: .required))
+        let sink = GuidedGenerationDiagnosticSink(cancelOnToolReasoningClose: true)
+        let stream = try await executeResponse(
+            executor,
+            request: request,
+            model: model,
+            guidedGenerationSink: sink)
+
+        var sawCancellation = false
+        do {
+            for try await _ in stream {}
+        } catch is CancellationError {
+            sawCancellation = true
+        }
+        await stream.cancelAndWait()
+
+        #expect(sink.toolReasoningCloseCount == 1, "reasoning must reach its close boundary")
+        #expect(sink.emitCount == 0, "cancellation must stop before guided tool generation emits")
+        #expect(sawCancellation, "reasoning-close cancellation must not become normal EOS")
     }
 }
 

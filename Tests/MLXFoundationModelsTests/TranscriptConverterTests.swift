@@ -10,6 +10,13 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct StructuredWeatherToolResult {
+    var temperature: Int
+    var condition: String
+}
+
 @Suite
 struct TranscriptConverterTests {
 
@@ -144,8 +151,9 @@ struct TranscriptConverterTests {
     func testUnsupportedEntryTypesAreSkipped() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        // Create a transcript with only supported types
-        // (toolCalls and toolOutput would be skipped, but we can't easily create them in tests)
+        // Only supported types here. toolCalls/toolOutput are now mapped (see
+        // the tool-calling tests below); genuinely unknown future entry types
+        // still hit the `default:` tripwire and are skipped.
         let entries: [Transcript.Entry] = [
             .prompt(
                 Transcript.Prompt(
@@ -156,6 +164,212 @@ struct TranscriptConverterTests {
 
         let messages = TranscriptConverter.mlxMessages(for: entries)
         #expect(messages.count == 1)
+    }
+
+    @Test
+    func testToolCallsBecomeAssistantMessageWithCalls() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let toolCall = Transcript.ToolCall(
+            id: "call_1",
+            toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location":"Paris"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .assistant)
+
+        // The structured calls are fileprivate on Chat.Message.Tool; assert via
+        // the observable serialization the chat template consumes.
+        let raw = DefaultMessageGenerator().generate(message: messages[0])
+        let calls = try #require(raw["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 1)
+        #expect(calls[0]["id"] as? String == "call_1")
+        let function = try #require(calls[0]["function"] as? [String: any Sendable])
+        #expect(function["name"] as? String == "get_weather")
+        let arguments = try #require(function["arguments"] as? [String: any Sendable])
+        #expect(arguments["location"] as? String == "Paris")
+    }
+
+    @Test
+    func testToolOutputBecomesToolMessageCorrelatedByID() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let output = Transcript.ToolOutput(
+            id: "call_1",
+            toolName: "get_weather",
+            segments: [.text(Transcript.TextSegment(content: "18C and sunny"))])
+        let entries: [Transcript.Entry] = [.toolOutput(output)]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .tool)
+        #expect(messages[0].content == "18C and sunny")
+
+        // ToolOutput.id is the originating call id, so the emitted tool message
+        // carries a tool_call_id that the template correlates to the call.
+        let raw = DefaultMessageGenerator().generate(message: messages[0])
+        #expect(raw["tool_call_id"] as? String == "call_1")
+    }
+
+    @Test
+    func testStructuredToolOutputPreservesEveryGeneratedContentJSONShape() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let cases: [(id: String, content: GeneratedContent)] = [
+            (
+                id: "generable",
+                content: StructuredWeatherToolResult(
+                    temperature: 18,
+                    condition: "sunny"
+                ).generatedContent
+            ),
+            (id: "array", content: try GeneratedContent(json: #"["Paris","Tokyo"]"#)),
+            (id: "scalar", content: try GeneratedContent(json: #"18"#)),
+        ]
+
+        for testCase in cases {
+            let output = Transcript.ToolOutput(
+                id: "call_\(testCase.id)",
+                toolName: "get_weather",
+                segments: [
+                    .structure(
+                        Transcript.StructuredSegment(
+                            schemaName: "WeatherResult",
+                            content: testCase.content))
+                ])
+
+            let messages = TranscriptConverter.mlxMessages(for: [.toolOutput(output)])
+
+            #expect(messages.count == 1)
+            let message = try #require(messages.first)
+            #expect(message.role == .tool)
+            #expect(message.content == testCase.content.jsonString)
+
+            let raw = DefaultMessageGenerator().generate(message: message)
+            #expect(raw["tool_call_id"] as? String == "call_\(testCase.id)")
+        }
+    }
+
+    @Test
+    func testMixedTextAndStructuredToolOutputPreservesSegmentOrder() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let content = try GeneratedContent(
+            json: #"{"temperature":18,"condition":"sunny"}"#)
+        let output = Transcript.ToolOutput(
+            id: "call_mixed",
+            toolName: "get_weather",
+            segments: [
+                .text(Transcript.TextSegment(content: "Weather result:")),
+                .structure(
+                    Transcript.StructuredSegment(
+                        schemaName: "WeatherResult",
+                        content: content)),
+                .text(Transcript.TextSegment(content: "Use this current reading.")),
+            ])
+
+        let messages = TranscriptConverter.mlxMessages(for: [.toolOutput(output)])
+
+        let message = try #require(messages.first)
+        #expect(
+            message.content
+                == [
+                    "Weather result:",
+                    content.jsonString,
+                    "Use this current reading.",
+                ].joined(separator: "\n"))
+
+        let raw = DefaultMessageGenerator().generate(message: message)
+        #expect(raw["tool_call_id"] as? String == "call_mixed")
+    }
+
+    @Test
+    func testToolCallAndOutputFormCorrelatedContinuation() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let toolCall = Transcript.ToolCall(
+            id: "call_1",
+            toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location":"Paris"}"#))
+        let output = Transcript.ToolOutput(
+            id: "call_1",
+            toolName: "get_weather",
+            segments: [.text(Transcript.TextSegment(content: "18C and sunny"))])
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Weather in Paris?"))],
+                    responseFormat: nil)),
+            .toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall])),
+            .toolOutput(output),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.map(\.role) == [.user, .assistant, .tool])
+
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+        let calls = try #require(raw[1]["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls[0]["id"] as? String == "call_1")
+        #expect(raw[2]["tool_call_id"] as? String == "call_1")
+    }
+
+    @Test
+    func testTwoToolRoundsProduceCorrelatedMessages() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let callA = Transcript.ToolCall(
+            id: "call_a",
+            toolName: "get_location",
+            arguments: try GeneratedContent(json: #"{}"#))
+        let outputA = Transcript.ToolOutput(
+            id: "call_a",
+            toolName: "get_location",
+            segments: [.text(Transcript.TextSegment(content: "Paris"))])
+        let callB = Transcript.ToolCall(
+            id: "call_b",
+            toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location":"Paris"}"#))
+        let outputB = Transcript.ToolOutput(
+            id: "call_b",
+            toolName: "get_weather",
+            segments: [.text(Transcript.TextSegment(content: "18C and sunny"))])
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [
+                        .text(Transcript.TextSegment(content: "What should I wear in Paris?"))
+                    ],
+                    responseFormat: nil)),
+            .toolCalls(Transcript.ToolCalls(id: "tc_a", [callA])),
+            .toolOutput(outputA),
+            .toolCalls(Transcript.ToolCalls(id: "tc_b", [callB])),
+            .toolOutput(outputB),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        // Both rounds replay in order: each assistant tool-call message is
+        // immediately followed by its correlated tool result, so a third-round
+        // invocation sees the full history.
+        #expect(messages.map(\.role) == [.user, .assistant, .tool, .assistant, .tool])
+
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+        let callsA = try #require(raw[1]["tool_calls"] as? [[String: any Sendable]])
+        #expect(callsA[0]["id"] as? String == "call_a")
+        #expect(raw[2]["tool_call_id"] as? String == "call_a")
+        #expect(messages[2].content == "Paris")
+
+        let callsB = try #require(raw[3]["tool_calls"] as? [[String: any Sendable]])
+        #expect(callsB[0]["id"] as? String == "call_b")
+        #expect(raw[4]["tool_call_id"] as? String == "call_b")
+        #expect(messages[4].content == "18C and sunny")
     }
 
     @Test

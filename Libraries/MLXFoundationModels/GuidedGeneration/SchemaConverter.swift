@@ -80,12 +80,12 @@ enum SchemaConverter {
 
     /// Builds an xgrammar structural-tag JSON that constrains the model
     /// to emit a tool call either wrapped in Qwen-style
-    /// `<tool_call>...</tool_call>` delimiters or as bare JSON. The
-    /// inner JSON is the envelope produced by
-    /// `toolCallingEnvelopeObject` (and serialized by
-    /// `encodeToolCallingEnvelopeJSON`).
+    /// `<tool_call>...</tool_call>` delimiters or as bare JSON.
     ///
-    /// Structural-tag shape:
+    /// Each tool is its own `tag` whose `begin` is the literal prefix
+    /// `{"name": "<tool>", "arguments": ` and whose `content` is that
+    /// tool's parameter schema, closed by an `end` of `}`. Structural-tag
+    /// shape:
     /// ```json
     /// {
     ///   "type": "structural_tag",
@@ -95,60 +95,85 @@ enum SchemaConverter {
     ///       {
     ///         "type": "tag",
     ///         "begin": "<tool_call>\n",
-    ///         "content": { "type": "json_schema", "json_schema": <envelope> },
+    ///         "content": <per-tool or>,
     ///         "end": ["\n</tool_call>"]
     ///       },
-    ///       { "type": "json_schema", "json_schema": <envelope> }
+    ///       <per-tool or>
     ///     ]
     ///   }
     /// }
     /// ```
+    /// where `<per-tool or>` is an `or` over one `tag` per tool:
+    /// ```json
+    /// {
+    ///   "type": "tag",
+    ///   "begin": "{\"name\": \"set_flashlight\", \"arguments\": ",
+    ///   "content": { "type": "json_schema", "json_schema": <tool params> },
+    ///   "end": ["}"]
+    /// }
+    /// ```
     ///
-    /// Accepting both alternatives lets the model stay in its trained
-    /// distribution — Qwen-family models overwhelmingly prefer the
-    /// wrapped form; the bare arm is a defensive fallback for models
-    /// that were trained on raw JSON and happen to share the envelope
-    /// shape.
+    /// **Why per-tool tags instead of one `oneOf` json_schema.** The
+    /// earlier shape embedded a single `{oneOf: [{name, arguments}, …]}`
+    /// json_schema in each arm. The structural-tag path compiles that
+    /// embedded schema with xgrammar's default (non-strict) property
+    /// ordering, so greedy decoding could open `"arguments"` before
+    /// `"name"` and dive into an unbounded free-text field before ever
+    /// committing to a tool -- producing a nameless, unparseable buffer
+    /// that ran the token budget dry (observed: Qwen filling `response`
+    /// with `"1234567890…"`). Making the name a literal tag prefix forces
+    /// the model to commit to a specific tool first, then fill only that
+    /// tool's arguments. It also removes the JSON whitespace wiggle room
+    /// around the `name`/`arguments` keys that open-source models tend to
+    /// exploit into long whitespace runs.
     ///
-    /// **Why structural tag over hand-rolled GBNF.** The envelope is a
-    /// JSON object whose shape depends on the tool's `parameters`
-    /// schema, which varies per tool. Emitting GBNF would require a
-    /// Swift-side JSON-schema-to-GBNF compiler — reinventing exactly
-    /// what xgrammar's `Grammar::FromJSONSchema` already does in C++.
-    /// Structural tag is xgrammar's first-class API for this
-    /// multi-format dispatch case; we assemble the dispatch shape in
-    /// Swift and let xgrammar compile the embedded JSON schema the
-    /// same way the plain `jsonSchema:` path does.
+    /// Accepting both wrapped and bare arms lets the model stay in its
+    /// trained distribution -- Qwen-family models overwhelmingly prefer
+    /// the wrapped form; the bare arm is a defensive fallback for models
+    /// trained on raw JSON.
     ///
-    /// **Why string literals, not special-token references.** The more
-    /// idiomatic structural-tag form for Qwen would use a
-    /// `TokenFormat` for `<tool_call>` / `</tool_call>` (Qwen encodes
-    /// them as single special tokens). That would require threading
-    /// the bound `GrammarTokenizer` through to `Grammar::FromStructuralTag`
-    /// for token-string resolution, which the shim entry point
-    /// (`xg_compile_structural_tag`) currently declines to do. The
-    /// plain-string form is equivalent at the byte level: xgrammar
-    /// matches the byte sequence `<tool_call>` against the vocab
-    /// mask, finds Qwen's `<tool_call>` special token (whose decoded
-    /// bytes are exactly that string), and accepts it.
+    /// **Why structural tag over hand-rolled GBNF.** Each tool's
+    /// `arguments` is a JSON object whose shape depends on the tool's
+    /// `parameters` schema. Emitting GBNF for it would require a
+    /// Swift-side JSON-schema-to-GBNF compiler -- reinventing what
+    /// xgrammar's `Grammar::FromJSONSchema` already does in C++.
+    /// Structural tag composes the fixed dispatch prefix with the
+    /// per-tool json_schema and lets xgrammar compile the embedded
+    /// schema the same way the plain `jsonSchema:` path does.
     ///
     /// Requires a non-empty tool list.
     static func encodeToolCallingGrammar(
         tools: [Transcript.ToolDefinition]
     ) throws -> String {
-        let envelope = try toolCallingEnvelopeObject(tools: tools)
+        guard !tools.isEmpty else {
+            throw SchemaConversionError.noTools
+        }
 
-        // `json_schema` entries must embed the schema as an inline
-        // JSON *object*, not a stringified schema — xgrammar's
-        // structural-tag parser rejects stringified schemas outright
-        // (see `StructuralTagParser::ParseJSONSchemaFormat`). The
-        // envelope is already an `[String: Any]`; pass the same
-        // reference into both `or.elements` arms so the emitted JSON
-        // round-trips identically on the wrapped and bare sides.
-        let jsonSchemaFormat: [String: Any] = [
-            "type": "json_schema",
-            "json_schema": envelope,
+        let encoder = JSONEncoder()
+        // One tag per tool. `begin` fixes `{"name": "<tool>", "arguments": `
+        // so the tool name is committed before the arguments schema opens;
+        // `content` is the tool's parameter schema; `end` closes the object.
+        let toolTags: [[String: Any]] = try tools.map { tool in
+            let paramsData = try encoder.encode(tool.parameters)
+            let paramsAny = try JSONSerialization.jsonObject(with: paramsData)
+            let nameData = try JSONSerialization.data(
+                withJSONObject: tool.name, options: [.fragmentsAllowed])
+            let nameJSON = String(data: nameData, encoding: .utf8) ?? "\"\(tool.name)\""
+            return [
+                "type": "tag",
+                "begin": "{\"name\": \(nameJSON), \"arguments\": ",
+                "content": [
+                    "type": "json_schema",
+                    "json_schema": paramsAny,
+                ],
+                "end": ["}"],
+            ]
+        }
+        let perToolOr: [String: Any] = [
+            "type": "or",
+            "elements": toolTags,
         ]
+
         let structuralTag: [String: Any] = [
             "type": "structural_tag",
             "format": [
@@ -157,10 +182,10 @@ enum SchemaConverter {
                     [
                         "type": "tag",
                         "begin": "<tool_call>\n",
-                        "content": jsonSchemaFormat,
+                        "content": perToolOr,
                         "end": ["\n</tool_call>"],
                     ],
-                    jsonSchemaFormat,
+                    perToolOr,
                 ] as [Any],
             ] as [String: Any],
         ]
