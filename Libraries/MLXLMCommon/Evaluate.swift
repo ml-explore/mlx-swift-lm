@@ -529,6 +529,36 @@ public struct PenaltyProcessor: LogitProcessor {
     }
 }
 
+/// Processor that applies multiple ``LogitProcessor`` instances in order.
+///
+/// ``GenerationComponents/logitProcessor(parameters:)`` uses this to compose the
+/// built-in ``PenaltyProcessor`` with a processor from
+/// ``GenerationComponents/logitProcessorFactory``. It can also be used directly
+/// to combine several custom processors into one.
+public struct ChainedLogitProcessor: LogitProcessor {
+    var processors: [any LogitProcessor]
+
+    public init(processors: [any LogitProcessor]) {
+        self.processors = processors
+    }
+
+    mutating public func prompt(_ prompt: MLXArray) {
+        for index in processors.indices {
+            processors[index].prompt(prompt)
+        }
+    }
+
+    public func process(logits: MLXArray) -> MLXArray {
+        processors.reduce(logits) { $1.process(logits: $0) }
+    }
+
+    mutating public func didSample(token: MLXArray) {
+        for index in processors.indices {
+            processors[index].didSample(token: token)
+        }
+    }
+}
+
 /// Common properties shared by token-generating iterators.
 public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element == Int {
     var maxTokens: Int? { get }
@@ -601,16 +631,17 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - model: the ``LanguageModel``
     ///   - cache: optional ``KVCache``
     ///   - parameters: the generation parameters
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     @available(*, deprecated, message: "please use init(input:model:cache:parameters:)")
     public init(
         prompt: MLXArray, model: any LanguageModel, cache: [KVCache]? = nil,
-        parameters: GenerateParameters
+        parameters: GenerateParameters, components: GenerationComponents = .init()
     ) throws {
         self.model = model
         self.y = .init(tokens: prompt)
         self.cache = cache ?? model.newCache(parameters: parameters)
 
-        self.processor = parameters.processor()
+        self.processor = components.logitProcessor(parameters: parameters)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
@@ -638,17 +669,18 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - state: optional per-call model state carried over from earlier
     ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - parameters: the generation parameters
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
         state: LMOutput.State? = nil,
-        parameters: GenerateParameters
+        parameters: GenerateParameters, components: GenerationComponents = .init()
     ) throws {
         self.model = model
         self.state = state
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: parameters)
 
-        self.processor = parameters.processor()
+        self.processor = components.logitProcessor(parameters: parameters)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
@@ -861,6 +893,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - draftCache: optional ``KVCache`` for the draft model
     ///   - parameters: the generation parameters
     ///   - numDraftTokens: number of tokens the draft model proposes per round
+    ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -868,7 +901,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         mainCache: [KVCache]? = nil,
         draftCache: [KVCache]? = nil,
         parameters: GenerateParameters,
-        numDraftTokens: Int
+        numDraftTokens: Int,
+        components: GenerationComponents = .init()
     ) throws {
         self.y = input.text
         self.draftY = input.text
@@ -882,7 +916,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
+        self.processor = components.logitProcessor(parameters: parameters)
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
@@ -1433,6 +1467,7 @@ public func generate(
 ///   - cache: optional ``KVCache``
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context, including the model itself and associated tokenizer.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
@@ -1467,11 +1502,13 @@ public func generate(
 /// ```
 public func generate(
     input: LMInput, cache: [KVCache]? = nil, parameters: GenerateParameters, context: ModelContext,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, parameters: parameters)
+        input: input, model: context.model, cache: cache, parameters: parameters,
+        components: components)
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -1524,6 +1561,7 @@ public func generate(
 ///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
 ///   - draftCache: optional ``KVCache`` for the draft model.
 ///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
 /// - Returns: An `AsyncStream` that emits `Generation` values.
 /// - Throws: An error if the iterator initialization fails.
@@ -1535,6 +1573,7 @@ public func generate(
     draftModel: any LanguageModel,
     draftCache: [KVCache]? = nil,
     numDraftTokens: Int = 2,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<Generation> {
     let iterator = try SpeculativeTokenIterator(
@@ -1544,7 +1583,8 @@ public func generate(
         mainCache: cache,
         draftCache: draftCache,
         parameters: parameters,
-        numDraftTokens: numDraftTokens
+        numDraftTokens: numDraftTokens,
+        components: components
     )
     let (stream, _) = generateLoopTask(
         promptTokenCount: input.text.tokens.size,
@@ -1630,6 +1670,7 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context, including the model itself and associated tokenizer.
 ///   - includeStopToken: when true, the terminating EOS/unknown token is yielded before finishing
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
@@ -1640,10 +1681,12 @@ public func generateTokens(
     parameters: GenerateParameters,
     context: ModelContext,
     includeStopToken: Bool = false,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
     let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, parameters: parameters)
+        input: input, model: context.model, cache: cache, parameters: parameters,
+        components: components)
     let (stream, _) = generateTokenTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -1670,6 +1713,7 @@ public func generateTokens(
 ///   - draftModel: The draft ``LanguageModel`` for speculative token proposals.
 ///   - draftCache: optional ``KVCache`` for the draft model.
 ///   - numDraftTokens: Number of tokens the draft model proposes per round (default: 2).
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
 /// - Returns: An `AsyncStream` that emits `TokenGeneration` values.
 /// - Throws: An error if the iterator initialization fails.
@@ -1681,6 +1725,7 @@ public func generateTokens(
     draftModel: any LanguageModel,
     draftCache: [KVCache]? = nil,
     numDraftTokens: Int = 2,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
     let iterator = try SpeculativeTokenIterator(
@@ -1690,7 +1735,8 @@ public func generateTokens(
         mainCache: cache,
         draftCache: draftCache,
         parameters: parameters,
-        numDraftTokens: numDraftTokens
+        numDraftTokens: numDraftTokens,
+        components: components
     )
     let (stream, _) = generateLoopTask(
         promptTokenCount: input.text.tokens.size,
@@ -1724,6 +1770,7 @@ public func generateTokens(
 ///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
 ///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: optional wired memory ticket.
 /// - Returns: an `AsyncStream<Generation>` yielding chunks and tool calls.
 /// - Throws: an error if the iterator initialization fails.
@@ -1734,6 +1781,7 @@ public func generate(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     blockSize: Int = 4,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<Generation> {
     let iterator = try MTPSpeculativeTokenIterator(
@@ -1742,7 +1790,8 @@ public func generate(
         drafter: mtpDrafter,
         mainCache: cache,
         parameters: parameters,
-        blockSize: blockSize
+        blockSize: blockSize,
+        components: components
     )
     let (stream, _) = generateLoopTask(
         promptTokenCount: input.text.tokens.size,
@@ -1772,6 +1821,7 @@ public func generateTokens(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     blockSize: Int = 4,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
     let iterator = try MTPSpeculativeTokenIterator(
@@ -1780,7 +1830,8 @@ public func generateTokens(
         drafter: mtpDrafter,
         mainCache: cache,
         parameters: parameters,
-        blockSize: blockSize
+        blockSize: blockSize,
+        components: components
     )
     let (stream, _) = generateLoopTask(
         promptTokenCount: input.text.tokens.size,
@@ -1806,6 +1857,7 @@ public func generateTokens(
 ///   - parameters: The configuration options for token generation.
 ///   - context: The model context, including the model itself and associated tokenizer.
 ///   - includeStopToken: when true, the terminating EOS/unknown token is yielded before finishing
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination across
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
@@ -1815,10 +1867,12 @@ public func generateTokensTask(
     parameters: GenerateParameters,
     context: ModelContext,
     includeStopToken: Bool = false,
+    components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
     let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, parameters: parameters)
+        input: input, model: context.model, cache: cache, parameters: parameters,
+        components: components)
     return generateTokenTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
