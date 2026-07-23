@@ -35,11 +35,19 @@ final class CachedForwardSmokeTests: XCTestCase {
         eval(logits)
 
         for (i, layerCache) in cache.enumerated() {
-            if layerCache is MambaCache {
+            switch layerCache {
+            case let list as CacheList:
+                // Composite layout (e.g. BaichuanM1): sub-cache 0 holds recurrent
+                // conv state, sub-cache 1 is the KV cache that tracks the offset.
+                XCTAssertEqual(
+                    list[1].offset, tokenCount,
+                    "layer \(i) KV sub-cache advanced by \(list[1].offset) for \(tokenCount) tokens",
+                    file: file, line: line)
+            case is MambaCache:
                 XCTAssertFalse(
                     layerCache.innerState().isEmpty,
                     "layer \(i) SSM cache was never written", file: file, line: line)
-            } else {
+            default:
                 XCTAssertEqual(
                     layerCache.offset, tokenCount,
                     "layer \(i) cache advanced by \(layerCache.offset) for \(tokenCount) tokens",
@@ -190,5 +198,107 @@ final class CachedForwardSmokeTests: XCTestCase {
             }
             """)
         try assertCacheAdvancesOnce(GPTOSSModel(config), expectedLayers: 4)
+    }
+
+    // MARK: - BaichuanM1 (per-layer CacheList: conv MambaCache + sliding/full KV)
+
+    func testBaichuanM1ForwardPassUpdatesCacheExactlyOnce() throws {
+        // slidingWindowLayers [0, 2] ⇒ layers 0 and 2 are SWA (RotatingKVCache),
+        // layers 1 and 3 full (KVCacheSimple), each wrapped in a CacheList with a
+        // MambaCache holding the short convolution state.
+        let config = try config(
+            BaichuanM1Configuration.self,
+            """
+            {
+                "vocab_size": 32, "hidden_size": 8, "intermediate_size": 16,
+                "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
+                "rope_theta": 10000.0, "sliding_window": 8, "sliding_window_layers": [0, 2],
+                "conv_window": 2, "rms_norm_eps": 1e-6, "tie_word_embeddings": true
+            }
+            """)
+        try assertCacheAdvancesOnce(BaichuanM1Model(config), expectedLayers: 4)
+    }
+
+    // MARK: - MiMoV2Flash (hybrid sliding/full attention + attention sinks)
+
+    func testMiMoV2FlashForwardPassUpdatesCacheExactlyOnce() throws {
+        // hybrid_layer_pattern [1,0,1,0] ⇒ layers 0,2 sliding, 1,3 full.
+        // moe_layer_freq all 0 keeps every layer dense (cache split is the target).
+        let config = try config(
+            MiMoV2FlashConfiguration.self,
+            """
+            {
+                "model_type": "mimo_v2_flash", "num_experts_per_tok": 2,
+                "hybrid_layer_pattern": [1, 0, 1, 0], "moe_layer_freq": [0, 0, 0, 0],
+                "add_swa_attention_sink_bias": true, "add_full_attention_sink_bias": true,
+                "sliding_window_size": 8, "vocab_size": 32, "hidden_size": 8,
+                "intermediate_size": 16, "moe_intermediate_size": 8, "num_hidden_layers": 4,
+                "num_attention_heads": 2, "num_key_value_heads": 1,
+                "topk_method": "greedy", "scoring_func": "softmax", "norm_topk_prob": true,
+                "n_group": 1, "topk_group": 1, "max_position_embeddings": 128,
+                "layernorm_epsilon": 1e-6, "rope_theta": 10000.0, "swa_rope_theta": 10000.0,
+                "swa_num_attention_heads": 2, "swa_num_key_value_heads": 1,
+                "head_dim": 4, "v_head_dim": 4, "swa_head_dim": 4, "swa_v_head_dim": 4,
+                "partial_rotary_factor": 1.0
+            }
+            """)
+        try assertCacheAdvancesOnce(MiMoV2FlashModel(config), expectedLayers: 4)
+    }
+
+    // MARK: - AfMoE (layer_types sliding/full + MoE routing)
+
+    func testAfMoEForwardPassUpdatesCacheExactlyOnce() throws {
+        // num_dense_layers 2 ⇒ layers 0,1 dense, 2,3 MoE. layer_types drive the cache split.
+        let config = try config(
+            AfMoEConfiguration.self,
+            """
+            {
+                "model_type": "afmoe", "vocab_size": 32, "hidden_size": 8,
+                "intermediate_size": 16, "moe_intermediate_size": 8, "num_hidden_layers": 4,
+                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
+                "rms_norm_eps": 1e-6, "num_experts": 4, "num_experts_per_tok": 2,
+                "num_shared_experts": 1, "num_dense_layers": 2, "n_group": 1, "topk_group": 1,
+                "layer_types": ["sliding_attention", "full_attention",
+                                "sliding_attention", "full_attention"],
+                "sliding_window": 8, "tie_word_embeddings": true
+            }
+            """)
+        try assertCacheAdvancesOnce(AfMoEModel(config), expectedLayers: 4)
+    }
+
+    // MARK: - Exaone4 (sliding_window_pattern string → local/global cache)
+
+    func testExaone4ForwardPassUpdatesCacheExactlyOnce() throws {
+        // pattern "LLLG" ⇒ layers 0,1,2 local (RotatingKVCache), layer 3 global (StandardKVCache).
+        let config = try config(
+            Exaone4Configuration.self,
+            """
+            {
+                "hidden_size": 8, "num_hidden_layers": 4, "intermediate_size": 16,
+                "num_attention_heads": 2, "rms_norm_eps": 1e-6, "vocab_size": 32,
+                "num_key_value_heads": 1, "max_position_embeddings": 128,
+                "rope_theta": 10000.0, "head_dim": 4, "tie_word_embeddings": true,
+                "sliding_window": 8, "sliding_window_pattern": "LLLG"
+            }
+            """)
+        try assertCacheAdvancesOnce(Exaone4Model(config), expectedLayers: 4)
+    }
+
+    // MARK: - Mistral3Text (layer_types sliding/full)
+
+    func testMistral3TextForwardPassUpdatesCacheExactlyOnce() throws {
+        let config = try config(
+            Mistral3TextConfiguration.self,
+            """
+            {
+                "model_type": "ministral3", "hidden_size": 8, "num_hidden_layers": 4,
+                "intermediate_size": 16, "num_attention_heads": 2, "rms_norm_eps": 1e-6,
+                "vocab_size": 32, "num_key_value_heads": 1, "head_dim": 4,
+                "rope_theta": 10000.0, "tie_word_embeddings": true, "sliding_window": 8,
+                "layer_types": ["sliding_attention", "full_attention",
+                                "sliding_attention", "full_attention"]
+            }
+            """)
+        try assertCacheAdvancesOnce(Mistral3TextModel(config), expectedLayers: 4)
     }
 }
