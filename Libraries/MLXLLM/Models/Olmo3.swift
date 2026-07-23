@@ -223,10 +223,6 @@ public class Olmo3Model: Module, LLMModel, KVCacheDimensionProvider {
         weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
     }
 
-    // The parameter must stay optional: `LanguageModel` declares
-    // `newCache(parameters: GenerateParameters?)`, and a non-optional parameter makes this
-    // an unused overload while `KVCacheDimensionProvider`'s all-`KVCacheSimple` default
-    // silently satisfies the protocol — dropping the sliding window entirely.
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         var caches: [KVCache] = []
         for layerType in args.layerTypes {
