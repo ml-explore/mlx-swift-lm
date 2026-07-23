@@ -99,26 +99,11 @@ open class RotateQuantizedLinear: QuantizedLinear {
     }
 
     private func rotate(_ x: MLXArray) -> MLXArray {
-        let dim = _scalesFlat.dim(0)
-        let numGroups = dim / groupSize
-        let krot = theta.dim(0)
-
-        // The kernel assigns 2 of the group's 64 pair slots to each of its
-        // 32 lanes; other group sizes would need a different lane mapping.
-        precondition(groupSize == 128, "RotateQuantizedLinear: groupSize must be 128, got \(groupSize)")
-
-        let batch = x.dim(0)
-        let tile = batch <= 1 ? 1 : 4
-        let gridX = ((batch + tile - 1) / tile) * 32
-        let params = MLXArray([Int32(batch), Int32(dim), Int32(krot), Int32(groupSize)])
-
-        return getRotationKernel(tile: tile, krot: krot, dtype: x.dtype)(
-            [x, _packedPairs, _cosTheta, _sinTheta, _scalesFlat, params],
-            grid: (gridX, numGroups, 1),
-            threadGroup: (32, 1, 1),
-            outputShapes: [x.shape],
-            outputDTypes: [x.dtype]
-        )[0]
+        dispatchPairwiseRotation(
+            x,
+            packedPairs: _packedPairs, cosTheta: _cosTheta, sinTheta: _sinTheta,
+            scalesFlat: _scalesFlat, groupSize: groupSize, krot: theta.dim(0)
+        )
     }
 
     /// Forward pass: applies pairwise Givens rotation then quantized matmul.
