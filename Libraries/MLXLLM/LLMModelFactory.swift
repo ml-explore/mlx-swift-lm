@@ -46,6 +46,7 @@ public enum LLMTypeRegistry {
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoEModel.init),
         "qwen3_5_text": create(Qwen35TextConfiguration.self, Qwen35TextModel.init),
         "minicpm": create(MiniCPMConfiguration.self, MiniCPMModel.init),
+        "minicpmv4_6": create(Qwen35Configuration.self, Qwen35Model.init),
         "starcoder2": create(Starcoder2Configuration.self, Starcoder2Model.init),
         "cohere": create(CohereConfiguration.self, CohereModel.init),
         "openelm": create(OpenElmConfiguration.self, OpenELMModel.init),
@@ -607,6 +608,7 @@ public final class LLMModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
+            quantization: baseConfig.quantization,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
         let tokenizer = try await tokenizerTask
