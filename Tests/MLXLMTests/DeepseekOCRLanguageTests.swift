@@ -29,8 +29,11 @@ final class DeepseekOCRLanguageTests: XCTestCase {
         let indices = routed.0.reshaped(-1).asArray(Int32.self).map(Int.init)
         let scores = routed.1.reshaped(-1).asArray(Float.self)
 
+        // Selection follows bias-corrected grouped scores (group {2,3} wins on
+        // sigmoid(0) + 1 = 1.5), but the returned weights come from the raw
+        // sigmoid scores — the Python reference gathers from `raw_flat`.
         XCTAssertEqual(Set(indices), [2, 3])
-        XCTAssertEqual(scores.max() ?? .nan, 1.5, accuracy: 1e-4)
+        XCTAssertEqual(scores.max() ?? .nan, 0.5, accuracy: 1e-4)
         XCTAssertEqual(scores.min() ?? .nan, 1 / (1 + expf(1)), accuracy: 1e-4)
     }
 
@@ -124,7 +127,9 @@ final class DeepseekOCRLanguageTests: XCTestCase {
             "norm_topk_prob": false,
             "n_group": 2,
             "topk_group": 1,
-            "routed_scaling_factor": 1.0
+            "routed_scaling_factor": 1.0,
+            "scoring_func": "sigmoid",
+            "topk_method": "noaux_tc"
           }
         }
         """#

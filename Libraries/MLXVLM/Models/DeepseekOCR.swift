@@ -99,6 +99,9 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
         public let routedScalingFactor: Float?
         /// Python `TextConfig.scoring_func` default is `"softmax"` (Unlimited / DeepSeek-OCR).
         public let scoringFunc: String?
+        /// Python `TextConfig.topk_method` default is `"greedy"`; `"noaux_tc"` enables
+        /// bias-corrected grouped routing.
+        public let topkMethod: String?
 
         enum CodingKeys: String, CodingKey {
             case vocabSize = "vocab_size"
@@ -123,6 +126,7 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             case topkGroup = "topk_group"
             case routedScalingFactor = "routed_scaling_factor"
             case scoringFunc = "scoring_func"
+            case topkMethod = "topk_method"
         }
 
         public init(from decoder: any Decoder) throws {
@@ -164,6 +168,7 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             self.routedScalingFactor =
                 try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor)
             self.scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc)
+            self.topkMethod = try container.decodeIfPresent(String.self, forKey: .topkMethod)
         }
     }
 
@@ -1238,6 +1243,7 @@ private final class MoEGate: Module {
     let nGroup: Int
     let topkGroup: Int?
     let scoringFunc: String
+    let topkMethod: String
 
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray
@@ -1251,6 +1257,8 @@ private final class MoEGate: Module {
         self.topkGroup = config.topkGroup
         // Match Python TextConfig default (`softmax`) used by Unlimited-OCR.
         self.scoringFunc = config.scoringFunc ?? "softmax"
+        // Match Python TextConfig default (`greedy`); DeepSeek-OCR ships greedy.
+        self.topkMethod = config.topkMethod ?? "greedy"
         self._weight.wrappedValue = zeros([expertCount, config.hiddenSize])
         self._eScoreCorrectionBias.wrappedValue = zeros([expertCount])
     }
@@ -1258,7 +1266,7 @@ private final class MoEGate: Module {
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
         let (batchSize, sequenceLength, _) = (x.dim(0), x.dim(1), x.dim(2))
         let gates = matmul(x.asType(.float32), weight.T.asType(.float32))
-        var scores: MLXArray
+        let scores: MLXArray
         switch scoringFunc {
         case "sigmoid":
             scores = sigmoid(gates)
@@ -1266,31 +1274,43 @@ private final class MoEGate: Module {
             // "softmax" (Python default) and any unrecognized value.
             scores = MLX.softmax(gates, axis: -1, precise: true)
         }
-        let scoresForChoice = scores + eScoreCorrectionBias
 
-        if nGroup > 1 {
-            let expertCount = weight.dim(0)
-            let expertsPerGroup = expertCount / nGroup
-            var groupScores = scoresForChoice.reshaped(
-                batchSize, sequenceLength, nGroup, expertsPerGroup)
-            let topPerGroup = top(groupScores, k: min(2, expertsPerGroup), axis: -1)
-                .sum(axis: -1, keepDims: true)
-            let droppedGroups = max(0, nGroup - (topkGroup ?? 1))
-            if droppedGroups > 0 {
-                var maskedGroupIndices = argPartition(
-                    topPerGroup, kth: droppedGroups - 1, axis: -2)[
-                        .ellipsis, ..<droppedGroups, 0...
-                    ]
-                maskedGroupIndices = broadcast(
-                    maskedGroupIndices,
-                    to: [batchSize, sequenceLength, droppedGroups, expertsPerGroup])
-                groupScores = putAlong(
-                    groupScores, stopGradient(maskedGroupIndices), values: MLXArray(0.0), axis: -2)
-                scores = flattened(groupScores, start: -2, end: -1)
+        let indices: MLXArray
+        if topkMethod == "noaux_tc" {
+            // The correction bias steers selection only; returned weights are
+            // gathered from the raw scores.
+            let corrected = scores + eScoreCorrectionBias
+            var masked = corrected
+            if nGroup > 1 {
+                let expertCount = weight.dim(0)
+                let expertsPerGroup = expertCount / nGroup
+                var groupScores = corrected.reshaped(
+                    batchSize, sequenceLength, nGroup, expertsPerGroup)
+                let topPerGroup = top(groupScores, k: min(2, expertsPerGroup), axis: -1)
+                    .sum(axis: -1, keepDims: true)
+                let keptGroups = (topkGroup ?? 0) > 0 ? topkGroup! : nGroup
+                let droppedGroups = max(0, nGroup - keptGroups)
+                if droppedGroups > 0 {
+                    var maskedGroupIndices = argPartition(
+                        topPerGroup, kth: droppedGroups - 1, axis: -2)[
+                            .ellipsis, ..<droppedGroups, 0...
+                        ]
+                    maskedGroupIndices = broadcast(
+                        maskedGroupIndices,
+                        to: [batchSize, sequenceLength, droppedGroups, expertsPerGroup])
+                    groupScores = putAlong(
+                        groupScores, stopGradient(maskedGroupIndices), values: MLXArray(0.0),
+                        axis: -2)
+                }
+                masked = flattened(groupScores, start: -2, end: -1)
             }
+            indices = argPartition(-masked, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        } else {
+            // "greedy" (Python default): plain top-k on raw scores; bias and
+            // groups are not consulted.
+            indices = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         }
 
-        let indices = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         var selected = takeAlong(scores, indices, axis: -1)
         if normTopkProb {
             selected = selected / (selected.sum(axis: -1, keepDims: true) + MLXArray(1e-20))
