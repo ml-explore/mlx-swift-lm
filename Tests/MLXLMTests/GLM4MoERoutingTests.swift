@@ -8,17 +8,11 @@ import XCTest
 
 /// Routing-correctness tests for the GLM-4 MoE gates (noaux_tc grouped top-k).
 ///
-/// These models had zero coverage. Unlike a cache offset bug, a mis-wired router
-/// still runs and produces plausible logits — the defect only shows as subtly wrong
-/// token probabilities, so it hides without a targeted test. Two structural properties
-/// are pinned here:
-///
-///  1. Group-limited routing: with `n_group`/`topk_group`, selection must be confined
-///     to the winning group(s) (the DeepSeek group-limited-greedy shape).
-///  2. `e_score_correction_bias` steers *which* experts are selected, but the returned
-///     gate weights are gathered from the *unbiased* scores. A port that gathers the
-///     biased `selectionScores` instead would inflate every routed weight — the single
-///     easiest routing bug to introduce and the hardest to notice.
+/// Pinned properties:
+///  1. Group-limited routing: with `n_group`/`topk_group`, selection is confined to the
+///     winning group(s).
+///  2. `e_score_correction_bias` steers which experts are selected, but the returned gate
+///     weights are gathered from the unbiased scores, not from `selectionScores`.
 final class GLM4MoERoutingTests: XCTestCase {
 
     // MARK: - Config builders
