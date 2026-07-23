@@ -2,10 +2,11 @@
 
 import Foundation
 import MLX
-@_spi(GemmaEncoder) @testable import MLXLLM
 import MLXLMCommon
 import MLXNN
 import XCTest
+
+@_spi(GemmaEncoder) @testable import MLXLLM
 
 /// Regression coverage for TranslateGemma.
 ///
