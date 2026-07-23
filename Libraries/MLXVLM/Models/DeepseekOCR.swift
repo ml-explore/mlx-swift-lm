@@ -93,7 +93,6 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
         public let numExpertsPerTok: Int?
         public let moeLayerFreq: Int?
         public let firstKDenseReplace: Int?
-        public let normTopkProb: Bool?
         public let nGroup: Int?
         public let topkGroup: Int?
         public let routedScalingFactor: Float?
@@ -121,7 +120,6 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             case numExpertsPerTok = "num_experts_per_tok"
             case moeLayerFreq = "moe_layer_freq"
             case firstKDenseReplace = "first_k_dense_replace"
-            case normTopkProb = "norm_topk_prob"
             case nGroup = "n_group"
             case topkGroup = "topk_group"
             case routedScalingFactor = "routed_scaling_factor"
@@ -162,7 +160,6 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
             self.moeLayerFreq = try container.decodeIfPresent(Int.self, forKey: .moeLayerFreq)
             self.firstKDenseReplace = try container.decodeIfPresent(
                 Int.self, forKey: .firstKDenseReplace)
-            self.normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb)
             self.nGroup = try container.decodeIfPresent(Int.self, forKey: .nGroup)
             self.topkGroup = try container.decodeIfPresent(Int.self, forKey: .topkGroup)
             self.routedScalingFactor =
@@ -920,6 +917,7 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             newWeights[normalized] = value
         }
 
+        let usesCorrectionBias = (config.textConfiguration.topkMethod ?? "greedy") == "noaux_tc"
         for layer in 0 ..< config.textConfiguration.numHiddenLayers {
             let prefix = "model.layers.\(layer)"
             for proj in ["gate_proj", "down_proj", "up_proj"] {
@@ -935,11 +933,17 @@ public final class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
                 }
             }
 
-            // Unlimited / some DeepSeek packs omit MoE gate correction bias; zeros are a no-op.
+            // The gate only owns `e_score_correction_bias` under `noaux_tc` (matching Python).
+            // Backfill zeros for noaux_tc packs that omit it, and drop the key for greedy
+            // packs that ship it — otherwise a strict load trips on an unused key.
             let gateWeightKey = "\(prefix).mlp.gate.weight"
             let gateBiasKey = "\(prefix).mlp.gate.e_score_correction_bias"
-            if newWeights[gateBiasKey] == nil, let gateWeight = newWeights[gateWeightKey] {
-                newWeights[gateBiasKey] = zeros([gateWeight.dim(0)])
+            if usesCorrectionBias {
+                if newWeights[gateBiasKey] == nil, let gateWeight = newWeights[gateWeightKey] {
+                    newWeights[gateBiasKey] = zeros([gateWeight.dim(0)])
+                }
+            } else {
+                newWeights[gateBiasKey] = nil
             }
         }
 
@@ -1238,7 +1242,6 @@ private final class TextMLP: Module, UnaryLayer {
 
 private final class MoEGate: Module {
     let topK: Int
-    let normTopkProb: Bool
     let routedScalingFactor: Float
     let nGroup: Int
     let topkGroup: Int?
@@ -1246,12 +1249,14 @@ private final class MoEGate: Module {
     let topkMethod: String
 
     @ModuleInfo(key: "weight") var weight: MLXArray
-    @ModuleInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray
+    /// Python only creates `e_score_correction_bias` under `topk_method == "noaux_tc"`; the
+    /// parameter stays absent for greedy packs so strict (`verify: [.all]`) loads against
+    /// safetensors that lack the key succeed.
+    @ParameterInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray?
 
     init(_ config: DeepseekOCRConfiguration.TextConfiguration) {
         let expertCount = config.nRoutedExperts ?? 1
         self.topK = config.numExpertsPerTok ?? 1
-        self.normTopkProb = config.normTopkProb ?? false
         self.routedScalingFactor = config.routedScalingFactor ?? 1.0
         self.nGroup = config.nGroup ?? 1
         self.topkGroup = config.topkGroup
@@ -1260,7 +1265,8 @@ private final class MoEGate: Module {
         // Match Python TextConfig default (`greedy`); DeepSeek-OCR ships greedy.
         self.topkMethod = config.topkMethod ?? "greedy"
         self._weight.wrappedValue = zeros([expertCount, config.hiddenSize])
-        self._eScoreCorrectionBias.wrappedValue = zeros([expertCount])
+        self._eScoreCorrectionBias.wrappedValue =
+            self.topkMethod == "noaux_tc" ? zeros([expertCount]) : nil
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
@@ -1279,7 +1285,7 @@ private final class MoEGate: Module {
         if topkMethod == "noaux_tc" {
             // The correction bias steers selection only; returned weights are
             // gathered from the raw scores.
-            let corrected = scores + eScoreCorrectionBias
+            let corrected = scores + (eScoreCorrectionBias ?? zeros([weight.dim(0)]))
             var masked = corrected
             if nGroup > 1 {
                 let expertCount = weight.dim(0)
@@ -1311,12 +1317,9 @@ private final class MoEGate: Module {
             indices = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         }
 
-        var selected = takeAlong(scores, indices, axis: -1)
-        if normTopkProb {
-            selected = selected / (selected.sum(axis: -1, keepDims: true) + MLXArray(1e-20))
-        }
-        // Python MoEGate always scales selected scores by routed_scaling_factor.
-        selected = selected * routedScalingFactor
+        // Python MoEGate has no `norm_topk_prob` step — selected scores go straight
+        // to the routed scaling factor.
+        let selected = takeAlong(scores, indices, axis: -1) * routedScalingFactor
         return (indices, selected.asType(x.dtype))
     }
 }

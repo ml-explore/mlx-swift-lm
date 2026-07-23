@@ -90,10 +90,53 @@ final class DeepseekOCRLanguageTests: XCTestCase {
         XCTAssertEqual(output.logits.shape, [1, 1, 32])
     }
 
-    private func makeMoEModel() throws -> DeepseekOCR {
+    /// Python only creates `e_score_correction_bias` under `topk_method == "noaux_tc"`, so a
+    /// greedy model must not declare the parameter — otherwise a strict (`verify: [.all]`)
+    /// load against DeepSeek-OCR safetensors, which lack the key, would fail.
+    func testGreedyGateOmitsCorrectionBiasParameterAndWeightKey() throws {
+        let greedy = try makeMoEModel(topkMethod: "greedy")
+        let biasKeys = greedy.parameters().flattened().map(\.0).filter {
+            $0.hasSuffix("e_score_correction_bias")
+        }
+        XCTAssertEqual(biasKeys, [])
+
+        // sanitize must not synthesize the key either, and must drop it if a pack ships one.
+        let sanitized = greedy.sanitize(weights: [
+            "model.layers.0.mlp.gate.weight": zeros([4, 32], type: Float.self),
+            "model.layers.0.mlp.gate.e_score_correction_bias": zeros([4], type: Float.self),
+        ])
+        XCTAssertNil(sanitized["model.layers.0.mlp.gate.e_score_correction_bias"])
+
+        // Strict load of the surviving weights succeeds.
+        try greedy.update(
+            parameters: ModuleParameters.unflattened(sanitized), verify: [.noUnusedKeys])
+    }
+
+    /// The `noaux_tc` path keeps the parameter, and sanitize still backfills zeros for packs
+    /// that omit it.
+    func testNoauxGateKeepsCorrectionBiasAndBackfillsMissingWeight() throws {
+        let noaux = try makeMoEModel()
+        let biasKeys = noaux.parameters().flattened().map(\.0).filter {
+            $0.hasSuffix("e_score_correction_bias")
+        }
+        XCTAssertEqual(biasKeys, ["model.layers.0.mlp.gate.e_score_correction_bias"])
+
+        let sanitized = noaux.sanitize(weights: [
+            "model.layers.0.mlp.gate.weight": zeros([4, 32], type: Float.self)
+        ])
+        XCTAssertEqual(sanitized["model.layers.0.mlp.gate.e_score_correction_bias"]?.shape, [4])
+    }
+
+    private func makeMoEModel(topkMethod: String = "noaux_tc") throws -> DeepseekOCR {
         let config = try JSONDecoder().decode(
             DeepseekOCRConfiguration.self,
-            from: Data(Self.configJSON.utf8))
+            from: Data(
+                Self.configJSON
+                    .replacingOccurrences(
+                        of: "\"topk_method\": \"noaux_tc\"",
+                        with: "\"topk_method\": \"\(topkMethod)\""
+                    )
+                    .utf8))
         return DeepseekOCR(config)
     }
 
