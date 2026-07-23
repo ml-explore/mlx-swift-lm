@@ -1,12 +1,9 @@
 name: Integration Tests
 
 # Heavy integration tests (Hugging Face model downloads, Metal GPU, long-running).
-# Kept out of the PR path so they never block merges; run manually or nightly.
+# Kept out of the PR path so they never block merges
 on:
   workflow_dispatch:
-  schedule:
-    # ~02:00 US Pacific. Adjust as needed.
-    - cron: "0 9 * * *"
 
 permissions:
   contents: read
