@@ -1,0 +1,49 @@
+name: Integration Tests
+
+# Heavy integration tests (Hugging Face model downloads, Metal GPU, long-running).
+# Kept out of the PR path so they never block merges
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration_tests:
+    if: github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Verify MetalToolchain installed
+        shell: bash
+        run: xcodebuild -showComponent MetalToolchain
+
+      - name: Run IntegrationTesting tests (Xcode, macOS)
+        shell: sh
+        run: |
+          xcodebuild -version
+          swift --version
+          # Model-dependent tests must run in a single xctest worker: concurrent
+          # workers race on the shared on-disk Hugging Face cache. Disable parallel
+          # testing (see IntegrationTestingTests/.../Support/FMTestHelpers.swift).
+          xcodebuild test \
+            -project IntegrationTesting/IntegrationTesting.xcodeproj \
+            -scheme IntegrationTesting \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -skipPackagePluginValidation \
+            -resultBundlePath IntegrationTesting.xcresult
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            IntegrationTesting.xcresult
+            ~/Library/Logs/DiagnosticReports/*
+          retention-days: 7
