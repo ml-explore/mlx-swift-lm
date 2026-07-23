@@ -1946,7 +1946,7 @@ private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
 
 // MARK: - Model
 
-public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
+public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, SuppressedTokensProviding {
     @ModuleInfo(key: "vision_tower") private var visionTower: Gemma4VisionModel
     /// Module-internal — also reached by `Gemma4Assistant.swift` (drafter `bind()`
     /// walks here to cache the target's input embeddings, embed scale, and
@@ -1960,8 +1960,19 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
 
+    /// Multimodal placeholder token IDs that must never be sampled as text.
+    /// Seeded from the model configuration; the model factory merges
+    /// `suppress_tokens` from `generation_config.json` on top.
+    /// See `SuppressedTokensProviding` in MLXLMCommon.
+    public var suppressedTokenIds: Set<Int>
+
     public init(_ config: Gemma4Configuration) {
         self.config = config
+        self.suppressedTokenIds = Set(
+            [
+                config.imageTokenId, config.audioTokenId,
+                config.boiTokenId, config.eoiTokenId,
+            ].compactMap { $0 })
         self._visionTower.wrappedValue = Gemma4VisionModel(config: config.visionConfiguration)
         self._languageModel.wrappedValue = Gemma4TextLanguageModel(config.textConfiguration)
         self._embedVision.wrappedValue = Gemma4MultimodalEmbedder(
@@ -2340,7 +2351,9 @@ private final class Gemma4UnifiedVisionEmbedder: Module {
     }
 }
 
-public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
+public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
+    SuppressedTokensProviding
+{
     @ModuleInfo(key: "language_model") private var languageModel: Gemma4TextLanguageModel
     @ModuleInfo(key: "vision_embedder") private var visionEmbedder: Gemma4UnifiedVisionEmbedder?
     @ModuleInfo(key: "embed_vision") private var embedVision: Gemma4MultimodalEmbedder?
@@ -2352,8 +2365,19 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
 
+    /// Multimodal placeholder token IDs that must never be sampled as text.
+    /// Seeded from the model configuration; the model factory merges
+    /// `suppress_tokens` from `generation_config.json` on top.
+    /// See `SuppressedTokensProviding` in MLXLMCommon.
+    public var suppressedTokenIds: Set<Int>
+
     public init(_ config: Gemma4UnifiedConfiguration) {
         self.config = config
+        self.suppressedTokenIds = Set(
+            [
+                config.imageTokenId, config.audioTokenId, config.videoTokenId,
+                config.boiTokenId, config.eoiTokenId, config.boaTokenId, config.eoaTokenId,
+            ].compactMap { $0 })
         self._languageModel.wrappedValue = Gemma4TextLanguageModel(config.textConfiguration)
         if let visionConfiguration = config.visionConfiguration {
             self._visionEmbedder.wrappedValue = Gemma4UnifiedVisionEmbedder(

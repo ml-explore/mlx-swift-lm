@@ -44,6 +44,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
+    /// Sampler handed to ``MTPDrafterModel/draftBlock``: the base sampler,
+    /// wrapped to mask suppressed token IDs when the target has any.
+    /// `draftBlock` receives no ``LogitProcessor``, and an unsuppressed
+    /// draft of a suppressed token would always be rejected by the
+    /// verifier, wasting draft slots.
+    let draftSampler: LogitSampler
+
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
     /// Total tokens proposed per round (`blockSize - 1` drafted, plus the
@@ -118,7 +125,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
+        self.processor = makeLogitProcessor(parameters: parameters, model: mainModel)
+        if let suppressor = makeSuppressTokensProcessor(model: mainModel) {
+            self.draftSampler = SuppressTokensSampler(base: self.sampler, suppressor: suppressor)
+        } else {
+            self.draftSampler = self.sampler
+        }
 
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
@@ -277,7 +289,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             sharedKV: sharedKV,
             queryOffset: cacheOffset,
             blockSize: numDraft + 1,  // total round size: bonus + numDraft
-            sampler: sampler
+            sampler: draftSampler
         )
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
         let flatDraftTokens = draftTokens.flattened()

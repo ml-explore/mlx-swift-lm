@@ -394,6 +394,10 @@ public func loadParoQuantModel<T: LanguageModel>(
         eosTokenIds = Set(genEos)
     }
 
+    // Honor `suppress_tokens` from generation_config.json: merge into the
+    // model's suppressed token IDs so they are masked during sampling.
+    mergeGenerationConfigSuppressedTokens(genConfig, into: model)
+
     var config = ModelConfiguration(
         directory: directory, stopStrings: genConfig?.stopStrings,
         toolCallFormat: toolCallFormat)
