@@ -7,7 +7,8 @@ struct ToolTests {
     func toolCallProcessorPublicDrain() {
         let processor = ToolCallProcessor(format: .json)
         _ = processor.processChunk(
-            #"<tool_call>{"name":"first","arguments":{}}</tool_call><tool_call>{"name":"second","arguments":{}}</tool_call>"#)
+            #"<tool_call>{"name":"first","arguments":{}}</tool_call><tool_call>{"name":"second","arguments":{}}</tool_call>"#
+        )
 
         #expect(processor.drainToolCalls().map(\.function.name) == ["first", "second"])
         #expect(processor.drainToolCalls().isEmpty)
@@ -16,8 +17,10 @@ struct ToolTests {
     @Test("ToolCallProcessor ordered outputs retain split call-text-call order")
     func toolCallProcessorOrderedSplitOutput() {
         let processor = ToolCallProcessor(format: .json)
-        #expect(processor.processChunkOutputs(
-            #"<tool_call>{"name":"first","arguments":{"#).isEmpty)
+        #expect(
+            processor.processChunkOutputs(
+                #"<tool_call>{"name":"first","arguments":{"#
+            ).isEmpty)
 
         let outputs = processor.processChunkOutputs(
             #"}}</tool_call>between<tool_call>{"name":"second","arguments":{}}</tool_call>"#)

@@ -8,14 +8,16 @@ import Testing
 
 @Suite
 struct AllowedToolOutputRouterTests {
-    private let tools: [[String: any Sendable]] = [[
-        "type": "function",
-        "function": [
-            "name": "get_weather",
-            "description": "Get weather",
-            "parameters": ["type": "object"] as [String: any Sendable],
-        ] as [String: any Sendable],
-    ]]
+    private let tools: [[String: any Sendable]] = [
+        [
+            "type": "function",
+            "function": [
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": ["type": "object"] as [String: any Sendable],
+            ] as [String: any Sendable],
+        ]
+    ]
 
     @Test func plainTextRemainsAResponse() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
@@ -94,7 +96,8 @@ struct AllowedToolOutputRouterTests {
             reasoning: (config: config, primedInside: false))
 
         let events = router.process(
-            #"<think>check live data</think><tool_call>{"name":"get_weather","arguments":{"location":"Rome"}}</tool_call>"#)
+            #"<think>check live data</think><tool_call>{"name":"get_weather","arguments":{"location":"Rome"}}</tool_call>"#
+        )
         #expect(events.first == .reasoning("check live data"))
         #expect(events.contains { if case .toolCall = $0 { true } else { false } })
         #expect(!router.isInsideReasoning)
@@ -147,7 +150,8 @@ struct AllowedToolOutputRouterTests {
     @Test func mixedCallTextCallEventsPreserveSourceOrder() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         let events = router.process(
-            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#)
+            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#
+        )
 
         #expect(events.count == 3)
         guard case .toolCall = events[0] else {
@@ -201,7 +205,8 @@ struct AllowedToolOutputRouterTests {
 
     @Test func callsOutsideEnabledToolDefinitionsAreSuppressed() {
         var router = AllowedToolOutputRouter(format: .llama3, tools: tools)
-        #expect(router.process(#"<|python_tag|>{"name":"delete_everything","arguments":{}}"#).isEmpty)
+        #expect(
+            router.process(#"<|python_tag|>{"name":"delete_everything","arguments":{}}"#).isEmpty)
         #expect(router.finish().isEmpty)
     }
 
@@ -236,7 +241,8 @@ struct AllowedToolOutputRouterTests {
 
     @Test func ordinaryTagLikeTextRemainsAResponse() {
         var jsonRouter = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(jsonRouter.process("Use <table> for layout") == [.response("Use <table> for layout")])
+        #expect(
+            jsonRouter.process("Use <table> for layout") == [.response("Use <table> for layout")])
 
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
         #expect(mistralRouter.process("[Today] is sunny") == [.response("[Today] is sunny")])
@@ -249,7 +255,9 @@ struct AllowedToolOutputRouterTests {
 
     @Test func eosRecoversLFM2NestedArrayAndStringBracketArguments() {
         var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(router.process(#"<|tool_call_start|>[get_weather(location=["Paris", "]"])]after"#).isEmpty)
+        #expect(
+            router.process(#"<|tool_call_start|>[get_weather(location=["Paris", "]"])]after"#)
+                .isEmpty)
 
         let events = router.finish()
         #expect(events.count == 2)
@@ -276,8 +284,9 @@ struct AllowedToolOutputRouterTests {
 
     @Test func leadingResponsePrecedesAnIncompleteTaggedCall() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(router.process(#"before <tool_call>{"name":"get_weather","arguments":{"#)
-            == [.response("before ")])
+        #expect(
+            router.process(#"before <tool_call>{"name":"get_weather","arguments":{"#)
+                == [.response("before ")])
 
         let events = router.process(#"}}</tool_call>"#)
         #expect(events.count == 1)
@@ -290,7 +299,8 @@ struct AllowedToolOutputRouterTests {
     @Test func leadingResponsePrecedesAnIncompleteSecondTaggedCall() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         let first = router.process(
-            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between <tool_call>{"name":"get_weather","arguments":{"#)
+            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between <tool_call>{"name":"get_weather","arguments":{"#
+        )
         #expect(first.count == 2)
         guard first.count == 2 else { return }
         guard case .toolCall = first[0] else {
@@ -322,8 +332,9 @@ struct AllowedToolOutputRouterTests {
 
     @Test func nearProtocolMarkersSuppressWithoutStrippingOrdinaryTags() {
         var ordinaryRouter = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(ordinaryRouter.process("Use <toolbar> and <tool> labels")
-            == [.response("Use <toolbar> and <tool> labels")])
+        #expect(
+            ordinaryRouter.process("Use <toolbar> and <tool> labels")
+                == [.response("Use <toolbar> and <tool> labels")])
 
         var partialRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(partialRouter.process("before <tool_cal") == [.response("before ")])
@@ -338,8 +349,10 @@ struct AllowedToolOutputRouterTests {
 
     @Test func specializedEOSPathsSanitizeOnlyMalformedResidualMarkers() {
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
-        #expect(mistralRouter.process(
-            #"[TOOL_CALLS]get_weather[ARGS]{"location":"Rome"}before [TOOL_CALLX] after"#).isEmpty)
+        #expect(
+            mistralRouter.process(
+                #"[TOOL_CALLS]get_weather[ARGS]{"location":"Rome"}before [TOOL_CALLX] after"#
+            ).isEmpty)
         let mistralEvents = mistralRouter.finish()
         #expect(mistralEvents.count == 2)
         guard mistralEvents.count == 2 else { return }
@@ -350,8 +363,10 @@ struct AllowedToolOutputRouterTests {
         #expect(mistralEvents[1] == .response("before  after"))
 
         var lfmRouter = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(lfmRouter.process(
-            "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after").isEmpty)
+        #expect(
+            lfmRouter.process(
+                "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after"
+            ).isEmpty)
         let lfmEvents = lfmRouter.finish()
         #expect(lfmEvents.count == 2)
         guard lfmEvents.count == 2 else { return }
@@ -364,8 +379,10 @@ struct AllowedToolOutputRouterTests {
 
     @Test func eosRecoversLFM2SingleQuotedEscapedBracketArguments() {
         var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(router.process(
-            #"<|tool_call_start|>[get_weather(location='it\']s ] sunny')]after"#).isEmpty)
+        #expect(
+            router.process(
+                #"<|tool_call_start|>[get_weather(location='it\']s ] sunny')]after"#
+            ).isEmpty)
 
         let events = router.finish()
         #expect(events.count == 2)
@@ -384,20 +401,23 @@ struct AllowedToolOutputRouterTests {
         #expect(jsonRouter.finish().isEmpty)
 
         var lfmRouter = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(lfmRouter.process("before <|tool_call_start|>[get_weather(")
-            == [.response("before ")])
+        #expect(
+            lfmRouter.process("before <|tool_call_start|>[get_weather(")
+                == [.response("before ")])
         #expect(lfmRouter.finish().isEmpty)
 
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
-        #expect(mistralRouter.process("before [TOOL_CALLS]get_weather[ARGS]{")
-            == [.response("before ")])
+        #expect(
+            mistralRouter.process("before [TOOL_CALLS]get_weather[ARGS]{")
+                == [.response("before ")])
         #expect(mistralRouter.finish().isEmpty)
     }
 
     @Test func responseBeforeIncompleteBareJSONSecondCallIsOrdered() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         let initial = router.process(
-            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between {"name":"get_weather","arguments":{"#)
+            #"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>between {"name":"get_weather","arguments":{"#
+        )
         #expect(initial.count == 2)
         guard initial.count == 2 else { return }
         guard case .toolCall = initial[0] else {
@@ -416,8 +436,10 @@ struct AllowedToolOutputRouterTests {
 
     @Test func eosEmitsLFM2PrefixBeforeUnfinishedSecondCallExactlyOnce() {
         var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(router.process(
-            "<|tool_call_start|>[get_weather()]between <|tool_call_start|>[get_weather(").isEmpty)
+        #expect(
+            router.process(
+                "<|tool_call_start|>[get_weather()]between <|tool_call_start|>[get_weather("
+            ).isEmpty)
 
         let events = router.finish()
         #expect(events.count == 2)
@@ -431,8 +453,10 @@ struct AllowedToolOutputRouterTests {
 
     @Test func eosSanitizesLFM2InterCallResponsePrefix() {
         var router = AllowedToolOutputRouter(format: .lfm2, tools: tools)
-        #expect(router.process(
-            "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after <|tool_call_start|>[get_weather()]").isEmpty)
+        #expect(
+            router.process(
+                "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after <|tool_call_start|>[get_weather()]"
+            ).isEmpty)
 
         let events = router.finish()
         #expect(events.count == 3)

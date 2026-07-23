@@ -286,16 +286,17 @@ public class ToolCallProcessor {
 
     private func stripProtocolSpans(from text: String) -> String {
         var result = text
-        let tags = [parser.startTag, parser.endTag].compactMap { $0 }
+        let tags =
+            [parser.startTag, parser.endTag].compactMap { $0 }
             + (format == .llama3 ? ["<|python_tag|>"] : [])
 
         for tag in tags {
             while let range = result.range(of: tag) {
                 if tag == parser.startTag,
                     let endTag = parser.endTag,
-                    let end = result.range(of: endTag, range: range.upperBound..<result.endIndex)
+                    let end = result.range(of: endTag, range: range.upperBound ..< result.endIndex)
                 {
-                    result.removeSubrange(range.lowerBound..<end.upperBound)
+                    result.removeSubrange(range.lowerBound ..< end.upperBound)
                 } else {
                     result.removeSubrange(range)
                 }
@@ -314,10 +315,11 @@ public class ToolCallProcessor {
                     index = result.index(after: index)
                     continue
                 }
-                let markerEnd = suffix.firstIndex(of: ">")
+                let markerEnd =
+                    suffix.firstIndex(of: ">")
                     ?? suffix.firstIndex(of: "]")
                 let removalEnd = markerEnd.map { result.index(after: $0) } ?? result.endIndex
-                result.removeSubrange(index..<removalEnd)
+                result.removeSubrange(index ..< removalEnd)
             }
         }
         return result
@@ -329,10 +331,11 @@ public class ToolCallProcessor {
         }
 
         var searchStart = text.startIndex
-        while let startRange = text.range(of: startTag, range: searchStart..<text.endIndex) {
+        while let startRange = text.range(of: startTag, range: searchStart ..< text.endIndex) {
             guard
                 let endTag = parser.endTag,
-                let endRange = text.range(of: endTag, range: startRange.upperBound..<text.endIndex)
+                let endRange = text.range(
+                    of: endTag, range: startRange.upperBound ..< text.endIndex)
             else {
                 return stripProtocolSpans(from: String(text[..<startRange.lowerBound]))
             }
@@ -394,7 +397,7 @@ public class ToolCallProcessor {
             let callStart = startRange.upperBound
             guard let callEnd = balancedBracketEnd(in: remaining, from: callStart) else { break }
 
-            let callText = String(remaining[startRange.lowerBound...callEnd])
+            let callText = String(remaining[startRange.lowerBound ... callEnd])
             guard let call = parser.parse(content: callText, tools: tools) else { break }
             appendResponse(stripProtocolSpans(from: responsePrefix), to: &outputs)
             appendToolCall(call)

@@ -22,9 +22,10 @@ struct AllowedToolOutputRouter {
         reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.toolProcessor = ToolCallProcessor(format: format, tools: tools)
-        self.allowedToolNames = Set(tools.compactMap { tool in
-            (tool["function"] as? [String: any Sendable])?["name"] as? String
-        })
+        self.allowedToolNames = Set(
+            tools.compactMap { tool in
+                (tool["function"] as? [String: any Sendable])?["name"] as? String
+            })
         self.reasoningEmitter = reasoning.map {
             ReasoningEventEmitter(config: $0.config, primedInside: $0.primedInside)
         }
