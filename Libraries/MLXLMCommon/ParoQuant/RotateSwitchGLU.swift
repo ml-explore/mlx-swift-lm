@@ -7,9 +7,10 @@ import MLXNN
 /// `RotateSwitchGLU`, paroquant `modules.py`).
 ///
 /// All experts share a single set of rotation parameters per projection
-/// input: `gate_up_rot` rotates the gathered activations before
-/// `gate_proj`/`up_proj` (which share their input), and `down_rot` rotates
-/// the activated hidden state before `down_proj`. The projections themselves
+/// input: `gate_up_rot` rotates the token activations ahead of the expert
+/// gather (bitwise-equivalent to rotating the gathered rows, at 1/topK the
+/// cost) for `gate_proj`/`up_proj` (which share their input), and `down_rot`
+/// rotates the activated hidden state before `down_proj`. The projections themselves
 /// stay stock `SwitchLinear`/`QuantizedSwitchLinear` — rotating the shared
 /// activations *once* per token is what makes PARO MoE cheap: the rotation
 /// cost is independent of the number of experts.
@@ -47,10 +48,15 @@ public class RotateSwitchGLU: SwitchGLU {
     }
 
     /// `SwitchGLU`'s dataflow (including the ≥64-indices gather/sort fast
-    /// path) with the two shared rotations applied to the gathered
-    /// activations. `PairwiseRotation.rotate` is shape-preserving over any
-    /// leading shape and passes empty batches through, so both the sorted
-    /// (flattened) and unsorted (broadcast) layouts go through unchanged.
+    /// path) with the two shared rotations applied around the expert
+    /// projections. `gate_up_rot` runs *before* the gather/sort: the
+    /// rotation kernel is row-independent (rows never mix, see the
+    /// `PairwiseRotation` Metal source) and `gatherSort` only duplicates
+    /// rows, so `rotate(gather(x)) ≡ gather(rotate(x))` bitwise — while
+    /// rotating `L` rows instead of `L × topK`. `PairwiseRotation.rotate`
+    /// is shape-preserving over any leading shape and passes empty batches
+    /// through, so both the sorted (flattened) and unsorted (broadcast)
+    /// layouts go through unchanged.
     override public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
@@ -59,11 +65,11 @@ public class RotateSwitchGLU: SwitchGLU {
         var idx = indices
         var inverseOrder = MLXArray()
 
+        x = gateUpRot.rotate(x)
+
         if doSort {
             (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
         }
-
-        x = gateUpRot.rotate(x)
 
         let xUp = upProj(x, idx, sortedIndices: doSort)
         let xGate = gateProj(x, idx, sortedIndices: doSort)
