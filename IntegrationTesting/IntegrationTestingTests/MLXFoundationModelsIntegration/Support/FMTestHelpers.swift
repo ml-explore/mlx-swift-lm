@@ -40,7 +40,7 @@ var fixturesBundle: Bundle { Bundle(for: FixturesBundleToken.self) }
 // SmallTokenizer — all of which live outside the gate — for tests that
 // exercise xgrammar / MLXLMCommon directly.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Constructs an `MLXLanguageModel` using the production test downloader /
 /// tokenizer loader and a `HubCache.default`-backed `weightsLocation:` closure.

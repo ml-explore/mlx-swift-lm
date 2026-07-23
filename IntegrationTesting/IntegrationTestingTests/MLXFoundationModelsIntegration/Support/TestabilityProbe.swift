@@ -9,7 +9,7 @@
 // If this file COMPILES, the gate is green. It is never executed — the
 // function is unreferenced and `@available`-gated.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 import FoundationModels
 @testable import MLXFoundationModels
 

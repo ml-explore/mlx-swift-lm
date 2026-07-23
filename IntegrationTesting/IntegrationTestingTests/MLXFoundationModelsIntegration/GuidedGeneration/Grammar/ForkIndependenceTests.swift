@@ -21,7 +21,7 @@
 // Gated on both traits because the tokenizer path routes through
 // `loadTestModelContainer`.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Testing
 import Foundation

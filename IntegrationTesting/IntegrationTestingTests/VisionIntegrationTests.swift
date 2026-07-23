@@ -8,7 +8,7 @@ import Testing
 
 @testable import MLXFoundationModels
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Opt-in end-to-end VLM test: drives a real `Qwen3-VL-4B-Instruct-4bit` through
 /// the FoundationModels adapter with a labeled image attachment and `.vision`
