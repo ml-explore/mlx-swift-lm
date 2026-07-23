@@ -471,7 +471,7 @@ public class Gemma3TextModel: Module, LLMModel {
 ///
 /// TranslateGemma's chat template needs each user turn tagged with `source_lang_code` /
 /// `target_lang_code` (ISO 639-1); supply them via `UserInput.additionalContext`. Without
-/// those codes this behaves exactly like ``DefaultMessageGenerator``.
+/// those codes this behaves exactly like `DefaultMessageGenerator`.
 public struct Gemma3MessageGenerator: MessageGenerator {
     public init() {}
 
