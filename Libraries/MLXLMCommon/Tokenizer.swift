@@ -53,6 +53,18 @@ extension Tokenizer {
     }
 }
 
+/// Optional tokenizer capability for bounded-memory streaming decode.
+///
+/// Conform only when the decoded suffix after appending token IDs depends on
+/// at most a known number of preceding token IDs. Existing ``Tokenizer``
+/// conformers do not need to adopt this protocol and retain the historical
+/// unbounded streaming buffer.
+public protocol BoundedStreamingDecodeTokenizer: Tokenizer {
+    /// The preceding-token overlap retained between streaming decode steps.
+    /// Return `nil` to disable compaction for a particular instance.
+    var streamingDecodeContextSize: Int? { get }
+}
+
 public enum TokenizerError: LocalizedError {
     case missingChatTemplate
 
@@ -82,15 +94,17 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
         segmentTokens.append(token)
     }
 
-    mutating func startNewSegment() {
-        let lastToken = segmentTokens.last
-        segmentTokens.removeAll()
-        if let lastToken {
-            segmentTokens.append(lastToken)
-            segment = tokenizer.decode(tokenIds: segmentTokens)
-        } else {
+    mutating func startNewSegment(retaining tokenCount: Int = 1) {
+        guard tokenCount > 0, !segmentTokens.isEmpty else {
+            segmentTokens.removeAll(keepingCapacity: true)
             segment = ""
+            return
         }
+
+        let retainedTokens = Array(segmentTokens.suffix(tokenCount))
+        segmentTokens.removeAll(keepingCapacity: true)
+        segmentTokens.append(contentsOf: retainedTokens)
+        segment = tokenizer.decode(tokenIds: segmentTokens)
     }
 
     public mutating func next() -> String? {
@@ -107,6 +121,14 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
             startNewSegment()
         } else {
             self.segment = newSegment
+
+            if let contextSize =
+                (tokenizer as? any BoundedStreamingDecodeTokenizer)?.streamingDecodeContextSize,
+                contextSize > 0,
+                segmentTokens.count > contextSize
+            {
+                startNewSegment(retaining: contextSize)
+            }
         }
 
         return String(new)

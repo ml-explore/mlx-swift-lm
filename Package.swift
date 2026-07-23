@@ -148,6 +148,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "BenchmarkHelpers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

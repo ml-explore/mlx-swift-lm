@@ -45,23 +45,50 @@ extension UserInput.Audio {
             reader.add(output)
             reader.startReading()
 
-            var samples: [Float] = []
+            var sampleData = Data()
+            if let duration = try? await asset.load(.duration) {
+                let estimatedByteCount =
+                    duration.seconds * processing.sampleRate * Double(processing.channels)
+                    * Double(MemoryLayout<Float>.size)
+                if estimatedByteCount.isFinite, estimatedByteCount > 0 {
+                    // Avoid a single unbounded eager allocation for unusually
+                    // long inputs while preventing geometric growth for common
+                    // clips.
+                    let reserveLimit = 64 * 1_024 * 1_024
+                    sampleData.reserveCapacity(Int(min(estimatedByteCount, Double(reserveLimit))))
+                }
+            }
 
             while let sampleBuffer = output.copyNextSampleBuffer() {
                 guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
 
                 let byteCount = CMBlockBufferGetDataLength(blockBuffer)
-                var chunk = [Float](repeating: 0, count: byteCount / MemoryLayout<Float>.size)
-                CMBlockBufferCopyDataBytes(
-                    blockBuffer, atOffset: 0, dataLength: byteCount, destination: &chunk)
-                samples.append(contentsOf: chunk)
+                guard byteCount > 0 else { continue }
+                let writeOffset = sampleData.count
+                sampleData.append(contentsOf: repeatElement(0, count: byteCount))
+                let copyStatus = sampleData.withUnsafeMutableBytes { destination in
+                    CMBlockBufferCopyDataBytes(
+                        blockBuffer,
+                        atOffset: 0,
+                        dataLength: byteCount,
+                        destination: destination.baseAddress!.advanced(by: writeOffset)
+                    )
+                }
+                guard copyStatus == kCMBlockBufferNoErr else {
+                    reader.cancelReading()
+                    throw UserInputError.unableToLoad(url)
+                }
             }
 
             guard reader.status == .completed else {
                 throw reader.error ?? UserInputError.unableToLoad(url)
             }
 
-            return MLXArray(samples)
+            guard sampleData.count.isMultiple(of: MemoryLayout<Float>.size) else {
+                throw UserInputError.unableToLoad(url)
+            }
+            let sampleCount = sampleData.count / MemoryLayout<Float>.size
+            return MLXArray(sampleData, [sampleCount], type: Float32.self)
             #else
             fatalError("Audio processing is not supported on this platform.")
             #endif

@@ -438,9 +438,13 @@ public enum MediaProcessing {
         let timescale = duration.timescale
         let sampledTimes = sampledTimeValues.map { CMTime(value: $0, timescale: timescale) }
 
-        // Collect the frames
-        var ciImages: [CIImage] = []
+        // Materialize each processed frame before requesting the next one. The
+        // result necessarily retains all MLX arrays for API compatibility, but
+        // it no longer retains every source CGImage/CIImage alongside them.
+        var frames: [MLXArray] = []
+        frames.reserveCapacity(finalFrameCount)
         var timestamps: [CMTime] = []
+        timestamps.reserveCapacity(finalFrameCount)
 
         for await result in generator.images(for: sampledTimes) {
             switch result {
@@ -448,16 +452,15 @@ public enum MediaProcessing {
                 let ciImage = CIImage(
                     cgImage: image, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
                 let frame = try frameProcessing(.init(image: .ciImage(ciImage), timeStamp: actual))
-                ciImages.append(try frame.image.asCIImage())
+                frames.append(try frame.image.asCIImage().asMLXArray())
                 timestamps.append(frame.timeStamp)
             case .failure(requestedTime: _, _):
                 break
             }
         }
 
-        let framesAsArrays = ciImages.map { $0.asMLXArray() }
         return ProcessedFrames(
-            frames: framesAsArrays,
+            frames: frames,
             timestamps: timestamps,
             totalDuration: duration
         )
@@ -490,9 +493,12 @@ public enum MediaProcessing {
         // Construct a CMTime using the sampled CMTimeValue's and the asset's timescale
         let timescale = duration.timescale
 
-        // Collect the frames
-        var ciImages: [CIImage] = []
+        // Materialize one sampled frame at a time instead of retaining all
+        // intermediate CIImage graphs until a second conversion pass.
+        var frames: [MLXArray] = []
+        frames.reserveCapacity(finalFrameCount)
         var timestamps: [CMTime] = []
+        timestamps.reserveCapacity(finalFrameCount)
 
         // See https://github.com/ml-explore/mlx-swift-lm/pull/64#discussion_r2713532157
         // for rationalle for the follwing timing code
@@ -516,14 +522,13 @@ public enum MediaProcessing {
                 let videoFrame = videoFrames[targetIndex]
                 let frame = try frameProcessing(
                     .init(image: videoFrame.image, timeStamp: videoFrame.timeStamp))
-                ciImages.append(try frame.image.asCIImage())
+                frames.append(try frame.image.asCIImage().asMLXArray())
                 timestamps.append(frame.timeStamp)
             }
         }
 
-        let framesAsArrays = ciImages.map { $0.asMLXArray() }
         return ProcessedFrames(
-            frames: framesAsArrays,
+            frames: frames,
             timestamps: timestamps,
             totalDuration: duration
         )

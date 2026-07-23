@@ -81,7 +81,7 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
             // import Tokenizers
             //
             { (huggingFaceTokenizer: Tokenizers.Tokenizer) -> MLXLMCommon.Tokenizer in
-                struct TokenizerBridge: MLXLMCommon.Tokenizer {
+                struct TokenizerBridge: MLXLMCommon.BoundedStreamingDecodeTokenizer {
                     private let upstream: any Tokenizers.Tokenizer
 
                     init(_ upstream: any Tokenizers.Tokenizer) {
@@ -108,6 +108,12 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
                     var bosToken: String? { upstream.bosToken }
                     var eosToken: String? { upstream.eosToken }
                     var unknownToken: String? { upstream.unknownToken }
+
+                    // swift-transformers' supported decoder pipeline has bounded
+                    // suffix context (UTF-8 byte fallback plus fixed cleanup
+                    // patterns). Keep a conservative overlap when streaming so
+                    // already-emitted prefixes do not remain in the decode buffer.
+                    var streamingDecodeContextSize: Int? { 16 }
 
                     func applyChatTemplate(
                         messages: [[String: any Sendable]],
