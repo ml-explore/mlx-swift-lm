@@ -8,10 +8,8 @@ import XCTest
 /// Cached-forward smoke tests for models with a bespoke `newCache` / hybrid cache layout.
 ///
 /// Each test builds a tiny model from an inline JSON config (no downloads), runs one
-/// prefill through `newCache(parameters:)`, and asserts every attention layer's cache
-/// advanced by exactly the token count. This catches the two structural failures that
-/// shipped undetected in DeepSeek-V3: a cache array whose length disagrees with the
-/// layer count (index-out-of-range), and a double KV update (offset == 2 * tokens).
+/// prefill, and asserts every attention layer's cache advanced by exactly the token count
+/// (SSM/Mamba caches are checked for populated recurrent state instead).
 final class CachedForwardSmokeTests: XCTestCase {
 
     /// Prefill `tokenCount` tokens and assert each KV cache advanced exactly once.
@@ -82,14 +80,8 @@ final class CachedForwardSmokeTests: XCTestCase {
         try assertCacheAdvancesOnce(Olmo3Model(olmo3Config()), expectedLayers: 4)
     }
 
-    /// Regression: `newCache` must be reachable through ``LanguageModel``.
-    ///
-    /// Olmo3 declared `newCache(parameters: GenerateParameters)` — a non-optional
-    /// parameter, which does *not* satisfy the protocol requirement
-    /// `newCache(parameters: GenerateParameters?)`. The model also conforms to
-    /// ``KVCacheDimensionProvider``, so the protocol picked up the generic default
-    /// (all-`KVCacheSimple`) and the sliding-window branch never ran: sliding layers
-    /// got an unbounded cache and attended past the window during decode.
+    /// Each sliding-window layer must get a `RotatingKVCache` (bounded to the window) and
+    /// each full-attention layer a `KVCacheSimple`.
     func testOlmo3SlidingLayersGetRotatingCache() throws {
         let config = try olmo3Config()
         let model: any LanguageModel = Olmo3Model(config)
