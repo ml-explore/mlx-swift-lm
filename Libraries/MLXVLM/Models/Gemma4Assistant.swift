@@ -174,7 +174,7 @@ public final class Gemma4AssistantDraftInner: Module {
 /// `mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py`
 /// (SHA d49d428). Conforms to `MTPDrafterModel`; consumed by
 /// `MTPSpeculativeTokenIterator` (Phase B).
-public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
+public final class Gemma4AssistantDraftModel: Module, MTPDistributionDrafterModel {
     public let config: Gemma4AssistantConfiguration
 
     @ModuleInfo(key: "model") public var model: Gemma4AssistantDraftInner
@@ -210,6 +210,28 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
+        draftBlockWithLogits(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            processor: nil,
+            sampler: sampler
+        ).tokens
+    }
+
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         precondition(blockSize >= 2, "blockSize must be >= 2 (K-1 drafted + 1 bonus)")
 
         // Derive target-bound constants inline per round. Mirrors mlx-vlm's
@@ -232,8 +254,11 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         var tok =
             lastToken.ndim == 1 ? lastToken.reshaped([lastToken.dim(0), 1]) : lastToken
         var hPrev = lastHidden
+        var processor = processor
         var tokens: [MLXArray] = []
+        var processedLogits: [MLXArray] = []
         tokens.reserveCapacity(blockSize - 1)
+        processedLogits.reserveCapacity(blockSize - 1)
 
         for _ in 0 ..< (blockSize - 1) {
             let tokEmbed =
@@ -246,12 +271,18 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
             )
             hPrev = newHidden
             // logits: [B, L, vocab]; take last step → [B, vocab]
-            let lastStepLogits = logits[0..., -1, 0...]
+            var lastStepLogits = logits[0..., -1, 0...]
+            lastStepLogits = processor?.process(logits: lastStepLogits) ?? lastStepLogits
             let nextTok = sampler.sample(logits: lastStepLogits)
+            processor?.didSample(token: nextTok)
             tok = nextTok.ndim == 1 ? nextTok.reshaped([nextTok.dim(0), 1]) : nextTok
             tokens.append(tok)
+            processedLogits.append(lastStepLogits.expandedDimensions(axis: 1))
         }
-        return concatenated(tokens, axis: 1)
+        return MTPDraftBlockOutput(
+            tokens: concatenated(tokens, axis: 1),
+            processedLogits: concatenated(processedLogits, axis: 1)
+        )
     }
 
     /// One drafter forward — pre-projection, layer loop with shared K/V,
