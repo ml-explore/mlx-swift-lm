@@ -212,6 +212,42 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<turn|>"]
     )
 
+    static public let translategemma_4b_it_4bit = ModelConfiguration(
+        id: "mlx-community/translategemma-4b-it-4bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let translategemma_4b_it_8bit = ModelConfiguration(
+        id: "mlx-community/translategemma-4b-it-8bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let translategemma_12b_it_4bit = ModelConfiguration(
+        id: "mlx-community/translategemma-12b-it-4bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let translategemma_12b_it_8bit = ModelConfiguration(
+        id: "mlx-community/translategemma-12b-it-8bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let translategemma_27b_it_4bit = ModelConfiguration(
+        id: "mlx-community/translategemma-27b-it-4bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
+    static public let translategemma_27b_it_8bit = ModelConfiguration(
+        id: "mlx-community/translategemma-27b-it-8bit",
+        defaultPrompt: "Hello, how are you?",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
     static public let hunyuan_mt_7b_4bit = ModelConfiguration(
         id: "mlx-community/Hunyuan-MT-7B-4bit",
         defaultPrompt: "Translate the following text into Chinese: Hello, how are you?"
@@ -445,6 +481,12 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3n_E2B_it_lm_4bit,
             gemma4_e4b_it_4bit,
             gemma4_e2b_it_4bit,
+            translategemma_4b_it_4bit,
+            translategemma_4b_it_8bit,
+            translategemma_12b_it_4bit,
+            translategemma_12b_it_8bit,
+            translategemma_27b_it_4bit,
+            translategemma_27b_it_8bit,
             hunyuan_mt_7b_4bit,
             hunyuan_mt_7b_8bit,
             hy_mt2_7b_4bit,
