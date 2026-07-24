@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Foundation
 import FoundationModels

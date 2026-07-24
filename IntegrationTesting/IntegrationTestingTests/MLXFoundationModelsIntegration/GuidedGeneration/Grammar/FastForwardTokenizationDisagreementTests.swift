@@ -95,7 +95,7 @@
 // `loadTestModelContainer`. The GrammarConstraint type lives in the
 // MLXGuidedGeneration library and is always available alongside the adapter.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Testing
 import Foundation

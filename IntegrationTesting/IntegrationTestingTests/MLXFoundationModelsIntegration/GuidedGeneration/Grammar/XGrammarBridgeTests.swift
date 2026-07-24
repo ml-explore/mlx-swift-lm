@@ -45,7 +45,7 @@
 // fixture is not yet available. Llama-3 coverage is pending its
 // `tokenizer_llama3.json` fixture.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Testing
 import Foundation
