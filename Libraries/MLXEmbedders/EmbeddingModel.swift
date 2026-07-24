@@ -3,7 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import MLXNN
+@_spi(MaterializedModule) import MLXNN
 
 public struct EmbeddingModelOutput {
     public let hiddenStates: MLXArray?
@@ -44,6 +44,26 @@ extension EmbeddingModel {
         attentionMask: MLXArray? = nil
     ) -> EmbeddingModelOutput {
         return callAsFunction(
+            inputs, positionIds: positionIds, tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+    }
+}
+
+public typealias TrainableEmbeddingModel = EmbeddingModel & Module
+
+extension MaterializedModule: EmbeddingModel where LayerType: EmbeddingModel {
+
+    public var vocabularySize: Int { _base.vocabularySize }
+    public var poolingStrategy: Pooling.Strategy? { _base.poolingStrategy }
+    public var maxPositionEmbeddings: Int? { _base.maxPositionEmbeddings }
+
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> EmbeddingModelOutput {
+        return _base(
             inputs, positionIds: positionIds, tokenTypeIds: tokenTypeIds,
             attentionMask: attentionMask)
     }

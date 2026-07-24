@@ -11,6 +11,7 @@ struct Macros: CompilerPlugin {
         TokenizerLoaderMacro.self,
         LoadContainerMacro.self,
         LoadContextMacro.self,
+        LoadTrainableContextMacro.self,
         LanguageModelMacro.self,
     ]
 }
@@ -166,14 +167,16 @@ public struct LoadContainerMacro: ExpressionMacro {
                 "#huggingFaceLoadModelContainer requires a configuration")
         }
 
-        let progress =
-            if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
-                .expression
-            {
-                expr.description
-            } else {
-                "{ _ in }"
-            }
+        let progress: String
+        if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
+            .expression
+        {
+            progress = expr.description
+        } else if let trailingClosure = node.trailingClosure {
+            progress = trailingClosure.description
+        } else {
+            progress = "{ _ in }"
+        }
 
         return
             """
@@ -195,18 +198,52 @@ public struct LoadContextMacro: ExpressionMacro {
             throw MacroExpansionError.message("#huggingFaceLoadModel requires a configuration")
         }
 
-        let progress =
-            if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
-                .expression
-            {
-                expr.description
-            } else {
-                "{ _ in }"
-            }
+        let progress: String
+        if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
+            .expression
+        {
+            progress = expr.description
+        } else if let trailingClosure = node.trailingClosure {
+            progress = trailingClosure.description
+        } else {
+            progress = "{ _ in }"
+        }
 
         return
             """
             loadModel(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: \(configuration),
+                progressHandler: \(raw: progress))
+            """
+    }
+}
+
+public struct LoadTrainableContextMacro: ExpressionMacro {
+    public static func expansion(
+        of node: some FreestandingMacroExpansionSyntax,
+        in context: some MacroExpansionContext
+    ) throws -> ExprSyntax {
+        guard let configuration = node.arguments.first?.expression else {
+            throw MacroExpansionError.message(
+                "#huggingFaceLoadTrainableModel requires a configuration")
+        }
+
+        let progress: String
+        if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
+            .expression
+        {
+            progress = expr.description
+        } else if let trailingClosure = node.trailingClosure {
+            progress = trailingClosure.description
+        } else {
+            progress = "{ _ in }"
+        }
+
+        return
+            """
+            loadTrainable(
                 from: #hubDownloader(),
                 using: #huggingFaceTokenizerLoader(),
                 configuration: \(configuration),

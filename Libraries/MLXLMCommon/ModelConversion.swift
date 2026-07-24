@@ -180,7 +180,7 @@ public enum ModelConversionError: LocalizedError, Equatable {
 public func convert(
     modelDirectory: URL,
     tokenizerDirectory: URL? = nil,
-    model: BaseLanguageModel,
+    model: any TrainableLanguageModel,
     to outputDirectory: URL,
     options: ModelConversionOptions = .init(),
     progressHandler: @Sendable (ModelConversionProgress) -> Void = { _ in },
@@ -285,7 +285,7 @@ package func removeExistingModelWeights(in outputDirectory: URL) throws {
 public func convert(
     modelDirectory: URL,
     tokenizerDirectory: URL? = nil,
-    model: BaseLanguageModel,
+    model: any TrainableLanguageModel,
     to outputDirectory: URL,
     bits: Int? = nil,
     groupSize: Int? = nil,
@@ -553,7 +553,7 @@ private func removeModelConversionWeights(in outputDirectory: URL) throws {
 }
 
 private func quantizeForModelConversion(
-    model: BaseLanguageModel,
+    model: any TrainableLanguageModel,
     options: ModelConversionOptions
 ) -> ModelConversionQuantizationResult {
     var layerQuantization = [String: ModelConversionQuantizationDecision]()

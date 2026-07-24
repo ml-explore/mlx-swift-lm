@@ -148,7 +148,7 @@ import Tokenizers
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
 
-let model = try await #huggingFaceLoadModelContainer(
+let model = try await #huggingFaceLoadModel(
     configuration: modelConfiguration
 )
 
@@ -170,7 +170,7 @@ import MLXHuggingFace
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
 
-let model = try await LLMModelFactory.shared.loadContainer(
+let model = try await LLMModelFactory.shared.load(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
     configuration: modelConfiguration

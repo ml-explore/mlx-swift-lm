@@ -90,7 +90,7 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-let model = try await #huggingFaceLoadModelContainer(
+let model = try await #huggingFaceLoadModel(
     configuration: LLMRegistry.gemma3_1B_qat_4bit
 )
 

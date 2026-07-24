@@ -7,7 +7,7 @@ import MLXLMCommon
 /// import MLXHuggingFace
 /// import HuggingFace
 ///
-/// let model = try await loadModelContainer(
+/// let model = try await loadModel(
 ///     from: #hubDownloader(HubClient()),
 ///     using: #huggingFaceTokenizerLoader(),
 ///     configuration: modelConfiguration
@@ -23,7 +23,7 @@ public macro hubDownloader(_ hub: Any) -> MLXLMCommon.Downloader =
 /// import MLXHuggingFace
 /// import HuggingFace
 ///
-/// let model = try await loadModelContainer(
+/// let model = try await loadModel(
 ///     from: #hubDownloader(),
 ///     using: #huggingFaceTokenizerLoader(),
 ///     configuration: modelConfiguration
@@ -55,7 +55,7 @@ public macro adaptHuggingFaceTokenizer(_ upstream: Any) -> MLXLMCommon.Tokenizer
 /// import MLXHuggingFace
 /// import HuggingFace
 ///
-/// let model = try await loadModelContainer(
+/// let model = try await loadModel(
 ///     from: #hubDownloader(),
 ///     using: #huggingFaceTokenizerLoader(),
 ///     configuration: modelConfiguration
@@ -76,6 +76,7 @@ public macro huggingFaceTokenizerLoader() -> MLXLMCommon.TokenizerLoader =
 ///     configuration: modelConfiguration
 /// )
 /// ```
+@available(*, deprecated, message: "use huggingFaceLoadModel instead")
 @freestanding(expression)
 public macro huggingFaceLoadModelContainer(
     configuration: ModelConfiguration
@@ -93,6 +94,7 @@ public macro huggingFaceLoadModelContainer(
 ///     configuration: modelConfiguration
 /// ) { progres in ... }
 /// ```
+@available(*, deprecated, message: "use huggingFaceLoadModel instead")
 @freestanding(expression)
 public macro huggingFaceLoadModelContainer(
     configuration: ModelConfiguration,
@@ -134,6 +136,24 @@ public macro huggingFaceLoadModel(
     progressHandler: @Sendable @escaping (Progress) -> Void
 ) -> ModelContext =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContextMacro")
+
+/// Load a `TrainableModelContext` using default hub client and tokenizer loader with progress.
+///
+/// ```swift
+/// import MLXHuggingFace
+/// import HuggingFace
+/// import Tokenizers
+///
+/// let modelContext = try await huggingFaceLoadTrainableModel(
+///     configuration: modelConfiguration
+/// ) { progres in ... }
+/// ```
+@freestanding(expression)
+public macro huggingFaceLoadTrainableModel(
+    configuration: ModelConfiguration,
+    progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+) -> TrainableModelContext =
+    #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadTrainableContextMacro")
 
 public enum HuggingFaceDownloaderError: LocalizedError {
     case invalidRepositoryID(String)

@@ -27,12 +27,12 @@ Tokenizers convert text to/from token IDs and apply chat templates for multi-tur
 Tokenizers are loaded automatically by model factories:
 
 ```swift
-let container = try await LLMModelFactory.shared.loadContainer(
+let context = try await LLMModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: config
 )
-let tokenizer = await container.tokenizer
+let tokenizer = context.tokenizer
 ```
 
 ### Manual Loading
@@ -185,7 +185,7 @@ let message = Chat.Message(
 
 ```swift
 // ChatSession handles messages internally
-let session = ChatSession(container, instructions: "You are helpful")
+let session = ChatSession(context, instructions: "You are helpful")
 let response = try await session.respond(to: "Hello")
 
 // Or restore from history
@@ -194,7 +194,7 @@ let history: [Chat.Message] = [
     .user("Previous question"),
     .assistant("Previous answer")
 ]
-let session = ChatSession(container, history: history)
+let session = ChatSession(context, history: history)
 ```
 
 ## MessageGenerator

@@ -19,11 +19,11 @@ private func create<C: Codable, M>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 public enum LLMTypeRegistry {
 
     /// Shared instance with default model types.
-    public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+    public static let shared: ModelTypeRegistry<TrainableLanguageModel> = .init(creators: [
         "mistral": create(LlamaConfiguration.self, LlamaModel.init),
         "mixtral": create(MixtralConfiguration.self, MixtralModel.init),
         "llama": create(LlamaConfiguration.self, LlamaModel.init),
@@ -541,16 +541,16 @@ private struct LLMUserInputProcessor: UserInputProcessor {
 /// is required.
 ///
 /// ```swift
-/// let modelContainer = try await LLMModelFactory.shared.loadContainer(
+/// let model = try await LLMModelFactory.shared.load(
 ///     configuration: LLMRegistry.llama3_8B_4bit)
 /// ```
-public final class LLMModelFactory: GenericModelFactory {
+public final class LLMModelFactory: GenericModelFactory, TrainableModelContextLoader {
 
     public typealias ContextType = ModelContext
-    public typealias ContainerType = ModelContainer
 
     public init(
-        typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry
+        typeRegistry: ModelTypeRegistry<TrainableLanguageModel>,
+        modelRegistry: AbstractModelRegistry
     ) {
         self.typeRegistry = typeRegistry
         self.modelRegistry = modelRegistry
@@ -561,15 +561,45 @@ public final class LLMModelFactory: GenericModelFactory {
         typeRegistry: LLMTypeRegistry.shared, modelRegistry: LLMRegistry.shared)
 
     /// registry of model type, e.g. configuration value `llama` -> configuration and init methods
-    public let typeRegistry: ModelTypeRegistry<LanguageModel>
+    public let typeRegistry: ModelTypeRegistry<TrainableLanguageModel>
 
     /// registry of model id to configuration, e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`
     public let modelRegistry: AbstractModelRegistry
+
+    /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
+    /// producing a ``TrainableModelContext``.
+    ///
+    /// Use this when the model needs to be mutated -- e.g. for training or
+    /// applying adapters (LoRA). The model inside a ``ModelContext`` is
+    /// materialized and sealed and cannot be modified; convert a trainable
+    /// context to an inference ``ModelContext`` via `ModelContext(_:)` when done.
+    public func loadTrainable(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> sending TrainableModelContext {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return try await _loadTrainable(configuration: resolved, tokenizerLoader: tokenizerLoader)
+    }
 
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
     ) async throws -> ModelContext {
+        let trainable = try await _loadTrainable(
+            configuration: configuration, tokenizerLoader: tokenizerLoader)
+        return ModelContext(trainable)
+    }
+
+    /// internal load of a TrainableModelContext that can be converted into a ModelContext
+    private func _loadTrainable(
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> TrainableModelContext {
         let modelDirectory = configuration.modelDirectory
 
         // Load config.json once and decode for both base config and model-specific config
@@ -589,7 +619,7 @@ public final class LLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let model: LanguageModel
+        let model: any TrainableLanguageModel
         do {
             model = try await typeRegistry.createModel(
                 configuration: configData, modelType: baseConfig.modelType)

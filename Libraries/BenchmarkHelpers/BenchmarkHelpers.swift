@@ -413,7 +413,7 @@ public func benchmarkEmbeddingLoading(
         id: "mlx-community/Qwen3-Embedding-0.6B-8bit"),
     runs: Int = BenchmarkDefaults.loadingRuns
 ) async throws -> BenchmarkStats {
-    _ = try await EmbedderModelFactory.shared.loadContainer(
+    _ = try await EmbedderModelFactory.shared.load(
         from: downloader, using: tokenizerLoader, configuration: configuration
     ) { _ in }
     Memory.clearCache()
@@ -421,7 +421,7 @@ public func benchmarkEmbeddingLoading(
     var times: [Double] = []
     for i in 1 ... runs {
         let start = CFAbsoluteTimeGetCurrent()
-        _ = try await EmbedderModelFactory.shared.loadContainer(
+        _ = try await EmbedderModelFactory.shared.load(
             from: downloader, using: tokenizerLoader, configuration: configuration
         ) { _ in }
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
@@ -542,7 +542,7 @@ public func benchmarkLLMGeneration(
     runs: Int = BenchmarkDefaults.loadingRuns
 ) async throws -> LLMGenerationStats {
     let configuration = MLXLMCommon.ModelConfiguration(id: modelId)
-    let container = try await LLMModelFactory.shared.loadContainer(
+    let context = try await LLMModelFactory.shared.load(
         from: downloader, using: tokenizerLoader, configuration: configuration
     ) { _ in }
 
@@ -558,9 +558,9 @@ public func benchmarkLLMGeneration(
     // Warm-up: prime caches and weights. UserInput is `sending`, so build a
     // fresh instance for each call.
     do {
-        let warmInput = try await container.prepare(input: UserInput(prompt: benchmarkPrompt))
-        let warmStream = try await container.generate(
-            input: warmInput, parameters: parameters)
+        let warmInput = try await context.processor.prepare(
+            input: UserInput(prompt: benchmarkPrompt))
+        let warmStream = try generate(input: warmInput, parameters: parameters, context: context)
         for await _ in warmStream {}
     }
 
@@ -570,8 +570,8 @@ public func benchmarkLLMGeneration(
     var generationTokenCount = 0
 
     for i in 1 ... runs {
-        let input = try await container.prepare(input: UserInput(prompt: benchmarkPrompt))
-        let stream = try await container.generate(input: input, parameters: parameters)
+        let input = try await context.processor.prepare(input: UserInput(prompt: benchmarkPrompt))
+        let stream = try generate(input: input, parameters: parameters, context: context)
         var info: GenerateCompletionInfo?
         for await item in stream {
             if case .info(let i) = item { info = i }
