@@ -62,6 +62,14 @@ public protocol KVCache: Evaluatable {
     /// get/set metadata state as string array for serialization
     var metaState: [String] { get set }
 
+    /// Approximate number of bytes held by this cache's allocated buffers.
+    ///
+    /// The basis is the *allocated* (step-rounded) buffers returned by
+    /// `innerState()`, not the offset-sliced ``state`` — matching Python
+    /// `mlx_lm`'s `KVCache.nbytes`, which counts the step-over-allocated arrays.
+    /// Used by ``LRUPromptCache`` for byte-budget accounting.
+    var nbytes: Int { get }
+
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
@@ -106,6 +114,14 @@ extension KVCache {
     public func prepare(lengths: MLXArray?) {}
 
     public func finalize() {}
+
+    /// Default ``nbytes`` for conformers that are not ``BaseKVCache`` subclasses:
+    /// sum the allocated buffers from `innerState()`. `BaseKVCache` overrides
+    /// this with an `open var` so its subclasses get a dynamically-dispatched
+    /// override point.
+    public var nbytes: Int {
+        innerState().reduce(0) { $0 + $1.nbytes }
+    }
 }
 
 public func withPreparedCache<Result>(
@@ -200,6 +216,15 @@ open class BaseKVCache: KVCache {
                 fatalError("This cache has no meta_state but a meta_state was set.")
             }
         }
+    }
+
+    /// Allocated-buffer byte size. Declared `open` (not left to the `KVCache`
+    /// extension default) so subclasses have a dynamically-dispatched override
+    /// point that survives being called through the protocol.
+    /// The default sums `innerState()`; no subclass needs to override it,
+    /// since each already reports its allocated buffers there.
+    open var nbytes: Int {
+        innerState().reduce(0) { $0 + $1.nbytes }
     }
 
     open var isTrimmable: Bool { false }

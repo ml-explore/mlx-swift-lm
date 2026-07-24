@@ -778,3 +778,54 @@ private final class BatchOffsetProbeCache: BaseKVCache {
     }
     #expect(offsets.asArray(Int32.self) == [10, 20])
 }
+
+// MARK: - nbytes (allocated-buffer basis, Python-parity)
+
+private func innerStateBytes(_ cache: any KVCache) -> Int {
+    cache.innerState().reduce(0) { $0 + $1.nbytes }
+}
+
+/// An empty cache holds no allocated buffers.
+@Test func testEmptyCacheNbytesIsZero() {
+    #expect(KVCacheSimple().nbytes == 0)
+    #expect(RotatingKVCache(maxSize: 32).nbytes == 0)
+}
+
+/// `nbytes` counts the step-rounded *allocated* buffers (`innerState()`), not
+/// the offset-sliced `state`. A single-token update allocates a 256-step buffer,
+/// so `nbytes` must exceed the 1-token slice — matching Python `mlx_lm`.
+@Test func testNbytesCountsAllocatedBuffersNotOffsetSlice() {
+    let cache = KVCacheSimple()
+    let keys = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+    _ = cache.update(keys: keys, values: keys)
+    let stateBytes = cache.state.reduce(0) { $0 + $1.nbytes }
+    #expect(cache.nbytes == innerStateBytes(cache))
+    #expect(cache.nbytes > stateBytes)
+}
+
+/// `nbytes` sums `innerState()` for every cache type; `CacheList` sums children.
+@Test func testNbytesSumsInnerStateForEachCacheType() {
+    let keys = MLXArray.ones([1, 4, 8, 64], dtype: .float32)
+
+    let simple = KVCacheSimple()
+    _ = simple.update(keys: keys, values: keys)
+    #expect(simple.nbytes == innerStateBytes(simple))
+    #expect(simple.nbytes > 0)
+
+    let rotating = RotatingKVCache(maxSize: 32)
+    _ = rotating.update(keys: keys, values: keys)
+    #expect(rotating.nbytes == innerStateBytes(rotating))
+    #expect(rotating.nbytes > 0)
+
+    let quantized = simple.toQuantized(groupSize: 64, bits: 4)
+    #expect(quantized.nbytes == innerStateBytes(quantized))
+    #expect(quantized.nbytes > 0)
+
+    let sub1 = KVCacheSimple()
+    _ = sub1.update(keys: keys, values: keys)
+    let sub2 = RotatingKVCache(maxSize: 32)
+    _ = sub2.update(keys: keys, values: keys)
+    let list = CacheList(sub1, sub2)
+    #expect(list.nbytes == innerStateBytes(list))
+    #expect(list.nbytes == sub1.nbytes + sub2.nbytes)
+}
