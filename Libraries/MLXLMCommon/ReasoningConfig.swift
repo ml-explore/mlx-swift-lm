@@ -147,6 +147,15 @@ public struct ReasoningConfig: Sendable, Equatable {
                 isSpecialToken: true)
         }
 
+        // Nanbeige4.2+: <think>/</think>, thinking toggled via `enable_thinking`
+        // (template default true), same contract as the Qwen3 family.
+        if type.hasPrefix("nanbeige") {
+            return ReasoningConfig(
+                startDelimiter: "<think>", endDelimiter: "</think>",
+                promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+                isSpecialToken: true)
+        }
+
         // DeepSeek-R1 (and R1-Distill): always-on <think>/</think>.
         //
         // R1-Distill reports its *base* model_type ("qwen2"/"llama"), so it must
