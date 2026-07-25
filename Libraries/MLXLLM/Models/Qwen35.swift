@@ -9,8 +9,124 @@
 
 import Foundation
 import MLX
+import MLXFast
 import MLXLMCommon
 import MLXNN
+
+// MARK: - Fused router top-k
+
+/// One-kernel replacement for the decode router tail:
+///
+/// ```
+/// inds   = argPartition(gates, kth: E-K)[..., (E-K)...]
+/// scores = takeAlong(gates, inds, axis: -1)
+/// scores = scores / scores.sum(axis: -1, keepDims: true)
+/// ```
+///
+/// `ArgPartition::eval_gpu` delegates to `gpu_merge_sort`, so the path above
+/// fully sorts all `E` experts just to name `K` of them — three serial
+/// dispatches, and three encoder-wide hazard barriers, for a 256→8 selection.
+/// Decode is barrier-bound (MLX's dispatch schedule already sits at the
+/// dispatch graph's critical-path depth, so the only way to drop a barrier is
+/// to drop a serial link), which makes collapsing these three into one worth
+/// far more than the arithmetic they do.
+///
+/// Bit-identical to the chain it replaces, by construction:
+///
+/// - **order** — `sort.h`'s `LessThan` compares values only, `ThreadSort` swaps
+///   on strict less-than and `merge_step` takes from A on ties, so the sort is
+///   *stable*: element `i` lands at ascending position
+///   `#{j: v_j < v_i} + #{j: v_j == v_i, j < i}`. Counting the elements that
+///   rank *above* `i` instead gives the same slot as `K-1-count`, and packing
+///   the index into the low bits of a monotone bit key folds the tie-break into
+///   that one comparison. NaN maps above `+inf` (all NaNs tie, as in
+///   `LessThan`) and the sign of zero is normalised, since `-0.0` and `+0.0`
+///   compare equal there but not as bit patterns.
+/// - **sum** — `reduce.metal` instantiates float16 with `U = float16_t`, and a
+///   row of 8 takes `thread_reduce`: sequential accumulation in the output
+///   dtype, from zero, in slot order.
+/// - **divide** — elementwise, same dtype.
+private let routerTopKSource = """
+    uint row = threadgroup_position_in_grid.y;
+    uint t = thread_position_in_threadgroup.x;
+
+    threadgroup ulong sk[E_];
+    threadgroup float top_v[K_];
+    threadgroup uint  top_i[K_];
+
+    float v = static_cast<float>(gates[row * E_ + t]);
+    uint b = (v == 0.0f) ? 0u : as_type<uint>(v);
+    uint mono = isnan(v) ? 0xFFFFFFFFu : (b ^ ((uint)(((int)b) >> 31) | 0x80000000u));
+    ulong key = (((ulong)mono) << 32) | (ulong)t;
+    sk[t] = key;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int above = 0;
+    for (uint j = 0; j < E_; ++j) {
+        above += (sk[j] > key) ? 1 : 0;
+    }
+    if (above < K_) {
+        top_v[K_ - 1 - above] = v;
+        top_i[K_ - 1 - above] = t;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (t == 0) {
+        T acc = static_cast<T>(0);
+        for (int q = 0; q < K_; ++q) {
+            acc = static_cast<T>(top_v[q]) + acc;
+        }
+        for (int q = 0; q < K_; ++q) {
+            T s = static_cast<T>(top_v[q]);
+            scores[row * K_ + q] = NORM_ ? (s / acc) : s;
+        }
+    }
+    if (t < K_) {
+        inds[row * K_ + t] = top_i[t];
+    }
+    """
+
+private final class RouterTopKKernel: Sendable {
+    static let shared = RouterTopKKernel()
+    let kernel: MLXFast.MLXFastKernel
+
+    private init() {
+        kernel = MLXFast.metalKernel(
+            name: "router_topk_norm",
+            inputNames: ["gates"],
+            outputNames: ["inds", "scores"],
+            source: routerTopKSource
+        )
+    }
+}
+
+/// Top-`k` selection + optional normalisation over the last axis, in one
+/// dispatch. Returns `(indices, scores)` shaped `[..., k]`, matching the
+/// argPartition/takeAlong/normalise chain bit for bit — including the
+/// `uint32` index dtype `argPartition` produces.
+///
+/// One threadgroup per row and an `O(E²)` rank count, which is only the right
+/// shape when there are very few rows — at prefill the block sort's
+/// `O(E log² E)` wins and there is no barrier to save, so callers gate this on
+/// the single-row decode case.
+///
+/// Internal (not private) so `Qwen35RouterTopKBitwiseTests` can hold the fused
+/// form against the chain it replaces.
+func fusedRouterTopK(_ gates: MLXArray, k: Int, normalize: Bool) -> (MLXArray, MLXArray) {
+    let e = gates.dim(-1)
+    let rows = gates.size / e
+    let out = RouterTopKKernel.shared.kernel(
+        [gates],
+        template: [
+            ("T", gates.dtype), ("E_", e), ("K_", k), ("NORM_", normalize ? 1 : 0),
+        ],
+        grid: (e, rows, 1),
+        threadGroup: (e, 1, 1),
+        outputShapes: [[rows, k], [rows, k]],
+        outputDTypes: [.uint32, gates.dtype]
+    )
+    return (out[0], out[1])
+}
 
 // MARK: - Configuration
 
@@ -416,12 +532,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         gates = MLX.softmax(gates, axis: -1, precise: true)
 
         let k = topK
-        let kth = gates.dim(-1) - k
-        let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
-        var scores = MLX.takeAlong(gates, inds, axis: -1)
-        if normTopkProb {
-            scores = scores / scores.sum(axis: -1, keepDims: true)
-        }
+        let (inds, scores) = routerTopK(gates, k: k)
 
         let y = switchMLP(x, inds)
         let combined = weightedExpertSum(y, scores)
@@ -430,6 +541,31 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         sharedY = sigmoid(sharedExpertGate(x)) * sharedY
 
         return combined + sharedY
+    }
+
+    /// Pick the top-`k` experts and normalise their scores.
+    ///
+    /// At decode there is exactly one row, and the three-dispatch chain below
+    /// is three encoder-wide barriers spent on a 256→8 selection; the fused
+    /// kernel does it in one and is bit-identical (see `fusedRouterTopK`).
+    /// Prefill keeps the chain: many rows make the fused kernel's `O(E²)` rank
+    /// count the wrong shape, and a GEMM-bound pass has no barrier to save.
+    private func routerTopK(_ gates: MLXArray, k: Int) -> (MLXArray, MLXArray) {
+        let e = gates.dim(-1)
+        if gates.size == e, e <= 1024 {
+            let (inds, scores) = fusedRouterTopK(gates, k: k, normalize: normTopkProb)
+            var shape = gates.shape
+            shape[shape.count - 1] = k
+            return (inds.reshaped(shape), scores.reshaped(shape))
+        }
+
+        let kth = e - k
+        let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
+        var scores = MLX.takeAlong(gates, inds, axis: -1)
+        if normTopkProb {
+            scores = scores / scores.sum(axis: -1, keepDims: true)
+        }
+        return (inds, scores)
     }
 }
 
