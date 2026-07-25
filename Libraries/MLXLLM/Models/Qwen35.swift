@@ -372,10 +372,15 @@ final class Qwen35GatedDeltaNet: Module {
             qkv = MLX.where(mask[.ellipsis, .newAxis], qkv, 0)
         }
 
-        let convInput = concatenated([convState, qkv], axis: 1)
-        let newConvState = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
-
-        let convOut = silu(conv1d(convInput))
+        let convOut: MLXArray
+        let newConvState: MLXArray
+        if S == 1 {
+            (convOut, newConvState) = decodeConv(convState: convState, qkv: qkv)
+        } else {
+            let convInput = concatenated([convState, qkv], axis: 1)
+            newConvState = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
+            convOut = silu(conv1d(convInput))
+        }
 
         let convSplit = MLX.split(convOut, indices: [keyDim, 2 * keyDim], axis: -1)
         let q = convSplit[0].reshaped(B, S, numKHeads, headKDim)
@@ -405,6 +410,28 @@ final class Qwen35GatedDeltaNet: Module {
 
         let gated = norm(out, gate: z)
         return (outProj(gated.reshaped(B, S, -1)), newConvState, newRecState)
+    }
+
+    /// The S == 1 depthwise conv as `convKernelSize` fused multiply-adds —
+    /// elementwise ops `compile` folds into the surrounding segment, deleting
+    /// a dispatch and a hazard barrier per GDN layer. f32 accumulation with a
+    /// single final round reproduces MLX's `Convolution` kernel bit-for-bit
+    /// (native-dtype accumulation differs in ~47% of channels);
+    /// `Qwen35GDNDecodeBitwiseTests` pins the contract.
+    func decodeConv(
+        convState: MLXArray, qkv: MLXArray
+    ) -> (convOut: MLXArray, newConvState: MLXArray) {
+        var acc =
+            convState[0..., 0, 0...].asType(.float32)
+            * conv1d.weight[0..., 0, 0].asType(.float32)
+        for tap in 1 ..< convKernelSize {
+            let row =
+                tap < convKernelSize - 1
+                ? convState[0..., tap, 0...] : qkv[0..., 0, 0...]
+            acc = acc + row.asType(.float32) * conv1d.weight[0..., tap, 0].asType(.float32)
+        }
+        let convOut = silu(acc.asType(qkv.dtype).reshaped(convState.dim(0), 1, convDim))
+        return (convOut, concatenated([convState[0..., 1..., 0...], qkv], axis: 1))
     }
 }
 
