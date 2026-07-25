@@ -79,6 +79,7 @@ Currently supported model types are:
 - gemma3
 - smolvlm
 - deepseekocr
+- unlimited-ocr / unlimited_ocr
 
 Tried DeepSeek-OCR Hub packs:
 
@@ -108,7 +109,7 @@ Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
 - **`base`** — single 640 view; pass `DeepseekOCRProcessor.modeContext(.base)` into `ChatSession`
 - **Multipage fused** — multiple `UserInput.Image`s + `.base` + prompt `Multi page parsing.` (Python Unlimited `multi_image_single_token`)
 
-See the fork README section “DeepSeek-OCR crop modes”.
+See the fork README section “DeepSeek-OCR / Unlimited-OCR crop modes”.
 
 ### DeepSeek-OCR grounding tokens
 

@@ -13,7 +13,7 @@ import Tokenizers
 // MARK: - DeepSeek-OCR (deepseekocr) IntegrationTesting example
 //
 // Track A / TASK-028. Proves first-class DeepSeek-OCR via `VLMRegistry.deepseekOCR5bit`
-// (`model_type=deepseekocr`).
+// (`model_type=deepseekocr`) — not Unlimited remap, `UnlimitedOCR`, or R-SWA.
 //
 // Cache-gated on `mlx-community/DeepSeek-OCR-5bit`, or force with
 // `MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1` (Hub download). Default CI never pulls
@@ -35,6 +35,10 @@ struct DeepseekOCRIntegrationTests {
 
     @Test
     func loadsDeepseekOCRAndRunsOCR() async throws {
+        // Keep Hub `_orig_model_type` from diverting loads to UnlimitedOCR.
+        setenv("REMAP_UNLIMITED", "0", 1)
+        defer { unsetenv("REMAP_UNLIMITED") }
+
         let tokenizerLoader = #huggingFaceTokenizerLoader()
         let container: ModelContainer
         if let dir = hfSnapshotDir(modelId: deepseekOCRModelId),
@@ -50,7 +54,9 @@ struct DeepseekOCRIntegrationTests {
         }
 
         let isDeepseek = await container.perform { $0.model is DeepseekOCR }
+        let isUnlimited = await container.perform { $0.model is UnlimitedOCR }
         #expect(isDeepseek, "expected DeepseekOCR for deepseekocr path")
+        #expect(!isUnlimited, "must not load UnlimitedOCR / R-SWA here")
 
         // Synthetic page — asserts path health, not OCR accuracy.
         let page = VisionTestImages.solidColor(.white, size: 640)

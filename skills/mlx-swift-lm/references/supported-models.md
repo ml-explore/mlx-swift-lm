@@ -164,6 +164,7 @@ IntegrationTesting: `DeepseekOCRIntegrationTests` (cache-gated or
 | `mistral3` | Mistral 3 VLM |
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
 | `deepseekocr` | DeepSeek-OCR (see section above) |
+| `unlimited-ocr` / `unlimited_ocr` | Unlimited-OCR (R-SWA; stacks on DeepSeek) |
 
 ## Loading Any Model
 

@@ -11,8 +11,8 @@ DeepSeek-OCR Swift code is adapted from **[mzbac/deepseek-ocr.swift](https://git
 ### Supported VLM: DeepSeek-OCR
 
 DeepSeek-OCR is a first-class MLXVLM (`model_type`: `deepseekocr`). Use
-`VLMRegistry.deepseekOCR5bit` (`mlx-community/DeepSeek-OCR-5bit`)
-for the upstream DeepSeek path (closes [#15](https://github.com/ml-explore/mlx-swift-lm/issues/15)):
+`VLMRegistry.deepseekOCR5bit` (`mlx-community/DeepSeek-OCR-5bit`) — not Unlimited-only
+APIs — for the upstream DeepSeek path (closes [#15](https://github.com/ml-explore/mlx-swift-lm/issues/15)):
 
 ```swift
 import HuggingFace
@@ -41,9 +41,9 @@ print(text)
 Opt-in IntegrationTesting example (cache-gated / `MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`):
 `IntegrationTesting/IntegrationTestingTests/DeepseekOCRIntegrationTests.swift`.
 
-### DeepSeek-OCR crop modes
+### DeepSeek-OCR / Unlimited-OCR crop modes
 
-`DeepseekOCRProcessor` supports two first-class modes,
+`DeepseekOCRProcessor` (also used as `UnlimitedOCRProcessor`) supports two first-class modes,
 selected via `ChatSession` / `UserInput` additional context:
 
 | Mode | Context | Behavior (matches Python) |
