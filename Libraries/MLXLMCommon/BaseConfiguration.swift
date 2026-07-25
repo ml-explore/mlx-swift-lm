@@ -219,8 +219,10 @@ public struct BaseConfiguration: Codable, Sendable {
     /// When `honorOrigModelType` is true (default), Unlimited-OCR packs that
     /// advertise `_orig_model_type` of `unlimited-ocr` / `unlimited_ocr` resolve
     /// to that type even if `model_type` is a DeepSeek shim. Pass `false` to
-    /// force the Hub `model_type` (DeepSeek-only verification via
-    /// `REMAP_UNLIMITED=0`).
+    /// force the Hub `model_type` (DeepSeek-only verification).
+    ///
+    /// Callers select the policy per load — see
+    /// `VLMModelFactory.loadContainer(from:using:honorOrigModelType:)`.
     public func resolvedModelType(honorOrigModelType: Bool = true) -> String {
         guard honorOrigModelType,
             let orig = origModelType?

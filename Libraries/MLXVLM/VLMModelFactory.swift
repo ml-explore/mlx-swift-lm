@@ -353,9 +353,51 @@ public final class VLMModelFactory: GenericModelFactory {
     /// registry of model id to configuration, e.g. `mlx-community/paligemma-3b-mix-448-8bit`
     public let modelRegistry: AbstractModelRegistry
 
+    /// Default remap policy: honor a pack's `_orig_model_type`.
+    ///
+    /// Unlimited-OCR packs ship `model_type: deepseekocr` with
+    /// `_orig_model_type: unlimited-ocr` so that loaders which predate the
+    /// Unlimited registration still resolve *something*. Honoring the original
+    /// type is therefore the correct default; pass `false` to load such a pack
+    /// through the plain DeepSeek-OCR path.
+    public static let defaultHonorOrigModelType = true
+
+    /// ``GenericModelFactory`` conformance — loads with the default remap
+    /// policy (``defaultHonorOrigModelType``).
+    ///
+    /// Callers that need to pin the policy explicitly should use
+    /// ``_load(configuration:tokenizerLoader:honorOrigModelType:)`` or one of
+    /// the `load`/`loadContainer` overloads that take `honorOrigModelType`.
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
+    ) async throws -> sending ModelContext {
+        try await _load(
+            configuration: configuration,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: Self.defaultHonorOrigModelType)
+    }
+
+    /// Loads a VLM from already-resolved local URLs, with an explicit
+    /// `_orig_model_type` remap policy.
+    ///
+    /// - Parameters:
+    ///   - configuration: resolved model + tokenizer directories.
+    ///   - tokenizerLoader: tokenizer loader for the tokenizer directory.
+    ///   - honorOrigModelType: when `true`, a pack advertising
+    ///     `_orig_model_type: unlimited-ocr` resolves to the `unlimited-ocr`
+    ///     registry entry (``UnlimitedOCR``, R-SWA cache) even though its
+    ///     `model_type` is the DeepSeek shim. When `false`, the pack's own
+    ///     `model_type` is used (``DeepseekOCR``, plain KV cache).
+    ///
+    /// > Note: This is a per-call argument on purpose. It used to be the
+    /// > process-global `REMAP_UNLIMITED` environment variable, which made the
+    /// > set-then-load pair racy for any caller loading two families
+    /// > concurrently.
+    public func _load(
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
     ) async throws -> sending ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -376,10 +418,6 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // Honor `_orig_model_type` (Unlimited under DeepSeek shim) unless the
-        // smoke/app harness sets REMAP_UNLIMITED=0 for DeepSeek-only loads.
-        let honorOrigModelType =
-            ProcessInfo.processInfo.environment["REMAP_UNLIMITED"] != "0"
         let modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
 
         let model: LanguageModel
@@ -477,6 +515,87 @@ public final class VLMModelFactory: GenericModelFactory {
             tokenizer: tokenizer)
     }
 
+}
+
+// MARK: - Explicit `_orig_model_type` remap policy
+
+/// Loading entry points that take the `_orig_model_type` remap policy as an
+/// argument.
+///
+/// These mirror ``GenericModelFactory``'s `load` / `loadContainer` helpers. The
+/// protocol's own overloads (no `honorOrigModelType:` label) keep
+/// ``VLMModelFactory/defaultHonorOrigModelType``.
+extension VLMModelFactory {
+
+    /// Loads a model from a local directory with an explicit remap policy.
+    ///
+    /// - Parameters:
+    ///   - directory: local MLX weights directory.
+    ///   - tokenizerLoader: tokenizer loader.
+    ///   - honorOrigModelType: see
+    ///     ``_load(configuration:tokenizerLoader:honorOrigModelType:)``.
+    public func load(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
+    ) async throws -> sending ModelContext {
+        try await _load(
+            configuration: .init(directory: directory),
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+    }
+
+    /// Loads a model from a local directory into a ``ModelContainer`` with an
+    /// explicit remap policy.
+    public func loadContainer(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
+    ) async throws -> ModelContainer {
+        let context = try await _load(
+            configuration: .init(directory: directory),
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+        return _wrap(context)
+    }
+
+    /// Loads a model via a ``Downloader`` with an explicit remap policy.
+    public func load(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        honorOrigModelType: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> sending ModelContext {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return try await _load(
+            configuration: resolved,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+    }
+
+    /// Loads a model via a ``Downloader`` into a ``ModelContainer`` with an
+    /// explicit remap policy.
+    public func loadContainer(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        honorOrigModelType: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> ModelContainer {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        let context = try await _load(
+            configuration: resolved,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+        return _wrap(context)
+    }
 }
 
 /// Error wrapper that includes the filename for better error messages.
