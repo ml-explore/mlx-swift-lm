@@ -18,6 +18,29 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Select Xcode
+        shell: bash
+        run: |
+          # The FoundationModels integration tests only build against the macOS 27
+          # SDK (canImport(FoundationModels, _version: 2)); on the macOS 26 SDK the
+          # MLXFoundationModels adapter compiles out and those tests are skipped.
+          # Prefer Xcode 27 when the runner has it so the full suite runs; otherwise
+          # fall back to the default toolchain and run the SDK-agnostic tests.
+          dev=""
+          for app in /Applications/Xcode_27*.app /Applications/Xcode-27*.app /Applications/Xcode.app; do
+            [ -d "$app" ] || continue
+            v=$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1)
+            case "$v" in "Xcode 27"*) dev="$app/Contents/Developer" ;; esac
+            [ -n "$dev" ] && break
+          done
+          if [ -n "$dev" ]; then
+            echo "Using Xcode 27 at $dev (full suite, incl. FoundationModels tests)"
+            echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
+          else
+            echo "Xcode 27 not found; using default $(xcode-select -p)."
+            echo "FoundationModels tests will be compiled out (macOS 27 SDK required)."
+          fi
+
       - name: Verify MetalToolchain installed
         shell: bash
         run: xcodebuild -showComponent MetalToolchain

@@ -15,7 +15,7 @@
 // Suite is `.serialized` and gated on both traits because the schema/
 // tool-calling tests load `ModelContainer` and require xgrammar.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Testing
 import Foundation
