@@ -53,9 +53,17 @@ public protocol LogitProcessor {
 /// for the `TokenIterator`.
 public struct GenerateParameters: Sendable {
 
+    /// How the prompt is prefilled into the cache: step size, chunking strategy,
+    /// and progress observation. See ``PrefillParameters``.
+    public var prefill: PrefillParameters
+
     /// Step size for processing the prompt. `nil` lets each model pick its own prefill
     /// chunk (the Gemma 3 text path uses a smaller chunk than the generic 512 default).
-    public var prefillStepSize: Int?
+    @available(*, deprecated, renamed: "prefill.stepSize")
+    public var prefillStepSize: Int? {
+        get { prefill.stepSize }
+        set { prefill.stepSize = newValue }
+    }
 
     /// Maximum tokens to generate
     public var maxTokens: Int?
@@ -154,7 +162,7 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int? = nil,
+        prefill: PrefillParameters = .init(),
         seed: UInt64? = nil
     ) {
         self.maxTokens = maxTokens
@@ -174,8 +182,43 @@ public struct GenerateParameters: Sendable {
         self.presenceContextSize = presenceContextSize
         self.frequencyPenalty = frequencyPenalty
         self.frequencyContextSize = frequencyContextSize
-        self.prefillStepSize = prefillStepSize
+        self.prefill = prefill
         self.seed = seed
+    }
+
+    @available(
+        *, deprecated,
+        renamed:
+            "init(maxTokens:maxKVSize:kvBits:kvGroupSize:quantizedKVStart:kvScheme:temperature:topP:topK:minP:repetitionPenalty:repetitionContextSize:presencePenalty:presenceContextSize:frequencyPenalty:frequencyContextSize:prefill:seed:)"
+    )
+    public init(
+        maxTokens: Int? = nil,
+        maxKVSize: Int? = nil,
+        kvBits: Int? = nil,
+        kvGroupSize: Int = 64,
+        quantizedKVStart: Int = 0,
+        kvScheme: String? = nil,
+        temperature: Float = 0.6,
+        topP: Float = 1.0,
+        topK: Int = 0,
+        minP: Float = 0.0,
+        repetitionPenalty: Float? = nil,
+        repetitionContextSize: Int = 20,
+        presencePenalty: Float? = nil,
+        presenceContextSize: Int = 20,
+        frequencyPenalty: Float? = nil,
+        frequencyContextSize: Int = 20,
+        prefillStepSize: Int?,
+        seed: UInt64? = nil
+    ) {
+        self.init(
+            maxTokens: maxTokens, maxKVSize: maxKVSize, kvBits: kvBits,
+            kvGroupSize: kvGroupSize, quantizedKVStart: quantizedKVStart, kvScheme: kvScheme,
+            temperature: temperature, topP: topP, topK: topK, minP: minP,
+            repetitionPenalty: repetitionPenalty, repetitionContextSize: repetitionContextSize,
+            presencePenalty: presencePenalty, presenceContextSize: presenceContextSize,
+            frequencyPenalty: frequencyPenalty, frequencyContextSize: frequencyContextSize,
+            prefill: .init(stepSize: prefillStepSize), seed: seed)
     }
 
     public func sampler() -> LogitSampler {
@@ -664,7 +707,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:state:processor:sampler:prefillStepSize:maxTokens:)``
+    /// ``init(input:model:cache:state:processor:sampler:prefill:maxTokens:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///
@@ -709,7 +752,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.maxTokens = parameters.maxTokens
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
+            try prepare(input: input, prefill: parameters.prefill)
         }
     }
 
@@ -723,12 +766,13 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///     evaluation against `cache` (e.g. by a caller resuming a session)
     ///   - processor: the logit processor
     ///   - sampler: the logit sampler
-    ///   - prefillStepSize: optional prefill step size
+    ///   - prefill: prefill parameters (step size, chunking, progress)
     ///   - maxTokens: maximum number of tokens to generate
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
         state: LMOutput.State? = nil,
-        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int? = nil,
+        processor: LogitProcessor?, sampler: LogitSampler,
+        prefill: PrefillParameters = .init(),
         maxTokens: Int? = nil
     ) throws {
         self.model = model
@@ -742,15 +786,30 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.maxTokens = maxTokens
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: prefillStepSize)
+            try prepare(input: input, prefill: prefill)
         }
     }
 
-    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+    @available(
+        *, deprecated, renamed: "init(input:model:cache:state:processor:sampler:prefill:maxTokens:)"
+    )
+    public init(
+        input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+        state: LMOutput.State? = nil,
+        processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int?,
+        maxTokens: Int? = nil
+    ) throws {
+        try self.init(
+            input: input, model: model, cache: cache, state: state,
+            processor: processor, sampler: sampler,
+            prefill: .init(stepSize: prefillStepSize), maxTokens: maxTokens)
+    }
+
+    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         let inputLength = input.text.cacheSequenceLength
 
-        switch try model.prepare(input, cache: cache, state: state, windowSize: windowSize) {
+        switch try model.prepare(input, cache: cache, state: state, prefill: prefill) {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength
             precondition(
@@ -988,18 +1047,18 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         self.numDraftTokens = numDraftTokens
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
+            try prepare(input: input, prefill: parameters.prefill)
         }
     }
 
     /// Prefill both main and draft models with the prompt, priming caches for generation
-    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         let inputLength = input.text.cacheSequenceLength
 
         // Prefill main model
         switch try mainModel.prepare(
-            input, cache: mainCache, state: mainState, windowSize: windowSize)
+            input, cache: mainCache, state: mainState, prefill: prefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength
@@ -1019,7 +1078,11 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
-        switch try draftModel.prepare(input, cache: draftCache, state: nil, windowSize: windowSize)
+        // The draft prefill gets no progress callback: the main model's prefill
+        // already reported the prompt, and a second pass would double-count it.
+        var draftPrefill = prefill
+        draftPrefill.progress = nil
+        switch try draftModel.prepare(input, cache: draftCache, state: nil, prefill: draftPrefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength

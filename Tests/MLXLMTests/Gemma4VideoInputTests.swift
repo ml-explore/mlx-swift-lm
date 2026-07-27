@@ -54,7 +54,8 @@ struct Gemma4VideoInputTests {
                 ? LMInput(text: text, video: LMInput.ProcessedVideo(pixels: pixels))
                 : LMInput(text: text, image: LMInput.ProcessedImage(pixels: pixels))
             let result = try model.prepare(
-                input, cache: model.newCache(parameters: nil), state: nil, windowSize: 1024)
+                input, cache: model.newCache(parameters: nil), state: nil,
+                prefill: .init(stepSize: 1024))
             guard case .logits(let out) = result else {
                 Issue.record("Expected .logits from Gemma4.prepare (multimodal branch)")
                 return MLXArray(0)
@@ -93,7 +94,8 @@ struct Gemma4VideoInputTests {
         let input = LMInput(text: text, video: LMInput.ProcessedVideo(pixels: pixels))
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil, windowSize: 1024)
+            input, cache: model.newCache(parameters: nil), state: nil,
+            prefill: .init(stepSize: 1024))
         guard case .logits(let out) = result else {
             Issue.record("Expected .logits from Gemma4.prepare")
             return

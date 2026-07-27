@@ -314,7 +314,9 @@ private final class StableTransitionLanguageModel: Module, LanguageModel, KVCach
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    )
         throws -> PrepareResult
     {
         .tokens(input.text)

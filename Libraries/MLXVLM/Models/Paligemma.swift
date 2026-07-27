@@ -598,7 +598,8 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?,
+        prefill _: PrefillParameters
     ) throws
         -> PrepareResult
     {

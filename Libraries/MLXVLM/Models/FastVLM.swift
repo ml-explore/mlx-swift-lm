@@ -1128,7 +1128,7 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -1137,7 +1137,7 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: input.image?.pixels,
             mask: input.text.mask
         )
-        let prefillStepSize = windowSize ?? 512
+        let prefillStepSize = prefill.stepSize ?? 512
         let totalPositions = embeddings.dim(1)
         var processed = 0
         while totalPositions - processed > 1 {

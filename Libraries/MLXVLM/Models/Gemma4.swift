@@ -2098,7 +2098,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -2120,7 +2120,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             return .logits(result)
         } else {
             return gemma4PrepareTextOnly(
-                input, cache: convertedCache, windowSize: windowSize, languageModel: languageModel)
+                input, cache: convertedCache, windowSize: prefill.stepSize,
+                languageModel: languageModel)
         }
     }
 
@@ -2560,13 +2561,13 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
         if input.image == nil, input.video == nil, input.audio == nil {
             return gemma4PrepareTextOnly(
-                input, cache: cache, windowSize: windowSize, languageModel: languageModel)
+                input, cache: cache, windowSize: prefill.stepSize, languageModel: languageModel)
         }
 
         let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(

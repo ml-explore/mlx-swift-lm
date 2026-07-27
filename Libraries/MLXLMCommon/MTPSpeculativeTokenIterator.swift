@@ -136,7 +136,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.blockSize = blockSize
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
-        try prepare(input: input, windowSize: parameters.prefillStepSize)
+        try prepare(input: input, prefill: parameters.prefill)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
 
         // The guard above ran against a fresh, zero-offset cache, where a
@@ -153,7 +153,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// Prefill the main model with the prompt. The drafter has no cache to
     /// prime; its first-round inputs come from the prefill's `LMOutput.state`.
-    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         let inputLength = input.text.cacheSequenceLength
 
@@ -164,7 +164,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // passing `prefillState` into `prepare` — the emit flag is meant for
         // exactly one position, not the whole prompt.
 
-        switch try mainModel.prepare(input, cache: mainCache, state: nil, windowSize: windowSize)
+        switch try mainModel.prepare(input, cache: mainCache, state: nil, prefill: prefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength

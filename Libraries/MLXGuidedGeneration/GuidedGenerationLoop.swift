@@ -123,7 +123,7 @@ public enum GuidedGenerationLoop {
         var logits: MLXArray
         let inputLength = input.text.cacheSequenceLength
         switch try model.prepare(
-            input, cache: cacheStorage.cache, state: nil, windowSize: 512)
+            input, cache: cacheStorage.cache, state: nil, prefill: .init(stepSize: 512))
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength

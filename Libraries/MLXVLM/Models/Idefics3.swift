@@ -730,7 +730,7 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -744,7 +744,7 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         // Prefill the merged image+text embeddings in windowSize-sized chunks,
         // matching mlx-vlm (and `LLMModel.prepare`'s token chunking): evaluate
         // the KV cache between chunks, leaving the last embedding for the logits.
-        let prefillStepSize = windowSize ?? 512
+        let prefillStepSize = prefill.stepSize ?? 512
         let totalTokens = embeddings.dim(1)
 
         var processed = 0

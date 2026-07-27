@@ -1025,7 +1025,7 @@ public class Qwen35: Module, VLMModel {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize: Int?
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
 
@@ -1038,7 +1038,7 @@ public class Qwen35: Module, VLMModel {
         // the cache offset plus the rope delta carried in `state` — never
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
-        let window = windowSize ?? 512
+        let window = prefill.stepSize ?? 512
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {

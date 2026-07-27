@@ -1743,7 +1743,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize _: Int?
+        prefill _: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
 

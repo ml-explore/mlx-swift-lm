@@ -983,11 +983,11 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
-        let prefillStepSize = windowSize ?? 512
+        let prefillStepSize = prefill.stepSize ?? 512
         let convertedCache = cache.compactMap { $0 as KVCache }
 
         guard let imagePixels = input.image?.pixels else {

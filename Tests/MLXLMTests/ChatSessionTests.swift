@@ -147,13 +147,13 @@ public class ChatSessionTests: XCTestCase {
         }
 
         func prepare(
-            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
         ) throws -> PrepareResult {
             try base.prepare(
                 LMInput(tokens: input.text.tokens),
                 cache: cache,
                 state: state,
-                windowSize: windowSize)
+                prefill: prefill)
         }
 
         func callAsFunction(

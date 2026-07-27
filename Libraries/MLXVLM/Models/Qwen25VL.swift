@@ -971,13 +971,14 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
         let inputIds = input.text.tokens
 
-        let window = windowSize ?? 512
+        let window = prefill.stepSize ?? 512
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {

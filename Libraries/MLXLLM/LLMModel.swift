@@ -65,11 +65,11 @@ extension LLMModel {
     /// 1024 plus a straggler. `prefillStepSize` becomes a pure loop-efficiency knob,
     /// bounded only by the peak memory of one chunk.
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
-        let prefillStepSize = windowSize ?? 512
+        let prefillStepSize = prefill.stepSize ?? 512
         var y = input.text
 
         // A prompt that fits in one chunk is handed to the iterator whole, exactly

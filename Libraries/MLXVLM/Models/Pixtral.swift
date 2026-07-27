@@ -870,7 +870,7 @@ public class PixtralVLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -883,7 +883,7 @@ public class PixtralVLM: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: pixelValues
         )
 
-        let prefillStepSize = windowSize ?? 512
+        let prefillStepSize = prefill.stepSize ?? 512
         let totalPositions = embeddings.dim(1)
         var processed = 0
         while totalPositions - processed > 1 {
