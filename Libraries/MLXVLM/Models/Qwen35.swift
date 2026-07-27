@@ -1031,7 +1031,7 @@ public class Qwen35: Module, VLMModel {
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
-        // (Gemma3/LLMModel: `windowSize ?? 512`). The windowed forward also
+        // (Gemma3/LLMModel: `prefill.stepSize ?? 512`). The windowed forward also
         // owns every warm continuation (multi-turn chat, tool restart,
         // restored prompt cache): a cold cache is just a continuation
         // anchored at offset 0, and a warm one anchors M-RoPE positions at

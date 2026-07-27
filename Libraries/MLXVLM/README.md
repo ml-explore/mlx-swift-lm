@@ -271,13 +271,14 @@ public class YourModel: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?,
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
         // Merge image and text embeddings, then prefill the KV cache in
-        // windowSize-sized chunks. Single-pass prefill allocates transient
-        // buffers proportional to prompt length and causes OOM on long prompts.
+        // chunks. Single-pass prefill allocates transient buffers
+        // proportional to prompt length and causes OOM on long prompts.
         guard let image = input.image else { throw VLMError.imageRequired }
         guard let mask = input.text.mask else { throw VLMError.maskRequired }
         var inputIds = input.text.tokens
@@ -286,21 +287,24 @@ public class YourModel: Module, VLMModel, KVCacheDimensionProvider {
         let allEmbeds = inputEmbeddings(
             inputIds: inputIds, pixelValues: image.pixels, mask: mask)
 
-        let prefillStepSize = windowSize ?? 512
         let totalPositions = allEmbeds.dim(1)
         var processed = 0
-        while totalPositions - processed > 1 {
-            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-            let range = processed ..< (processed + chunkLength)
-            _ = languageModel(inputIds[0..., range], cache: cache,
-                              inputEmbedding: allEmbeds[0..., range, 0...], mask: mask)
-            asyncEval(cache)
-            processed += chunkLength
+        if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
+            while totalPositions - processed > 1 {
+                let n = min(chunkLength, totalPositions - processed - 1)
+                let range = processed ..< (processed + n)
+                _ = languageModel(inputIds[0..., range], cache: cache,
+                                  inputEmbedding: allEmbeds[0..., range, 0...], mask: mask)
+                asyncEval(cache)
+                processed += n
+                prefill.progress?(processed, totalPositions)
+            }
+            eval(cache)
         }
-        eval(cache)
         let result = languageModel(
             inputIds[0..., processed...], cache: cache,
             inputEmbedding: allEmbeds[0..., processed..., 0...], mask: mask)
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(result)
     }
 
