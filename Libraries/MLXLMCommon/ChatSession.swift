@@ -327,6 +327,7 @@ public final class ChatSession {
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
+    ///   - state: optional model state loaded with ``loadPromptCacheSnapshot(url:)``
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -337,6 +338,7 @@ public final class ChatSession {
         _ model: ModelContainer,
         instructions: String? = nil,
         cache: consuming [KVCache],
+        state: LMOutput.State? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
@@ -346,7 +348,7 @@ public final class ChatSession {
     ) {
         self.model = model
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: state))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -373,6 +375,7 @@ public final class ChatSession {
     ///     cache already encodes a system prompt
     ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
     ///     matching the given model
+    ///   - state: optional model state loaded with ``loadPromptCacheSnapshot(url:)``
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -383,6 +386,7 @@ public final class ChatSession {
         _ model: ModelContext,
         instructions: String? = nil,
         cache: consuming [KVCache],
+        state: LMOutput.State? = nil,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
@@ -392,7 +396,7 @@ public final class ChatSession {
     ) {
         self.model = ModelContainer(context: model)
         self.instructions = instructions
-        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: nil))
+        self.cache = .init(.kvcache(cache, draftKVCache: nil, state: state))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
         self.generateParameters = generateParameters
@@ -400,6 +404,56 @@ public final class ChatSession {
         self.toolDispatch = toolDispatch
         self.additionalContext = additionalContext
         self.speculativeDecoding = speculativeDecoding
+    }
+
+    /// Initialize the `ChatSession` with a prompt cache loaded from disk.
+    public convenience init(
+        _ model: ModelContainer,
+        instructions: String? = nil,
+        promptCache: consuming PromptCacheSnapshot,
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.init(
+            model,
+            instructions: instructions,
+            cache: promptCache.cache,
+            state: promptCache.state,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: generateParameters,
+            processing: processing,
+            additionalContext: additionalContext,
+            tools: tools,
+            toolDispatch: toolDispatch)
+    }
+
+    /// Initialize the `ChatSession` with a prompt cache loaded from disk.
+    public convenience init(
+        _ model: ModelContext,
+        instructions: String? = nil,
+        promptCache: consuming PromptCacheSnapshot,
+        speculativeDecoding: SpeculativeDecodingConfig? = nil,
+        generateParameters: GenerateParameters = .init(),
+        processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
+        additionalContext: [String: any Sendable]? = nil,
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) {
+        self.init(
+            model,
+            instructions: instructions,
+            cache: promptCache.cache,
+            state: promptCache.state,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: generateParameters,
+            processing: processing,
+            additionalContext: additionalContext,
+            tools: tools,
+            toolDispatch: toolDispatch)
     }
 
     /// Produces a response to a prompt.
@@ -677,7 +731,20 @@ public final class ChatSession {
                             )
                         }
 
-                        if let speculativeDecoding {
+                        func defaultGenerationWithoutDraft() throws -> (
+                            AsyncStream<Generation>, Task<Void, Never>
+                        ) {
+                            draftKVCache = nil
+                            return try defaultGeneration()
+                        }
+
+                        if let speculativeDecoding,
+                            lmState == nil,
+                            input.image == nil,
+                            input.video == nil,
+                            input.audio == nil,
+                            draftKVCache != nil || kvCache.allSatisfy({ $0.offset == 0 })
+                        {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryPolicy = speculativeDecoding.memoryPolicy,
                                 let draftModelBytes =
@@ -700,7 +767,7 @@ public final class ChatSession {
                             }
 
                             if shouldFallBackBeforeLoadingDraft {
-                                (genStream, genTask) = try defaultGeneration()
+                                (genStream, genTask) = try defaultGenerationWithoutDraft()
                             } else {
                                 let cachedDraftContainer = await loadedDraftModel.read { $0 }
                                 let draftContainer: ModelContainer
@@ -727,7 +794,7 @@ public final class ChatSession {
                                             evaluation: memoryEvaluation)
                                     }
 
-                                    (genStream, genTask) = try defaultGeneration()
+                                    (genStream, genTask) = try defaultGenerationWithoutDraft()
                                 } else {
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
@@ -767,8 +834,8 @@ public final class ChatSession {
                                 }
                             }
                         } else {
-                            // Standard path with no speculative decoding.
-                            (genStream, genTask) = try defaultGeneration()
+                            // Standard path for stateful, media, or unsynchronized cache input.
+                            (genStream, genTask) = try defaultGenerationWithoutDraft()
                         }
 
                         var pendingToolCalls: [ToolCall] = []
@@ -890,8 +957,8 @@ public final class ChatSession {
 
     /// Saves the current KV cache to disk.
     ///
-    /// Use one of the initializers that accept a `cache` parameter together with
-    /// ``loadPromptCache(url:)`` to restore the saved cache in a future session.
+    /// Use ``loadPromptCacheSnapshot(url:)`` and an initializer that accepts a
+    /// `promptCache` to restore the saved cache and model state in a future session.
     ///
     /// - Parameter url: the file URL to write the cache to
     /// - Throws: ``ChatSessionError/noCacheAvailable`` if no generation has occurred yet,
@@ -899,8 +966,8 @@ public final class ChatSession {
     public func saveCache(to url: URL) async throws {
         try await cache.read { cache in
             switch cache {
-            case .kvcache(let cache, _, _):
-                try savePromptCache(url: url, cache: cache)
+            case .kvcache(let cache, _, let state):
+                try savePromptCache(url: url, cache: cache, state: state)
             default:
                 throw ChatSessionError.noCacheAvailable
             }

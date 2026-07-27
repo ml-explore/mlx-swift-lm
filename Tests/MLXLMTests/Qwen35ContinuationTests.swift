@@ -185,6 +185,87 @@ final class Qwen35ContinuationTests: XCTestCase {
             "state-threaded warm continuation diverged from full prefill")
     }
 
+    func testImageStateSurvivesPromptCacheRoundTrip() throws {
+        MLXRandom.seed(17)
+        let model = try makeTinyModel()
+
+        let pixels = MLXRandom.normal([16, 3 * 2 * 16 * 16])
+        let frame = THW(1, 4, 4)
+        let image = LMInput.ProcessedImage(pixels: pixels, frames: [frame])
+        let bothImages = LMInput.ProcessedImage(
+            pixels: concatenated([pixels, pixels]), frames: [frame, frame])
+        let visionStart = MLXArray([Int32(502)]).expandedDimensions(axis: 0)
+        let imageRun = MLXArray([Int32](repeating: 500, count: 4)).expandedDimensions(axis: 0)
+        let turn1 = textTokens(12)
+        let turn2 = concatenated(
+            [textTokens(4, seed: 2), visionStart, imageRun, textTokens(6, seed: 4)], axis: 1)
+        let turn3 = textTokens(8, seed: 6)
+        let turn4 = concatenated(
+            [textTokens(3, seed: 8), visionStart, imageRun, textTokens(5, seed: 10)], axis: 1)
+        let full = concatenated([turn1, turn2, turn3, turn4], axis: 1)
+
+        let coldCache = model.newCache(parameters: nil)
+        let (coldLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: full), image: bothImages), cache: coldCache,
+                state: nil, windowSize: nil))
+
+        let warmCache = model.newCache(parameters: nil)
+        let (_, turn1State) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn1)), cache: warmCache, state: nil,
+                windowSize: nil))
+        let (_, savedState) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn2), image: image), cache: warmCache,
+                state: turn1State, windowSize: nil))
+        XCTAssertNotNil(savedState)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: warmCache, state: savedState)
+
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        let missingStateCache = try loadPromptCacheSnapshot(url: url).cache
+        let (warmTextLogits, warmTextState) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn3)), cache: warmCache, state: savedState,
+                windowSize: nil))
+        let (restoredTextLogits, restoredTextState) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn3)), cache: snapshot.cache,
+                state: snapshot.state, windowSize: nil))
+        let (missingStateLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn3)), cache: missingStateCache, state: nil,
+                windowSize: nil))
+
+        XCTAssertLessThanOrEqual(
+            maxAbsDiff(restoredTextLogits, warmTextLogits), 1e-6,
+            "disk-restored state diverged on the text continuation")
+        XCTAssertGreaterThan(
+            maxAbsDiff(missingStateLogits, warmTextLogits), 1e-3,
+            "nil-state control did not exercise the visual M-RoPE persistence bug")
+
+        let (warmImageLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn4), image: image), cache: warmCache,
+                state: warmTextState, windowSize: nil))
+        let (restoredImageLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: turn4), image: image), cache: snapshot.cache,
+                state: restoredTextState, windowSize: nil))
+
+        XCTAssertLessThanOrEqual(
+            maxAbsDiff(restoredImageLogits, warmImageLogits), 1e-6,
+            "disk-restored state diverged when a later turn added another image")
+        XCTAssertLessThanOrEqual(
+            maxAbsDiff(restoredImageLogits, coldLogits), 1e-3,
+            "restored two-image continuation diverged from full prefill")
+    }
+
     /// The full three-turn round trip: a warm continuation whose remainder
     /// itself contains a new image must compute that image's positions from
     /// the anchor AND hand back a resume state that positions the following

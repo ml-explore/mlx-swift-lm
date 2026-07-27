@@ -1588,20 +1588,39 @@ private func cacheClassName(_ cache: KVCache) -> String {
     }
 }
 
+/// A prompt cache restored from disk, including model state carried beside the KV arrays.
+///
+/// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
+/// caches before constructing multiple sessions from it.
+public struct PromptCacheSnapshot {
+    public let cache: [KVCache]
+    public let metadata: [String: String]
+    public let state: LMOutput.State?
+}
+
 /// Save a pre-computed prompt cache to a file.
 ///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 ///   - cache: The model cache state
 ///   - metadata: Optional metadata to save along with cache state
+///   - state: Optional model state associated with the cache
 public func savePromptCache(
     url: URL,
     cache: [KVCache],
-    metadata: [String: String] = [:]
+    metadata: [String: String] = [:],
+    state: LMOutput.State? = nil
 ) throws {
+    let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
+    guard stateArrays.isEmpty || !cache.isEmpty else {
+        throw KVCacheError(message: "Model state requires at least one prompt cache")
+    }
+
     let cacheData = cache.map { $0.state }
     let cacheInfo = cache.map { $0.metaState }
-    let cacheClasses = cache.map { cacheClassName($0) }
+    let cacheClasses = cache.map {
+        promptCacheClassName(cacheClassName($0), hasState: !stateArrays.isEmpty)
+    }
 
     // Flatten cache data using tree_flatten compatible structure: "i.j" format
     var flattenedData: [String: MLXArray] = [:]
@@ -1631,6 +1650,9 @@ public func savePromptCache(
         flattenedMetadata["2.\(i)"] = className
     }
 
+    addPromptCacheState(
+        stateArrays, flattenedData: &flattenedData, flattenedMetadata: &flattenedMetadata)
+
     try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
 }
 
@@ -1639,13 +1661,23 @@ public func savePromptCache(
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 /// - Returns: The prompt cache and the metadata
+/// - Throws: If the file contains model state that this tuple return value cannot represent
 public func loadPromptCache(
     url: URL
 ) throws -> ([KVCache], [String: String]) {
-    let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+    let promptCache = try loadPromptCacheSnapshot(url: url)
+    guard promptCache.state == nil else {
+        throw KVCacheError(
+            message:
+                "Prompt cache contains model state; use loadPromptCacheSnapshot(url:) to restore it"
+        )
+    }
+    return (promptCache.cache, promptCache.metadata)
+}
 
-    // Unflatten arrays using tree_unflatten compatible logic
-    let cacheData = unflattenArrays(arrays)
+/// Load a prompt cache and its associated model state from a file.
+public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
+    var (arrays, metadata) = try loadArraysAndMetadata(url: url)
 
     // Unflatten metadata using tree_unflatten compatible logic
     let unflattenedMetadata = unflattenMetadata(metadata)
@@ -1657,8 +1689,14 @@ public func loadPromptCache(
     }
 
     let cacheInfo = unflattenedMetadata[0] as? [[String]] ?? []
-    let userMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
-    let cacheClasses = unflattenedMetadata[2] as? [String] ?? []
+    let storedUserMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
+    let (state, userMetadata) = try loadPromptCacheState(
+        arrays: &arrays, metadata: storedUserMetadata)
+    let storedCacheClasses = unflattenedMetadata[2] as? [String] ?? []
+    let cacheClasses = try loadPromptCacheClasses(storedCacheClasses, hasState: state != nil)
+
+    // Unflatten arrays using tree_unflatten compatible logic
+    let cacheData = unflattenArrays(arrays)
 
     guard cacheData.count == cacheInfo.count && cacheData.count == cacheClasses.count else {
         throw KVCacheError(message: "Mismatch in cache counts")
@@ -1675,8 +1713,116 @@ public func loadPromptCache(
         caches.append(cache)
     }
 
-    return (caches, userMetadata)
+    return PromptCacheSnapshot(cache: caches, metadata: userMetadata, state: state)
 }
+
+private func promptCacheStateArrays(
+    _ state: LMOutput.State?, userMetadata: [String: String]
+) throws -> [(key: String, value: MLXArray)] {
+    guard !userMetadata.keys.contains(where: { $0.hasPrefix(promptCacheStateMetadataPrefix) })
+    else {
+        throw KVCacheError(message: "User metadata uses the reserved prompt cache state namespace")
+    }
+    guard let state else { return [] }
+    return try state.serializedArrays().sorted { $0.key < $1.key }
+}
+
+private func addPromptCacheState(
+    _ stateArrays: [(key: String, value: MLXArray)],
+    flattenedData: inout [String: MLXArray], flattenedMetadata: inout [String: String]
+) {
+    guard !stateArrays.isEmpty else { return }
+
+    flattenedMetadata["1.\(promptCacheStateVersionKey)"] = promptCacheStateFormatVersion
+    flattenedMetadata["1.\(promptCacheStateCountKey)"] = String(stateArrays.count)
+    for (index, entry) in stateArrays.enumerated() {
+        flattenedData[promptCacheStateTensorKey(index)] = entry.value
+        flattenedMetadata["1.\(promptCacheStateEntryKey(index))"] = entry.key
+    }
+}
+
+private func loadPromptCacheState(
+    arrays: inout [String: MLXArray], metadata: [String: String]
+) throws -> (LMOutput.State?, [String: String]) {
+    let stateMetadata = metadata.filter { $0.key.hasPrefix(promptCacheStateMetadataPrefix) }
+    let stateTensorKeys = arrays.keys.filter { $0.hasPrefix(promptCacheStateTensorPrefix) }
+    guard !stateMetadata.isEmpty || !stateTensorKeys.isEmpty else { return (nil, metadata) }
+
+    guard metadata[promptCacheStateVersionKey] == promptCacheStateFormatVersion else {
+        throw KVCacheError(message: "Unsupported prompt cache state format")
+    }
+    guard let countValue = metadata[promptCacheStateCountKey],
+        let count = Int(countValue), count > 0
+    else {
+        throw KVCacheError(message: "Invalid prompt cache state count")
+    }
+
+    var serializedArrays: [String: MLXArray] = [:]
+    var expectedMetadataKeys = Set([promptCacheStateVersionKey, promptCacheStateCountKey])
+    var expectedTensorKeys = Set<String>()
+    for index in 0 ..< count {
+        let keyMetadataKey = promptCacheStateEntryKey(index)
+        let tensorKey = promptCacheStateTensorKey(index)
+        guard let key = metadata[keyMetadataKey], let array = arrays.removeValue(forKey: tensorKey)
+        else {
+            throw KVCacheError(message: "Invalid prompt cache state entry at index \(index)")
+        }
+        guard serializedArrays.updateValue(array, forKey: key) == nil else {
+            throw KVCacheError(message: "Duplicate prompt cache state key: \(key)")
+        }
+        expectedMetadataKeys.insert(keyMetadataKey)
+        expectedTensorKeys.insert(tensorKey)
+    }
+
+    guard Set(stateMetadata.keys) == expectedMetadataKeys else {
+        throw KVCacheError(message: "Unexpected prompt cache state metadata")
+    }
+    guard Set(stateTensorKeys) == expectedTensorKeys else {
+        throw KVCacheError(message: "Unexpected prompt cache state tensors")
+    }
+
+    var userMetadata = metadata
+    for key in stateMetadata.keys {
+        userMetadata.removeValue(forKey: key)
+    }
+    return (LMOutput.State(serializedArrays: serializedArrays), userMetadata)
+}
+
+private func promptCacheClassName(_ className: String, hasState: Bool) -> String {
+    hasState ? "\(promptCacheStateClassPrefix)\(className)" : className
+}
+
+private func loadPromptCacheClasses(_ classNames: [String], hasState: Bool) throws -> [String] {
+    if hasState {
+        guard !classNames.isEmpty,
+            classNames.allSatisfy({ $0.hasPrefix(promptCacheStateClassPrefix) })
+        else {
+            throw KVCacheError(
+                message: "Prompt cache model state is missing its compatibility marker")
+        }
+        return classNames.map { String($0.dropFirst(promptCacheStateClassPrefix.count)) }
+    }
+
+    guard !classNames.contains(where: { $0.hasPrefix(promptCacheStateClassPrefix) }) else {
+        throw KVCacheError(message: "Prompt cache compatibility marker has no model state")
+    }
+    return classNames
+}
+
+private func promptCacheStateEntryKey(_ index: Int) -> String {
+    "\(promptCacheStateMetadataPrefix)\(index)_key"
+}
+
+private func promptCacheStateTensorKey(_ index: Int) -> String {
+    "\(promptCacheStateTensorPrefix)\(index)"
+}
+
+private let promptCacheStateFormatVersion = "1"
+private let promptCacheStateMetadataPrefix = "__mlx_lm_state_"
+private let promptCacheStateVersionKey = "__mlx_lm_state_version"
+private let promptCacheStateCountKey = "__mlx_lm_state_count"
+private let promptCacheStateTensorPrefix = "__mlx_lm_state_tensor_"
+private let promptCacheStateClassPrefix = "__mlx_lm_state_v1__:"
 
 /// Reconstruct a single cache from its class name, state arrays, and metaState.
 ///

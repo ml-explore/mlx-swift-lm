@@ -202,12 +202,40 @@ public struct LMOutput {
             self.contents = [:]
         }
 
+        init(serializedArrays: [String: MLXArray]) {
+            self.contents = Dictionary(
+                uniqueKeysWithValues: serializedArrays.map { ($0.key, $0.value as Any) })
+        }
+
+        func serializedArrays() throws -> [String: MLXArray] {
+            var arrays: [String: MLXArray] = [:]
+            for (key, value) in contents {
+                guard let array = value as? MLXArray else {
+                    throw SerializationError.unsupportedValue(
+                        key: key, type: String(describing: type(of: value)))
+                }
+                arrays[key] = array
+            }
+            return arrays
+        }
+
         public subscript<T>(_ key: Key<T>) -> T? {
             get {
                 contents[key.id] as? T
             }
             set {
                 contents[key.id] = newValue
+            }
+        }
+
+        enum SerializationError: LocalizedError {
+            case unsupportedValue(key: String, type: String)
+
+            var errorDescription: String? {
+                switch self {
+                case .unsupportedValue(let key, let type):
+                    "LMOutput.State key '\(key)' contains unsupported value type '\(type)'"
+                }
             }
         }
     }

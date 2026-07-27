@@ -29,6 +29,17 @@ public class ChatSessionTests: XCTestCase {
 
     private struct UnexpectedDraftModelLoadError: Error {}
 
+    private struct PreparedImageInputProcessor: UserInputProcessor {
+        private let base = TestInputProcessor()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let text = try base.prepare(input: input).text
+            return LMInput(
+                text: text,
+                image: .init(pixels: MLXArray.zeros([1, 1, 1, 1])))
+        }
+    }
+
     private actor DraftModelLoadCounter {
         private var count = 0
 
@@ -355,6 +366,113 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
     }
 
+    func testSpeculativeDecodingFallsBackForPreparedMedia() async throws {
+        var context = model()
+        context.processor = PreparedImageInputProcessor()
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    func testSpeculativeDecodingFallsBackForCarriedModelState() async throws {
+        let context = model()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let cache = context.model.newCache(parameters: parameters)
+        let stateKey = LMOutput.Key<MLXArray>("test.carriedState")
+        var state = LMOutput.State()
+        state[stateKey] = MLXArray([Int32(1)])
+        let session = ChatSession(
+            context,
+            cache: cache,
+            state: state,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    func testSpeculativeDecodingFallsBackForPrebuiltCacheWithoutDraftCache() async throws {
+        let context = model()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let cache = context.model.newCache(parameters: parameters)
+        let input = try await context.processor.prepare(
+            input: UserInput(chat: [.user("cached prefix")]))
+        _ = try TokenIterator(
+            input: input,
+            model: context.model,
+            cache: cache,
+            parameters: parameters)
+        XCTAssertTrue(cache.contains { $0.offset > 0 })
+
+        let session = ChatSession(
+            context,
+            cache: cache,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
     func testDeferredSpeculativeDecodingMemoryPolicyFailDoesNotLoadDraftModel() async throws {
         let session = ChatSession(
             model(),
@@ -471,11 +589,35 @@ public class ChatSessionTests: XCTestCase {
             .appendingPathExtension("safetensors")
         try await initial.saveCache(to: url)
 
-        let (loadedCache, _) = try loadPromptCache(url: url)
+        let promptCache = try loadPromptCacheSnapshot(url: url)
         let restored = ChatSession(
-            ctx, cache: loadedCache, generateParameters: generationParameters)
+            ctx, promptCache: promptCache, generateParameters: generationParameters)
         let result = try await restored.respond(to: "hello again")
         XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testSaveCachePreservesRestoredState() async throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let stateKey = LMOutput.Key<MLXArray>("test.chatSessionState")
+        let stateValue = MLXArray([Int32(2), 4, 6])
+        var state = LMOutput.State()
+        state[stateKey] = stateValue
+        let promptCache = PromptCacheSnapshot(cache: [cache], metadata: [:], state: state)
+        let session = ChatSession(
+            model(), promptCache: promptCache, generateParameters: generationParameters)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try await session.saveCache(to: url)
+        let restored = try loadPromptCacheSnapshot(url: url)
+        let restoredState = try XCTUnwrap(restored.state?[stateKey])
+
+        XCTAssertTrue(allClose(restoredState, stateValue, rtol: 0, atol: 0).item(Bool.self))
     }
 
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {
