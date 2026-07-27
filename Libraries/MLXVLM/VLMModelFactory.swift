@@ -87,9 +87,6 @@ public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
     public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
-        "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
-        "unlimited_ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
-        "unlimited-ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
         "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
         "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
         "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
@@ -108,6 +105,9 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
+        "unlimited_ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
+        "unlimited-ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
     ])
 }
 
@@ -115,12 +115,6 @@ public enum VLMProcessorTypeRegistry {
 
     /// Shared instance with default processor types.
     public static let shared: ProcessorTypeRegistry = .init(creators: [
-        "DeepseekOCRProcessor": create(
-            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
-        "DeepseekVLV2Processor": create(
-            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
-        "UnlimitedOCRProcessor": create(
-            UnlimitedOCRProcessorConfiguration.self, UnlimitedOCRProcessor.init),
         "PaliGemmaProcessor": create(
             PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
         "Qwen2VLProcessor": create(
@@ -149,6 +143,12 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "DeepseekOCRProcessor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "DeepseekVLV2Processor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "UnlimitedOCRProcessor": create(
+            UnlimitedOCRProcessorConfiguration.self, UnlimitedOCRProcessor.init),
     ])
 }
 
@@ -277,11 +277,22 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    /// DeepSeek-OCR.
+    ///
+    /// > Note: For both OCR entries below the prompt acts as a **mode selector**
+    /// > rather than an instruction — the decoder is a transcription specialist,
+    /// > and the prompt picks which transcription mode to run. A general-VLM
+    /// > default such as "Describe the image in English" would ask it to caption
+    /// > instead, which is why each entry defaults to its own family's mode
+    /// > string. Other DeepSeek-OCR modes include
+    /// > `"<|grounding|>Convert the document to markdown."`; see
+    /// > ``DeepseekOCRSpecialTokens`` for the grounding prompt builders.
     static public let deepseekOCR5bit = ModelConfiguration(
         id: "mlx-community/DeepSeek-OCR-5bit",
-        defaultPrompt: "Describe the image in English"
+        defaultPrompt: "Free OCR."
     )
 
+    /// Unlimited-OCR (DeepSeek-OCR encoder + decoder with R-SWA attention).
     static public let unlimitedOCR6bit = ModelConfiguration(
         id: "majentik/Unlimited-OCR-MLX-6bit",
         defaultPrompt: "document parsing. "
@@ -289,8 +300,6 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     static public func all() -> [ModelConfiguration] {
         [
-            deepseekOCR5bit,
-            unlimitedOCR6bit,
             paligemma3bMix448_8bit,
             qwen2VL2BInstruct4Bit,
             qwen2_5VL3BInstruct4Bit,
@@ -308,6 +317,8 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             fastvlm,
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
+            deepseekOCR5bit,
+            unlimitedOCR6bit,
         ]
     }
 

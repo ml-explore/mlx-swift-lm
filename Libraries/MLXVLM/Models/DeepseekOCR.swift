@@ -809,7 +809,8 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         let mode = promptMode(from: input)
         let maxNumTiles = Self.maxNumTiles(from: input.additionalContext)
         // Unlimited multipage/PDF base mode pads each page to 1024² (273 tokens).
-        // Single-page DeepSeek `MODE=base` stays 640² for TASK-026 compatibility.
+        // Single-page DeepSeek `MODE=base` stays 640², matching the Python
+        // reference — widening it here would change single-page output.
         let basePadSide =
             (mode == .base && input.images.count > 1)
             ? config.baseSize

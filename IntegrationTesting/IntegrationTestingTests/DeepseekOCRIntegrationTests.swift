@@ -12,7 +12,7 @@ import Tokenizers
 
 // MARK: - DeepSeek-OCR (deepseekocr) IntegrationTesting example
 //
-// Track A / TASK-028. Proves first-class DeepSeek-OCR via `VLMRegistry.deepseekOCR5bit`
+// Proves first-class DeepSeek-OCR via `VLMRegistry.deepseekOCR5bit`
 // (`model_type=deepseekocr`) — not Unlimited remap, `UnlimitedOCR`, or R-SWA.
 //
 // Cache-gated on `mlx-community/DeepSeek-OCR-5bit`, or force with
@@ -36,8 +36,8 @@ struct DeepseekOCRIntegrationTests {
     @Test
     func loadsDeepseekOCRAndRunsOCR() async throws {
         // Keep Hub `_orig_model_type` from diverting loads to UnlimitedOCR.
-        // A per-call argument, not the old process-global `REMAP_UNLIMITED`
-        // env var (TASK-050) — so this suite cannot perturb a load beside it.
+        // A per-call argument rather than process-global state, so this suite
+        // cannot perturb a load running beside it.
         let tokenizerLoader = #huggingFaceTokenizerLoader()
         let container: ModelContainer
         if let dir = hfSnapshotDir(modelId: deepseekOCRModelId),

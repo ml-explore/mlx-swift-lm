@@ -6,8 +6,9 @@ import MLXLMCommon
 import MLXVLM
 import XCTest
 
-/// TASK-010: UnlimitedOCR wires R-SWA caches; L4 memory bound =
-/// `prefill_length + sliding_window_size`.
+/// `UnlimitedOCR` must wire R-SWA caches for every layer, and long decodes must
+/// stay bounded at `prefill_length + sliding_window_size` rather than growing
+/// with output length.
 final class UnlimitedOCRCacheTests: XCTestCase {
 
     func testNewCacheDefaultsToRingWindow128() async throws {

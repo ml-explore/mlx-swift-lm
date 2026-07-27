@@ -6,8 +6,8 @@ import XCTest
 
 @testable import MLXLMCommon
 
-/// TASK-009: Unlimited-OCR R-SWA cache — prefill retains full prompt KV;
-/// decode fills then overwrites a ring while absolute offset keeps growing.
+/// Unlimited-OCR's R-SWA cache: prefill retains the full prompt KV; decode fills
+/// then overwrites a ring while the absolute offset keeps growing.
 final class RingSlidingKVCacheTests: XCTestCase {
 
     private func token(value: Float, heads: Int = 2, dim: Int = 4) -> (MLXArray, MLXArray) {

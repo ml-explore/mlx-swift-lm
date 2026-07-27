@@ -18,14 +18,14 @@ public typealias UnlimitedOCRConfiguration = DeepseekOCRConfiguration
 ///
 /// Python `processing_unlimitedocr.py` subclasses DeepseekOCRProcessor with
 /// torch-free `from_pretrained`, default `sft_format="unlimitedocr"`,
-/// `max_num=32` tiling, and multipage single-`<image>` support. Single-page
-/// inference templates match ``DeepseekOCRProcessor`` (TASK-023 audit), so this
-/// remains a typealias. Multipage fused prepare (`Multi page parsing.`, base
-/// mode) and optional `max_num=32` live on the shared processor (TASK-022):
-/// pass multiple `UserInput.Image`s and ``DeepseekOCRProcessor/modeContext(_:)``
-/// `.base`, or ``DeepseekOCRProcessor/unlimitedContext(_:)`` for Unlimited tiling.
-///
-/// Audit: coordination-hub `docs/guides/unlimited-ocr-processor-audit.md`.
+/// `max_num=32` tiling, and multipage single-`<image>` support. Comparing the
+/// two processors tensor-by-tensor showed the single-page inference templates
+/// are identical, so a distinct Swift type would carry no behavior — hence a
+/// typealias rather than a subclass. Multipage fused prepare
+/// (`Multi page parsing.`, base mode) and optional `max_num=32` live on the
+/// shared processor: pass multiple `UserInput.Image`s and
+/// ``DeepseekOCRProcessor/modeContext(_:)`` `.base`, or
+/// ``DeepseekOCRProcessor/unlimitedContext(_:)`` for Unlimited tiling.
 public typealias UnlimitedOCRProcessorConfiguration = DeepseekOCRProcessorConfiguration
 public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 
@@ -35,7 +35,7 @@ public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 /// routing always uses ``RingSlidingKVCache`` (never unbounded
 /// ``KVCacheSimple``).
 ///
-/// ## Optional n-gram no-repeat (TASK-021)
+/// ## Optional n-gram no-repeat
 ///
 /// Upstream Unlimited-OCR / mlx-vlm leave the sliding-window no-repeat n-gram
 /// logits processor **off** by default. Opt in via generate parameters:
