@@ -805,7 +805,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 ///
 /// Keeps the full prompt/prefill KV, then appends decode tokens until a ring of
 /// ``windowSize`` is full. Afterwards new decode keys/values overwrite that ring
-/// while ``offset`` (and therefore RoPE absolute positions) keeps increasing.
+/// while `offset` (and therefore RoPE absolute positions) keeps increasing.
 ///
 /// Do **not** substitute ``RotatingKVCache`` — that cache keeps leading tokens and
 /// rotates from the start, which is a different sliding-window semantics.

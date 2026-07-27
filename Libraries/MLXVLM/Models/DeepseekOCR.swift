@@ -999,7 +999,7 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     /// When `sliding_window_size` is set (Unlimited-OCR packs), use R-SWA
-    /// ``RingSlidingKVCache``; otherwise unbounded ``KVCacheSimple``.
+    /// `RingSlidingKVCache`; otherwise unbounded `KVCacheSimple`.
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         _ = parameters
         return makeCaches(

@@ -18,8 +18,9 @@ public struct BaseConfiguration: Codable, Sendable {
     /// Optional original architecture when a Hub pack shims `model_type`.
     ///
     /// Majentik Unlimited-OCR MLX packs ship `model_type=deepseekocr` with
-    /// `_orig_model_type=unlimited-ocr`. Prefer ``resolvedModelType`` when
-    /// selecting a registry creator.
+    /// `_orig_model_type=unlimited-ocr`. Prefer
+    /// ``resolvedModelType(honorOrigModelType:)`` when selecting a registry
+    /// creator.
     public let origModelType: String?
 
     /// Configuration parameters for weight quantization.

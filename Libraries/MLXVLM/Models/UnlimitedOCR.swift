@@ -32,8 +32,8 @@ public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 /// Unlimited-OCR VLM: DeepSeek-OCR weights + R-SWA decode cache.
 ///
 /// Python defaults `sliding_window_size` to 128 when unset; native Unlimited
-/// routing always uses ``RingSlidingKVCache`` (never unbounded
-/// ``KVCacheSimple``).
+/// routing always uses `RingSlidingKVCache` (never unbounded
+/// `KVCacheSimple`).
 ///
 /// ## Optional n-gram no-repeat
 ///
@@ -47,8 +47,8 @@ public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 /// // multi-page/PDF examples often use unlimitedOCRMultiPageWindow (1024)
 /// ```
 ///
-/// Or attach ``SlidingWindowNoRepeatNGramProcessor/unlimitedOCRSingleImage()``
-/// through a custom ``LogitProcessor`` chain. Disabled (`noRepeatNgramSize` nil/0)
+/// Or attach `SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage()`
+/// through a custom `LogitProcessor` chain. Disabled (`noRepeatNgramSize` nil/0)
 /// matches Python Unlimited defaults.
 public final class UnlimitedOCR: DeepseekOCR {
 

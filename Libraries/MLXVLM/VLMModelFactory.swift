@@ -544,7 +544,7 @@ extension VLMModelFactory {
     ///   - directory: local MLX weights directory.
     ///   - tokenizerLoader: tokenizer loader.
     ///   - honorOrigModelType: see
-    ///     ``_load(configuration:tokenizerLoader:honorOrigModelType:)``.
+    ///     `_load(configuration:tokenizerLoader:honorOrigModelType:)`.
     public func load(
         from directory: URL,
         using tokenizerLoader: any TokenizerLoader,
@@ -556,7 +556,7 @@ extension VLMModelFactory {
             honorOrigModelType: honorOrigModelType)
     }
 
-    /// Loads a model from a local directory into a ``ModelContainer`` with an
+    /// Loads a model from a local directory into a `ModelContainer` with an
     /// explicit remap policy.
     public func loadContainer(
         from directory: URL,
@@ -570,7 +570,7 @@ extension VLMModelFactory {
         return _wrap(context)
     }
 
-    /// Loads a model via a ``Downloader`` with an explicit remap policy.
+    /// Loads a model via a `Downloader` with an explicit remap policy.
     public func load(
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
@@ -588,7 +588,7 @@ extension VLMModelFactory {
             honorOrigModelType: honorOrigModelType)
     }
 
-    /// Loads a model via a ``Downloader`` into a ``ModelContainer`` with an
+    /// Loads a model via a `Downloader` into a `ModelContainer` with an
     /// explicit remap policy.
     public func loadContainer(
         from downloader: any Downloader,
