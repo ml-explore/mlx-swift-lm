@@ -18,8 +18,8 @@ extension LLMModel {
     /// Default prepare step for ``LLMModel``.
     ///
     /// Evaluates the prompt into the cache in chunks of at most
-    /// ``PrefillParameters/stepSize`` (default 512), leaving one token for the
-    /// `TokenIterator`'s first forward. With ``PrefillParameters/Chunking/balanced``
+    /// `PrefillParameters.stepSize` (default 512), leaving one token for the
+    /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
     /// (the default) the chunks are equal-sized, so no forward is a small
     /// remainder paying full attention cost against the whole prompt.
     public func prepare(
