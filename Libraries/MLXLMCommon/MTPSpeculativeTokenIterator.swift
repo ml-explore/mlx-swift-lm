@@ -188,6 +188,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // equivalent autoregressive run, violating speculative
             // decoding's bit-exact-equivalence-to-greedy guarantee.
             pendingTokens.append(token.item(Int.self))
+
+            // the model reported per-chunk progress; the bonus forward above
+            // consumed the remainder of the prompt
+            let total = input.text.tokens.size
+            prefill.progress?(total, total)
         case .logits(let prefillResult):
             mainCacheStorage.commitProcessedTokens(inputLength)
             // Some `prepare` implementations evaluate the final position

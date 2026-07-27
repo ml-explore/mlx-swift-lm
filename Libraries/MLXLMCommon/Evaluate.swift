@@ -823,6 +823,11 @@ public struct TokenIterator: TokenIteratorProtocol {
             y = .init(tokens: token)
             asyncEval(y.tokens)
 
+            // the model reported per-chunk progress; the remainder it left to us
+            // completes the prompt (models returning .logits report their own terminal)
+            let total = input.text.tokens.size
+            prefill.progress?(total, total)
+
         case .logits(let result):
             cacheStorage.commitProcessedTokens(inputLength)
             // carry the prefill state into decode, as step(previous:) does for later steps
@@ -1067,6 +1072,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 "Main model prepare returned more tokens than it received")
             mainCacheStorage.commitProcessedTokens(inputLength - remainingLength)
             y = tokens
+            // the remaining tokens are consumed by the first verify pass; the
+            // prompt is as processed as prefill will make it
+            let total = input.text.tokens.size
+            prefill.progress?(total, total)
         case .logits(let result):
             mainCacheStorage.commitProcessedTokens(inputLength)
             var logits = result.logits[0..., -1, 0...]
