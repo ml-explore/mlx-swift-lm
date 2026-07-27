@@ -51,45 +51,32 @@ final class DeepseekOCRLayerParityTests: XCTestCase {
         XCTAssertEqual(projected.shape.last, golden.vision.projectorOutputDim)
     }
 
-    private func loadGolden() throws -> LayerParityGolden {
-        let env = ProcessInfo.processInfo.environment["LAYER_PARITY_GOLDEN"]
-        let defaultPath = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("fixtures/baseline/layer-parity.json")
-
-        let goldenURL: URL
-        if let env, !env.isEmpty {
-            goldenURL = URL(fileURLWithPath: env)
-        } else if FileManager.default.fileExists(atPath: defaultPath.path) {
-            goldenURL = defaultPath
-        } else {
-            throw XCTSkip("Set LAYER_PARITY_GOLDEN or generate fixtures/baseline/layer-parity.json")
+    /// Path to a layer-parity export produced from the Python reference
+    /// implementation. The export is not checked in — it is several MB of
+    /// per-layer activations — so these tests skip unless the environment
+    /// points at one.
+    private func goldenURL() throws -> URL {
+        guard let env = ProcessInfo.processInfo.environment["LAYER_PARITY_GOLDEN"], !env.isEmpty
+        else {
+            throw XCTSkip(
+                "Set LAYER_PARITY_GOLDEN to a layer-parity JSON export from the Python reference")
         }
+        return URL(fileURLWithPath: env)
+    }
 
-        let data = try Data(contentsOf: goldenURL)
+    private func loadGolden() throws -> LayerParityGolden {
+        let data = try Data(contentsOf: try goldenURL())
         return try JSONDecoder().decode(LayerParityGolden.self, from: data)
     }
 
     private func resolveFixtureURL(from golden: LayerParityGolden) throws -> URL {
-        let hubRoot: URL
-        if let env = ProcessInfo.processInfo.environment["LAYER_PARITY_GOLDEN"], !env.isEmpty {
-            hubRoot = URL(fileURLWithPath: env)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-        } else {
-            hubRoot = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-        }
-        let fixtureURL = hubRoot.appendingPathComponent(golden.fixture)
+        // `golden.fixture` is recorded relative to the export root, three levels
+        // above the JSON file itself.
+        let root = try goldenURL()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtureURL = root.appendingPathComponent(golden.fixture)
         guard FileManager.default.fileExists(atPath: fixtureURL.path) else {
             throw XCTSkip("Fixture not found at \(fixtureURL.path)")
         }

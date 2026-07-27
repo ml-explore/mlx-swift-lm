@@ -434,8 +434,7 @@ public enum DeepseekOCRSpecialTokens: String, Sendable, CaseIterable {
 public struct DeepseekOCRProcessor: UserInputProcessor {
     /// Image crop modes matching Python `DeepseekOCRProcessor.tokenize_with_images`.
     ///
-    /// Select via ``modeContext(_:)`` on `ChatSession` / `UserInput.additionalContext`,
-    /// or the `MODE` env var in `DeepseekOCRSmoke` / `scripts/swift_smoke.sh`.
+    /// Select via ``modeContext(_:)`` on `ChatSession` / `UserInput.additionalContext`.
     public enum Mode: String, Sendable, CaseIterable {
         /// Multi-resolution OCR: 1024² global view + 640² local tiles when the page
         /// exceeds 640×640 (Python `cropping=True`, `base_size=1024`). Default.

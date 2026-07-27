@@ -401,10 +401,9 @@ public final class VLMModelFactory: GenericModelFactory {
     ///     `model_type` is the DeepSeek shim. When `false`, the pack's own
     ///     `model_type` is used (``DeepseekOCR``, plain KV cache).
     ///
-    /// > Note: This is a per-call argument on purpose. It used to be the
-    /// > process-global `REMAP_UNLIMITED` environment variable, which made the
-    /// > set-then-load pair racy for any caller loading two families
-    /// > concurrently.
+    /// > Note: This is a per-call argument rather than process-global state on
+    /// > purpose: a caller loading two families concurrently would otherwise
+    /// > have to serialize the set-then-load pair itself.
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader,

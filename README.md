@@ -74,10 +74,10 @@ let text = try await ChatSession(
 ```
 
 Optional Unlimited gundam tiling ceiling (`max_num=32`):
-`DeepseekOCRProcessor.unlimitedContext(.gundam)` or smoke `UNLIMITED_MAX_NUM=1`.
+`DeepseekOCRProcessor.unlimitedContext(.gundam)`.
 
-Smoke: `MODE=base swift run DeepseekOCRSmoke` (single-page 640; `MODE=gundam` is the
-default). Multipage 1024 base: pass a comma-separated `IMAGES` list to the same tool.
+`gundam` is the default crop mode; pass `DeepseekOCRProcessor.modeContext(.base)` for the
+single-page 640² view, and multiple images with `.base` for multipage 1024² parsing.
 
 ### DeepSeek-OCR grounding / ref / det tokens
 
