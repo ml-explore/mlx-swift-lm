@@ -741,29 +741,32 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: pixelValues
         )
 
-        // Prefill the merged image+text embeddings in windowSize-sized chunks,
-        // matching mlx-vlm (and `LLMModel.prepare`'s token chunking): evaluate
-        // the KV cache between chunks, leaving the last embedding for the logits.
-        let prefillStepSize = prefill.stepSize ?? 512
+        // Prefill the merged image+text embeddings in chunks, matching mlx-vlm
+        // (and `LLMModel.prepare`'s token chunking): evaluate the KV cache
+        // between chunks, leaving the last embedding for the logits.
         let totalTokens = embeddings.dim(1)
 
         var processed = 0
-        while embeddings.dim(1) > 1 {
-            let nToProcess = min(prefillStepSize, embeddings.dim(1) - 1)
-            let chunk = embeddings[0..., ..<nToProcess]
-            _ = languageModel(nil, cache: cache, inputs_embeds: chunk)
-            eval(cache)
-            embeddings = embeddings[0..., nToProcess...]
-            processed += nToProcess
-        }
+        if let chunkLength = prefill.chunkLength(forChunking: totalTokens - 1) {
+            while embeddings.dim(1) > 1 {
+                let nToProcess = min(chunkLength, embeddings.dim(1) - 1)
+                let chunk = embeddings[0..., ..<nToProcess]
+                _ = languageModel(nil, cache: cache, inputs_embeds: chunk)
+                eval(cache)
+                embeddings = embeddings[0..., nToProcess...]
+                processed += nToProcess
+                prefill.progress?(processed, totalTokens)
+            }
 
-        // The prefix is now in the KV cache; the final embedding yields the
-        // first-token logits.
-        precondition(
-            processed == totalTokens - 1,
-            "Idefics3 chunked prefill: expected one residual embedding, processed "
-                + "\(processed) of \(totalTokens)")
+            // The prefix is now in the KV cache; the final embedding yields the
+            // first-token logits.
+            precondition(
+                processed == totalTokens - 1,
+                "Idefics3 chunked prefill: expected one residual embedding, processed "
+                    + "\(processed) of \(totalTokens)")
+        }
         let result = languageModel(nil, cache: cache, inputs_embeds: embeddings)
+        prefill.progress?(totalTokens, totalTokens)
         return .logits(result)
     }
 

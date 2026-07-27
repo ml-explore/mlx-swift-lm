@@ -987,7 +987,6 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     ) throws
         -> PrepareResult
     {
-        let prefillStepSize = prefill.stepSize ?? 512
         let convertedCache = cache.compactMap { $0 as KVCache }
 
         guard let imagePixels = input.image?.pixels else {
@@ -995,17 +994,21 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
             if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
             let totalPositions = tokens.dim(1)
             var processed = 0
-            while totalPositions - processed > 1 {
-                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-                _ = languageModel(
-                    tokens[0..., processed ..< (processed + chunkLength)],
-                    cache: convertedCache, inputEmbedding: nil, mask: nil)
-                asyncEval(cache)
-                processed += chunkLength
+            if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
+                while totalPositions - processed > 1 {
+                    let n = min(chunkLength, totalPositions - processed - 1)
+                    _ = languageModel(
+                        tokens[0..., processed ..< (processed + n)],
+                        cache: convertedCache, inputEmbedding: nil, mask: nil)
+                    asyncEval(cache)
+                    processed += n
+                    prefill.progress?(processed, totalPositions)
+                }
+                eval(cache)
             }
-            eval(cache)
             let result = languageModel(
                 tokens[0..., processed...], cache: convertedCache, inputEmbedding: nil, mask: nil)
+            prefill.progress?(totalPositions, totalPositions)
             return .logits(result)
         }
 
@@ -1018,19 +1021,23 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .causal
         let totalPositions = inputEmbeddings.dim(1)
         var processed = 0
-        while totalPositions - processed > 1 {
-            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-            let range = processed ..< (processed + chunkLength)
-            _ = languageModel(
-                nil, cache: convertedCache,
-                inputEmbedding: inputEmbeddings[0..., range, 0...], mask: maskMode)
-            asyncEval(cache)
-            processed += chunkLength
+        if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
+            while totalPositions - processed > 1 {
+                let n = min(chunkLength, totalPositions - processed - 1)
+                let range = processed ..< (processed + n)
+                _ = languageModel(
+                    nil, cache: convertedCache,
+                    inputEmbedding: inputEmbeddings[0..., range, 0...], mask: maskMode)
+                asyncEval(cache)
+                processed += n
+                prefill.progress?(processed, totalPositions)
+            }
+            eval(cache)
         }
-        eval(cache)
         let result = languageModel(
             nil, cache: convertedCache,
             inputEmbedding: inputEmbeddings[0..., processed..., 0...], mask: maskMode)
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(result)
     }
 

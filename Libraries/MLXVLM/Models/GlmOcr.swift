@@ -1018,7 +1018,7 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
 
     public func prepare(
         _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?,
-        prefill _: PrefillParameters
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -1043,6 +1043,8 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         let result = languageModel(
             nil, cache: cache, state: state, inputEmbedding: inputEmbeddings)
 
+        let total = inputEmbeddings.dim(1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 

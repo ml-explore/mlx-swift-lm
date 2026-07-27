@@ -1043,7 +1043,7 @@ public class Qwen35: Module, VLMModel {
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {
             return try prepareContinuation(
-                input, cache: cache, state: state, windowSize: window)
+                input, cache: cache, state: state, prefill: prefill)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1064,6 +1064,8 @@ public class Qwen35: Module, VLMModel {
             )
         }
 
+        let total = inputIds.dim(-1)
+        prefill.progress?(total, total)
         return .logits(output)
     }
 
@@ -1081,7 +1083,7 @@ public class Qwen35: Module, VLMModel {
     /// remainder, computes the new image's M-RoPE positions **once** from the
     /// seeded **Position Anchor** (so the image's diverging t/h/w indices
     /// start at the anchor, not zero), then drives the language-model forward
-    /// in chunks of `windowSize`. The full-attention scratch is bounded to
+    /// in chunks from the prefill parameters. The full-attention scratch is bounded to
     /// `[heads, chunk, L]` instead of `[heads, L, L]`, so it cannot crash on
     /// a long prefix or a large image.
     ///
@@ -1096,7 +1098,7 @@ public class Qwen35: Module, VLMModel {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize: Int
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
         let remainderLength = inputIds.dim(-1)
@@ -1139,7 +1141,7 @@ public class Qwen35: Module, VLMModel {
         // while letting the GPU run window i as the CPU builds window i+1
         // (same shape as the sibling chunked prefills, e.g. Gemma3).
         let typedCache = castCache(cache)
-        let step = max(1, windowSize)
+        let step = prefill.chunkLength(forChunking: remainderLength) ?? remainderLength
         var lastLogits: MLXArray
         var start = 0
         repeat {
@@ -1163,6 +1165,7 @@ public class Qwen35: Module, VLMModel {
             if let typedCache {
                 asyncEval(typedCache)
             }
+            prefill.progress?(end, remainderLength)
             start = end
         } while start < remainderLength
         if let typedCache {

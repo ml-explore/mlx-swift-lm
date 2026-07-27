@@ -599,7 +599,7 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
 
     public func prepare(
         _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?,
-        prefill _: PrefillParameters
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -613,6 +613,8 @@ public class PaliGemma: Module, VLMModel, KVCacheDimensionProvider {
         let result = languageModel(
             inputIds, cache: cache, inputEmbedding: inputEmbedding, mask: finalAttentionMask4d)
 
+        let total = inputEmbedding.dim(1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 

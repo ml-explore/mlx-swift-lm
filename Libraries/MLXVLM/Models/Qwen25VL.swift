@@ -982,7 +982,7 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {
-            return try prepareContinuation(input, cache: cache, state: state, windowSize: window)
+            return try prepareContinuation(input, cache: cache, state: state, prefill: prefill)
         }
 
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
@@ -1007,11 +1007,13 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         let result = languageModel(
             embeds == nil ? inputIds2D : nil, cache: cache, state: state, inputEmbedding: embeds)
 
+        let total = inputIds2D.dim(-1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 
     private func prepareContinuation(
-        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
         let remainderLength = inputIds.dim(-1)
@@ -1040,7 +1042,7 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             visionStartTokenId: config.baseConfiguration.visionStartTokenId,
             positionOffset: positionOffset)
 
-        let step = max(1, windowSize)
+        let step = prefill.chunkLength(forChunking: remainderLength) ?? remainderLength
         var lastLogits = MLXArray(0)
         var start = 0
         repeat {
@@ -1061,6 +1063,7 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             }
             lastLogits = output.logits
             asyncEval(cache)
+            prefill.progress?(end, remainderLength)
             start = end
         } while start < remainderLength
         eval(cache)

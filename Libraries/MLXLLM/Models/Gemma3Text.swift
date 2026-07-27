@@ -446,15 +446,21 @@ public class Gemma3TextModel: Module, LLMModel {
 
         // Prefill through the inner model (no lm_head) to fill the KV cache, handing only
         // the last token to the TokenIterator — skipping the 262k-vocab lm_head over every
-        // prompt position is the speedup. Chunk = explicit windowSize, else a tuned 128.
-        let prefillStepSize = Swift.min(
-            prefill.stepSize ?? Self.defaultPrefillChunkSize, config.slidingWindow)
+        // prompt position is the speedup. Tuned 128 default, capped at the sliding window.
         var y = input.text
-        while y.tokens.size > 1 {
-            let n = Swift.min(prefillStepSize, y.tokens.size - 1)
-            _ = model(y[.newAxis, ..<n].tokens, mask: nil, cache: cache)
-            asyncEval(cache)
-            y = y[n...]
+        let total = y.tokens.size
+        if let chunkLength = prefill.chunkLength(
+            forChunking: total - 1,
+            defaultStepSize: Self.defaultPrefillChunkSize,
+            maximumStepSize: config.slidingWindow)
+        {
+            while y.tokens.size > 1 {
+                let n = Swift.min(chunkLength, y.tokens.size - 1)
+                _ = model(y[.newAxis, ..<n].tokens, mask: nil, cache: cache)
+                asyncEval(cache)
+                y = y[n...]
+                prefill.progress?(total - y.tokens.size, total)
+            }
         }
         return .tokens(y)
     }

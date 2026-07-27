@@ -883,22 +883,25 @@ public class PixtralVLM: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: pixelValues
         )
 
-        let prefillStepSize = prefill.stepSize ?? 512
         let totalPositions = embeddings.dim(1)
         var processed = 0
-        while totalPositions - processed > 1 {
-            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-            let range = processed ..< (processed + chunkLength)
-            _ = languageModel(
-                inputIds[0..., range], cache: cache,
-                inputsEmbeds: embeddings[0..., range, 0...])
-            asyncEval(cache)
-            processed += chunkLength
+        if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
+            while totalPositions - processed > 1 {
+                let n = min(chunkLength, totalPositions - processed - 1)
+                let range = processed ..< (processed + n)
+                _ = languageModel(
+                    inputIds[0..., range], cache: cache,
+                    inputsEmbeds: embeddings[0..., range, 0...])
+                asyncEval(cache)
+                processed += n
+                prefill.progress?(processed, totalPositions)
+            }
+            eval(cache)
         }
-        eval(cache)
         let logits = languageModel(
             inputIds[0..., processed...], cache: cache,
             inputsEmbeds: embeddings[0..., processed..., 0...])
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(.init(logits: logits))
     }
 

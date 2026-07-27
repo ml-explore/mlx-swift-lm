@@ -244,27 +244,31 @@ private func gemma4TextOnlyPromptTokens(_ input: LMInput) -> MLXArray {
 private func gemma4PrepareTextOnly(
     _ input: LMInput,
     cache: [any KVCache],
-    windowSize: Int?,
+    prefill: PrefillParameters,
     languageModel: Gemma4TextLanguageModel
 ) -> PrepareResult {
-    let prefillStepSize = max(windowSize ?? 512, 1)
     let y = gemma4TextOnlyPromptTokens(input).expandedDimensions(axis: 0)
     let convertedCache = cache.map { $0 }
     let totalPositions = y.dim(1)
 
     var processed = 0
-    while totalPositions - processed > 1 {
-        let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-        _ = languageModel(
-            y[0..., processed ..< (processed + chunkLength)],
-            cache: convertedCache
-        )
-        asyncEval(cache)
-        processed += chunkLength
-    }
+    if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
+        while totalPositions - processed > 1 {
+            let n = min(chunkLength, totalPositions - processed - 1)
+            _ = languageModel(
+                y[0..., processed ..< (processed + n)],
+                cache: convertedCache
+            )
+            asyncEval(cache)
+            processed += n
+            prefill.progress?(processed, totalPositions)
+        }
 
-    eval(cache)
-    return .logits(languageModel(y[0..., processed...], cache: convertedCache))
+        eval(cache)
+    }
+    let result = languageModel(y[0..., processed...], cache: convertedCache)
+    prefill.progress?(totalPositions, totalPositions)
+    return .logits(result)
 }
 
 private func gemma4BlockSequenceIdsForMask(_ tokenTypeIds: MLXArray) -> MLXArray {
@@ -2117,10 +2121,12 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                     videoTokenId: config.videoTokenId,
                     audioTokenId: config.audioTokenId)
             )
+            let total = inputsEmbeds.dim(1)
+            prefill.progress?(total, total)
             return .logits(result)
         } else {
             return gemma4PrepareTextOnly(
-                input, cache: convertedCache, windowSize: prefill.stepSize,
+                input, cache: convertedCache, prefill: prefill,
                 languageModel: languageModel)
         }
     }
@@ -2567,7 +2573,7 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
     {
         if input.image == nil, input.video == nil, input.audio == nil {
             return gemma4PrepareTextOnly(
-                input, cache: cache, windowSize: prefill.stepSize, languageModel: languageModel)
+                input, cache: cache, prefill: prefill, languageModel: languageModel)
         }
 
         let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
@@ -2592,6 +2598,8 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
             perLayerInputs: perLayerInputs,
             tokenTypeIds: tokenTypeIds
         )
+        let total = inputsEmbeds.dim(1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 
