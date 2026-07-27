@@ -57,8 +57,7 @@ public struct GenerateParameters: Sendable {
     /// and progress observation. See ``PrefillParameters``.
     public var prefill: PrefillParameters
 
-    /// Step size for processing the prompt. `nil` lets each model pick its own prefill
-    /// chunk (the Gemma 3 text path uses a smaller chunk than the generic 512 default).
+    /// See ``PrefillParameters/stepSize``.
     @available(*, deprecated, renamed: "prefill.stepSize")
     public var prefillStepSize: Int? {
         get { prefill.stepSize }
@@ -189,7 +188,9 @@ public struct GenerateParameters: Sendable {
     @available(
         *, deprecated,
         renamed:
-            "init(maxTokens:maxKVSize:kvBits:kvGroupSize:quantizedKVStart:kvScheme:temperature:topP:topK:minP:repetitionPenalty:repetitionContextSize:presencePenalty:presenceContextSize:frequencyPenalty:frequencyContextSize:prefill:seed:)"
+            "init(maxTokens:maxKVSize:kvBits:kvGroupSize:quantizedKVStart:kvScheme:temperature:topP:topK:minP:repetitionPenalty:repetitionContextSize:presencePenalty:presenceContextSize:frequencyPenalty:frequencyContextSize:prefill:seed:)",
+        message:
+            "prefill now defaults to balanced chunking; use prefill.chunking = .remainder for the legacy chunk boundaries"
     )
     public init(
         maxTokens: Int? = nil,
@@ -791,7 +792,10 @@ public struct TokenIterator: TokenIteratorProtocol {
     }
 
     @available(
-        *, deprecated, renamed: "init(input:model:cache:state:processor:sampler:prefill:maxTokens:)"
+        *, deprecated,
+        renamed: "init(input:model:cache:state:processor:sampler:prefill:maxTokens:)",
+        message:
+            "prefill now defaults to balanced chunking; use prefill.chunking = .remainder for the legacy chunk boundaries"
     )
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,

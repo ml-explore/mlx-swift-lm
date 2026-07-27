@@ -163,7 +163,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: tokenCount,
-            prefillStepSize: parameters.prefill.stepSize ?? 512
+            prefillStepSize: parameters.prefill.resolvedStepSize()
         )
     }
 
@@ -207,7 +207,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: input.text.tokens.size,
-            prefillStepSize: parameters.prefill.stepSize ?? 512
+            prefillStepSize: parameters.prefill.resolvedStepSize()
         )
     }
 

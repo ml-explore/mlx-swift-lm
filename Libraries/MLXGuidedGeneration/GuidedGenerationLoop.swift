@@ -98,6 +98,7 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -123,7 +124,7 @@ public enum GuidedGenerationLoop {
         var logits: MLXArray
         let inputLength = input.text.cacheSequenceLength
         switch try model.prepare(
-            input, cache: cacheStorage.cache, state: nil, prefill: .init(stepSize: 512))
+            input, cache: cacheStorage.cache, state: nil, prefill: prefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength

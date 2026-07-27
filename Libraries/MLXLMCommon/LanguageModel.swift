@@ -257,6 +257,14 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// This can return:
     /// - ``PrepareResult/tokens(_:)`` if the caller should evaluate the (remaining) tokens normally
     /// - ``PrepareResult/logits(_:)`` to produce the next token from the prompt
+    ///
+    /// Implementations that chunk the prompt should drive the loop with
+    /// ``PrefillParameters/forEachChunk(total:reserving:defaultStepSize:maximumStepSize:_:)``,
+    /// which owns cancellation, pooling, and per-chunk progress. An
+    /// implementation returning `.logits` owns its whole
+    /// ``PrefillParameters/progress`` sequence, including the terminal
+    /// `(total, total)`; one returning `.tokens` reports only its own chunks —
+    /// the iterator that evaluates the remainder completes the sequence.
     func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     )
@@ -275,7 +283,11 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 }
 
 extension LanguageModel {
-    @available(*, deprecated, renamed: "prepare(_:cache:state:prefill:)")
+    @available(
+        *, deprecated, renamed: "prepare(_:cache:state:prefill:)",
+        message:
+            "prefill now defaults to balanced chunking; use prefill.chunking = .remainder for the legacy chunk boundaries"
+    )
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
     ) throws -> PrepareResult {

@@ -1031,14 +1031,14 @@ public class Qwen35: Module, VLMModel {
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
-        // (Gemma3/LLMModel: `prefill.stepSize ?? 512`). The windowed forward also
+        // (Gemma3/LLMModel: `prefill.resolvedStepSize()`). The windowed forward also
         // owns every warm continuation (multi-turn chat, tool restart,
         // restored prompt cache): a cold cache is just a continuation
         // anchored at offset 0, and a warm one anchors M-RoPE positions at
         // the cache offset plus the rope delta carried in `state` — never
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
-        let window = prefill.stepSize ?? 512
+        let window = prefill.resolvedStepSize()
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {
@@ -1135,42 +1135,46 @@ public class Qwen35: Module, VLMModel {
 
         // Chunk the forward. Each window forwards `chunk` query tokens against
         // the growing cache, so the full-attention scratch stays `[heads,
-        // chunk, L]`. Intermediate logits are dropped un-evaluated (only the
-        // cache is realized between windows), so `lm_head` never materializes a
-        // `[1, L, vocab]` tensor. `asyncEval` bounds the un-evaluated graph
-        // while letting the GPU run window i as the CPU builds window i+1
-        // (same shape as the sibling chunked prefills, e.g. Gemma3).
+        // chunk, L]`. Chunk logits are dropped un-evaluated (only the cache is
+        // realized between windows) and the logits the iterator samples come
+        // from the reserved final position, so `lm_head` materializes
+        // `[1, 1, vocab]`, never `[1, L, vocab]`. `asyncEval` bounds the
+        // un-evaluated graph while letting the GPU run window i as the CPU
+        // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
-        let step = prefill.chunkLength(forChunking: remainderLength) ?? remainderLength
-        var lastLogits: MLXArray
-        var start = 0
-        repeat {
-            try Task.checkCancellation()
-            let end = min(start + step, remainderLength)
-            let chunkInputs = inputIds[0..., start ..< end]
-            let chunkEmbeds = inputEmbeddings.map { $0[0..., start ..< end, 0...] }
-            let chunkPositions = positionIds[0..., 0..., start ..< end]
-            let output = languageModel(
-                chunkInputs,
-                inputsEmbeds: chunkEmbeds,
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = languageModel(
+                inputIds[0..., range],
+                inputsEmbeds: inputEmbeddings.map { $0[0..., range, 0...] },
                 cache: typedCache,
                 state: nil,
                 mask: nil,
-                positionIds: chunkPositions,
+                positionIds: positionIds[0..., 0..., range],
                 pixelValues: nil,
                 imageGridTHW: nil,
                 videoGridTHW: nil
             )
-            lastLogits = output.logits
             if let typedCache {
                 asyncEval(typedCache)
             }
-            prefill.progress?(end, remainderLength)
-            start = end
-        } while start < remainderLength
-        if let typedCache {
+        }
+        if processed > 0, let typedCache {
             eval(typedCache)
         }
+
+        let tailRange = processed ..< remainderLength
+        let lastLogits = languageModel(
+            inputIds[0..., tailRange],
+            inputsEmbeds: inputEmbeddings.map { $0[0..., tailRange, 0...] },
+            cache: typedCache,
+            state: nil,
+            mask: nil,
+            positionIds: positionIds[0..., 0..., tailRange],
+            pixelValues: nil,
+            imageGridTHW: nil,
+            videoGridTHW: nil
+        ).logits
+        prefill.progress?(remainderLength, remainderLength)
 
         // Seed the post-image text tail's anchor. The vendor's flat-continuation
         // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;

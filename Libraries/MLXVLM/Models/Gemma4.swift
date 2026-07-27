@@ -246,26 +246,16 @@ private func gemma4PrepareTextOnly(
     cache: [any KVCache],
     prefill: PrefillParameters,
     languageModel: Gemma4TextLanguageModel
-) -> PrepareResult {
+) throws -> PrepareResult {
     let y = gemma4TextOnlyPromptTokens(input).expandedDimensions(axis: 0)
     let convertedCache = cache.map { $0 }
     let totalPositions = y.dim(1)
 
-    var processed = 0
-    if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
-        while totalPositions - processed > 1 {
-            let n = min(chunkLength, totalPositions - processed - 1)
-            _ = languageModel(
-                y[0..., processed ..< (processed + n)],
-                cache: convertedCache
-            )
-            asyncEval(cache)
-            processed += n
-            prefill.progress?(processed, totalPositions)
-        }
-
-        eval(cache)
+    let processed = try prefill.forEachChunk(total: totalPositions) { range in
+        _ = languageModel(y[0..., range], cache: convertedCache)
+        asyncEval(cache)
     }
+    if processed > 0 { eval(cache) }
     let result = languageModel(y[0..., processed...], cache: convertedCache)
     prefill.progress?(totalPositions, totalPositions)
     return .logits(result)
@@ -2125,7 +2115,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             prefill.progress?(total, total)
             return .logits(result)
         } else {
-            return gemma4PrepareTextOnly(
+            return try gemma4PrepareTextOnly(
                 input, cache: convertedCache, prefill: prefill,
                 languageModel: languageModel)
         }
@@ -2572,7 +2562,7 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         if input.image == nil, input.video == nil, input.audio == nil {
-            return gemma4PrepareTextOnly(
+            return try gemma4PrepareTextOnly(
                 input, cache: cache, prefill: prefill, languageModel: languageModel)
         }
 

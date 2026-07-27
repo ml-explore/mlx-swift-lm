@@ -1138,18 +1138,11 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
             mask: input.text.mask
         )
         let totalPositions = embeddings.dim(1)
-        var processed = 0
-        if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
-            while totalPositions - processed > 1 {
-                let n = min(chunkLength, totalPositions - processed - 1)
-                let range = processed ..< (processed + n)
-                _ = languageModel(nil, cache: cache, inputEmbedding: embeddings[0..., range, 0...])
-                asyncEval(cache)
-                processed += n
-                prefill.progress?(processed, totalPositions)
-            }
-            eval(cache)
+        let processed = try prefill.forEachChunk(total: totalPositions) { range in
+            _ = languageModel(nil, cache: cache, inputEmbedding: embeddings[0..., range, 0...])
+            asyncEval(cache)
         }
+        if processed > 0 { eval(cache) }
         let result = languageModel(
             nil, cache: cache, inputEmbedding: embeddings[0..., processed..., 0...])
         prefill.progress?(totalPositions, totalPositions)

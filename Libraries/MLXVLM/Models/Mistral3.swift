@@ -748,20 +748,13 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         var tokens = inputIds
         if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
         let totalPositions = embeddings.dim(1)
-        var processed = 0
-        if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
-            while totalPositions - processed > 1 {
-                let n = min(chunkLength, totalPositions - processed - 1)
-                let range = processed ..< (processed + n)
-                _ = languageModel(
-                    tokens[0..., range], cache: cache,
-                    inputsEmbeds: embeddings[0..., range, 0...])
-                asyncEval(cache)
-                processed += n
-                prefill.progress?(processed, totalPositions)
-            }
-            eval(cache)
+        let processed = try prefill.forEachChunk(total: totalPositions) { range in
+            _ = languageModel(
+                tokens[0..., range], cache: cache,
+                inputsEmbeds: embeddings[0..., range, 0...])
+            asyncEval(cache)
         }
+        if processed > 0 { eval(cache) }
         let logits = languageModel(
             tokens[0..., processed...], cache: cache,
             inputsEmbeds: embeddings[0..., processed..., 0...])

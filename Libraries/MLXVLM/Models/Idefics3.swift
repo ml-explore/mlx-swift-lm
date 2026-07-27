@@ -736,7 +736,7 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
     {
         let inputIds = input.text.tokens
         let pixelValues = input.image?.pixels
-        var embeddings = getInputEmbeddings(
+        let embeddings = getInputEmbeddings(
             inputIds: inputIds,
             pixelValues: pixelValues
         )
@@ -745,27 +745,15 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         // (and `LLMModel.prepare`'s token chunking): evaluate the KV cache
         // between chunks, leaving the last embedding for the logits.
         let totalTokens = embeddings.dim(1)
-
-        var processed = 0
-        if let chunkLength = prefill.chunkLength(forChunking: totalTokens - 1) {
-            while embeddings.dim(1) > 1 {
-                let nToProcess = min(chunkLength, embeddings.dim(1) - 1)
-                let chunk = embeddings[0..., ..<nToProcess]
-                _ = languageModel(nil, cache: cache, inputs_embeds: chunk)
-                eval(cache)
-                embeddings = embeddings[0..., nToProcess...]
-                processed += nToProcess
-                prefill.progress?(processed, totalTokens)
-            }
-
-            // The prefix is now in the KV cache; the final embedding yields the
-            // first-token logits.
-            precondition(
-                processed == totalTokens - 1,
-                "Idefics3 chunked prefill: expected one residual embedding, processed "
-                    + "\(processed) of \(totalTokens)")
+        let processed = try prefill.forEachChunk(total: totalTokens) { range in
+            _ = languageModel(nil, cache: cache, inputs_embeds: embeddings[0..., range])
+            eval(cache)
         }
-        let result = languageModel(nil, cache: cache, inputs_embeds: embeddings)
+
+        // The prefix is now in the KV cache; the final embedding(s) yield the
+        // first-token logits.
+        let result = languageModel(
+            nil, cache: cache, inputs_embeds: embeddings[0..., processed...])
         prefill.progress?(totalTokens, totalTokens)
         return .logits(result)
     }

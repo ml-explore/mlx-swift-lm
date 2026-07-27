@@ -1036,21 +1036,14 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             pixelAttentionMask: pixelAttentionMask
         )
 
-        let result = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
+        let result = try withPreparedCache(cache, lengths: input.text.sequenceLengths) {
             let totalPositions = inputEmbeddings.dim(1)
-            var processed = 0
-            if let chunkLength = prefill.chunkLength(forChunking: totalPositions - 1) {
-                while totalPositions - processed > 1 {
-                    let n = min(chunkLength, totalPositions - processed - 1)
-                    let range = processed ..< (processed + n)
-                    _ = languageModel(
-                        nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., range, 0...])
-                    asyncEval(cache)
-                    processed += n
-                    prefill.progress?(processed, totalPositions)
-                }
-                eval(cache)
+            let processed = try prefill.forEachChunk(total: totalPositions) { range in
+                _ = languageModel(
+                    nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., range, 0...])
+                asyncEval(cache)
             }
+            if processed > 0 { eval(cache) }
 
             let result = languageModel(
                 nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., processed..., 0...])

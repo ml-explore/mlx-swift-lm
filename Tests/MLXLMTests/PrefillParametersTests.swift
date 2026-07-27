@@ -64,57 +64,52 @@ struct PrefillParametersTests {
         #expect(prefill.chunkLength(forChunking: 31884) == nil)
     }
 
-    // MARK: - default-prepare chunk schedule
+    // MARK: - forEachChunk schedule
 
-    /// Mirrors the chunk schedule of the default `LLMModel.prepare` loop:
-    /// returns the per-forward chunk lengths and the tokens left to the
-    /// `TokenIterator`.
-    private static func schedule(promptTokens: Int, prefill: PrefillParameters) -> (
-        chunks: [Int], iteratorTokens: Int
-    ) {
-        let stepSize = max(1, prefill.stepSize ?? 512)
-        var remaining = promptTokens
-        guard promptTokens > stepSize,
-            let chunkSize = prefill.chunkLength(
-                forChunking: promptTokens - 1, defaultStepSize: stepSize)
-        else {
-            return ([], remaining)
+    /// Collects the chunk ranges `forEachChunk` drives: the schedule the
+    /// shipping code produces, plus the positions left for the caller's final
+    /// forward.
+    private static func schedule(
+        total: Int, reserving: Int = 1, prefill: PrefillParameters
+    ) throws -> (chunks: [Range<Int>], tail: Int) {
+        var chunks: [Range<Int>] = []
+        let processed = try prefill.forEachChunk(total: total, reserving: reserving) {
+            chunks.append($0)
         }
-        let tail = prefill.chunking == .remainder ? stepSize : 1
-        var chunks: [Int] = []
-        while remaining > tail {
-            let n = min(chunkSize, remaining - 1)
-            chunks.append(n)
-            remaining -= n
-        }
-        return (chunks, remaining)
+        return (chunks, total - processed)
     }
 
     /// Pins the exact schedule of the banked measurement (31,885 tokens at a
     /// 1024 ceiling on Qwen3.6-35B-A3B): balanced runs 32 near-equal chunks
     /// and hands the iterator one token, where the legacy stride ran 31 full
-    /// chunks and left a degenerate 141-token remainder.
+    /// chunks and left a degenerate 141-token remainder. `reserving` values
+    /// mirror `LLMModel.prepare`'s calls.
     @Test("schedule pin: 31,885 tokens @ 1024")
-    func schedulePin() {
-        let balanced = Self.schedule(
-            promptTokens: 31885, prefill: .init(stepSize: 1024, chunking: .balanced))
-        #expect(balanced.chunks == Array(repeating: 997, count: 31) + [977])
-        #expect(balanced.iteratorTokens == 1)
+    func schedulePin() throws {
+        let balanced = try Self.schedule(
+            total: 31885, prefill: .init(stepSize: 1024, chunking: .balanced))
+        #expect(balanced.chunks.map(\.count) == Array(repeating: 997, count: 31) + [977])
+        #expect(balanced.chunks.first?.lowerBound == 0)
+        #expect(balanced.chunks.last?.upperBound == 31884)
+        #expect(balanced.tail == 1)
 
-        let legacy = Self.schedule(
-            promptTokens: 31885, prefill: .init(stepSize: 1024, chunking: .remainder))
-        #expect(legacy.chunks == Array(repeating: 1024, count: 31))
-        #expect(legacy.iteratorTokens == 141)
+        let legacy = try Self.schedule(
+            total: 31885, reserving: 1024, prefill: .init(stepSize: 1024, chunking: .remainder))
+        #expect(legacy.chunks.map(\.count) == Array(repeating: 1024, count: 31))
+        #expect(legacy.tail == 141)
     }
 
-    @Test("schedule: fits-in-one-chunk prompts go to the iterator whole")
-    func scheduleShortPrompt() {
-        for chunking in [PrefillParameters.Chunking.balanced, .remainder, .unchunked] {
-            let result = Self.schedule(
-                promptTokens: 300, prefill: .init(stepSize: 512, chunking: chunking))
-            #expect(result.chunks.isEmpty)
-            #expect(result.iteratorTokens == 300)
-        }
+    @Test("schedule: fits-in-one-chunk totals become a single chunk; unchunked, none")
+    func scheduleShortPrompt() throws {
+        let balanced = try Self.schedule(
+            total: 300, prefill: .init(stepSize: 512, chunking: .balanced))
+        #expect(balanced.chunks.map(\.count) == [299])
+        #expect(balanced.tail == 1)
+
+        let unchunked = try Self.schedule(
+            total: 300, prefill: .init(stepSize: 512, chunking: .unchunked))
+        #expect(unchunked.chunks.isEmpty)
+        #expect(unchunked.tail == 300)
     }
 
     // MARK: - progress through a real TokenIterator
