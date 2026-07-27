@@ -151,7 +151,8 @@ let text = try await session.respond(to: "Free OCR.", image: .url(pageURL))
 ```
 
 IntegrationTesting: `DeepseekOCRIntegrationTests` (cache-gated or
-`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`). See fork README “Supported VLM: DeepSeek-OCR”.
+`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1`). See the top-level README
+“Supported VLM: DeepSeek-OCR”.
 
 ### Other VLM Types
 

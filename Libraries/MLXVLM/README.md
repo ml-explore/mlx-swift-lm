@@ -101,6 +101,22 @@ let text = try await ChatSession(
 Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
 (`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1` or cached DeepSeek-OCR-5bit).
 
+Tried Unlimited-OCR Hub packs:
+
+- `majentik/Unlimited-OCR-MLX-6bit` (`VLMRegistry.unlimitedOCR6bit`)
+
+Unlimited-OCR (`model_type`: `unlimited-ocr` / `unlimited_ocr`) reuses the whole
+DeepSeek-OCR stack and swaps the decode cache for `RingSlidingKVCache` (R-SWA), so
+the KV cache stays constant-size no matter how long the output runs. Load it the
+same way, with `VLMRegistry.unlimitedOCR6bit` and its default prompt
+`"document parsing. "`.
+
+> Note: these packs ship `model_type: deepseekocr` with
+> `_orig_model_type: unlimited-ocr` as a back-compat shim for loaders predating the
+> Unlimited registration. `VLMModelFactory` honors the original type by default, so
+> such a pack loads as `UnlimitedOCR`. Pass `honorOrigModelType: false` to one of the
+> `load` / `loadContainer` overloads to force the plain DeepSeek-OCR path instead.
+
 ### DeepSeek-OCR processor modes
 
 `DeepseekOCRProcessor.Mode`:
@@ -109,14 +125,14 @@ Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
 - **`base`** — single 640 view; pass `DeepseekOCRProcessor.modeContext(.base)` into `ChatSession`
 - **Multipage fused** — multiple `UserInput.Image`s + `.base` + prompt `Multi page parsing.` (Python Unlimited `multi_image_single_token`)
 
-See the fork README section “DeepSeek-OCR / Unlimited-OCR crop modes”.
+See the top-level README section “DeepSeek-OCR / Unlimited-OCR crop modes”.
 
 ### DeepSeek-OCR grounding tokens
 
 `DeepseekOCRSpecialTokens` exposes `<|grounding|>`, `<|ref|>`/`<|/ref|>`,
 `<|det|>`/`<|/det|>` with tokenizer ID resolution and prompt helpers. Decode with
 `skipSpecialTokens: false`. Full structured layout-tree parsing is deferred;
-`parseDetections(from:)` covers bbox extraction. See the fork README.
+`parseDetections(from:)` covers bbox extraction. See the top-level README.
 
 ### Optional sliding-window no-repeat n-gram
 
