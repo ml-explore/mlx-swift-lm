@@ -187,6 +187,10 @@ class Gemma3nTextLaurelBlock: Module {
     }
 }
 
+/// Slices an array mask down to the key sequence length, preserving its dtype.
+///
+/// Masks created internally through `createAttentionMask` already match the key
+/// length, so this only applies to caller-supplied masks wider than the keys.
 func gemma3nAdjustedAttentionMask(
     _ mask: MLXFast.ScaledDotProductAttentionMaskMode?,
     keySequenceLength: Int
