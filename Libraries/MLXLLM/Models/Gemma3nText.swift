@@ -187,6 +187,16 @@ class Gemma3nTextLaurelBlock: Module {
     }
 }
 
+func gemma3nAdjustedAttentionMask(
+    _ mask: MLXFast.ScaledDotProductAttentionMaskMode?,
+    keySequenceLength: Int
+) -> MLXFast.ScaledDotProductAttentionMaskMode? {
+    guard case .array(let maskArray) = mask, maskArray.dim(-1) > keySequenceLength else {
+        return mask
+    }
+    return .array(maskArray[.ellipsis, 0 ..< keySequenceLength])
+}
+
 class Gemma3nAttention: Module {
     let isSliding: Bool
     let numHeads: Int
@@ -296,16 +306,10 @@ class Gemma3nAttention: Module {
         queries = queries.transposed(0, 2, 1, 3)
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
 
-        var adjustedMask = mask
-        if case .array(let maskArray) = mask {
-            let keysSeqLen = keys.shape[keys.shape.count - 2]
-            if maskArray.dim(-1) != keysSeqLen {
-                let slicedMask = maskArray[.ellipsis, 0 ..< keysSeqLen].asType(queries.dtype)
-                adjustedMask = .array(slicedMask)
-            } else {
-                adjustedMask = .array(maskArray.asType(queries.dtype))
-            }
-        }
+        let adjustedMask = gemma3nAdjustedAttentionMask(
+            mask,
+            keySequenceLength: keys.dim(-2)
+        )
 
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
@@ -498,8 +502,6 @@ class Gemma3nDecoderLayer: Module {
     let config: Gemma3nTextConfiguration
     let hiddenSize: Int
     let layerIdx: Int
-    let isSliding: Bool
-    let slidingWindow: Int
     let hiddenSizePerLayerInput: Int
 
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma3nAttention
@@ -518,14 +520,9 @@ class Gemma3nDecoderLayer: Module {
         self.config = config
         self.hiddenSize = config.hiddenSize
         self.layerIdx = layerIdx
-        self.slidingWindow = config.slidingWindow
         self.hiddenSizePerLayerInput = config.hiddenSizePerLayerInput
 
         self._selfAttn.wrappedValue = Gemma3nAttention(config, layerIdx: layerIdx)
-        self.isSliding =
-            (config.layerTypes
-            ?? Array(repeating: "global_attention", count: config.numHiddenLayers))[layerIdx]
-            == "sliding_attention"
 
         self._mlp.wrappedValue = Gemma3nMLP(config, layerIdx: layerIdx)
         self._inputLayernorm.wrappedValue = RMSNorm(
@@ -571,30 +568,11 @@ class Gemma3nDecoderLayer: Module {
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
-        perLayerInput: MLXArray? = nil,
-        caches: [KVCache?]? = nil,
-        cachePosition: MLXArray? = nil
+        perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         var x = x
         if x.ndim == 1 {
             x = expandedDimensions(x, axis: 0)
-        }
-
-        var finalMask = mask
-        if isSliding, case .array(let maskArray) = mask {
-            let effectiveSeqLen = max(cachePosition?.dim(0) ?? 0, slidingWindow)
-            let minDtype = MLXArray.maskFill(for: maskArray.dtype)
-
-            let slidingWindowMask = tril(
-                MLXArray.ones(maskArray.shape, dtype: .bool),
-                k: -slidingWindow
-            )
-            let updatedMask = MLX.where(slidingWindowMask, minDtype, maskArray)
-
-            let offset = max(0, (cachePosition?.max().item() ?? 0) - effectiveSeqLen + 1)
-            let maskIndexes = MLXArray(0 ..< min(effectiveSeqLen, updatedMask.dim(-1))) + offset
-            let slicedMask = take(updatedMask, maskIndexes.asType(.int32), axis: -1)
-            finalMask = .array(slicedMask)
         }
 
         let predictions = altup.predict(x)
@@ -605,7 +583,7 @@ class Gemma3nDecoderLayer: Module {
 
         let attn = selfAttn(
             activePredictionNormed,
-            mask: finalMask,
+            mask: mask,
             cache: cache
         )
 
@@ -814,9 +792,6 @@ public class Gemma3nLanguageModel: Module {
         let requiredCacheSize = max(firstKvSharedLayerIdx, maxCacheIdx + 1)
         let cacheArray = cache ?? Array(repeating: nil as KVCache?, count: requiredCacheSize)
 
-        let pastSeenTokens = cacheArray.first??.offset ?? 0
-        let cachePosition = MLXArray(pastSeenTokens ..< (pastSeenTokens + h.dim(1)))
-
         var fullMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
         var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
 
@@ -871,9 +846,7 @@ public class Gemma3nLanguageModel: Module {
                 h,
                 mask: localMask,
                 cache: layerCache,
-                perLayerInput: perLayerInput,
-                caches: cacheArray,
-                cachePosition: cachePosition
+                perLayerInput: perLayerInput
             )
         }
 
