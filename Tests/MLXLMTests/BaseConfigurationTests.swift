@@ -67,4 +67,41 @@ public class BaseConfigurationTests: XCTestCase {
             .init(groupSize: 64, bits: 4))
     }
 
+    func testNestedTextConfigurationEOSTokenIds() throws {
+        let json =
+            """
+            {
+                "model_type": "qwen3_5",
+                "text_config": {
+                    "eos_token_id": 248044
+                }
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertNil(config.eosTokenIds)
+        XCTAssertEqual(config.effectiveEOSTokenIds, [248044])
+    }
+
+    func testRootEOSTokenIdsTakePrecedenceOverNestedValues() throws {
+        let json =
+            """
+            {
+                "model_type": "qwen3_5",
+                "eos_token_id": 248046,
+                "text_config": {
+                    "eos_token_id": [248044, 248046]
+                }
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(config.eosTokenIds?.values, [248046])
+        XCTAssertEqual(config.effectiveEOSTokenIds, [248046])
+    }
+
 }

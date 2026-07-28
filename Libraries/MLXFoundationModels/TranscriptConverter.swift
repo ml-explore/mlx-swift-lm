@@ -3,6 +3,7 @@
 #if FoundationModelsIntegration
 #if canImport(FoundationModels, _version: 2)
 
+import Foundation
 import FoundationModels
 import MLXLMCommon
 import os.log
@@ -66,12 +67,74 @@ struct TranscriptConverter {
                 logger.debug("Skipping reasoning entry (not replayed into chat history)")
                 return nil
 
+            case .toolCalls(let toolCalls):
+                // Replay prior tool calls as an assistant message carrying the
+                // structured calls. The model's tool-aware chat template renders
+                // these into its native tool-call channel; DefaultMessageGenerator
+                // serializes each id/name/arguments (see ToolCallIdTests). Without
+                // this, a continuation round would re-issue the same call.
+                let calls = toolCalls.map { call -> MLXLMCommon.ToolCall in
+                    let argumentsData = Data(call.arguments.jsonString.utf8)
+                    let arguments: [String: JSONValue]
+                    if let decoded = try? JSONDecoder().decode(
+                        [String: JSONValue].self, from: argumentsData)
+                    {
+                        arguments = decoded
+                    } else {
+                        logger.warning(
+                            "Failed to decode arguments for tool: \(call.toolName, privacy: .public)"
+                        )
+                        arguments = [:]
+                    }
+                    return MLXLMCommon.ToolCall(
+                        function: .init(name: call.toolName, arguments: arguments),
+                        id: call.id)
+                }
+                guard !calls.isEmpty else {
+                    logger.warning("Skipping toolCalls entry with no calls")
+                    return nil
+                }
+                return Chat.Message.assistant("", toolCalls: calls)
+
+            case .toolOutput(let output):
+                // Replay the tool result as a `tool` message correlated to its
+                // originating call by id. Text remains verbatim; structured
+                // GeneratedContent is serialized as JSON so the native chat
+                // template can expose it to the continuation model turn.
+                let content = extractToolOutputContent(from: output.segments)
+                return Chat.Message.tool(content, id: output.id)
+
             default:
-                // Skip unsupported entry types (toolCalls, toolOutput, etc.)
+                // Skip unsupported entry types. Explicit `return nil` is a
+                // tripwire: a newly added SDK entry type surfaces here for review
+                // rather than being silently coerced into the wrong role.
                 logger.debug("Skipping unsupported entry type")
                 return nil
             }
         }
+    }
+
+    /// Extracts supported tool-output content in transcript segment order.
+    ///
+    /// Foundation Models lowers `String` outputs to `.text` and
+    /// `GeneratedContent`/`@Generable` outputs to `.structure`. MLX chat
+    /// templates accept tool results as strings, so structured values retain
+    /// their JSON representation. Attachments and custom segments are deferred
+    /// until their media and prompt-representation contracts are implemented.
+    private static func extractToolOutputContent(
+        from segments: [Transcript.Segment]
+    ) -> String {
+        segments.compactMap { segment -> String? in
+            switch segment {
+            case .text(let textSegment):
+                return textSegment.content
+            case .structure(let structuredSegment):
+                return structuredSegment.content.jsonString
+            default:
+                logger.debug("Skipping unsupported tool-output segment")
+                return nil
+            }
+        }.joined(separator: "\n")
     }
 
     /// Extracts text content from transcript segments.

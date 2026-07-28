@@ -21,7 +21,7 @@
 // text because the schema -- a single `const` string field -- forces
 // the entire body as FF after the opening `{`.
 
-#if FoundationModelsIntegration
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Testing
 import Foundation

@@ -3,6 +3,41 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    @Test("ToolCallProcessor drains calls once in parse order")
+    func toolCallProcessorPublicDrain() {
+        let processor = ToolCallProcessor(format: .json)
+        _ = processor.processChunk(
+            #"<tool_call>{"name":"first","arguments":{}}</tool_call><tool_call>{"name":"second","arguments":{}}</tool_call>"#
+        )
+
+        #expect(processor.drainToolCalls().map(\.function.name) == ["first", "second"])
+        #expect(processor.drainToolCalls().isEmpty)
+    }
+
+    @Test("ToolCallProcessor ordered outputs retain split call-text-call order")
+    func toolCallProcessorOrderedSplitOutput() {
+        let processor = ToolCallProcessor(format: .json)
+        #expect(
+            processor.processChunkOutputs(
+                #"<tool_call>{"name":"first","arguments":{"#
+            ).isEmpty)
+
+        let outputs = processor.processChunkOutputs(
+            #"}}</tool_call>between<tool_call>{"name":"second","arguments":{}}</tool_call>"#)
+        #expect(outputs.count == 3)
+        guard case .toolCall(let first) = outputs[0] else {
+            Issue.record("Expected first call")
+            return
+        }
+        #expect(first.function.name == "first")
+        #expect(outputs[1] == .response("between"))
+        guard case .toolCall(let second) = outputs[2] else {
+            Issue.record("Expected second call")
+            return
+        }
+        #expect(second.function.name == "second")
+    }
+
     @Test("Test Weather Tool Schema Generation")
     func testWeatherToolSchemaGeneration() throws {
         struct WeatherInput: Codable {

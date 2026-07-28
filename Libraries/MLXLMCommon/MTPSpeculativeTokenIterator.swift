@@ -423,7 +423,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
             // speculateRound chose passthrough -- fall through.

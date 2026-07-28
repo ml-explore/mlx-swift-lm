@@ -99,6 +99,7 @@ public enum GuidedGenerationLoop {
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
+        let diagnosticSink = GuidedGenerationDiagnosticSink.current
         var cache = model.newCache(parameters: nil)
         var modelState: LMOutput.State?
 
@@ -288,6 +289,7 @@ public enum GuidedGenerationLoop {
             // Commit to grammar
             let commitResult = try constraint.commitToken(Int32(token))
 
+            diagnosticSink?.recordSampledToken(tokenId)
             // Yield the sampled token
             detokenizer.append(token: tokenId)
             if let text = detokenizer.next() {
@@ -337,6 +339,7 @@ public enum GuidedGenerationLoop {
                         shouldStopAfterFF = true
                         break
                     }
+                    diagnosticSink?.recordFastForwardToken(Int(ffToken))
                     detokenizer.append(token: Int(ffToken))
                     if let text = detokenizer.next() {
                         accumulatedText += text
@@ -428,6 +431,9 @@ public enum GuidedGenerationLoop {
         if diagnosticLog, let logs = constraint.flushLogs() {
             logger.warning("[GuidedGen] xgrammar logs:\n\(logs)")
         }
+
+        diagnosticSink?.recordTermination(
+            grammarTerminated: grammarStopped, generatedTokenCount: tokenCount)
 
         // If we exhausted maxTokens without the grammar reaching a stop state,
         // the output is structurally incomplete (e.g., truncated JSON).

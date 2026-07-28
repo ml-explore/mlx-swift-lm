@@ -479,6 +479,33 @@ enum Qwen3VLVision {
         return rotated.asType(tensor.dtype)
     }
 
+    /// The fused SDPA Metal kernel supports head dims 64/80/128; the vision tower's is 72
+    /// (1152/16), which otherwise falls back to composed ops that materialize the
+    /// [L, L] score matrix per head. Zero-padding Q/K/V to 80 preserves the math exactly
+    /// (padded dims contribute nothing to the dot products; `scale` is passed explicitly)
+    /// and dispatches the O(L)-memory fused kernel. Same trick as `gemma4EnsureFusedSDPA`
+    /// and mlx-vlm's Python `ensure_fused_sdpa`.
+    fileprivate static func ensureFusedSDPA(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float
+    ) -> MLXArray {
+        let fusedDims = [64, 80, 128]
+        let headDim = queries.dim(queries.ndim - 1)
+        let target = fusedDims.first(where: { headDim <= $0 }) ?? headDim
+
+        if target == headDim {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: .none)
+        }
+
+        let widths: [IntOrPair] = [0, 0, 0, .init((0, target - headDim))]
+        return MLXFast.scaledDotProductAttention(
+            queries: MLX.padded(queries, widths: widths),
+            keys: MLX.padded(keys, widths: widths),
+            values: MLX.padded(values, widths: widths),
+            scale: scale, mask: .none
+        )[.ellipsis, ..<headDim]
+    }
+
     final class VisionRotaryEmbedding {
         let dimension: Int
         let theta: Float
@@ -620,25 +647,26 @@ enum Qwen3VLVision {
             keys = keys.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
             values = values.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
 
-            var mask = ones([1, sequenceLength, sequenceLength], dtype: queries.dtype)
-            mask = mask * MLXArray(-1e9, dtype: queries.dtype)
-
+            // Attention is block-diagonal over the images in `cuSeqlens`, so each image is
+            // attended independently instead of materializing a dense [L, L] additive mask
+            // over the joint sequence (memory O((sum L_i)^2) for math that never crosses an
+            // image boundary). Mirrors mlx-vlm's Python implementation.
             let seqlens = cuSeqlens.asArray(Int.self)
+            var attendedParts: [MLXArray] = []
             for idx in 1 ..< seqlens.count {
                 let start = seqlens[idx - 1]
                 let end = seqlens[idx]
-                mask[0..., start ..< end, start ..< end] = MLXArray(0, dtype: queries.dtype)
+                guard end > start else { continue }
+                attendedParts.append(
+                    Qwen3VLVision.ensureFusedSDPA(
+                        queries: queries[0..., 0..., start ..< end, 0...],
+                        keys: keys[0..., 0..., start ..< end, 0...],
+                        values: values[0..., 0..., start ..< end, 0...],
+                        scale: scale))
             }
-
-            let attended = MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
-                scale: scale,
-                mask: .array(mask)
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(sequenceLength, -1)
+            let attended = concatenated(attendedParts, axis: 2)
+                .transposed(0, 2, 1, 3)
+                .reshaped(sequenceLength, -1)
 
             return proj(attended)
         }
@@ -986,37 +1014,26 @@ enum Qwen3VLLanguage {
     final class RotaryEmbedding {
 
         private let invFreq: MLXArray
-        private let mropeSection: [Int]
+        private let mropeIndices: MLXArray
 
         init(headDim: Int, base: Double, ropeScaling: Qwen3VLConfiguration.RoPEScaling?) {
             var freq = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
             freq = freq / Float(headDim)
             let baseArray = MLXArray(Float(base))
             self.invFreq = 1.0 / pow(baseArray, freq)
-            self.mropeSection = ropeScaling?.mropeSection ?? [24, 20, 20]
+            let sections = ropeScaling?.mropeSection ?? [24, 20, 20]
+            var indices = [Int32](repeating: 0, count: freq.dim(0))
+            for (dimension, offset) in [(1, 1), (2, 2)] {
+                let end = min(sections[dimension] * 3, indices.count)
+                for index in stride(from: offset, to: end, by: 3) {
+                    indices[index] = Int32(dimension)
+                }
+            }
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let freqs_t = freqs[0, 0..., 0..., 0...]  // (bs, seq_len, head_dim // 2)
-
-            let dims = freqs_t.dim(-1)
-            var slices: [MLXArray] = []
-
-            for idx in 0 ..< dims {
-                var slice = freqs_t[0..., 0..., idx]
-
-                for (dimIndex, offset) in [(1, 1), (2, 2)] {
-                    let end = min(mropeSection[dimIndex] * 3, dims)
-                    if idx >= offset && idx < end && (idx - offset) % 3 == 0 {
-                        slice = freqs[dimIndex, 0..., 0..., idx]
-                        break
-                    }
-                }
-
-                slices.append(slice)
-            }
-
-            return stacked(slices, axis: -1)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(positionIds: MLXArray, dtype: MLX.DType) -> (MLXArray, MLXArray) {

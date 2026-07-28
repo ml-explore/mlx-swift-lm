@@ -7,6 +7,7 @@ Common language model code.
 - <doc:model-compatibility>
 - <doc:upgrade>
 - <doc:wired-memory>
+- <doc:kv-cache-quantization>
 
 ## Other MLX Libraries Packages
 
