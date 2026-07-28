@@ -722,7 +722,8 @@ public func loadParoQuantModel<T: LanguageModel>(
     markPhase("eval")
     logger.info("ParoQuant model loaded and evaluated")
     let totalSeconds = (loadClock.now - loadStart) / .seconds(1)
-    let breakdown = phaseTimes
+    let breakdown =
+        phaseTimes
         .map { String(format: "%@=%.2fs", $0.0, $0.1) }
         .joined(separator: " ")
     logger.notice(
