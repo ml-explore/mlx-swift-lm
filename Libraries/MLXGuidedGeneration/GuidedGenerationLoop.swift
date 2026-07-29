@@ -2,7 +2,6 @@
 
 import MLX
 import MLXLMCommon
-import os
 
 /// Runs grammar-constrained generation with fast-forward token support.
 ///

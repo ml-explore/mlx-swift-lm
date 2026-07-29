@@ -224,7 +224,9 @@ let package = Package(
                 .unsafeFlags(["-w"], .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])),
             ],
             linkerSettings: [
-                .linkedLibrary("c++")
+                // Apple platforms only: on Linux the Swift toolchain links libstdc++,
+                // and there is no libc++ to link against.
+                .linkedLibrary("c++", .when(platforms: [.macOS, .iOS, .visionOS, .tvOS]))
             ]
         ),
         // Grammar-constrained ("guided") generation engine built on the
