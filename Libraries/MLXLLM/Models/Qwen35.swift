@@ -51,7 +51,6 @@ private let routerTopKSource = """
 
     threadgroup ulong sk[E_];
     threadgroup float top_v[K_];
-    threadgroup uint  top_i[K_];
 
     float v = static_cast<float>(gates[row * E_ + t]);
     uint b = (v == 0.0f) ? 0u : as_type<uint>(v);
@@ -66,7 +65,7 @@ private let routerTopKSource = """
     }
     if (above < K_) {
         top_v[K_ - 1 - above] = v;
-        top_i[K_ - 1 - above] = t;
+        inds[row * K_ + (K_ - 1 - above)] = t;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -79,9 +78,6 @@ private let routerTopKSource = """
             T s = static_cast<T>(top_v[q]);
             scores[row * K_ + q] = NORM_ ? (s / acc) : s;
         }
-    }
-    if (t < K_) {
-        inds[row * K_ + t] = top_i[t];
     }
     """
 
@@ -99,6 +95,11 @@ private final class RouterTopKKernel: Sendable {
     }
 }
 
+/// Metal's threads-per-threadgroup ceiling: the fused kernel launches one
+/// thread per expert, so past this the dispatch is invalid — a correctness
+/// bound, not a tuning knob.
+private let maxFusedRouterExperts = 1024
+
 /// Top-`k` selection + optional normalisation over the last axis, in one
 /// dispatch. Returns `(indices, scores)` shaped `[..., k]`, matching the
 /// argPartition/takeAlong/normalise chain bit for bit — including the
@@ -114,6 +115,7 @@ private final class RouterTopKKernel: Sendable {
 func fusedRouterTopK(_ gates: MLXArray, k: Int, normalize: Bool) -> (MLXArray, MLXArray) {
     let e = gates.dim(-1)
     let rows = gates.size / e
+    let shape = Array(gates.shape.dropLast()) + [k]
     let out = RouterTopKKernel.shared.kernel(
         [gates],
         template: [
@@ -121,10 +123,24 @@ func fusedRouterTopK(_ gates: MLXArray, k: Int, normalize: Bool) -> (MLXArray, M
         ],
         grid: (e, rows, 1),
         threadGroup: (e, 1, 1),
-        outputShapes: [[rows, k], [rows, k]],
+        outputShapes: [shape, shape],
         outputDTypes: [.uint32, gates.dtype]
     )
     return (out[0], out[1])
+}
+
+/// The exact three-dispatch chain the fused kernel replaces — the prefill
+/// path. Internal (not private) so `Qwen35RouterTopKBitwiseTests` holds the
+/// fused kernel against the chain production actually falls back to, not a
+/// copy of it.
+func chainRouterTopK(_ gates: MLXArray, k: Int, normalize: Bool) -> (MLXArray, MLXArray) {
+    let kth = gates.dim(-1) - k
+    let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
+    var scores = MLX.takeAlong(gates, inds, axis: -1)
+    if normalize {
+        scores = scores / scores.sum(axis: -1, keepDims: true)
+    }
+    return (inds, scores)
 }
 
 // MARK: - Configuration
@@ -530,8 +546,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         var gates = gate(x)
         gates = MLX.softmax(gates, axis: -1, precise: true)
 
-        let k = topK
-        let (inds, scores) = routerTopK(gates, k: k)
+        let (inds, scores) = routerTopK(gates, k: topK)
 
         let y = switchMLP(x, inds)
         let combined = weightedExpertSum(y, scores)
@@ -544,27 +559,17 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
     /// Pick the top-`k` experts and normalise their scores.
     ///
-    /// At decode there is exactly one row, and the three-dispatch chain below
-    /// is three encoder-wide barriers spent on a 256→8 selection; the fused
-    /// kernel does it in one and is bit-identical (see `fusedRouterTopK`).
-    /// Prefill keeps the chain: many rows make the fused kernel's `O(E²)` rank
-    /// count the wrong shape, and a GEMM-bound pass has no barrier to save.
+    /// At decode there is exactly one row, and `chainRouterTopK` is three
+    /// encoder-wide barriers spent on a 256→8 selection; the fused kernel
+    /// does it in one and is bit-identical (see `fusedRouterTopK`). Prefill
+    /// keeps the chain: many rows make the fused kernel's `O(E²)` rank count
+    /// the wrong shape, and a GEMM-bound pass has no barrier to save.
     private func routerTopK(_ gates: MLXArray, k: Int) -> (MLXArray, MLXArray) {
         let e = gates.dim(-1)
-        if gates.size == e, e <= 1024 {
-            let (inds, scores) = fusedRouterTopK(gates, k: k, normalize: normTopkProb)
-            var shape = gates.shape
-            shape[shape.count - 1] = k
-            return (inds.reshaped(shape), scores.reshaped(shape))
+        if gates.size == e, e <= maxFusedRouterExperts {
+            return fusedRouterTopK(gates, k: k, normalize: normTopkProb)
         }
-
-        let kth = e - k
-        let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
-        var scores = MLX.takeAlong(gates, inds, axis: -1)
-        if normTopkProb {
-            scores = scores / scores.sum(axis: -1, keepDims: true)
-        }
-        return (inds, scores)
+        return chainRouterTopK(gates, k: k, normalize: normTopkProb)
     }
 }
 

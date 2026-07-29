@@ -9,13 +9,10 @@
 // this fails a unit test instead of silently splitting decode (fused
 // kernel) from prefill (chain).
 
-import Foundation
 import MLX
-import MLXNN
 import XCTest
 
 @testable import MLXLLM
-@testable import MLXLMCommon
 
 final class Qwen35RouterTopKBitwiseTests: XCTestCase {
 
@@ -34,19 +31,6 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
         XCTAssertEqual(
             mismatches, 0, "\(label): \(mismatches)/\(a.count) elements differ bitwise",
             file: file, line: line)
-    }
-
-    /// The exact chain `routerTopK` falls back to at prefill.
-    private func chainRouterTopK(
-        _ gates: MLXArray, k: Int, normalize: Bool
-    ) -> (MLXArray, MLXArray) {
-        let kth = gates.dim(-1) - k
-        let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
-        var scores = MLX.takeAlong(gates, inds, axis: -1)
-        if normalize {
-            scores = scores / scores.sum(axis: -1, keepDims: true)
-        }
-        return (inds, scores)
     }
 
     private func assertRouterMatchesChain(
