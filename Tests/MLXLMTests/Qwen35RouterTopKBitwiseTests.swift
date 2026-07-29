@@ -1,13 +1,8 @@
 // Copyright © 2026 Apple Inc.
 //
-// CI pin for the bitwise contract behind the fused router top-k kernel:
-// it replaces the argPartition/takeAlong/normalise chain and must
-// reproduce the stable sort's selection order (ties, signed zeros,
-// NaN-above-everything) and the K-wide sequential in-dtype sum, bit for
-// bit, including the `uint32` index dtype argPartition produces. If an
-// MLX bump changes the sort's tie-breaking or the reduce's accumulation,
-// this fails a unit test instead of silently splitting decode (fused
-// kernel) from prefill (chain).
+// Pins fusedRouterTopK bitwise-equal to chainRouterTopK. If an MLX bump
+// changes the sort's tie-breaking or the reduce's accumulation, this
+// fails instead of decode (fused) silently splitting from prefill (chain).
 
 import MLX
 import XCTest
@@ -16,9 +11,8 @@ import XCTest
 
 final class Qwen35RouterTopKBitwiseTests: XCTestCase {
 
-    /// Bitwise equality, dtype and shape included. The f32 upcast is exact
-    /// and injective for f16/bf16/f32 finite values, so bit-comparing the
-    /// upcast compares the originals.
+    /// Bitwise equality, dtype and shape included; the f32 upcast is exact
+    /// for f16/bf16/f32, so comparing upcast bits compares the originals.
     private func assertBitIdentical(
         _ got: MLXArray, _ want: MLXArray, _ label: String,
         file: StaticString = #filePath, line: UInt = #line
@@ -49,9 +43,8 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
         let b = fusedInds.reshaped(-1).asArray(UInt32.self)
         XCTAssertEqual(a, b, "\(label): expert selection order", file: file, line: line)
 
-        // NaN score payloads are propagation-order-dependent and not part of
-        // the contract (production gates are softmax outputs, NaN-free); the
-        // NaN cases pin the *ordering* only.
+        // NaN score payloads are propagation-order-dependent and out of
+        // contract (production gates are softmax outputs, NaN-free).
         if !indicesOnly {
             assertBitIdentical(
                 fusedScores.reshaped(-1, k), chainScores.reshaped(-1, k),
@@ -81,8 +74,7 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
                     let equal = MLX.full([rows, e], values: MLXArray(Float(0.25))).asType(dtype)
                     assertRouterMatchesChain(equal, k: k, normalize: normalize, "all-equal \(tag)")
 
-                    // Signed zeros compare equal but differ bitwise; the tie
-                    // class must merge and the surviving values keep their sign.
+                    // Signed zeros: compare equal, differ bitwise.
                     let signs = MLX.where(
                         MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.5,
                         MLXArray(Float(-0.0)), MLXArray(Float(0.0)))
@@ -92,8 +84,7 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
                     ).asType(dtype)
                     assertRouterMatchesChain(zeros, k: k, normalize: normalize, "±0 \(tag)")
 
-                    // NaN rows: sort.h's LessThan puts NaN above everything
-                    // and ties all NaNs; order must match, scores exempt.
+                    // NaN above everything, all NaNs tie; indices only.
                     var nans = MLX.where(
                         MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.05,
                         MLXArray(Float.nan), MLXRandom.normal([rows, e])
