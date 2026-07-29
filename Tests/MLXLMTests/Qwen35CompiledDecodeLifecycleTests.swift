@@ -1,18 +1,10 @@
 // Copyright © 2026 Apple Inc.
 //
-// Regression tests for the compiled-decode closures: each is stored on the
-// module that owns it while capturing that module, so a strong capture
-// cycles (module → closure → CompiledFunction → closure → module) and keeps
-// the blocks — weights and compiled mlx tape included — alive after the
-// model is released. The captures are `unowned`; these tests pin the
+// The compiled-decode closures are stored on the module they capture, so a
+// strong capture would cycle and keep the module — weights and compiled tape
+// included — alive after the model is released. These tests pin the
 // lifecycle: after compiled decode steps, releasing the model must
 // deallocate the blocks.
-//
-// Coverage spans all three kinds of closures: the plain-cache decode
-// installs the per-layer traces (first token, no GDN state yet) and the
-// whole-step segment traces (second token); the quantized-cache decode
-// forces the fallback that installs the MoE block's own compiled closure —
-// the one the original regression was filed against.
 
 import Foundation
 import MLX
@@ -23,12 +15,11 @@ import XCTest
 
 final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
 
-    /// Hybrid layout: layer 0 GDN (linear), layer 1 full attention, MoE mlp
-    /// in both — the two block types that lazily install compiled decode
-    /// closures. Every omitted field has a config default. `headDim` is
-    /// parameterized because the quantized-cache variant needs a head dim
-    /// the KV quantizer's group size divides.
-    private func tinyMoEConfiguration(headDim: Int = 8) throws -> Qwen35TextConfiguration {
+    /// Layer 0 GDN, layer 1 full attention, MoE mlp in both — the two block
+    /// kinds that install compiled decode closures. `headDim` is a parameter
+    /// because the quantized-cache variant needs one the KV group size
+    /// divides.
+    private func tinyMoEConfiguration(headDim: Int) throws -> Qwen35TextConfiguration {
         let json = """
             {
                 "model_type": "qwen3_5_moe",
@@ -55,13 +46,17 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
             Qwen35TextConfiguration.self, from: Data(json.utf8))
     }
 
-    func testBlocksDeallocateAfterCompiledDecode() throws {
-        var model: Qwen35TextModel? = Qwen35TextModel(try tinyMoEConfiguration())
-        var cache: [KVCache]? = model!.newCache(parameters: nil)
+    /// Runs two decode steps (the first installs the compiled closures, the
+    /// second replays them), releases the model, and asserts the
+    /// closure-owning blocks deallocate.
+    private func assertBlocksDeallocate(
+        headDim: Int,
+        mapCache: ([KVCache]) -> [KVCache] = { $0 },
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        var model: Qwen35TextModel? = Qwen35TextModel(try tinyMoEConfiguration(headDim: headDim))
+        var cache: [KVCache]? = mapCache(model!.newCache(parameters: nil))
 
-        // Two S==1 steps: the first installs the compiled closures (and
-        // exercises the explicit zero-state first-token leg of the GDN
-        // trace), the second replays them.
         for token in [Int32(1), Int32(2)] {
             let logits = model!(MLXArray([token]).reshaped(1, 1), cache: cache)
             eval(logits)
@@ -69,53 +64,26 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
 
         weak var gdn = model!.modules().compactMap { $0 as? Qwen35GatedDeltaNet }.first
         weak var moe = model!.modules().compactMap { $0 as? Qwen35SparseMoeBlock }.first
-        XCTAssertNotNil(gdn, "expected a GDN layer in the tiny hybrid config")
-        XCTAssertNotNil(moe, "expected a MoE mlp in the tiny hybrid config")
+        XCTAssertNotNil(gdn, "expected a GDN layer in the config", file: file, line: line)
+        XCTAssertNotNil(moe, "expected a MoE mlp in the config", file: file, line: line)
 
         model = nil
         cache = nil
 
-        XCTAssertNil(
-            gdn,
-            "Qwen35GatedDeltaNet leaked after model release — the compiled "
-                + "decode closure must not retain its module")
-        XCTAssertNil(
-            moe,
-            "Qwen35SparseMoeBlock leaked after model release — the compiled "
-                + "decode closure must not retain its module")
+        XCTAssertNil(gdn, "Qwen35GatedDeltaNet leaked after model release", file: file, line: line)
+        XCTAssertNil(moe, "Qwen35SparseMoeBlock leaked after model release", file: file, line: line)
+    }
+
+    func testBlocksDeallocateAfterCompiledDecode() throws {
+        try assertBlocksDeallocate(headDim: 8)
     }
 
     func testBlocksDeallocateAfterQuantizedCacheDecode() throws {
-        // A quantized KV cache makes the whole-step schedule and the
-        // per-layer attention traces bail, so the FA layer runs the general
-        // body and its MoE mlp installs the block's own compiled closure.
-        // GDN layers still take the per-layer trace.
-        var model: Qwen35TextModel? = Qwen35TextModel(
-            try tinyMoEConfiguration(headDim: 32))
-        var cache: [KVCache]? = model!.newCache(parameters: nil).map { c in
-            c is MambaCache ? c : QuantizedKVCache(groupSize: 32, bits: 8)
+        // A quantized KV cache forces the fallback that installs the MoE
+        // block's own compiled closure; GDN layers still take per-layer
+        // traces.
+        try assertBlocksDeallocate(headDim: 32) { caches in
+            caches.map { $0 is MambaCache ? $0 : QuantizedKVCache(groupSize: 32, bits: 8) }
         }
-
-        for token in [Int32(1), Int32(2)] {
-            let logits = model!(MLXArray([token]).reshaped(1, 1), cache: cache)
-            eval(logits)
-        }
-
-        weak var gdn = model!.modules().compactMap { $0 as? Qwen35GatedDeltaNet }.first
-        weak var moe = model!.modules().compactMap { $0 as? Qwen35SparseMoeBlock }.first
-        XCTAssertNotNil(gdn, "expected a GDN layer in the tiny hybrid config")
-        XCTAssertNotNil(moe, "expected a MoE mlp in the tiny hybrid config")
-
-        model = nil
-        cache = nil
-
-        XCTAssertNil(
-            gdn,
-            "Qwen35GatedDeltaNet leaked after quantized-cache decode — the "
-                + "compiled decode closure must not retain its module")
-        XCTAssertNil(
-            moe,
-            "Qwen35SparseMoeBlock leaked after quantized-cache decode — the "
-                + "block's compiled closure must not retain its module")
     }
 }
