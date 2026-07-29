@@ -31,6 +31,43 @@ private func check(_ condition: Bool, _ message: String) throws {
     guard condition else { throw IntegrationTestFailure(message) }
 }
 
+// MARK: - Network Retry
+
+/// Transient network failures worth retrying on a flaky CI network — chiefly
+/// `-1005 networkConnectionLost`, which surfaced mid-download in CI.
+private func isTransientNetworkError(_ error: Error) -> Bool {
+    guard let urlError = error as? URLError else { return false }
+    switch urlError.code {
+    case .networkConnectionLost, .timedOut, .cannotConnectToHost,
+        .notConnectedToInternet, .dnsLookupFailed, .cannotFindHost,
+        .resourceUnavailable, .badServerResponse:
+        return true
+    default:
+        return false
+    }
+}
+
+/// Run `operation`, retrying a few times with linear backoff on transient
+/// network errors. Non-network errors (and the final attempt) rethrow.
+private func withNetworkRetry<T>(
+    _ label: String, attempts: Int = 3, _ operation: () async throws -> T
+) async throws -> T {
+    var lastError: Error?
+    for attempt in 1 ... attempts {
+        do {
+            return try await operation()
+        } catch {
+            lastError = error
+            guard isTransientNetworkError(error), attempt < attempts else { throw error }
+            print(
+                "Transient network error loading \(label) "
+                    + "(attempt \(attempt)/\(attempts)): \(error). Retrying…")
+            try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+        }
+    }
+    throw lastError ?? IntegrationTestFailure("\(label): retry loop exited unexpectedly")
+}
+
 // MARK: - Model IDs
 
 public enum IntegrationTestModelIDs {
@@ -72,16 +109,27 @@ public actor IntegrationTestModels {
         let tokenizerLoader = self.tokenizerLoader
         let task = Task {
             print("Loading LLM: \(key)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: configuration,
-                progressHandler: logProgress(key)
-            )
+            let container = try await withNetworkRetry(key) {
+                try await LLMModelFactory.shared.loadContainer(
+                    from: downloader, using: tokenizerLoader,
+                    configuration: configuration,
+                    progressHandler: logProgress(key)
+                )
+            }
             print("Loaded LLM: \(key)")
             return container
         }
         llmTasksByName[key] = task
         return try await task.value
+    }
+
+    /// Drop the cached container for `configuration` so ARC can free its
+    /// GPU-resident weights between tests. Pair with `GPU.clearCache()` at the
+    /// call site to release the freed buffers back to the system — without this,
+    /// loading many large models in one serialized run accumulates weights until
+    /// the process is jetsammed (Metal compiler XPC failures / crashes).
+    public func evictLLM(_ configuration: ModelConfiguration) {
+        llmTasksByName[configuration.name] = nil
     }
 
     /// Load an arbitrary VLM container, cached by `configuration.name` so the same
