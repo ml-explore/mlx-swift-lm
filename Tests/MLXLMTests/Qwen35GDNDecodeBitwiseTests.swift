@@ -1,9 +1,7 @@
 // Copyright © 2026 Apple Inc.
 //
-// CI pin for the bitwise contract GDN decode rests on: `decodeConv`
-// (elementwise multiply-adds, f32 accumulation) must reproduce MLX's
-// `Convolution` kernel bit-for-bit, or compiled decode silently diverges
-// from prefill after an MLX bump.
+// Pins `decodeConv` bit-for-bit against `generalConv` (MLX's `Convolution`
+// kernel); a mismatch means compiled decode silently diverges from prefill.
 
 import Foundation
 import MLX
@@ -11,13 +9,11 @@ import MLXNN
 import XCTest
 
 @testable import MLXLLM
-@testable import MLXLMCommon
 
 final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
 
-    /// Bitwise equality, dtype and shape included. The f32 upcast is
-    /// injective for f16/bf16/f32 finite values, so bit-comparing the upcast
-    /// compares the originals.
+    /// The f32 upcast is injective on finite f16/bf16/f32 values, so
+    /// bit-comparing the upcast compares the originals.
     private func assertBitIdentical(
         _ got: MLXArray, _ want: MLXArray, _ label: String,
         file: StaticString = #filePath, line: UInt = #line
@@ -26,7 +22,7 @@ final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
         XCTAssertEqual(got.shape, want.shape, "\(label): shape", file: file, line: line)
         let a = got.asType(.float32).asArray(Float.self)
         let b = want.asType(.float32).asArray(Float.self)
-        let mismatches = zip(a, b).filter { $0.bitPattern != $1.bitPattern }.count
+        let mismatches = zip(a, b).lazy.filter { $0.bitPattern != $1.bitPattern }.count
         XCTAssertEqual(
             mismatches, 0, "\(label): \(mismatches)/\(a.count) elements differ bitwise",
             file: file, line: line)
@@ -67,7 +63,8 @@ final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
         for dtype in [DType.float16, DType.bfloat16] {
             MLXRandom.seed(11)
             let gdn = Qwen35GatedDeltaNet(config)
-            gdn.update(parameters: gdn.parameters().mapValues { $0.asType(dtype) })
+            gdn.conv1d.update(
+                parameters: gdn.conv1d.parameters().mapValues { $0.asType(dtype) })
 
             let qkv = MLXRandom.normal([1, 1, gdn.convDim]).asType(dtype)
             let convState = MLXRandom.normal(
@@ -75,15 +72,12 @@ final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
             ).asType(dtype)
             eval(qkv, convState)
 
-            let (convOut, newConvState) = gdn.decodeConv(convState: convState, qkv: qkv)
+            let (conv, state) = gdn.decodeConv(convState: convState, qkv: qkv)
+            let (refConv, refState) = gdn.generalConv(convState: convState, qkv: qkv)
+            eval(conv, state, refConv, refState)
 
-            let convInput = concatenated([convState, qkv], axis: 1)
-            let refOut = silu(gdn.conv1d(convInput))
-            let refState = contiguous(convInput[0..., (-(gdn.convKernelSize - 1))..., 0...])
-            eval(convOut, newConvState, refOut, refState)
-
-            assertBitIdentical(convOut, refOut, "conv output (\(dtype))")
-            assertBitIdentical(newConvState, refState, "conv state (\(dtype))")
+            assertBitIdentical(conv, refConv, "conv output (\(dtype))")
+            assertBitIdentical(state, refState, "conv state (\(dtype))")
         }
     }
 }
