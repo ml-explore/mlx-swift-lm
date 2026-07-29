@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
 import Foundation
 import FoundationModels
 import Testing
@@ -314,3 +316,5 @@ struct IntegrationTests {
         #expect(tokenCount >= 5, "Should have received at least 5 tokens before cancellation")
     }
 }
+
+#endif  // FoundationModelsIntegration

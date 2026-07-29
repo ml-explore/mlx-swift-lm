@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
 import Foundation
 import MLXLMCommon
 import Testing
@@ -68,3 +70,5 @@ struct ApplyChatTemplateProbeTests {
         }
     }
 }
+
+#endif  // FoundationModelsIntegration
