@@ -444,6 +444,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         if x.dim(1) != 1 {
             return forward(x)
         }
+        compileLock.lock()
         if compiledForward == nil {
             // [unowned self]: stored only on self, so it cannot outlive self;
             // a strong capture would cycle and leak the module, weights and
@@ -452,9 +453,14 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
             // rather than swapping parameters on a live one.
             compiledForward = compile { [unowned self] x in forward(x) }
         }
-        return compiledForward!(x)
+        let fn = compiledForward!
+        compileLock.unlock()
+        return fn(x)
     }
 
+    /// Compiled functions are created on first decode, not at init (the
+    /// weights aren't loaded yet), so the lazy assignment needs a lock.
+    private let compileLock = NSLock()
     private var compiledForward: ((MLXArray) -> MLXArray)?
 
     /// The uncompiled body; an enclosing layer trace inlines it rather than
@@ -562,6 +568,8 @@ final class Qwen35DecoderLayer: Module {
 
     // MARK: - Compiled decode blocks
 
+    // Lock rationale: see Qwen35SparseMoeBlock.compileLock.
+    private let compileLock = NSLock()
     private var compiledLinearLayer: (([MLXArray]) -> [MLXArray])?
     private var compiledAttentionPre: (([MLXArray]) -> [MLXArray])?
     private var compiledAttentionPost: (([MLXArray]) -> [MLXArray])?
@@ -573,6 +581,7 @@ final class Qwen35DecoderLayer: Module {
         let convState = cache[0] ?? zero.conv
         let recState = cache[1] ?? zero.rec
 
+        compileLock.lock()
         if compiledLinearLayer == nil {
             // [unowned self]: see Qwen35SparseMoeBlock.callAsFunction.
             compiledLinearLayer = compile { [unowned self] args in
@@ -581,8 +590,10 @@ final class Qwen35DecoderLayer: Module {
                 return [out, newConvState, newRecState]
             }
         }
+        let fn = compiledLinearLayer!
+        compileLock.unlock()
 
-        let out = compiledLinearLayer!([x, convState, recState])
+        let out = fn([x, convState, recState])
         cache[0] = out[1]
         cache[1] = out[2]
         cache.advance(1)
@@ -594,6 +605,7 @@ final class Qwen35DecoderLayer: Module {
     private func decodeAttentionLayer(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache
     ) -> MLXArray {
+        compileLock.lock()
         if compiledAttentionPre == nil {
             compiledAttentionPre = compile { [unowned self] args in
                 let (queries, gate, keys, values) = attentionPreBody(x: args[0])
@@ -605,12 +617,15 @@ final class Qwen35DecoderLayer: Module {
                 [attentionPostBody(x: args[0], attention: args[1], gate: args[2])]
             }
         }
+        let pre = compiledAttentionPre!
+        let post = compiledAttentionPost!
+        compileLock.unlock()
 
-        let projected = compiledAttentionPre!([x])
+        let projected = pre([x])
         let attention = attentionCacheStep(
             queries: projected[0], keys: projected[2], values: projected[3],
             cache: cache, mask: mask)
-        return compiledAttentionPost!([x, attention, projected[1]])[0]
+        return post([x, attention, projected[1]])[0]
     }
 
     /// The part of a full-attention decode step that cannot be traced: rope
@@ -743,6 +758,8 @@ public class Qwen35TextModelInner: Module {
     }
 
     private let decodeSegments: [DecodeSegment]
+    // Lock rationale: see Qwen35SparseMoeBlock.compileLock.
+    private let compileLock = NSLock()
     private var compiledSegments: [(([MLXArray]) -> [MLXArray])?]
 
     private static func decodeSchedule(for layers: [Qwen35DecoderLayer]) -> [DecodeSegment] {
@@ -839,13 +856,16 @@ public class Qwen35TextModelInner: Module {
                 args.append(mambaCache[1]!)
             }
 
+            compileLock.lock()
             if compiledSegments[segmentIndex] == nil {
                 // [unowned self]: see Qwen35SparseMoeBlock.callAsFunction.
                 compiledSegments[segmentIndex] = compile { [unowned self] segmentArgs in
                     segmentBody(at: segmentIndex, segmentArgs)
                 }
             }
-            let outputs = compiledSegments[segmentIndex]!(args)
+            let fn = compiledSegments[segmentIndex]!
+            compileLock.unlock()
+            let outputs = fn(args)
 
             carry = outputs[0]
             for (i, layerIndex) in segment.linearLayers.enumerated() {
