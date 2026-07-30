@@ -73,22 +73,37 @@ public enum ParoQuantPreparedCheckpoint {
         let sources: [Source]
     }
 
+    /// The directory's conversion source files: every top-level
+    /// `*.safetensors` minus the artifact names in `excludedFileNames`,
+    /// hidden files skipped (an AppleDouble `._*.safetensors` sibling is
+    /// not a checkpoint).
+    ///
+    /// Single definition shared by `currentManifest` and the loader's raw
+    /// scan — the manifest exists to record exactly what the loader read,
+    /// so the two lists must be the same list by construction.
+    static func sourceURLs(
+        in directory: URL, includingPropertiesForKeys keys: [URLResourceKey]? = nil
+    ) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+        )
+        .filter {
+            $0.pathExtension == "safetensors" && !excludedFileNames.contains($0.lastPathComponent)
+        }
+    }
+
     /// Manifest describing the directory's current conversion inputs,
     /// sorted by file name for deterministic comparison.
     static func currentManifest(directory: URL) throws -> Manifest {
-        let contents = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
+        var urls = try sourceURLs(
+            in: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
         )
-        var sourceURLs = contents.filter {
-            $0.pathExtension == "safetensors" && !excludedFileNames.contains($0.lastPathComponent)
-        }
-        sourceURLs.append(directory.appendingPathComponent("config.json", isDirectory: false))
+        urls.append(directory.appendingPathComponent("config.json", isDirectory: false))
 
         var sources: [Manifest.Source] = []
-        sources.reserveCapacity(sourceURLs.count)
-        for url in sourceURLs {
+        sources.reserveCapacity(urls.count)
+        for url in urls {
             let values = try url.resourceValues(forKeys: [
                 .fileSizeKey, .contentModificationDateKey,
             ])
@@ -189,13 +204,4 @@ public enum ParoQuantPreparedCheckpoint {
             try? fm.removeItem(at: tmpURL)
         }
     }
-}
-
-/// Transport for the background persist `Task` — `MLXArray` is not
-/// `Sendable`; the captured arrays are the immutable, already-evaluated
-/// checkpoint tensors shared with the live model, read-only on both sides.
-struct PreparedCheckpointPayload: @unchecked Sendable {
-    let weights: [String: MLXArray]
-    let manifest: ParoQuantPreparedCheckpoint.Manifest
-    let directory: URL
 }
