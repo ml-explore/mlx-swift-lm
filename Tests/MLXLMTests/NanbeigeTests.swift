@@ -181,4 +181,25 @@ final class NanbeigeTests: XCTestCase {
             maxAbsDiff(logitsW, logitsF), 1e-3,
             "warm continuation diverged from cold full prefill")
     }
+
+    // MARK: - Chat conventions
+
+    /// Nanbeige declares its own tool-call format and reasoning config via
+    /// `ChatConventionsProviding`, rather than the centralized `model_type`
+    /// inference chains. XML is the trained default for agentic use.
+    func testDeclaresXMLFunctionToolCallFormat() throws {
+        let model = NanbeigeModel(try makeConfig())
+        XCTAssertEqual(model.toolCallFormat, .xmlFunction)
+    }
+
+    /// <think>/</think>, toggled via `enable_thinking` (template default true).
+    func testDeclaresQwen3StyleReasoningConfig() throws {
+        let model = NanbeigeModel(try makeConfig())
+        let config = try XCTUnwrap(model.reasoningConfig)
+        XCTAssertEqual(config.startDelimiter, "<think>")
+        XCTAssertEqual(config.endDelimiter, "</think>")
+        XCTAssertEqual(
+            config.promptStrategy, .templateFlag(key: "enable_thinking", defaultOn: true))
+        XCTAssertTrue(config.isSpecialToken)
+    }
 }

@@ -3,6 +3,13 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    @Test("ChatConventionsProviding defaults to nil for both properties")
+    func chatConventionsOptInDefaults() {
+        struct Bare: ChatConventionsProviding {}
+        #expect(Bare().toolCallFormat == nil)
+        #expect(Bare().reasoningConfig == nil)
+    }
+
     @Test("ToolCallProcessor drains calls once in parse order")
     func toolCallProcessorPublicDrain() {
         let processor = ToolCallProcessor(format: .json)
@@ -1110,10 +1117,6 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
-
-        // Nanbeige models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "nanbeige") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "NANBEIGE") == .xmlFunction)
 
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)

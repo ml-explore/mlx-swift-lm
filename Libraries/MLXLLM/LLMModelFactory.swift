@@ -616,16 +616,21 @@ public final class LLMModelFactory: GenericModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
+        // Chat conventions: registry override wins (config already non-nil);
+        // otherwise ask the model, then fall back to model_type inference.
         if mutableConfiguration.toolCallFormat == nil {
-            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
-                from: baseConfig.modelType, configData: configData)
+            mutableConfiguration.toolCallFormat =
+                model.toolCallFormat
+                ?? ToolCallFormat.infer(from: baseConfig.modelType, configData: configData)
         }
-        // Reasoning protocol: registry override wins; otherwise infer from
-        // model_type + repo id. `modelId` is load-bearing — R1-Distill reports a
-        // base model_type (qwen2/llama) and is only recognizable by id.
+        // Reasoning protocol falls back to inference from model_type + repo id.
+        // `modelId` is load-bearing — R1-Distill reports a base model_type
+        // (qwen2/llama) and is only recognizable by id.
         if mutableConfiguration.reasoningConfig == nil {
-            mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
-                from: baseConfig.modelType, modelId: configuration.name, configData: configData)
+            mutableConfiguration.reasoningConfig =
+                model.reasoningConfig
+                ?? ReasoningConfig.infer(
+                    from: baseConfig.modelType, modelId: configuration.name, configData: configData)
         }
 
         // Load tokenizer and weights in parallel
