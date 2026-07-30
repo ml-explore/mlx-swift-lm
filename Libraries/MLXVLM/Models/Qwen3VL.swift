@@ -1242,7 +1242,7 @@ enum Qwen3VLLanguage {
             inputEmbeddings: MLXArray?,
             mask: MLXArray?,
             positionIds: MLXArray?,
-            visualMask: MLXArray?,
+            visualIndices: [Int]?,
             deepstackEmbeds: [MLXArray]?
         ) -> MLXArray {
             var hidden: MLXArray
@@ -1264,12 +1264,11 @@ enum Qwen3VLLanguage {
                 hidden = layer(hidden, mask: mask, cache: layerCache, positionIds: positionIds)
 
                 if let embeds = deepstackEmbeds, index < embeds.count,
-                    let visualMask
+                    let visualIndices, !visualIndices.isEmpty
                 {
-
                     hidden = applyDeepstack(
                         hiddenStates: hidden,
-                        visualMask: visualMask,
+                        visualIndices: visualIndices,
                         visualEmbeds: embeds[index])
                 }
             }
@@ -1279,28 +1278,15 @@ enum Qwen3VLLanguage {
 
         private func applyDeepstack(
             hiddenStates: MLXArray,
-            visualMask: MLXArray,
+            visualIndices: [Int],
             visualEmbeds: MLXArray
         ) -> MLXArray {
-            let indices = maskIndices(visualMask)
-            guard !indices.isEmpty else { return hiddenStates }
-
-            let indexArray = MLXArray(indices.map { UInt32($0) })
+            let indexArray = MLXArray(visualIndices.map { UInt32($0) })
 
             let result = hiddenStates
             result[0..., indexArray, 0...] = result[0..., indexArray, 0...] + visualEmbeds
 
             return result
-        }
-
-        private func maskIndices(_ mask: MLXArray) -> [Int] {
-            let bools = mask.asType(.bool).asArray(Bool.self)
-            var indices: [Int] = []
-            indices.reserveCapacity(bools.count)
-            for (idx, value) in bools.enumerated() where value {
-                indices.append(idx)
-            }
-            return indices
         }
     }
 
@@ -1336,7 +1322,7 @@ enum Qwen3VLLanguage {
             inputEmbeddings: MLXArray?,
             mask: MLXArray?,
             positionIds providedPositionIds: MLXArray?,
-            visualMask: MLXArray?,
+            visualIndices: [Int]?,
             deepstackEmbeds: [MLXArray]?,
             pixelValues: MLXArray?,
             imageGridTHW: [THW]?,
@@ -1407,7 +1393,7 @@ enum Qwen3VLLanguage {
                 inputEmbeddings: inputEmbeddings,
                 mask: nil,
                 positionIds: positionIds,
-                visualMask: visualMask,
+                visualIndices: visualIndices,
                 deepstackEmbeds: deepstackEmbeds)
 
             if let lmHead {
@@ -1648,6 +1634,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
 
     public var vocabularySize: Int { config.vocabSize }
     public var kvHeads: [Int] { languageModel.kvHeads }
+    public var requiresContinuationState: Bool { true }
 
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -1659,12 +1646,15 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray,
         imageTokenIndex: Int,
         videoTokenIndex: Int
-    ) throws -> (MLXArray, MLXArray) {
+    ) throws -> (MLXArray, [Int]) {
         let imageMask = (inputIds .== MLXArray(imageTokenIndex))
         let videoMask = (inputIds .== MLXArray(videoTokenIndex))
         var specialMask = (imageMask .|| videoMask)
 
         let nImageTokens = specialMask.sum().item(Int.self)
+        // Deepstack features are indexed by token position, before the token
+        // mask is broadcast across hidden dimensions for the scatter below.
+        let visualIndices = nonZero(specialMask.asType(.bool))
 
         specialMask = expandedDimensions(specialMask, axis: -1)
         let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
@@ -1691,9 +1681,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         result = result.reshaped(originalShape)
-
-        let visualMask = specialMask.squeezed(axis: -1).asType(.bool)
-        return (result, visualMask)
+        return (result, visualIndices)
     }
 
     private func nonZero(_ mask: MLXArray) -> [Int] {
@@ -1724,93 +1712,247 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         }
     }
 
-    public func prepare(
-        _ input: LMInput,
-        cache: [any KVCache],
-        state _: LMOutput.State?,
-        windowSize _: Int?
-    ) throws -> PrepareResult {
-        let inputIds = input.text.tokens
-
+    /// The vision tower, the image→token merge, and the per-layer deepstack
+    /// features for one call's inputs. All of it is relative to the tokens in
+    /// this call, which is what lets a windowed forward slice it per chunk.
+    private struct VisionInputs {
         var pixelValues: MLXArray?
-        var imageFrames: [THW]? = nil
-        var videoFrames: [THW]? = nil
+        var imageFrames: [THW]?
+        var videoFrames: [THW]?
+        var inputEmbeddings: MLXArray?
+        var visualIndices: [Int]?
+        var deepstackEmbeds: [MLXArray]?
+    }
+
+    private func visionInputs(_ input: LMInput) throws -> VisionInputs {
+        var result = VisionInputs()
 
         let dtype = visionModel.patchEmbed.proj.weight.dtype
-
         var pixelParts: [MLXArray] = []
 
         if let image = input.image {
             pixelParts.append(image.pixels.asType(dtype))
-            imageFrames = image.frames
+            result.imageFrames = image.frames
         }
 
         if let video = input.video {
             pixelParts.append(video.pixels.asType(dtype))
-            videoFrames = video.frames
+            result.videoFrames = video.frames
         }
 
         if !pixelParts.isEmpty {
-            pixelValues = concatenated(pixelParts)
+            result.pixelValues = concatenated(pixelParts)
         }
 
-        var inputEmbeddings: MLXArray? = nil
-        var visualMask: MLXArray?
-        var deepstackEmbeds: [MLXArray]? = nil
+        guard let pixelValues = result.pixelValues,
+            let framesList = combinedFrames(
+                imageFrames: result.imageFrames, videoFrames: result.videoFrames
+            ).nilIfEmpty
+        else {
+            return result
+        }
 
-        if let pixelValues,
-            let framesList = combinedFrames(imageFrames: imageFrames, videoFrames: videoFrames)
-                .nilIfEmpty
-        {
-            let textEmbeds = languageModel.model.embedTokens(inputIds)
-            let (visionHidden, deepstackOutputs) = visionModel(pixelValues, gridTHW: framesList)
-            let mergeSize = config.visionConfiguration.spatialMergeSize
-            let splits = framesList.map { $0.product / (mergeSize * mergeSize) }
-            let splitIndices = cumulativeSplitIndices(from: splits)
-            let featureSlices = visionHidden.split(indices: splitIndices)
-            let flattenedFeatures = concatenated(featureSlices).asType(textEmbeds.dtype)
+        let inputIds = input.text.tokens
+        let textEmbeds = languageModel.model.embedTokens(inputIds)
+        let (visionHidden, deepstackOutputs) = visionModel(pixelValues, gridTHW: framesList)
+        let mergeSize = config.visionConfiguration.spatialMergeSize
+        let splits = framesList.map { $0.product / (mergeSize * mergeSize) }
+        let splitIndices = cumulativeSplitIndices(from: splits)
+        let featureSlices = visionHidden.split(indices: splitIndices)
+        let flattenedFeatures = concatenated(featureSlices).asType(textEmbeds.dtype)
 
-            let (mergedEmbeds, mask) = try mergeInputIdsWithImageFeatures(
-                imageFeatures: flattenedFeatures,
-                inputEmbeds: textEmbeds,
-                inputIds: inputIds,
-                imageTokenIndex: config.imageTokenIndex,
-                videoTokenIndex: config.videoTokenIndex)
+        let (mergedEmbeds, visualIndices) = try mergeInputIdsWithImageFeatures(
+            imageFeatures: flattenedFeatures,
+            inputEmbeds: textEmbeds,
+            inputIds: inputIds,
+            imageTokenIndex: config.imageTokenIndex,
+            videoTokenIndex: config.videoTokenIndex)
 
-            inputEmbeddings = mergedEmbeds
-            visualMask = mask
+        result.inputEmbeddings = mergedEmbeds
+        result.visualIndices = visualIndices
 
-            if !deepstackOutputs.isEmpty {
-                deepstackEmbeds = deepstackOutputs.map { layerFeatures in
-                    let splitIndices = cumulativeSplitIndices(from: splits)
-                    let slices = layerFeatures.split(indices: splitIndices)
-                    let concatenatedSlices = concatenated(slices).asType(textEmbeds.dtype)
-                    return concatenatedSlices
-                }
+        if !deepstackOutputs.isEmpty {
+            result.deepstackEmbeds = deepstackOutputs.map { layerFeatures in
+                let slices = layerFeatures.split(indices: splitIndices)
+                return concatenated(slices).asType(textEmbeds.dtype)
             }
         }
 
+        return result
+    }
+
+    public func prepare(
+        _ input: LMInput,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        windowSize: Int?
+    ) throws -> PrepareResult {
+        let inputIds = input.text.tokens
+        // Text-only follow-up processors may return rank-1 tokens. The language
+        // model and continuation slicers require [batch, sequence], so normalize
+        // before choosing a warm path rather than falling through and trapping.
+        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
+        let cacheOffset = cache.first?.offset ?? 0
+
+        // A warm cache without its anchor cannot be continued correctly: the
+        // remainder would be positioned as if the cached prefix held no images.
+        // Fail rather than silently changing the output.
+        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
+            throw ContinuationStateError.missingState(
+                model: "Qwen3VL", key: ropeDeltasKey.id)
+        }
+        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
+            throw ContinuationStateError.unsupportedBatchContinuation(model: "Qwen3VL")
+        }
+
+        let window = windowSize ?? 512
+        if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
+            cacheOffset > 0 || inputIds2D.dim(-1) > window
+        {
+            return try prepareContinuation(
+                input, inputIds: inputIds2D, cache: cache, state: state, cacheOffset: cacheOffset,
+                windowSize: window)
+        }
+
+        let vision = try visionInputs(input)
         let typedCache = castCache(cache)
 
+        // `state` is forwarded so a warm text continuation that did not take the
+        // windowed path above still anchors at the cache offset rather than zero.
         let languageOutput = languageModel(
             inputIds,
             cache: typedCache,
-            state: nil,
-            inputEmbeddings: inputEmbeddings,
+            state: state,
+            inputEmbeddings: vision.inputEmbeddings,
             mask: nil,
             positionIds: nil,
-            visualMask: visualMask,
-            deepstackEmbeds: deepstackEmbeds,
-            pixelValues: pixelValues,
-            imageGridTHW: imageFrames,
-            videoGridTHW: videoFrames)
+            visualIndices: vision.visualIndices,
+            deepstackEmbeds: vision.deepstackEmbeds,
+            pixelValues: vision.pixelValues,
+            imageGridTHW: vision.imageFrames,
+            videoGridTHW: vision.videoFrames)
 
         return .logits(languageOutput)
+    }
+
+    /// Warm, windowed continuation — the path `prepare` also uses for long cold
+    /// prompts.
+    ///
+    /// The vision tower and the image→token merge run **once** over the
+    /// remainder, and the remainder's M-RoPE positions are computed **once**
+    /// from the seeded position anchor (the cache offset plus the rope delta
+    /// carried in `state`), so a new image's diverging t/h/w indices start at
+    /// the anchor rather than at zero. The language model is then driven in
+    /// chunks of `windowSize`, bounding the full-attention scratch to
+    /// `[heads, chunk, L]` instead of `[heads, L, L]`.
+    ///
+    /// Chunking is what makes this more than a slice of the embeddings: the
+    /// visual mask and every per-layer deepstack tensor have to be sliced in
+    /// lockstep with them, the deepstack rows by visual-token count rather than
+    /// by token index.
+    ///
+    /// The returned state carries `getRopeIndex` delta − cache offset, so a
+    /// caller threading state end to end continues the next turn correctly.
+    private func prepareContinuation(
+        _ input: LMInput,
+        inputIds: MLXArray,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        cacheOffset: Int,
+        windowSize: Int
+    ) throws -> PrepareResult {
+        let remainderLength = inputIds.dim(-1)
+        precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
+
+        var anchorRopeDelta = 0
+        if let seeded = state?[ropeDeltasKey] {
+            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
+        }
+        let positionOffset = cacheOffset + anchorRopeDelta
+
+        let vision = try visionInputs(input)
+
+        let (positionIds, ropeDeltas) = Qwen3VLLanguage.getRopeIndex(
+            inputIds: inputIds,
+            imageGridTHW: vision.imageFrames,
+            videoGridTHW: vision.videoFrames,
+            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            visionStartTokenId: config.visionStartTokenId,
+            // The single-shot path forwards no attention mask; retain the same
+            // M-RoPE coordinates regardless of whether prefill is windowed.
+            attentionMask: nil,
+            positionOffset: positionOffset)
+
+        let visualIndices = vision.visualIndices ?? []
+        let typedCache = castCache(cache)
+        let step = max(1, windowSize)
+        var lastLogits = MLXArray(0)
+        var start = 0
+        var visualStart = 0
+        repeat {
+            let end = min(start + step, remainderLength)
+
+            let chunkPositions = positionIds[0..., 0..., start ..< end]
+            let chunkEmbeds = vision.inputEmbeddings?[0..., start ..< end, 0...]
+            let chunkIds = chunkEmbeds == nil ? inputIds[0..., start ..< end] : nil
+
+            var visualEnd = visualStart
+            while visualEnd < visualIndices.count, visualIndices[visualEnd] < end {
+                visualEnd += 1
+            }
+
+            let chunkVisualIndices: [Int]?
+            let chunkDeepstack: [MLXArray]?
+            if visualEnd > visualStart {
+                chunkVisualIndices = visualIndices[visualStart ..< visualEnd].map { $0 - start }
+                chunkDeepstack = vision.deepstackEmbeds?.map {
+                    $0[visualStart ..< visualEnd, 0...]
+                }
+            } else {
+                chunkVisualIndices = nil
+                chunkDeepstack = nil
+            }
+
+            let output = languageModel(
+                chunkIds,
+                cache: typedCache,
+                state: nil,
+                inputEmbeddings: chunkEmbeds,
+                mask: nil,
+                positionIds: chunkPositions,
+                visualIndices: chunkVisualIndices,
+                deepstackEmbeds: chunkDeepstack,
+                // Never the pixels: a non-nil value here clears the carried
+                // anchor and restarts positions at zero.
+                pixelValues: nil,
+                imageGridTHW: nil,
+                videoGridTHW: nil)
+
+            lastLogits = output.logits
+            if let typedCache {
+                asyncEval(typedCache)
+            }
+            visualStart = visualEnd
+            start = end
+        } while start < remainderLength
+        if let typedCache {
+            eval(typedCache)
+        }
+
+        var resumeState = LMOutput.State()
+        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
+
+        return .logits(LMOutput(logits: lastLogits, state: resumeState))
     }
 
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        precondition(
+            (cache?.first?.offset ?? 0) == 0 || state?[ropeDeltasKey] != nil,
+            "Qwen3VL cannot continue a warm prompt cache without \(ropeDeltasKey.id)")
         let typedCache = castCacheOptional(cache)
 
         let result = languageModel(
@@ -1820,7 +1962,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             inputEmbeddings: nil,
             mask: nil,
             positionIds: nil,
-            visualMask: nil,
+            visualIndices: nil,
             deepstackEmbeds: nil,
             pixelValues: nil,
             imageGridTHW: nil,

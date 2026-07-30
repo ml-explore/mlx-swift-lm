@@ -534,11 +534,13 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var maxTokens: Int? { get }
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
+    var state: LMOutput.State? { get }
     var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
     mutating func discardGeneratedToken()
 }
 
 extension TokenIteratorProtocol {
+    public var state: LMOutput.State? { nil }
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
     public mutating func discardGeneratedToken() {}
 }
@@ -791,6 +793,22 @@ public struct TokenIterator: TokenIteratorProtocol {
     }
 }
 
+/// Errors raised when speculative decoding would pair a trimmed KV cache with
+/// model state that cannot be rewound after rejected proposals.
+public enum SpeculativeDecodingError: LocalizedError, Equatable {
+    case statefulMainModel
+    case statefulDraftModel
+
+    public var errorDescription: String? {
+        switch self {
+        case .statefulMainModel:
+            "Speculative decoding does not support main models with continuation state."
+        case .statefulDraftModel:
+            "Speculative decoding does not support draft models with continuation state."
+        }
+    }
+}
+
 /// Generator of tokens using speculative decoding.
 ///
 /// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
@@ -824,7 +842,13 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     let mainModel: any LanguageModel
     let draftModel: any LanguageModel
 
-    var mainState: LMOutput.State?
+    /// Model state carried by the main model, as ``TokenIterator/state``.
+    ///
+    /// Populated by the prefill that runs during initialization, so a caller
+    /// threading state across turns can read it once the iterator is
+    /// constructed. Read it from the same iterator value you generate with:
+    /// this is a struct, so a copy would not observe later mutations.
+    public internal(set) var state: LMOutput.State?
     var mainCache: [KVCache]
     var draftCache: [KVCache]
     let quantizeKVCache: (inout [KVCache]) -> Void
@@ -867,9 +891,17 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         draftModel: any LanguageModel,
         mainCache: [KVCache]? = nil,
         draftCache: [KVCache]? = nil,
+        mainState: LMOutput.State? = nil,
         parameters: GenerateParameters,
         numDraftTokens: Int
     ) throws {
+        guard !mainModel.requiresContinuationState else {
+            throw SpeculativeDecodingError.statefulMainModel
+        }
+        guard !draftModel.requiresContinuationState else {
+            throw SpeculativeDecodingError.statefulDraftModel
+        }
+
         self.y = input.text
         self.draftY = input.text
         self.mainModel = mainModel
@@ -877,6 +909,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
         self.draftCache = draftCache ?? draftModel.newCache(parameters: parameters)
+        self.state = mainState
         guard canTrimPromptCache(self.mainCache), canTrimPromptCache(self.draftCache) else {
             throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
         }
@@ -908,7 +941,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Prefill main model
         switch try mainModel.prepare(
-            input, cache: mainCache, state: mainState, windowSize: windowSize)
+            input, cache: mainCache, state: state, windowSize: windowSize)
         {
         case .tokens(let tokens):
             y = tokens
@@ -918,7 +951,11 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             let token = sampler.sample(logits: logits)
             processor?.didSample(token: token)
             y = .init(tokens: token)
-            mainState = result.state
+            state = result.state
+            if case .some = state {
+                preconditionFailure(
+                    "A stateful main model must declare requiresContinuationState before speculative decoding.")
+            }
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
@@ -927,6 +964,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         case .tokens(let tokens):
             draftY = tokens
         case .logits(let result):
+            if case .some = result.state {
+                preconditionFailure(
+                    "A stateful draft model must declare requiresContinuationState before speculative decoding.")
+            }
             var logits = result.logits[0..., -1, 0...]
             logits = processor?.process(logits: logits) ?? logits
             let token = sampler.sample(logits: logits)
@@ -964,9 +1005,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = [y.tokens] + draftTokens
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: state)
         let mainLogits = mainResult.logits
-        mainState = mainResult.state
+        state = mainResult.state
 
         let mainTokens: MLXArray
         if var verifyProcessor = processor {

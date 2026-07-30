@@ -1588,7 +1588,12 @@ private func cacheClassName(_ cache: KVCache) -> String {
     }
 }
 
-/// A prompt cache restored from disk, including model state carried beside the KV arrays.
+/// A prompt cache and the model state that belongs with it.
+///
+/// Keeping the two together is the point: a KV cache restored without its model state positions
+/// later tokens as if the cached prefix contained no images, which changes the output silently.
+/// Pass a snapshot to a `ChatSession` initializer that accepts a `promptCache` rather than
+/// unpacking it into the `cache:` initializer.
 ///
 /// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
 /// caches before constructing multiple sessions from it.
@@ -1596,6 +1601,21 @@ public struct PromptCacheSnapshot {
     public let cache: [KVCache]
     public let metadata: [String: String]
     public let state: LMOutput.State?
+
+    /// Pair a cache with the model state that belongs with it.
+    ///
+    /// Use this when the cache was built in process — ``loadPromptCacheSnapshot(url:)`` returns a
+    /// snapshot for caches read from disk.
+    ///
+    /// - Parameters:
+    ///   - cache: the KV cache
+    ///   - metadata: optional caller metadata to carry alongside it
+    ///   - state: the model state captured with the cache, if the model produced any
+    public init(cache: [KVCache], metadata: [String: String] = [:], state: LMOutput.State? = nil) {
+        self.cache = cache
+        self.metadata = metadata
+        self.state = state
+    }
 }
 
 /// Save a pre-computed prompt cache to a file.
@@ -1656,7 +1676,15 @@ public func savePromptCache(
     try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
 }
 
-/// Load a prompt cache from a file.
+/// Load a prompt cache from a file, without model state.
+///
+/// Prefer ``loadPromptCacheSnapshot(url:)``, which also restores the model state a cache needs to
+/// be continued correctly. This tuple form has no slot for that state, so it rejects files that
+/// carry any rather than dropping it.
+///
+/// Models that position tokens from a carried anchor — the Qwen vision families, GLM-OCR — refuse
+/// to continue a warm cache that arrives without one, so a cache saved through this API cannot be
+/// used as a warm prefix for them.
 ///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file

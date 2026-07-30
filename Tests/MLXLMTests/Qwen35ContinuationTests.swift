@@ -127,21 +127,84 @@ final class Qwen35ContinuationTests: XCTestCase {
         }
         let noiseFloor = maxAbsDiff(logitsD, logitsF)
 
-        // Warm continuation via prepare, no carried state — the direct
-        // TokenIterator flow. The anchored windowed path must place the new
-        // tokens at the cache offset, not back at zero.
+        // Warm continuation via prepare with the anchor threaded — the
+        // ChatSession/TokenIterator cross-turn flow. The anchored windowed path
+        // must place the new tokens at the cache offset, not back at zero.
         let cacheW = model.newCache(parameters: nil)
-        _ = try lastLogits(
+        let (_, w1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, windowSize: nil))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: w1, windowSize: nil))
 
         let drift = maxAbsDiff(logitsW, logitsF)
         XCTAssertLessThanOrEqual(
             drift, max(noiseFloor * 10, 1e-3),
             "warm continuation diverged from full prefill (noise floor \(noiseFloor))")
+    }
+
+    /// Public callers may supply a rank-1 text remainder. It must be normalized
+    /// before warm routing rather than interpreted as a batch whose size is the
+    /// sequence length.
+    func testRank1WarmContinuationMatchesFullPrefill() throws {
+        MLXRandom.seed(41)
+        let model = try makeTinyModel()
+        let t1 = textTokens(40)
+        let t2 = textTokens(8, seed: 3)
+
+        let fullCache = model.newCache(parameters: nil)
+        let (fullLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1))),
+                cache: fullCache, state: nil, windowSize: nil))
+
+        let warmCache = model.newCache(parameters: nil)
+        let (_, state) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: t1)), cache: warmCache, state: nil, windowSize: nil))
+        let (warmLogits, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: t2[0])), cache: warmCache, state: state,
+                windowSize: nil))
+
+        XCTAssertLessThanOrEqual(
+            maxAbsDiff(warmLogits, fullLogits), 1e-3,
+            "rank-1 warm continuation diverged from full prefill")
+    }
+
+    /// A warm cache continued without its anchor must throw. The model cannot
+    /// tell whether the cached prefix held images, so continuing would risk
+    /// silently repositioning the remainder; a text-only prefix is refused too
+    /// rather than guessed at. A cold cache needs no anchor and still works.
+    func testWarmContinuationWithoutStateThrows() throws {
+        MLXRandom.seed(19)
+        let model = try makeTinyModel()
+
+        let cache = model.newCache(parameters: nil)
+        XCTAssertNoThrow(
+            try model.prepare(
+                LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
+                windowSize: 8),
+            "a long cold prefill carries no anchor and must not throw")
+
+        XCTAssertThrowsError(
+            try model.prepare(
+                LMInput(text: .init(tokens: textTokens(6, seed: 2)[0])), cache: cache, state: nil,
+                windowSize: nil)
+        ) { error in
+            guard
+                case ContinuationStateError.missingState(_, let key)? =
+                    error as? ContinuationStateError
+            else {
+                return XCTFail("expected ContinuationStateError.missingState, got \(error)")
+            }
+            XCTAssertEqual(key, "qwen35.ropeDeltas")
+            XCTAssertTrue(
+                (error as? ContinuationStateError)?.errorDescription?
+                    .contains("loadPromptCacheSnapshot") == true,
+                "error should name the snapshot loader")
+        }
     }
 
     /// With an image in turn 1, the rope delta the image accumulated must be
@@ -237,17 +300,27 @@ final class Qwen35ContinuationTests: XCTestCase {
             model.prepare(
                 LMInput(text: .init(tokens: turn3)), cache: snapshot.cache,
                 state: snapshot.state, windowSize: nil))
-        let (missingStateLogits, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: turn3)), cache: missingStateCache, state: nil,
-                windowSize: nil))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(restoredTextLogits, warmTextLogits), 1e-6,
             "disk-restored state diverged on the text continuation")
-        XCTAssertGreaterThan(
-            maxAbsDiff(missingStateLogits, warmTextLogits), 1e-3,
-            "nil-state control did not exercise the visual M-RoPE persistence bug")
+
+        // The negative control: restoring the KV arrays while dropping the state
+        // is what this whole feature exists to prevent. It used to decode at the
+        // wrong positions; it must now fail loudly instead.
+        XCTAssertThrowsError(
+            try model.prepare(
+                LMInput(text: .init(tokens: turn3)), cache: missingStateCache, state: nil,
+                windowSize: nil)
+        ) { error in
+            guard
+                case ContinuationStateError.missingState(_, let key)? =
+                    error as? ContinuationStateError
+            else {
+                return XCTFail("expected ContinuationStateError.missingState, got \(error)")
+            }
+            XCTAssertEqual(key, "qwen35.ropeDeltas")
+        }
 
         let (warmImageLogits, _) = try lastLogits(
             model.prepare(

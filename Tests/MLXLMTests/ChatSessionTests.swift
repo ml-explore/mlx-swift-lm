@@ -40,6 +40,60 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    /// A model that hands back model state on every prefill, the way the Qwen
+    /// vision families and GLM-OCR hand back an M-RoPE anchor. The state is
+    /// what a session has to carry across turns and persist with its cache;
+    /// this stands in for a VLM without needing image inputs.
+    private final class StateProducingModel: Module, LanguageModel, KVCacheDimensionProvider {
+        static let anchorKey = LMOutput.Key<MLXArray>("test.ropeDeltas")
+
+        @ModuleInfo var inner: Gemma3TextModel
+
+        var kvHeads: [Int] { (inner as? KVCacheDimensionProvider)?.kvHeads ?? [] }
+        var requiresContinuationState: Bool { true }
+
+        init(_ inner: Gemma3TextModel) {
+            self.inner = inner
+        }
+
+        private func batched(_ tokens: MLXArray) -> MLXArray {
+            tokens.ndim == 1 ? tokens[.newAxis, 0...] : tokens
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        ) throws -> PrepareResult {
+            let logits = inner(batched(input.text.tokens), cache: cache.isEmpty ? nil : cache)
+            // Carry a seeded anchor forward, or start one at zero — the shape
+            // of every wired model's cold prefill.
+            var produced = LMOutput.State()
+            produced[Self.anchorKey] = state?[Self.anchorKey] ?? MLXArray([Int32(0)])
+            return .logits(LMOutput(logits: logits, state: produced))
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            LMOutput(logits: inner(batched(input.tokens), cache: cache), state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            inner.newCache(parameters: parameters)
+        }
+    }
+
+    private static func makeStateProducingModel() -> ModelContext {
+        let base = makeModel()
+        guard let inner = base.model as? Gemma3TextModel else {
+            fatalError("expected the test model to be a Gemma3TextModel")
+        }
+        return .init(
+            configuration: base.configuration,
+            model: StateProducingModel(inner),
+            processor: base.processor,
+            tokenizer: base.tokenizer)
+    }
+
     private actor DraftModelLoadCounter {
         private var count = 0
 
@@ -618,6 +672,98 @@ public class ChatSessionTests: XCTestCase {
         let restoredState = try XCTUnwrap(restored.state?[stateKey])
 
         XCTAssertTrue(allClose(restoredState, stateValue, rtol: 0, atol: 0).item(Bool.self))
+    }
+
+    // MARK: - Carrying model state
+
+    /// Stateful continuation models cannot safely rewind arbitrary model state
+    /// when speculative proposals are rejected, so the session must use normal
+    /// generation without loading a draft model.
+    func testSpeculativeDecodingFallsBackForStatefulModel() async throws {
+        let context = Self.makeStateProducingModel()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(to: "hello") {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+        XCTAssertNil(try XCTUnwrap(info).speculativeDecodingTelemetry)
+
+        // A second normal turn must succeed with the carried anchor.
+        _ = try await session.respond(to: "hello again")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await session.saveCache(to: url)
+
+        let restored = try loadPromptCacheSnapshot(url: url)
+        XCTAssertNotNil(
+            restored.state?[StateProducingModel.anchorKey],
+            "the session dropped the model state produced by its turns")
+    }
+
+    /// The end-to-end path the snapshot API exists for: a session that carries
+    /// model state saves it with its cache, and a new session restored from
+    /// that snapshot keeps generating.
+    func testStateProducingSessionSurvivesSaveAndRestore() async throws {
+        let context = Self.makeStateProducingModel()
+        let session = ChatSession(context, generateParameters: generationParameters)
+        _ = try await session.respond(to: "hello")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await session.saveCache(to: url)
+
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        XCTAssertNotNil(
+            snapshot.state?[StateProducingModel.anchorKey],
+            "saveCache dropped the model state")
+
+        let restored = ChatSession(
+            Self.makeStateProducingModel(), promptCache: snapshot,
+            generateParameters: generationParameters)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    /// A snapshot can be built in process, not only read from disk, so a caller
+    /// holding a cache and its state has a way to keep the two together.
+    func testSessionAcceptsInProcessPromptCacheSnapshot() async throws {
+        let context = Self.makeStateProducingModel()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+
+        // Warm a cache directly, the way a caller building a prefix cache in
+        // process would, and pair it with its state without going through disk.
+        let cache = context.model.newCache(parameters: parameters)
+        let input = try await context.processor.prepare(
+            input: UserInput(chat: [.user("cached prefix")]))
+        let iterator = try TokenIterator(
+            input: input, model: context.model, cache: cache, parameters: parameters)
+        XCTAssertTrue(cache.contains { $0.offset > 0 })
+
+        let snapshot = PromptCacheSnapshot(cache: cache, state: iterator.state)
+        XCTAssertNotNil(snapshot.state?[StateProducingModel.anchorKey])
+
+        let restored = ChatSession(
+            context, promptCache: snapshot, generateParameters: generationParameters)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
     }
 
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {

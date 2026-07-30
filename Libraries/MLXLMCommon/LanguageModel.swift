@@ -288,12 +288,19 @@ public protocol LanguageModel: BaseLanguageModel {
     /// Models may implement this simplified interface if they do not produce any ``LMOutput/State``
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
 
+    /// Whether the cache must always be paired with ``LMOutput/state`` to
+    /// continue correctly. Stateful models are ineligible for speculative
+    /// decoding until verifier-state rollback is implemented.
+    var requiresContinuationState: Bool { get }
+
     /// create a new array of ``KVCache``: automatic implementation if self
     /// implements ``KVCacheDimensionProvider``
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
 extension LanguageModel {
+    public var requiresContinuationState: Bool { false }
+
     public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
     {

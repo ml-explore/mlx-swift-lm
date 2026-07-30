@@ -346,7 +346,7 @@ private enum Language {
 
         public func callAsFunction(
             _ inputs: MLXArray?, cache: [KVCache]? = nil, state: LMOutput.State? = nil,
-            inputEmbedding: MLXArray? = nil
+            inputEmbedding: MLXArray? = nil, positionIds providedPositionIds: MLXArray? = nil
         ) -> LMOutput {
             let state = state ?? .init()
             var positionIds: MLXArray? = nil
@@ -358,35 +358,41 @@ private enum Language {
                 cacheOffset = 0
             }
 
-            if let storedPositionIds = state[precomputedPositionIdsKey] {
-                let seqLen: Int
-                if let inputEmbedding {
-                    seqLen = inputEmbedding.dim(inputEmbedding.ndim - 2)
-                } else if let inputs {
-                    seqLen = inputs.dim(inputs.ndim - 1)
-                } else {
-                    seqLen = 0
-                }
+            let seqLen: Int
+            if let inputEmbedding {
+                seqLen = inputEmbedding.dim(inputEmbedding.ndim - 2)
+            } else if let inputs {
+                seqLen = inputs.dim(inputs.ndim - 1)
+            } else {
+                seqLen = 0
+            }
 
-                let storedLen = storedPositionIds.dim(2)
-                if cacheOffset + seqLen <= storedLen {
-                    // Prefill: use stored M-RoPE position IDs
-                    positionIds =
-                        storedPositionIds[
-                            0..., 0..., cacheOffset ..< (cacheOffset + seqLen)]
-                } else {
-                    // Autoregressive: compute sequential positions using rope_deltas
-                    let delta = state[ropeDeltasKey] ?? MLXArray(Int32(0))
-                    let batchSize = inputEmbedding?.dim(0) ?? inputs?.dim(0) ?? 1
-                    var posArrays = [MLXArray]()
-                    for _ in 0 ..< 3 {
-                        let pos = MLXArray(Int32(cacheOffset) ..< Int32(cacheOffset + seqLen))
-                            .expandedDimensions(axis: 0)
-                        let tiledPos = tiled(pos, repetitions: [batchSize, 1])
-                        posArrays.append((tiledPos + delta).expandedDimensions(axis: 0))
-                    }
-                    positionIds = concatenated(posArrays, axis: 0)
+            let storedPositionIds = state[precomputedPositionIdsKey]
+            let storedCoversThisCall =
+                storedPositionIds.map { cacheOffset + seqLen <= $0.dim(2) } ?? false
+
+            if let providedPositionIds {
+                // The caller computed anchored positions (windowed prefill or a
+                // warm continuation) — use them as given.
+                positionIds = providedPositionIds
+            } else if let storedPositionIds, storedCoversThisCall {
+                // Prefill: use stored M-RoPE position IDs
+                positionIds =
+                    storedPositionIds[
+                        0..., 0..., cacheOffset ..< (cacheOffset + seqLen)]
+            } else if let delta = state[ropeDeltasKey] {
+                // Autoregressive: sequential positions anchored by rope_deltas.
+                // Reachable with the delta alone, so a resume state that carries
+                // only the anchor still decodes at the right positions.
+                let batchSize = inputEmbedding?.dim(0) ?? inputs?.dim(0) ?? 1
+                var posArrays = [MLXArray]()
+                for _ in 0 ..< 3 {
+                    let pos = MLXArray(Int32(cacheOffset) ..< Int32(cacheOffset + seqLen))
+                        .expandedDimensions(axis: 0)
+                    let tiledPos = tiled(pos, repetitions: [batchSize, 1])
+                    posArrays.append((tiledPos + delta).expandedDimensions(axis: 0))
                 }
+                positionIds = concatenated(posArrays, axis: 0)
             }
 
             var out = model(
@@ -879,6 +885,7 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
 
     public var vocabularySize: Int { config.baseConfiguration.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
+    public var requiresContinuationState: Bool { true }
 
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -892,8 +899,14 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
 
     /// Compute 3D M-RoPE position IDs for prefill with images.
     /// Returns position_ids (3, batch, seq) and rope_deltas.
+    ///
+    /// `positionOffset` is the position anchor: the first token of `inputIds`
+    /// is placed there rather than at zero, so a remainder appended to a warm
+    /// cache continues from where the cached prefix left off (cache offset plus
+    /// the rope delta the cached images accumulated). The returned delta is in
+    /// the same anchored frame.
     private func getRopeIndex(
-        inputIds: MLXArray, imageGridThw: [THW]?
+        inputIds: MLXArray, imageGridThw: [THW]?, positionOffset: Int = 0
     ) -> (MLXArray, MLXArray) {
         let batchSize = inputIds.dim(0)
         let seqLength = inputIds.dim(1)
@@ -902,11 +915,13 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
 
         guard let imageGridThw, !imageGridThw.isEmpty else {
             // Text only: sequential positions tiled 3x
-            let positions = MLXArray(0 ..< Int32(seqLength)).expandedDimensions(axis: 0)
+            let positions = MLXArray(
+                Int32(positionOffset) ..< Int32(positionOffset + seqLength)
+            ).expandedDimensions(axis: 0)
             let positionIds = tiled(
                 broadcast(positions, to: [batchSize, seqLength]).expandedDimensions(axis: 0),
                 repetitions: [3, 1, 1])
-            let deltas = MLXArray(Int32(0))
+            let deltas = MLXArray(Int32(positionOffset))
             return (positionIds, deltas)
         }
 
@@ -927,7 +942,9 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
             dimH.reserveCapacity(seqLength)
             dimW.reserveCapacity(seqLength)
             var st = 0
-            var lastMax: Int32 = -1
+            // Seeded at the anchor, so both the text runs and the images'
+            // diverging t/h/w indices below start from it rather than zero.
+            var lastMax: Int32 = Int32(positionOffset) - 1
 
             // Append sequential text positions to all 3 dimensions
             let appendTextPositions = { (count: Int) in
@@ -991,10 +1008,13 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     private func inputEmbeddings(inputIds: MLXArray, pixelValues: MLXArray?, frames: [THW]?)
-        -> (MLXArray, MLXArray?, MLXArray?)
+        -> (MLXArray, MLXArray?, MLXArray)
     {
         guard let pixelValues, let frames else {
-            return (languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis]), nil, nil)
+            // A text-only prompt accumulates no M-RoPE drift, but its anchor is
+            // still zero rather than absent: a later warm turn needs an anchor,
+            // and a missing one is how a state-dropping restore is detected.
+            return (languageModel.model.embedTokens(inputIds), nil, MLXArray(Int32(0)))
         }
 
         let inputEmbeds = languageModel.model.embedTokens(inputIds)
@@ -1016,24 +1036,50 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         return (merged, positionIds, ropeDeltas)
     }
 
+    /// The pixels and grids for one call's inputs, in the dtype the vision
+    /// tower expects.
+    private func visionInputs(_ input: LMInput) -> (pixels: MLXArray?, frames: [THW]?) {
+        guard let imagePixels = input.image?.pixels, let imageFrames = input.image?.frames,
+            !imageFrames.isEmpty
+        else {
+            return (nil, nil)
+        }
+        let dtype = visionModel.patchEmbed.proj.weight.dtype
+        return (imagePixels.asType(dtype), imageFrames)
+    }
+
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int?
     ) throws
         -> PrepareResult
     {
-        let dtype = visionModel.patchEmbed.proj.weight.dtype
+        let inputIds = input.text.tokens
+        let cacheOffset = cache.first?.offset ?? 0
 
-        var allPixels: MLXArray?
-        var allFrames: [THW] = []
-
-        if let imagePixels = input.image?.pixels, let imageFrames = input.image?.frames {
-            allPixels = imagePixels.asType(dtype)
-            allFrames.append(contentsOf: imageFrames)
+        // A warm cache without its anchor cannot be continued correctly: the
+        // remainder would be positioned as if the cached prefix held no images.
+        // Fail rather than silently changing the output.
+        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
+            throw ContinuationStateError.missingState(
+                model: "GlmOcr", key: ropeDeltasKey.id)
         }
 
+        let window = windowSize ?? 512
+        let tokenCount = inputIds.dim(-1)
+        if inputIds.ndim <= 2, tokenCount > 0, cacheOffset > 0 || tokenCount > window {
+            return try prepareContinuation(
+                input, cache: cache, state: state, cacheOffset: cacheOffset, windowSize: window)
+        }
+
+        let (allPixels, allFrames) = visionInputs(input)
+
+        // Both the image merge and getRopeIndex index a [batch, seq] layout,
+        // and a warm text turn arrives already batched — normalize once here
+        // rather than inflating the rank on the text-only path.
+        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
+
         let (inputEmbeddings, positionIds, ropeDeltas) = self.inputEmbeddings(
-            inputIds: input.text.tokens, pixelValues: allPixels,
-            frames: allFrames.isEmpty ? nil : allFrames)
+            inputIds: inputIds2D, pixelValues: allPixels, frames: allFrames)
 
         var state = LMOutput.State()
         state[precomputedPositionIdsKey] = positionIds
@@ -1045,10 +1091,85 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         return .logits(result)
     }
 
+    /// Warm, windowed continuation — the path `prepare` also uses for long cold
+    /// prompts.
+    ///
+    /// The vision tower and the image→token merge run **once** over the
+    /// remainder, and the remainder's M-RoPE positions are computed **once**
+    /// from the seeded position anchor (the cache offset plus the rope delta
+    /// carried in `state`), so a new image's diverging t/h/w indices start at
+    /// the anchor rather than at zero. The language model is then driven in
+    /// chunks of `windowSize`, bounding the attention scratch to
+    /// `[heads, chunk, L]` instead of `[heads, L, L]`.
+    ///
+    /// The returned state carries `getRopeIndex` delta − cache offset, so a
+    /// caller threading state end to end continues the next turn correctly.
+    private func prepareContinuation(
+        _ input: LMInput,
+        cache: [any KVCache],
+        state: LMOutput.State?,
+        cacheOffset: Int,
+        windowSize: Int
+    ) throws -> PrepareResult {
+        let rawInputIds = input.text.tokens
+        // getRopeIndex and the image merge both index a [batch, seq] layout.
+        let inputIds = rawInputIds.ndim == 1 ? rawInputIds[.newAxis, 0...] : rawInputIds
+        let remainderLength = inputIds.dim(-1)
+        precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
+
+        var anchorRopeDelta = 0
+        if let seeded = state?[ropeDeltasKey] {
+            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
+        }
+        let positionOffset = cacheOffset + anchorRopeDelta
+
+        let (pixels, frames) = visionInputs(input)
+
+        var embeds = languageModel.model.embedTokens(inputIds)
+        if let pixels, let frames {
+            var hiddenStates = visionModel(pixels, frames: frames)
+            if hiddenStates.ndim == 2 {
+                hiddenStates = hiddenStates[.newAxis, 0..., 0...]
+            }
+            embeds = QwenVL.mergeInputIdsWithImageFeatures(
+                inputIds: inputIds, inputEmbeds: embeds, imageFeatures: hiddenStates,
+                imageTokenId: config.baseConfiguration.imageTokenId,
+                videoTokenId: config.baseConfiguration.videoTokenId)
+        }
+
+        let (positionIds, ropeDeltas) = getRopeIndex(
+            inputIds: inputIds, imageGridThw: frames, positionOffset: positionOffset)
+
+        let step = max(1, windowSize)
+        var lastLogits = MLXArray(0)
+        var start = 0
+        repeat {
+            let end = min(start + step, remainderLength)
+            let output = languageModel(
+                nil,
+                cache: cache,
+                state: nil,
+                inputEmbedding: embeds[0..., start ..< end, 0...],
+                positionIds: positionIds[0..., 0..., start ..< end])
+            lastLogits = output.logits
+            asyncEval(cache)
+            start = end
+        } while start < remainderLength
+        eval(cache)
+
+        var resumeState = LMOutput.State()
+        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
+
+        return .logits(LMOutput(logits: lastLogits, state: resumeState))
+    }
+
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        languageModel(input.tokens, cache: cache, state: state)
+        precondition(
+            (cache?.first?.offset ?? 0) == 0 || state?[ropeDeltasKey] != nil,
+            "GlmOcr cannot continue a warm prompt cache without \(ropeDeltasKey.id)")
+        return languageModel(input.tokens, cache: cache, state: state)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

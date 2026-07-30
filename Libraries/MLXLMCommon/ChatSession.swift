@@ -321,13 +321,20 @@ public final class ChatSession {
     /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
     /// > KV state, producing incoherent output.
     ///
+    /// > Important: Prefer the initializer that takes a `promptCache`. A cache and the model state
+    /// > that belongs with it must travel together: passing `cache: snapshot.cache` while dropping
+    /// > `snapshot.state` compiles, but positions later tokens as if the cached prefix contained no
+    /// > images. Models that carry a position anchor throw ``ContinuationStateError`` rather than
+    /// > continue without it.
+    ///
     /// - Parameters:
     ///   - model: the ``ModelContainer``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
-    ///     matching the given model
-    ///   - state: optional model state loaded with ``loadPromptCacheSnapshot(url:)``
+    ///   - cache: a non-empty `[KVCache]`, matching the given model — from
+    ///     ``loadPromptCacheSnapshot(url:)`` if it was saved to disk
+    ///   - state: the model state captured with that cache; pass `snapshot.state` whenever the
+    ///     cache came from a snapshot
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -369,13 +376,20 @@ public final class ChatSession {
     /// > re-tokenized on each call to ``respond(to:role:images:videos:audios:)`` without matching
     /// > KV state, producing incoherent output.
     ///
+    /// > Important: Prefer the initializer that takes a `promptCache`. A cache and the model state
+    /// > that belongs with it must travel together: passing `cache: snapshot.cache` while dropping
+    /// > `snapshot.state` compiles, but positions later tokens as if the cached prefix contained no
+    /// > images. Models that carry a position anchor throw ``ContinuationStateError`` rather than
+    /// > continue without it.
+    ///
     /// - Parameters:
     ///   - model: the ``ModelContext``
     ///   - instructions: optional system instructions for the session — leave `nil` if the
     ///     cache already encodes a system prompt
-    ///   - cache: a non-empty `[KVCache]` previously loaded with ``loadPromptCache(url:)``,
-    ///     matching the given model
-    ///   - state: optional model state loaded with ``loadPromptCacheSnapshot(url:)``
+    ///   - cache: a non-empty `[KVCache]`, matching the given model — from
+    ///     ``loadPromptCacheSnapshot(url:)`` if it was saved to disk
+    ///   - state: the model state captured with that cache; pass `snapshot.state` whenever the
+    ///     cache came from a snapshot
     ///   - speculativeDecoding: optional speculative decoding configuration for faster generation
     ///   - generateParameters: parameters that control generation
     ///   - processing: media processing configuration for images/videos
@@ -406,7 +420,14 @@ public final class ChatSession {
         self.speculativeDecoding = speculativeDecoding
     }
 
-    /// Initialize the `ChatSession` with a prompt cache loaded from disk.
+    /// Initialize the `ChatSession` with a prompt cache and the model state that belongs with it.
+    ///
+    /// This is the preferred way to start a session from a saved cache: the snapshot keeps the KV
+    /// arrays and the model state together, so neither can be dropped. Read one from disk with
+    /// ``loadPromptCacheSnapshot(url:)``, or build one in process with
+    /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
+    ///
+    /// Models that do not carry model state simply ignore it, so this works for any model.
     public convenience init(
         _ model: ModelContainer,
         instructions: String? = nil,
@@ -431,7 +452,14 @@ public final class ChatSession {
             toolDispatch: toolDispatch)
     }
 
-    /// Initialize the `ChatSession` with a prompt cache loaded from disk.
+    /// Initialize the `ChatSession` with a prompt cache and the model state that belongs with it.
+    ///
+    /// This is the preferred way to start a session from a saved cache: the snapshot keeps the KV
+    /// arrays and the model state together, so neither can be dropped. Read one from disk with
+    /// ``loadPromptCacheSnapshot(url:)``, or build one in process with
+    /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
+    ///
+    /// Models that do not carry model state simply ignore it, so this works for any model.
     public convenience init(
         _ model: ModelContext,
         instructions: String? = nil,
@@ -444,10 +472,9 @@ public final class ChatSession {
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
         self.init(
-            model,
+            ModelContainer(context: model),
             instructions: instructions,
-            cache: promptCache.cache,
-            state: promptCache.state,
+            promptCache: promptCache,
             speculativeDecoding: speculativeDecoding,
             generateParameters: generateParameters,
             processing: processing,
@@ -739,6 +766,7 @@ public final class ChatSession {
                         }
 
                         if let speculativeDecoding,
+                            !model.requiresContinuationState,
                             lmState == nil,
                             input.image == nil,
                             input.video == nil,
@@ -795,6 +823,11 @@ public final class ChatSession {
                                     }
 
                                     (genStream, genTask) = try defaultGenerationWithoutDraft()
+                                } else if draftModel.requiresContinuationState {
+                                    // A speculative rejection trims KV rows but cannot rewind
+                                    // arbitrary model state. Use the normal iterator rather
+                                    // than pairing a trimmed draft cache with stale state.
+                                    (genStream, genTask) = try defaultGenerationWithoutDraft()
                                 } else {
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
@@ -820,9 +853,16 @@ public final class ChatSession {
                                         draftModel: draftModel,
                                         mainCache: kvCache,
                                         draftCache: draftCache,
+                                        mainState: lmState,
                                         parameters: generateParameters,
                                         numDraftTokens: speculativeDecoding.numDraftTokens
                                     )
+                                    // Carry the main model's post-prefill state,
+                                    // as the standard path does. Without this a
+                                    // model that positions from a rope delta
+                                    // would lose its anchor after a speculative
+                                    // turn and mis-position the next one.
+                                    lmState = iterator.state
 
                                     (genStream, genTask) = MLXLMCommon.generateTask(
                                         promptTokenCount: input.text.tokens.size,

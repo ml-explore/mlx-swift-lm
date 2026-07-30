@@ -902,6 +902,7 @@ public class Qwen35: Module, VLMModel {
     }
 
     public var vocabularySize: Int { config.vocabSize }
+    public var requiresContinuationState: Bool { true }
 
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -1028,6 +1029,11 @@ public class Qwen35: Module, VLMModel {
         windowSize: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
+        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
+        let cacheOffset = faCacheOffset(cache)
+        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
+            throw ContinuationStateError.unsupportedBatchContinuation(model: "Qwen35")
+        }
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
@@ -1039,11 +1045,11 @@ public class Qwen35: Module, VLMModel {
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
         let window = windowSize ?? 512
-        if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
-            faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
+        if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
+            cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
             return try prepareContinuation(
-                input, cache: cache, state: state, windowSize: window)
+                input, inputIds: inputIds2D, cache: cache, state: state, windowSize: window)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1094,17 +1100,25 @@ public class Qwen35: Module, VLMModel {
     /// flat-continuation branch. Decode stays caller-owned.
     private func prepareContinuation(
         _ input: LMInput,
+        inputIds: MLXArray,
         cache: [any KVCache],
         state: LMOutput.State?,
         windowSize: Int
     ) throws -> PrepareResult {
-        let inputIds = input.text.tokens
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
 
         // The Position Anchor: token offset already in the cache (P) plus the
         // rope delta the cached images accumulated, carried in `state`.
         let cacheOffset = faCacheOffset(cache)
+        // A warm cache without its anchor cannot be continued correctly: the
+        // remainder would be positioned as if the cached prefix held no images.
+        // Fail rather than silently changing the output. A cold cache (P = 0)
+        // needs no anchor, so long cold prefills still route through here.
+        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
+            throw ContinuationStateError.missingState(
+                model: "Qwen35", key: ropeDeltasKey.id)
+        }
         var anchorRopeDelta = 0
         if let seeded = state?[ropeDeltasKey] {
             anchorRopeDelta = seeded.asType(.int32).item(Int.self)
@@ -1183,6 +1197,9 @@ public class Qwen35: Module, VLMModel {
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        precondition(
+            faCacheOffset(cache ?? []) == 0 || state?[ropeDeltasKey] != nil,
+            "Qwen35 cannot continue a warm prompt cache without \(ropeDeltasKey.id)")
         let typedCache = castCacheOptional(cache)
         let result = languageModel(
             input.tokens,
