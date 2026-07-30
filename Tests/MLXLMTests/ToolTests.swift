@@ -514,6 +514,52 @@ struct ToolTests {
         #expect(toolCall.function.arguments["unit"] == .string("celsius"))
     }
 
+    @Test("Test Pythonic Tool Call Parser - Object Wrapper Argument (LFM2)")
+    func testPythonicParserObjectWrapperArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // LFM2 emits the full parameter object under a `properties` wrapper key.
+        // The object also contains a comma the old `[^,\)]+` value regex truncated on.
+        let content =
+            "<|tool_call_start|>[get_weather(properties={\"location\": \"Tokyo\", \"unit\": \"celsius\"})]<|tool_call_end|>"
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "get_weather",
+                    "parameters": [
+                        "properties": [
+                            "location": ["type": "string"],
+                            "unit": ["type": "string"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Object-Valued Argument Preserved")
+    func testPythonicParserObjectValuedArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // A non-wrapper key is not unwrapped; the object value (with its inner
+        // comma) is parsed intact rather than truncated.
+        let content =
+            "<|tool_call_start|>[configure(settings={\"width\": 10, \"height\": 20})]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "configure")
+        #expect(
+            toolCall.function.arguments["settings"]
+                == .object(["width": .int(10), "height": .int(20)]))
+    }
+
     @Test("Test Pythonic Tool Call Parser - Double Quotes")
     func testPythonicParserDoubleQuotes() throws {
         let parser = PythonicToolCallParser(
@@ -1064,6 +1110,10 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
+
+        // Nanbeige models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "nanbeige") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "NANBEIGE") == .xmlFunction)
 
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)

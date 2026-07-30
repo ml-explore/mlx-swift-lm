@@ -216,6 +216,12 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .xmlFunction
         }
 
+        // Nanbeige4.2+ — chat template supports XML and JSON; XML is the trained
+        // default and the model card's recommendation for agentic use
+        if type.hasPrefix("nanbeige") {
+            return .xmlFunction
+        }
+
         // Mistral3 family (mistral3, mistral3_text, etc.)
         if type.hasPrefix("mistral3") {
             return .mistral

@@ -20,10 +20,22 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
     /// Stateful across passes, hence a class; calls are serialized by the
     /// session's generation task.
     private final class ScriptedToolCallTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
-        private let toolCallScript =
-            #"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#
+        private struct MissingUserQuery: Error {}
+
+        private let requiresUserQuery: Bool
+        private let toolCallPrefix: String
         private let plainScript = "It is sunny in Paris today."
         private var pass = 0
+
+        init(requiresUserQuery: Bool = true, toolCallPrefix: String = "") {
+            self.requiresUserQuery = requiresUserQuery
+            self.toolCallPrefix = toolCallPrefix
+        }
+
+        private var toolCallScript: String {
+            toolCallPrefix
+                + #"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#
+        }
 
         let vocabularySize = 100
         private let _eosTokenId = 101
@@ -40,6 +52,12 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             tools: [[String: any Sendable]]?,
             additionalContext: [String: any Sendable]?
         ) throws -> [Int] {
+            guard
+                !requiresUserQuery
+                    || messages.contains(where: { $0["role"] as? String == "user" })
+            else {
+                throw MissingUserQuery()
+            }
             pass += 1
             return encode(text: "")
         }
@@ -128,6 +146,21 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             tokenizer: tokenizer)
     }
 
+    private static let weatherTool: ToolSpec = [
+        "type": "function",
+        "function": [
+            "name": "get_weather",
+            "description": "Get the weather for a city",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "city": ["type": "string"] as [String: any Sendable]
+                ] as [String: any Sendable],
+                "required": ["city"],
+            ] as [String: any Sendable],
+        ] as [String: any Sendable],
+    ]
+
     func testRestartedGenerationSeesAssistantToolCallsBeforeResults() async throws {
         let log = MessageLog()
         let dispatched = DispatchLog()
@@ -136,25 +169,10 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             tokenizer: tokenizer,
             messageGenerator: RecordingMessageGenerator(log: log))
 
-        let weatherTool: ToolSpec = [
-            "type": "function",
-            "function": [
-                "name": "get_weather",
-                "description": "Get the weather for a city",
-                "parameters": [
-                    "type": "object",
-                    "properties": [
-                        "city": ["type": "string"] as [String: any Sendable]
-                    ] as [String: any Sendable],
-                    "required": ["city"],
-                ] as [String: any Sendable],
-            ] as [String: any Sendable],
-        ]
-
         let session = ChatSession(
             context,
             generateParameters: GenerateParameters(maxTokens: 24),
-            tools: [weatherTool],
+            tools: [Self.weatherTool],
             toolDispatch: { call in
                 dispatched.record(call)
                 return #"{"forecast": "sunny"}"#
@@ -174,6 +192,9 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         let passes = log.all
         XCTAssertGreaterThanOrEqual(passes.count, 2)
         let restart = try XCTUnwrap(passes.last)
+        XCTAssertTrue(
+            restart.contains { $0.role == .user },
+            "conversation-aware templates must retain the user query on tool continuation")
 
         let toolIndex = try XCTUnwrap(
             restart.lastIndex { $0.role == .tool },
@@ -194,5 +215,43 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         XCTAssertEqual(toolCalls.count, 1)
         let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: any Sendable])
         XCTAssertEqual(function["name"] as? String, "get_weather")
+    }
+
+    func testRawCacheToolRestartPreservesLegacyFragmentShape() async throws {
+        let log = MessageLog()
+        let tokenizer = ScriptedToolCallTokenizer(
+            requiresUserQuery: false,
+            toolCallPrefix: "Checking the tool. ")
+        let context = Self.makeContext(
+            tokenizer: tokenizer,
+            messageGenerator: RecordingMessageGenerator(log: log))
+        let parameters = GenerateParameters(maxTokens: 40)
+        let rawCache = context.model.newCache(parameters: parameters)
+        let session = ChatSession(
+            context,
+            cache: rawCache,
+            generateParameters: parameters,
+            tools: [Self.weatherTool],
+            toolDispatch: { _ in #"{"forecast": "sunny"}"# })
+
+        _ = try await session.respond(to: "What's the weather in Paris?")
+
+        let passes = log.all
+        XCTAssertGreaterThanOrEqual(passes.count, 2)
+        let restart = try XCTUnwrap(passes.last)
+        XCTAssertFalse(
+            restart.contains { $0.role == .user },
+            "raw KV caches cannot reconstruct and replay their original transcript")
+
+        let toolIndex = try XCTUnwrap(restart.lastIndex { $0.role == .tool })
+        guard toolIndex > 0 else {
+            XCTFail("tool result was rendered with no preceding assistant message")
+            return
+        }
+        XCTAssertEqual(restart[toolIndex - 1].role, .assistant)
+        XCTAssertEqual(
+            restart[toolIndex - 1].content,
+            "",
+            "generated text is already represented by the raw cache and must not be replayed")
     }
 }

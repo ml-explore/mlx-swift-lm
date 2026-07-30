@@ -883,6 +883,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - draftModel: the draft ``LanguageModel`` (must share the same tokenizer)
     ///   - mainCache: optional ``KVCache`` for the main model
     ///   - draftCache: optional ``KVCache`` for the draft model
+    ///   - mainState: optional model state that belongs with `mainCache`
     ///   - parameters: the generation parameters
     ///   - numDraftTokens: number of tokens the draft model proposes per round
     public init(
@@ -1660,6 +1661,32 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     )
 }
 
+/// Internal variant used by `ChatSession` to keep its token-prefix record in
+/// lockstep with the KV cache.
+func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming TOKEN,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
+) -> (AsyncStream<Generation>, Task<[Int], Never>) {
+    generateLoopTask(
+        promptTokenCount: promptTokenCount,
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: RecordingGeneratedTokens(),
+        handler: TextToolTokenLoopHandler(
+            tokenizer: tokenizer,
+            stopStrings: modelConfiguration.effectiveStopStrings,
+            format: modelConfiguration.toolCallFormat ?? .json,
+            tools: tools
+        )
+    )
+}
+
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
 ///
 /// This is similar to `generate(input:cache:parameters:context:)`, but yields raw token IDs instead of decoded text/tool calls.
@@ -1905,6 +1932,30 @@ public func generateTokenTask(
     )
 }
 
+private protocol GeneratedTokenCollector: Sendable {
+    associatedtype Result: Sendable
+
+    mutating func record(_ token: Int)
+    consuming func result() -> Result
+}
+
+private struct IgnoringGeneratedTokens: GeneratedTokenCollector {
+    mutating func record(_ token: Int) {}
+    consuming func result() {}
+}
+
+private struct RecordingGeneratedTokens: GeneratedTokenCollector {
+    private var tokens: [Int] = []
+
+    mutating func record(_ token: Int) {
+        tokens.append(token)
+    }
+
+    consuming func result() -> [Int] {
+        tokens
+    }
+}
+
 private func generateLoopTask<Handler: TokenLoopHandler>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
@@ -1914,17 +1965,41 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     includeStopToken: Bool = false,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Void, Never>) {
+    generateLoopTask(
+        promptTokenCount: promptTokenCount,
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        includeStopToken: includeStopToken,
+        tokenCollector: IgnoringGeneratedTokens(),
+        handler: handler)
+}
 
+private func generateLoopTask<
+    Handler: TokenLoopHandler, Collector: GeneratedTokenCollector
+>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming any TokenIteratorProtocol,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    includeStopToken: Bool = false,
+    tokenCollector: consuming Collector,
+    handler: consuming Handler
+) -> (AsyncStream<Handler.Output>, Task<Collector.Result, Never>) {
     let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
 
     let iterator = SendableBox(iterator)
     let handler = SendableBox(handler)
+    let tokenCollector = consume tokenCollector
 
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
         let performIteration = {
             var iterator = iterator.consume()
             var handler = handler.consume()
+            var tokenCollector = tokenCollector
 
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
@@ -1945,6 +2020,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             // settles any in-flight evaluation at the end of the task body.
             tokenLoop: while !Task.isCancelled {
                 guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
+                tokenCollector.record(token)
 
                 if promptTime == 0 {
                     let now = Date.timeIntervalSinceReferenceDate
@@ -2020,14 +2096,16 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
 
             // Finalize the stream
             continuation.finish()
+
+            return tokenCollector.result()
         }
 
         if let ticket = wiredMemoryTicket {
-            await WiredMemoryTicket.withWiredLimit(ticket) {
+            return await WiredMemoryTicket.withWiredLimit(ticket) {
                 performIteration()
             }
         } else {
-            performIteration()
+            return performIteration()
         }
     }
 

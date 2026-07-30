@@ -57,6 +57,15 @@ private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let target31BRevision = "fe92291011fc698452920c0b558b52f790dff711"
 private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 
+/// The 31B target+drafter pair is ~35GB. These diagnostics only run when both
+/// snapshots are already in the local HF cache, matching the gating in
+/// `MTPAcceptanceRateTests` / `MTPQuantizationOnsetTests`. This keeps a cold CI
+/// run from spending its entire time budget downloading the pair; warm the
+/// cache out-of-band (or run locally after a first fetch) to exercise them.
+private let has31BPair: Bool =
+    hfSnapshotDir(modelId: target31BModelId, revision: target31BRevision) != nil
+    && hfSnapshotDir(modelId: drafter31BModelId, revision: drafter31BRevision) != nil
+
 /// Shared downloader for the 31B target+drafter pair. Fetches to the local
 /// HF cache on first use (~35GB); subsequent tests and runs reuse the cache.
 private let downloader: any Downloader = #hubDownloader()
@@ -113,7 +122,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// No acceptance-rate floor is asserted here; the first successful run
     /// logs the observed rate and a floor is added in a follow-up commit
     /// after a real number is on the table.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BPairProducesAcceptedDrafts() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -200,7 +209,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// aligned with the autoregressive baseline. The maxTokens=64
     /// measurement here is the more stable rate over a larger sample
     /// (n=66 vs n=29) and is the better regression gate.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BBlockSize4AcceptanceLifted() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -269,7 +278,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// Post-fix measurement: 29.8% acceptance, 8.60 tok/s — +11.9pp,
     /// +1.50 tok/s. The 25% floor below catches a regression toward the
     /// pre-fix baseline while leaving ~8pp headroom for variance.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BBlockSize6AcceptanceLifted() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -335,7 +344,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// commit ee86bff (Phase 4b): the iterator's prepare(input:) sampled one
     /// or two bonus tokens but never appended them to pendingTokens, so the
     /// output stream silently started 1 or 2 positions ahead of baseline.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BMatchesBaselineByteIdentical() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -411,7 +420,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// doesn't prove that empirically. This test extends the bit-exact-
     /// equivalence check to a second prompt whose acceptance profile differs
     /// from sky-blue (46% acceptance per v1.1 §5.2 sweep).
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BMatchesBaselineRainbowsPrompt() async throws {
         try await runMTPVsBaselineByteIdentityCheck(
             prompt: "Write a paragraph about how rainbows form.",
@@ -424,7 +433,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// acceptance means more correction-token positions per stream, which
     /// exercises the speculation/verify/accept boundary differently from the
     /// rainbows prompt.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BMatchesBaselineSwiftPrompt() async throws {
         try await runMTPVsBaselineByteIdentityCheck(
             prompt: "What's the best way to learn Swift?",
@@ -459,7 +468,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// stream lengths. The 64-token prefix-identity assertion
     /// captures the empirical boundary on this hardware + model
     /// configuration.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BLongerStreamProducesValidContinuation() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -588,7 +597,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// upheld and the Phase B divergence is genuinely MTP-vs-baseline drift.
     /// If they differ, the byte-identity framework's premise is broken at
     /// this stream length and the Phase B "failure" is reframed.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testBaselineSelfDeterminism128() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -649,7 +658,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// rounds (sky-blue chat-template prompt ≈ 30 tokens; +3-4 cache positions
     /// per blockSize=4 round) complete on the regular cache before
     /// quantization triggers around round 3.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTP31BQuantizationOnsetEngagesPassthrough() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
@@ -745,7 +754,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
     /// the emitted token stream. Equivalently, the recorded count is no
     /// more than the emitted count, and the contents match position-by-
     /// position from the recorded-sequence start.
-    @Test
+    @Test(.enabled(if: has31BPair))
     func testMTPLogitProcessorReceivesOnlyEmittedTokens() async throws {
         let loaded = try await loadTargetAndDrafter(
             targetModelId: target31BModelId,
