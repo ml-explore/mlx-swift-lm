@@ -15,14 +15,10 @@ import MLXNN
 /// preserves per-node dtype rounding (verified bitwise against the unfused
 /// chain on the real decode/prefill shapes, bf16 and f16), so this is
 /// bit-identical while cutting ~6 kernel launches per GDN layer per step.
-private let compiledGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray = compile(
+private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray = compile(
     shapeless: true
 ) { aLog, a, dtBias in
     exp(-exp(aLog.asType(.float32)) * softplus(a + dtBias))
-}
-
-func computeGatedDeltaG(_ aLog: MLXArray, _ a: MLXArray, _ dtBias: MLXArray) -> MLXArray {
-    compiledGatedDeltaG(aLog, a, dtBias)
 }
 
 // MARK: - Metal Kernel

@@ -135,6 +135,15 @@ private func rotationKernelTypeNames(_ dtype: DType) -> (String, String)? {
     }
 }
 
+/// Cache key for the compiled simdgroup kernels. A value type rather than a
+/// formatted string: the lookup runs on every rotation dispatch (hundreds of
+/// times per token on a MoE model), so the key must hash without allocating.
+private struct RotationKernelKey: Hashable {
+    let tile: Int
+    let krot: Int
+    let dtype: DType
+}
+
 /// Cached compiled Metal kernels keyed by tile size, krot and IO dtype,
 /// guarded by `kernelCacheLock`. Callers are multi-threaded (each
 /// `ModelContainer.perform` closure can run on its own task), so the
@@ -142,21 +151,23 @@ private func rotationKernelTypeNames(_ dtype: DType) -> (String, String)? {
 /// nil — only two tile sizes (1 and 4), one krot and one dtype are ever
 /// requested per model, so the lock is contended a handful of times per
 /// process before steady-state hits.
-nonisolated(unsafe) private var kernelCache: [String: MLXFast.MLXFastKernel] = [:]
+nonisolated(unsafe) private var kernelCache: [RotationKernelKey: MLXFast.MLXFastKernel] = [:]
 private let kernelCacheLock = NSLock()
 
-/// Internal (not file-private): shared by every module that dispatches the
-/// pairwise rotation kernel — `PairwiseRotation` and `RotateQuantizedLinear`.
-nonisolated func getRotationKernel(tile: Int, krot: Int, dtype: DType) -> MLXFast.MLXFastKernel {
+/// Sole entry point is `dispatchPairwiseRotation`, which owns kernel
+/// selection (this kernel requires groupSize == 128).
+nonisolated private func getRotationKernel(tile: Int, krot: Int, dtype: DType)
+    -> MLXFast.MLXFastKernel
+{
     kernelCacheLock.withLock {
+        let key = RotationKernelKey(tile: tile, krot: krot, dtype: dtype)
+        if let cached = kernelCache[key] {
+            return cached
+        }
         guard let (t, t4) = rotationKernelTypeNames(dtype) else {
             preconditionFailure(
                 "PairwiseRotation: unsupported activation dtype \(dtype) (expected float16/bfloat16/float32)"
             )
-        }
-        let key = "\(tile)_\(krot)_\(t)"
-        if let cached = kernelCache[key] {
-            return cached
         }
         let kernel = MLXFast.metalKernel(
             name: "paro_rotate_r\(tile)_k\(krot)_\(t)",
@@ -284,34 +295,36 @@ nonisolated private func getGenericRotationKernel(tile: Int) -> MLXFast.MLXFastK
 /// groupSize == 128 takes the simdgroup-resident kernel (2 pair slots per
 /// lane, no CTA rendezvous); any other groupSize <= 128 falls back to the
 /// generic kernel. Shared by `PairwiseRotation` and `RotateQuantizedLinear`.
+///
+/// Zero-row inputs pass straight through: gathered MoE activations can be
+/// legitimately empty, and a zero-sized grid dispatch is undefined. The
+/// guard lives here, with the grid math, so no caller needs one.
 nonisolated func dispatchPairwiseRotation(
-    _ flat: MLXArray,
-    packedPairs: MLXArray, cosTheta: MLXArray, sinTheta: MLXArray, scalesFlat: MLXArray,
-    groupSize: Int, krot: Int
+    _ flat: MLXArray, state: RotationDerivedState, groupSize: Int, krot: Int
 ) -> MLXArray {
     let batch = flat.dim(0)
-    let dim = scalesFlat.dim(0)
+    if batch == 0 { return flat }
+
+    let dim = state.scalesFlat.dim(0)
     let numGroups = dim / groupSize
     let tile = batch <= 1 ? 1 : 4
     let params = MLXArray([Int32(batch), Int32(dim), Int32(krot), Int32(groupSize)])
 
+    let kernel: MLXFast.MLXFastKernel
+    let threads: Int
     if groupSize == 128 {
-        let gridX = ((batch + tile - 1) / tile) * 32
-        return getRotationKernel(tile: tile, krot: krot, dtype: flat.dtype)(
-            [flat, packedPairs, cosTheta, sinTheta, scalesFlat, params],
-            grid: (gridX, numGroups, 1),
-            threadGroup: (32, 1, 1),
-            outputShapes: [flat.shape],
-            outputDTypes: [flat.dtype]
-        )[0]
+        kernel = getRotationKernel(tile: tile, krot: krot, dtype: flat.dtype)
+        threads = 32
+    } else {
+        kernel = getGenericRotationKernel(tile: tile)
+        threads = groupSize / 2
     }
 
-    let halfGroup = groupSize / 2
-    let gridX = ((batch + tile - 1) / tile) * halfGroup
-    return getGenericRotationKernel(tile: tile)(
-        [flat, packedPairs, cosTheta, sinTheta, scalesFlat, params],
+    let gridX = ((batch + tile - 1) / tile) * threads
+    return kernel(
+        [flat, state.packedPairs, state.cosTheta, state.sinTheta, state.scalesFlat, params],
         grid: (gridX, numGroups, 1),
-        threadGroup: (halfGroup, 1, 1),
+        threadGroup: (threads, 1, 1),
         outputShapes: [flat.shape],
         outputDTypes: [flat.dtype]
     )[0]
@@ -338,6 +351,73 @@ nonisolated func packPairs(_ pairs: MLXArray, groupSize: Int) -> MLXArray {
     return (lo | (hi << 16)).reshaped(krot, -1)
 }
 
+// MARK: - Derived Rotation State
+
+/// The four kernel-ready tensors derived from a rotation's checkpoint
+/// parameters (`theta` / `pairs` / `channel_scales`), shared by
+/// `RotateQuantizedLinear` (dense) and `PairwiseRotation` (MoE shared) so
+/// the derivation cannot diverge between the two paths.
+///
+/// Owners store this in an underscore-prefixed property: Module reflection
+/// drops `_`-prefixed keys (`Module.parameterIsValid`), so the derived
+/// tensors don't participate in weight loading — which keeps the loader's
+/// strict `verify: [.allModelKeysSet]` contract intact — and are skipped by
+/// `eval(model)`, which walks reflected parameters only.
+struct RotationDerivedState {
+    var cosTheta: MLXArray
+    var sinTheta: MLXArray
+    var packedPairs: MLXArray
+    var scalesFlat: MLXArray
+
+    /// Placeholder state — `prepare(...)` overwrites it after checkpoint
+    /// load. Shapes are correct so a forward pass before finalize would be
+    /// degenerate (identity-ish rotation) rather than crash.
+    init(dims: Int, krot: Int) {
+        cosTheta = MLXArray.ones([krot, dims / 2])
+        sinTheta = MLXArray.zeros([krot, dims / 2])
+        packedPairs = MLXArray.zeros([krot, dims / 2], type: Int32.self)
+        scalesFlat = MLXArray.ones([dims])
+    }
+
+    /// Recompute from the loaded checkpoint parameters. The results are
+    /// lazy graph nodes — materializing them is the caller's job (see
+    /// `RotationStatePreparing` for why).
+    mutating func prepare(
+        theta: MLXArray, pairs: MLXArray, channelScales: MLXArray, groupSize: Int
+    ) {
+        cosTheta = MLX.cos(theta)
+        sinTheta = MLX.sin(theta)
+        packedPairs = packPairs(pairs, groupSize: groupSize)
+        scalesFlat = channelScales.reshaped(-1)
+    }
+
+    /// The derived tensors, for batching one `eval` across many modules.
+    var all: [MLXArray] { [cosTheta, sinTheta, packedPairs, scalesFlat] }
+}
+
+/// Load-time finalization hook shared by every rotation-carrying module.
+///
+/// The loader walks leaf modules and finalizes each conformer after the
+/// checkpoint update — a protocol rather than a class enumeration so a new
+/// rotation carrier cannot be silently skipped (a missed module would keep
+/// its degenerate placeholder state and produce wrong numbers without ever
+/// crashing).
+///
+/// `prepareDerivedRotationState()` returns the freshly derived tensors
+/// *unmaterialized*: the loader batches a single `eval` over every module's
+/// tensors instead of paying one GPU round-trip per module (~480 modules on
+/// a 48-layer MoE). Discarding the result leaves the tensors lazy until
+/// first use — harmless for tests, but the loader must eval them so
+/// materialization stays out of the first forward pass's graph. Deriving
+/// lazily *during* a forward pass was issue #157.
+protocol RotationStatePreparing: AnyObject {
+    /// Recompute rotation-derived tensors from the loaded checkpoint
+    /// parameters. Must run after `update(parameters:)` and never
+    /// concurrently with forward passes — the loader owns this call.
+    @discardableResult
+    func prepareDerivedRotationState() -> [MLXArray]
+}
+
 // MARK: - PairwiseRotation
 
 /// Standalone pairwise Givens rotation over the last axis of an activation
@@ -353,7 +433,7 @@ nonisolated func packPairs(_ pairs: MLXArray, groupSize: Int) -> MLXArray {
 /// reflection under this module's key prefix (e.g.
 /// `switch_mlp.gate_up_rot.theta`). After loading, the owner must call
 /// `prepareDerivedRotationState()` once, before any forward pass.
-public class PairwiseRotation: Module {
+public class PairwiseRotation: Module, RotationStatePreparing {
 
     // Rotation parameters — discovered by Module reflection for update(parameters:).
     // `channelScales` uses @ParameterInfo so it can keep the snake_case checkpoint
@@ -364,17 +444,11 @@ public class PairwiseRotation: Module {
 
     let groupSize: Int
 
-    // Rotation-derived state. Populated once by `prepareDerivedRotationState()`
-    // after the checkpoint parameters are loaded (see ParoQuantLoader), and
-    // never mutated afterwards. Underscore-prefixed private properties are
-    // ignored by Module reflection — see Documentation.docc/porting.md
-    // "Computed vs Loaded Parameters" — so they don't participate in weight
-    // loading, which keeps the loader's strict `verify: [.allModelKeysSet]`
-    // contract intact.
-    private var _cosTheta: MLXArray
-    private var _sinTheta: MLXArray
-    private var _packedPairs: MLXArray
-    private var _scalesFlat: MLXArray
+    // Populated once by `prepareDerivedRotationState()` after the checkpoint
+    // parameters are loaded (see ParoQuantLoader), and never mutated
+    // afterwards. See `RotationDerivedState` for why the underscore prefix
+    // keeps it out of weight loading.
+    private var _rotation: RotationDerivedState
 
     public init(dims: Int, groupSize: Int, krot: Int) {
         self.theta = MLXArray.zeros([krot, dims / 2])
@@ -383,68 +457,36 @@ public class PairwiseRotation: Module {
         // survives init — see the matching note in RotateQuantizedLinear.
         self._channelScales.wrappedValue = MLXArray.ones([1, dims])
         self.groupSize = groupSize
-
-        // Placeholder values — `prepareDerivedRotationState()` overwrites
-        // these with real derived tensors after checkpoint load. Shapes are
-        // correct so a forward pass before finalize would be degenerate
-        // (identity-ish rotation) rather than crash.
-        self._cosTheta = MLXArray.ones([krot, dims / 2])
-        self._sinTheta = MLXArray.zeros([krot, dims / 2])
-        self._packedPairs = MLXArray.zeros([krot, dims / 2], type: Int32.self)
-        self._scalesFlat = MLXArray.ones([dims])
+        self._rotation = RotationDerivedState(dims: dims, krot: krot)
 
         super.init()
     }
 
-    /// Compute rotation-derived tensors from the loaded checkpoint parameters.
-    ///
-    /// Must be called once, after `update(parameters:)` populates
-    /// `theta` / `pairs` / `channelScales`, and before any forward pass.
-    /// Must not be called concurrently with forward passes — the loader
-    /// owns this call, nothing else should.
-    ///
-    /// Deriving lazily on first forward and caching in a mutable field is
-    /// unsafe under multi-threaded inference (issue #157 — a shared model
-    /// container is driven by multiple tasks simultaneously), so derivation
-    /// is done explicitly at load time.
-    ///
-    /// The four derived arrays are `eval(...)`ed here because underscore-
-    /// prefixed private fields are invisible to Module reflection — the
-    /// loader's later `eval(model)` walks `@ParameterInfo` tensors only, so
-    /// these would otherwise stay unmaterialised promises until the first
-    /// forward pass, and materialisation would then become part of that
-    /// pass's graph (exactly the eval-time state we're eliminating).
-    public func prepareDerivedRotationState() {
-        _cosTheta = MLX.cos(theta)
-        _sinTheta = MLX.sin(theta)
-        _packedPairs = packPairs(pairs, groupSize: groupSize)
-        _scalesFlat = channelScales.reshaped(-1)
-        eval(_cosTheta, _sinTheta, _packedPairs, _scalesFlat)
+    /// See `RotationStatePreparing` — loader-owned, results batched into a
+    /// single load-time `eval` with every other rotation module's.
+    @discardableResult
+    public func prepareDerivedRotationState() -> [MLXArray] {
+        _rotation.prepare(
+            theta: theta, pairs: pairs, channelScales: channelScales, groupSize: groupSize)
+        return _rotation.all
     }
 
     /// Apply channel scaling + pairwise Givens rotations to the last axis.
     ///
     /// Accepts any leading shape (the MoE path passes gathered 4-D
     /// activations); the input is flattened to 2-D for the kernel and the
-    /// original shape is restored on return. No mutable state is read or
-    /// written by this method.
+    /// original shape is restored on return. Empty batches pass through
+    /// unchanged (guarded in `dispatchPairwiseRotation`). No mutable state
+    /// is read or written by this method.
     ///
     /// Kernel selection lives in `dispatchPairwiseRotation`: groupSize == 128
     /// takes the simdgroup-resident kernel, any other group size the generic
     /// fallback.
     public func rotate(_ x: MLXArray) -> MLXArray {
-        let dim = _scalesFlat.dim(0)
         let shape = x.shape
-        let flat = x.reshaped(-1, dim)
-
-        // Gathered MoE activations can be legitimately empty; a zero-sized
-        // grid dispatch is undefined, so pass the input through.
-        if flat.dim(0) == 0 { return x }
-
         return dispatchPairwiseRotation(
-            flat,
-            packedPairs: _packedPairs, cosTheta: _cosTheta, sinTheta: _sinTheta,
-            scalesFlat: _scalesFlat, groupSize: groupSize, krot: theta.dim(0)
+            x.reshaped(-1, _rotation.scalesFlat.dim(0)),
+            state: _rotation, groupSize: groupSize, krot: theta.dim(0)
         ).reshaped(shape)
     }
 }

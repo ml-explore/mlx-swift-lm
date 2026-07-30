@@ -606,12 +606,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         logger.info("Loaded \(weights.count) weight keys from the Prepared Checkpoint")
         markPhase("preparedLoad")
     } else {
-        let contents = try FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil)
-        for url in contents
-        where url.pathExtension == "safetensors"
-            && !ParoQuantPreparedCheckpoint.excludedFileNames.contains(url.lastPathComponent)
-        {
+        for url in try ParoQuantPreparedCheckpoint.sourceURLs(in: directory) {
             let w = try loadArrays(url: url)
             for (key, value) in w {
                 weights[key] = value
@@ -690,22 +685,19 @@ public func loadParoQuantModel<T: LanguageModel>(
 
     // 10b. Finalize rotation-derived state. Must run *after* the checkpoint
     //      update (so theta / pairs / channel_scales hold real values) and
-    //      *before* any forward pass. `prepareDerivedRotationState()`
-    //      eval(...)s its own derived arrays because they live in underscore-
-    //      prefixed private fields that Module reflection — and therefore
-    //      step 12's eval(model) — skips.
+    //      *before* any forward pass. The derived arrays live in underscore-
+    //      prefixed fields that Module reflection — and therefore step 12's
+    //      eval(model) — skips, so they are materialized here: one batched
+    //      eval across all rotation modules (dense RotateQuantizedLinear and
+    //      the MoE shared PairwiseRotation leaves) instead of a GPU
+    //      round-trip per module. See `RotationStatePreparing`.
+    var derivedRotationArrays: [MLXArray] = []
     for (_, layer) in rotationLeafModules(model: model) {
-        switch layer {
-        case let dense as RotateQuantizedLinear:
-            dense.prepareDerivedRotationState()
-        case let shared as PairwiseRotation:
-            // MoE shared rotations (children of RotateSwitchGLU) are leaf
-            // modules of their own and carry the same derived-state contract.
-            shared.prepareDerivedRotationState()
-        default:
-            break
+        if let rotation = layer as? RotationStatePreparing {
+            derivedRotationArrays.append(contentsOf: rotation.prepareDerivedRotationState())
         }
     }
+    eval(derivedRotationArrays)
     markPhase("rotState")
 
     // 11. Quantize IO embedding path from FP16 weights
@@ -736,12 +728,14 @@ public func loadParoQuantModel<T: LanguageModel>(
     //      reference); readiness never waits on the write, and a failed or
     //      interrupted write only means the next load converts again.
     if !usedPreparedCheckpoint {
-        let payload = PreparedCheckpointPayload(
-            weights: preSanitizeWeights, manifest: preparedManifest, directory: directory)
+        // `[String: MLXArray]` is not Sendable; the boxed dict holds the
+        // immutable, already-evaluated checkpoint tensors shared with the
+        // live model, read-only on both sides.
+        let weightsBox = SendableBox(preSanitizeWeights)
         Task.detached(priority: .utility) {
             ParoQuantPreparedCheckpoint.write(
-                weights: payload.weights, manifest: payload.manifest,
-                directory: payload.directory)
+                weights: weightsBox.consume(), manifest: preparedManifest,
+                directory: directory)
         }
     }
 
