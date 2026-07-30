@@ -189,29 +189,6 @@ struct SpeculativeDecodingTests {
         #expect(telemetry.emittedTokenCount == completionInfo.generationTokenCount)
     }
 
-    @Test func `Stateful models are rejected before speculative prefill`() throws {
-        let stateful = StatefulSpeculativeTestModel()
-        let stateless = StableTransitionLanguageModel(vocabularySize: 16)
-
-        #expect(throws: SpeculativeDecodingError.self) {
-            try SpeculativeTokenIterator(
-                input: LMInput(tokens: MLXArray([1, 2, 3])),
-                mainModel: stateful,
-                draftModel: stateless,
-                parameters: .init(maxTokens: 1, temperature: 0),
-                numDraftTokens: 1)
-        }
-
-        #expect(throws: SpeculativeDecodingError.self) {
-            try SpeculativeTokenIterator(
-                input: LMInput(tokens: MLXArray([1, 2, 3])),
-                mainModel: stateless,
-                draftModel: stateful,
-                parameters: .init(maxTokens: 1, temperature: 0),
-                numDraftTokens: 1)
-        }
-    }
-
     @Test func `Speculative telemetry emitted count works with direct iterator`() async throws {
         let input = UserInput(prompt: "Input text")
         let modelInput = try await processor.prepare(input: input)
@@ -236,22 +213,6 @@ struct SpeculativeDecodingTests {
         let telemetry = try #require(iterator.speculativeDecodingTelemetry)
         #expect(tokenCount == 3)
         #expect(telemetry.emittedTokenCount == tokenCount)
-    }
-}
-
-private final class StatefulSpeculativeTestModel: Module, LanguageModel, KVCacheDimensionProvider {
-    let vocabularySize = 16
-    var kvHeads: [Int] { [] }
-    var requiresContinuationState: Bool { true }
-
-    func prepare(_ input: LMInput, cache _: [KVCache], state _: LMOutput.State?, windowSize _: Int?)
-        throws -> PrepareResult
-    {
-        .tokens(input.text)
-    }
-
-    func callAsFunction(_ inputs: MLXArray, cache _: [KVCache]?) -> MLXArray {
-        MLXArray.zeros([1, inputs.dim(-1), vocabularySize])
     }
 }
 

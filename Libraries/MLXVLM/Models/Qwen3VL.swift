@@ -1259,16 +1259,24 @@ enum Qwen3VLLanguage {
                 mask = createAttentionMask(h: hidden, cache: cache)
             }
 
+            // Loop-invariant: the scatter targets the same token positions in
+            // every deepstack layer, so build the index array once rather than
+            // re-uploading it per layer.
+            var deepstackIndices: MLXArray?
+            if deepstackEmbeds != nil, let visualIndices, !visualIndices.isEmpty {
+                deepstackIndices = MLXArray(visualIndices.map { UInt32($0) })
+            }
+
             for (index, layer) in layers.enumerated() {
                 let layerCache = cache?[index]
                 hidden = layer(hidden, mask: mask, cache: layerCache, positionIds: positionIds)
 
                 if let embeds = deepstackEmbeds, index < embeds.count,
-                    let visualIndices, !visualIndices.isEmpty
+                    let deepstackIndices
                 {
                     hidden = applyDeepstack(
                         hiddenStates: hidden,
-                        visualIndices: visualIndices,
+                        visualIndices: deepstackIndices,
                         visualEmbeds: embeds[index])
                 }
             }
@@ -1278,13 +1286,12 @@ enum Qwen3VLLanguage {
 
         private func applyDeepstack(
             hiddenStates: MLXArray,
-            visualIndices: [Int],
+            visualIndices: MLXArray,
             visualEmbeds: MLXArray
         ) -> MLXArray {
-            let indexArray = MLXArray(visualIndices.map { UInt32($0) })
-
             let result = hiddenStates
-            result[0..., indexArray, 0...] = result[0..., indexArray, 0...] + visualEmbeds
+            result[0..., visualIndices, 0...] =
+                result[0..., visualIndices, 0...] + visualEmbeds
 
             return result
         }
@@ -1634,7 +1641,6 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
 
     public var vocabularySize: Int { config.vocabSize }
     public var kvHeads: [Int] { languageModel.kvHeads }
-    public var requiresContinuationState: Bool { true }
 
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -1651,10 +1657,10 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let videoMask = (inputIds .== MLXArray(videoTokenIndex))
         var specialMask = (imageMask .|| videoMask)
 
-        let nImageTokens = specialMask.sum().item(Int.self)
         // Deepstack features are indexed by token position, before the token
         // mask is broadcast across hidden dimensions for the scatter below.
-        let visualIndices = nonZero(specialMask.asType(.bool))
+        // This also counts the special tokens, so no separate sum is needed.
+        let visualIndices = nonZero(specialMask)
 
         specialMask = expandedDimensions(specialMask, axis: -1)
         let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
@@ -1664,7 +1670,8 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let imageFeatureSize = imageFeatures.size
 
         guard nImageMaskElements == imageFeatureSize else {
-            throw Qwen3VLError.featureTokenMismatch(expected: nImageTokens, actual: nImageFeatures)
+            throw Qwen3VLError.featureTokenMismatch(
+                expected: visualIndices.count, actual: nImageFeatures)
         }
 
         let originalShape = inputEmbeds.shape

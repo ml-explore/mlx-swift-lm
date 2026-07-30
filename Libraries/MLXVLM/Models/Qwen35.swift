@@ -902,7 +902,6 @@ public class Qwen35: Module, VLMModel {
     }
 
     public var vocabularySize: Int { config.vocabSize }
-    public var requiresContinuationState: Bool { true }
 
     public var loraLayers: [Module] {
         languageModel.model.layers

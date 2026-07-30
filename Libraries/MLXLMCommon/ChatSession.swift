@@ -991,7 +991,12 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         let generation: GenerationRun
-                        func defaultGeneration() throws -> GenerationRun {
+                        /// Generate with the normal iterator, abandoning any draft
+                        /// cache: every caller below reaches this because
+                        /// speculation was refused, and a retained draft cache
+                        /// would then sit at an offset the main cache never visits.
+                        func defaultGenerationWithoutDraft() throws -> GenerationRun {
+                            draftKVCache = nil
                             // Seed the iterator with the carried state; read
                             // back the post-prefill state (prefill runs in the
                             // iterator's init, and the rope delta does not
@@ -1013,14 +1018,12 @@ public final class ChatSession {
                             )
                         }
 
-                        func defaultGenerationWithoutDraft() throws -> GenerationRun {
-                            draftKVCache = nil
-                            return try defaultGeneration()
-                        }
-
+                        // Carried model state is fine here: the iterator seeds it
+                        // and reads it back, and the anchors the vision models
+                        // carry position from the cache offset, which a rejected
+                        // proposal rewinds along with the KV rows. Media is not —
+                        // the draft model would have to prefill the same images.
                         if let speculativeDecoding,
-                            !model.requiresContinuationState,
-                            lmState == nil,
                             // `input` may have been narrowed to a token-only suffix
                             // above; the prepared input still shows whether this turn
                             // carries media.
@@ -1067,11 +1070,6 @@ public final class ChatSession {
                                             evaluation: memoryEvaluation)
                                     }
 
-                                    generation = try defaultGenerationWithoutDraft()
-                                } else if draftModel.requiresContinuationState {
-                                    // A speculative rejection trims KV rows but cannot rewind
-                                    // arbitrary model state. Use the normal iterator rather
-                                    // than pairing a trimmed draft cache with stale state.
                                     generation = try defaultGenerationWithoutDraft()
                                 } else {
                                     if cachedDraftContainer == nil {

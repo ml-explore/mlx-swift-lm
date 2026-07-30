@@ -211,7 +211,6 @@ public class ChatSessionTests: XCTestCase {
         @ModuleInfo var inner: Gemma3TextModel
 
         var kvHeads: [Int] { (inner as? KVCacheDimensionProvider)?.kvHeads ?? [] }
-        var requiresContinuationState: Bool { true }
 
         init(_ inner: Gemma3TextModel) {
             self.inner = inner
@@ -1066,7 +1065,10 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
     }
 
-    func testSpeculativeDecodingFallsBackForCarriedModelState() async throws {
+    /// Carried model state does not disqualify a turn from speculation. The
+    /// anchors these models carry position from the cache offset, and a
+    /// rejected proposal rewinds that offset along with the KV rows.
+    func testSpeculativeDecodingRunsWithCarriedModelState() async throws {
         let context = model()
         let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
         let cache = context.model.newCache(parameters: parameters)
@@ -1078,11 +1080,9 @@ public class ChatSessionTests: XCTestCase {
             cache: cache,
             state: state,
             speculativeDecoding: SpeculativeDecodingConfig(
-                draftModelBytes: 0,
+                draftModel: ModelContainer(context: model()),
                 numDraftTokens: 2
-            ) {
-                throw UnexpectedDraftModelLoadError()
-            },
+            ),
             generateParameters: parameters
         )
 
@@ -1099,7 +1099,7 @@ public class ChatSessionTests: XCTestCase {
         }
 
         let completionInfo = try XCTUnwrap(info)
-        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+        XCTAssertNotNil(completionInfo.speculativeDecodingTelemetry)
     }
 
     func testSpeculativeDecodingFallsBackForPrebuiltCacheWithoutDraftCache() async throws {
@@ -1295,17 +1295,18 @@ public class ChatSessionTests: XCTestCase {
     /// Stateful continuation models cannot safely rewind arbitrary model state
     /// when speculative proposals are rejected, so the session must use normal
     /// generation without loading a draft model.
-    func testSpeculativeDecodingFallsBackForStatefulModel() async throws {
+    /// A model that hands back an anchor on every prefill still speculates, and
+    /// the anchor survives the speculative turn: the iterator seeds it, threads
+    /// it through verification, and hands it back for the next turn to persist.
+    func testSpeculativeDecodingCarriesModelStateProducedByItsTurns() async throws {
         let context = Self.makeStateProducingModel()
         let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
         let session = ChatSession(
             context,
             speculativeDecoding: SpeculativeDecodingConfig(
-                draftModelBytes: 0,
+                draftModel: ModelContainer(context: model()),
                 numDraftTokens: 2
-            ) {
-                throw UnexpectedDraftModelLoadError()
-            },
+            ),
             generateParameters: parameters
         )
 
@@ -1315,9 +1316,9 @@ public class ChatSessionTests: XCTestCase {
                 info = generationInfo
             }
         }
-        XCTAssertNil(try XCTUnwrap(info).speculativeDecodingTelemetry)
+        XCTAssertNotNil(try XCTUnwrap(info).speculativeDecodingTelemetry)
 
-        // A second normal turn must succeed with the carried anchor.
+        // A second turn must succeed with the anchor the speculative turn carried.
         _ = try await session.respond(to: "hello again")
 
         let url = FileManager.default.temporaryDirectory
