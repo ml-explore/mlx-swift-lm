@@ -112,7 +112,7 @@ extension LLMModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let model: LanguageModel
+        let model: TrainableLanguageModel
         do {
             model = try await typeRegistry.createModel(
                 configuration: configData, modelType: baseConfig.modelType)

@@ -364,18 +364,18 @@ If you need custom keys, override `loraDefaultKeys`.
 ## Testing
 
 ```swift
-let modelContainer = try await LLMModelFactory.shared.loadContainer(
+let context = try await LLMModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: ModelConfiguration(id: "mlx-community/YourModel-4bit")
 )
 
 let parameters = GenerateParameters()
-let lmInput = try await modelContainer.prepare(
+let lmInput = try context.processor.prepare(
     input: UserInput(prompt: "Hello")
 )
 
-let stream = try await modelContainer.generate(input: lmInput, parameters: parameters)
+let stream = try generate(input: lmInput, parameters: parameters, context: context)
 for await event in stream {
     if case let .chunk(text) = event {
         print(text, terminator: "")

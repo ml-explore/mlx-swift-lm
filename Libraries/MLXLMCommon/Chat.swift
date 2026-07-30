@@ -1,7 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 public enum Chat {
-    public struct Message {
+    public struct Message: Sendable {
         /// The role of the message sender.
         public var role: Role
 

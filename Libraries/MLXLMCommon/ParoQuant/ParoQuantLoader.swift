@@ -331,7 +331,7 @@ private struct ParoQuantInputProcessor: UserInputProcessor {
 
 // MARK: - Load Entry Point
 
-/// Load a ParoQuant model from a local directory, returning a ``ModelContainer``.
+/// Load a ParoQuant model from a local directory, returning a ``ModelContext``.
 ///
 /// Handles AutoAWQ weight conversion, rotation layer patching, and IO layer
 /// quantization. Rotation parameters (theta, pairs, channel_scales) are kept
@@ -342,13 +342,13 @@ private struct ParoQuantInputProcessor: UserInputProcessor {
 ///   - typeRegistry: Registry used to create the underlying model architecture.
 ///   - tokenizerLoader: Loader for tokenizer.
 ///   - toolCallFormat: Optional tool-call format for the model configuration.
-/// - Returns: A ``ModelContainer`` ready for inference.
-public func loadParoQuantModel<T: LanguageModel>(
+/// - Returns: A ``ModelContext`` ready for inference.
+public func loadParoQuantModel<T: TrainableLanguageModel>(
     from directory: URL,
     typeRegistry: ModelTypeRegistry<T>,
     tokenizerLoader: any TokenizerLoader,
     toolCallFormat: ToolCallFormat? = nil
-) async throws -> ModelContainer {
+) async throws -> ModelContext {
     // 1. Parse config.json (flatten VLM text_config if present)
     let configURL = directory.appendingPathComponent("config.json")
     var configData = try Data(contentsOf: configURL)
@@ -492,7 +492,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         configuration: config, model: model,
         processor: processor, tokenizer: tokenizer
     )
-    return ModelContainer(context: context)
+    return context
 }
 
 // MARK: - Errors

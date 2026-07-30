@@ -48,16 +48,18 @@ public struct Parameters: Sendable {
 import MLXLLM
 import MLXLMCommon
 
-// Load base model
-let container = try await LLMModelFactory.shared.loadContainer(
+// Load a TRAINABLE model — training needs a mutable model, so use
+// loadTrainable(...) (or factory.loadTrainable(...)), NOT load(...).
+// load(...) returns a materialized/sealed ModelContext that traps on mutation.
+let context = try await LLMModelFactory.shared.loadTrainable(
     from: HubClient.default,
     using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: .init(id: "mlx-community/Llama-3.2-3B-Instruct-4bit")
 )
 
-// Extract model and tokenizer for training
-let model = await container.perform { $0.model }
-let tokenizer = await container.tokenizer
+// context is a TrainableModelContext; use its members directly.
+let model = context.model          // a TrainableLanguageModel (mutable)
+let tokenizer = context.tokenizer
 ```
 
 ### 2. Apply LoRA Layers
@@ -345,19 +347,19 @@ import MLXLMCommon
 import MLXOptimizers
 
 func trainAdapter() async throws {
-    // Load model
-    let container = try await LLMModelFactory.shared.loadContainer(
+    // Load a TRAINABLE (mutable) model
+    let context = try await LLMModelFactory.shared.loadTrainable(
         from: HubClient.default,
         using: TokenizersLoader(),
         configuration: .init(id: "mlx-community/Llama-3.2-1B-Instruct-4bit")
     )
 
-    let model = await container.perform { SendableBox($0.model) }.consume()
-    let tokenizer = await container.tokenizer
+    let model = context.model          // TrainableLanguageModel
+    let tokenizer = context.tokenizer
 
-    // Apply LoRA
+    // Apply LoRA — adapters require a TrainableLanguageModel
     let adapter = try LoRAContainer.from(
-        model: model as! LanguageModel,
+        model: model,
         configuration: LoRAConfiguration(
             numLayers: 8,
             loraParameters: .init(rank: 8)
@@ -389,6 +391,10 @@ func trainAdapter() async throws {
     }
 
     print("Training complete!")
+
+    // When done, convert to an inference (Sendable, materialized) ModelContext
+    let inferenceContext = ModelContext(context)
+    _ = inferenceContext
 }
 ```
 

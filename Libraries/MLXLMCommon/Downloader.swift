@@ -35,6 +35,22 @@ public protocol Downloader: Sendable {
     ) async throws -> URL
 }
 
+/// Implementation of Downloader that produces a local URL.
+public struct LocalDownloader: Downloader {
+    let url: URL
+
+    public init(url: URL) {
+        self.url = url
+    }
+
+    public func download(
+        id: String, revision: String?, matching patterns: [String], useLatest: Bool,
+        progressHandler: @escaping (Progress) -> Void
+    ) async throws -> URL {
+        url
+    }
+}
+
 /// Identifies where a tokenizer should be loaded from.
 ///
 /// Used by ``ModelConfiguration`` to specify an alternate tokenizer source

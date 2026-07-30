@@ -16,13 +16,13 @@ public typealias Message = [String: any Sendable]
 ///
 /// A ``UserInputProcessor`` can convert this to ``LMInput``.
 /// See also ``ModelContext``.
-public struct UserInput {
+public struct UserInput: Sendable {
 
     /// Representation of a prompt or series of messages (conversation).
     ///
     /// This may be a single string with a user prompt or a series of back
     /// and forth responses representing a conversation.
-    public enum Prompt: CustomStringConvertible {
+    public enum Prompt: CustomStringConvertible, Sendable {
         /// A single string
         case text(String)
 
@@ -44,7 +44,7 @@ public struct UserInput {
         }
     }
 
-    public struct VideoFrame {
+    public struct VideoFrame: Sendable {
         public let image: Image
         public let timeStamp: CMTime
 
@@ -76,7 +76,7 @@ public struct UserInput {
     }
 
     /// Representation of a video resource.
-    public enum Video {
+    public enum Video: Sendable {
         #if canImport(AVFoundation)
         case avAsset(AVAsset)
         #endif
@@ -105,12 +105,12 @@ public struct UserInput {
     }
 
     /// Representation of an image resource.
-    public enum Image {
+    public enum Image: Sendable {
         #if canImport(CoreImage)
         case ciImage(CIImage)
         #endif
         case url(URL)
-        case array(MLXArray)
+        case array(MaterializedArray)
 
         #if canImport(CoreImage)
         public func asCIImage() throws -> CIImage {
@@ -130,7 +130,7 @@ public struct UserInput {
                         "array must have 3 dimensions: \(array.ndim)")
                 }
 
-                var array = array
+                var array: MLXArray = array
 
                 // convert to 0 .. 255
                 if array.max().item(Float.self) <= 1.0 {
@@ -173,9 +173,9 @@ public struct UserInput {
     }
 
     /// Representation of an audio resource.
-    public enum Audio {
+    public enum Audio: Sendable {
         case url(URL)
-        case array(MLXArray)
+        case array(MaterializedArray)
 
         // See also UserInput+Audio
     }

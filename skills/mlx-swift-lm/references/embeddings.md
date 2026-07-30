@@ -17,7 +17,7 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 | Type | Purpose |
 |------|---------|
 | `EmbeddingModel` | Protocol for embedding models |
-| `ModelContainer` | Thread-safe embedding model wrapper |
+| `EmbedderModelContext` | `Sendable` model + tokenizer + pooling bundle |
 | `ModelConfiguration` | Model ID and settings |
 | `Pooling` | Pooling strategies for embeddings |
 | `Pooling.Strategy` | mean, cls, first, last, max, none |
@@ -51,9 +51,9 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 import MLXEmbedders
 
 let config = ModelConfiguration.bge_small
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+let context = try await EmbedderModelFactory.shared.load(
+    from: HubClient.default,          // a Downloader (e.g. HubClient.default), or a directory URL
+    using: TokenizersLoader(),        // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: config
 )
 ```
@@ -62,7 +62,7 @@ let container = try await loadModelContainer(
 
 ```swift
 let config = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
-let container = try await loadModelContainer(
+let context = try await EmbedderModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),
     configuration: config
@@ -72,8 +72,8 @@ let container = try await loadModelContainer(
 ### From Local Directory
 
 ```swift
-let container = try await loadModelContainer(
-    from: localModelURL,
+let context = try await EmbedderModelFactory.shared.load(
+    from: localModelURL,              // directory URL
     using: TokenizersLoader()
 )
 ```
@@ -81,7 +81,7 @@ let container = try await loadModelContainer(
 ### With Progress Tracking
 
 ```swift
-let container = try await loadModelContainer(
+let context = try await EmbedderModelFactory.shared.load(
     from: HubClient.default,
     using: TokenizersLoader(),
     configuration: config
@@ -95,22 +95,19 @@ let container = try await loadModelContainer(
 ### Basic Usage
 
 ```swift
-let container: ModelContainer = ...
+let context: EmbedderModelContext = ...
 
-let embedding = await container.perform { model, tokenizer, pooler in
-    // Encode text
-    let tokens = tokenizer.encode(text: "Hello world")
-    let input = MLXArray(tokens).expandedDimensions(axis: 0)
+// EmbedderModelContext is Sendable — use its members directly
+let tokens = context.tokenizer.encode(text: "Hello world")
+let input = MLXArray(tokens).expandedDimensions(axis: 0)
 
-    // Get model output
-    let output = model(input)
+// Get model output
+let output = context.model(input)
 
-    // Pool to single vector
-    let pooled = pooler(output, normalize: true)
+// Pool to single vector
+let pooled = context.pooling(output, normalize: true)
 
-    eval(pooled)
-    return pooled
-}
+eval(pooled)
 ```
 
 ### Batch Embeddings
@@ -118,33 +115,30 @@ let embedding = await container.perform { model, tokenizer, pooler in
 ```swift
 let texts = ["First text", "Second text", "Third text"]
 
-let embeddings = await container.perform { model, tokenizer, pooler in
-    // Encode all texts
-    let tokensList = texts.map { tokenizer.encode(text: $0) }
-    let maxLen = tokensList.map { $0.count }.max() ?? 0
+// Encode all texts
+let tokensList = texts.map { context.tokenizer.encode(text: $0) }
+let maxLen = tokensList.map { $0.count }.max() ?? 0
 
-    // Pad to same length
-    var padded = [[Int]]()
-    var mask = [[Float]]()
-    for tokens in tokensList {
-        let padding = Array(repeating: 0, count: maxLen - tokens.count)
-        padded.append(tokens + padding)
-        mask.append(Array(repeating: 1.0, count: tokens.count) +
-                   Array(repeating: 0.0, count: padding.count))
-    }
-
-    let input = MLXArray(padded)
-    let attentionMask = MLXArray(mask)
-
-    // Forward pass
-    let output = model(input, attentionMask: attentionMask)
-
-    // Pool
-    let pooled = pooler(output, mask: attentionMask, normalize: true)
-
-    eval(pooled)
-    return pooled
+// Pad to same length
+var padded = [[Int]]()
+var mask = [[Float]]()
+for tokens in tokensList {
+    let padding = Array(repeating: 0, count: maxLen - tokens.count)
+    padded.append(tokens + padding)
+    mask.append(Array(repeating: 1.0, count: tokens.count) +
+               Array(repeating: 0.0, count: padding.count))
 }
+
+let input = MLXArray(padded)
+let attentionMask = MLXArray(mask)
+
+// Forward pass
+let output = context.model(input, attentionMask: attentionMask)
+
+// Pool
+let pooled = context.pooling(output, mask: attentionMask, normalize: true)
+
+eval(pooled)
 ```
 
 ## Pooling Strategies

@@ -89,17 +89,6 @@ package final class SerialAccessContainer<T>: @unchecked Sendable {
 /// ```
 ///
 /// Note that the parameters are `consuming`.
-///
-/// Here is an example where ``UserInput`` is consumed and passed to an async block and ``LMInput``
-/// is produced and handed back:
-///
-/// ```swift
-/// public func prepare(input: consuming sending UserInput) async throws -> sending LMInput {
-///     let input = SendableBox(input)
-///     return try await context.read {
-///         SendableBox(try await $0.processor.prepare(input: input.consume()))
-///     }.consume()
-/// }
 /// ```
 package final class SendableBox<T>: @unchecked Sendable {
     private var value: T?

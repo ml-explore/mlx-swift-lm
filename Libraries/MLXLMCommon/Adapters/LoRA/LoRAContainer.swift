@@ -96,7 +96,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     ///
     /// Note:  This function freezes the model base weights and applies LoRA layers to it.
     public static func from(
-        model: LanguageModel,
+        model: TrainableLanguageModel,
         configuration: LoRAConfiguration = .init()
     ) throws -> LoRAContainer {
         guard let lora = model as? LoRAModel else {
@@ -138,7 +138,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     /// This method replaces target layers in the model with corresponding
     /// adapter layers based on the configuration. It also loads adapter-specific
     /// weights into the model.
-    public func load(into model: LanguageModel) throws {
+    public func load(into model: TrainableLanguageModel) throws {
         guard let lora = model as? LoRAModel else {
             throw ModelAdapterError.incompatibleModelType
         }
@@ -159,7 +159,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     ///
     /// After fusion, adapter weights become part of the model’s original parameters,
     /// and adapter layers are no longer needed.
-    public func fuse(with model: LanguageModel) throws {
+    public func fuse(with model: TrainableLanguageModel) throws {
         guard let lora = model as? LoRAModel else {
             throw ModelAdapterError.incompatibleModelType
         }
@@ -175,7 +175,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     /// Removes adapter layers (LoRA or DoRA) and restores the model to its original form.
     ///
     /// This method reverts each adapted layer to its original linear layer, if possible.
-    public func unload(from model: LanguageModel) {
+    public func unload(from model: TrainableLanguageModel) {
         guard let lora = model as? LoRAModel else {
             return  // Don't throw an error because nothing was likely applied before
         }

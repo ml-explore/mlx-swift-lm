@@ -604,7 +604,7 @@ let modelConfiguration = ModelConfiguration(id: "mlx-community/quantized-gemma-2
 let tokenizerLoader: any TokenizerLoader
 
 // This will download the weights and load the model
-let container = try await MLXModelFactory.shared.loadContainer(
+let context = try await MLXModelFactory.shared.load(
     using: tokenizerLoader,
     configuration: modelConfiguration
 )
@@ -613,19 +613,19 @@ let container = try await MLXModelFactory.shared.loadContainer(
 let generateParameters = GenerateParameters()
 let input = UserInput(prompt: "Are cherries sweet?")
 
-// Run inference
-let result = try await modelContainer.perform { [input] context in
-    // Convert the UserInput into LMInput
-    let input = try context.processor.prepare(input: input)
+// Convert the UserInput into LMInput
+let lmInput = try context.processor.prepare(input: input)
 
-    return generate(input: input, parameters: generateParameters, context: context) { tokens in
-        // This could potentially use NaiveStreamingDetokenizer and print
-        // text as it was generated
-        if tokens.count >= 20 {
-            return .stop
-        } else {
-            return .more
-        }
+// Run inference
+let result = generate(
+    input: lmInput, parameters: generateParameters, context: context
+) { tokens in
+    // This could potentially use NaiveStreamingDetokenizer and print
+    // text as it was generated
+    if tokens.count >= 20 {
+        return .stop
+    } else {
+        return .more
     }
 }
 

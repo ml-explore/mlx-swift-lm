@@ -19,19 +19,19 @@ public enum ModelAdapterError: Error {
 public protocol ModelAdapter: Sendable {
 
     /// Loads the adapter into the specified model.
-    func load(into model: LanguageModel) throws
+    func load(into model: TrainableLanguageModel) throws
 
     /// Permanently fuses the adapter into the specified model.
-    func fuse(with model: LanguageModel) throws
+    func fuse(with model: TrainableLanguageModel) throws
 
     /// Unloads the adapter from the specified model.
-    func unload(from model: LanguageModel)
+    func unload(from model: TrainableLanguageModel)
 }
 
 public typealias SendableModelAdapter = ModelAdapter & Sendable
 
 /// Extension to `LanguageModel` providing convenience methods for adapter usage.
-extension LanguageModel {
+extension LanguageModel where Self: TrainableLanguageModel {
 
     /// Loads an adapter into the model.
     ///

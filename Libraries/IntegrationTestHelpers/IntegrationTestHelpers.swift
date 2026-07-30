@@ -533,8 +533,8 @@ public enum EmbedderTests {
 
 public enum ToolCallTests {
 
-    public static func lfm2FormatAutoDetection(container: LLModelContainer) async throws {
-        let config = await container.configuration
+    public static func lfm2FormatAutoDetection(container: LLModelContainer) throws {
+        let config = container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.lfm2,
             "Expected .lfm2 tool call format, got: \(String(describing: config.toolCallFormat))"
@@ -564,8 +564,8 @@ public enum ToolCallTests {
         )
     }
 
-    public static func glm4FormatAutoDetection(container: LLModelContainer) async throws {
-        let config = await container.configuration
+    public static func glm4FormatAutoDetection(container: LLModelContainer) throws {
+        let config = container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.glm4,
             "Expected .glm4 tool call format, got: \(String(describing: config.toolCallFormat))"
@@ -597,8 +597,8 @@ public enum ToolCallTests {
 
     // MARK: Mistral3
 
-    public static func mistral3FormatAutoDetection(container: LLModelContainer) async throws {
-        let config = await container.configuration
+    public static func mistral3FormatAutoDetection(container: LLModelContainer) throws {
+        let config = container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.mistral,
             "Expected .mistral tool call format, got: \(String(describing: config.toolCallFormat))"
@@ -670,8 +670,8 @@ public enum ToolCallTests {
 
     // MARK: Nemotron
 
-    public static func nemotronFormatAutoDetection(container: LLModelContainer) async throws {
-        let config = await container.configuration
+    public static func nemotronFormatAutoDetection(container: LLModelContainer) throws {
+        let config = container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.xmlFunction,
             "Expected .xmlFunction tool call format, got: \(String(describing: config.toolCallFormat))"
@@ -745,8 +745,8 @@ public enum ToolCallTests {
 
     // MARK: Qwen3.5
 
-    public static func qwen35FormatAutoDetection(container: LLModelContainer) async throws {
-        let config = await container.configuration
+    public static func qwen35FormatAutoDetection(container: LLModelContainer) throws {
+        let config = container.configuration
         try check(
             config.toolCallFormat == ToolCallFormat.xmlFunction,
             "Expected .xmlFunction tool call format, got: \(String(describing: config.toolCallFormat))"

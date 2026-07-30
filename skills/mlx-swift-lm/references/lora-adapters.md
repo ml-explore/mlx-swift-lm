@@ -228,42 +228,30 @@ public protocol LoRALayer: Module {
 ### Inference with Adapter
 
 ```swift
-// Load base model
-let container = try await LLMModelFactory.shared.loadContainer(
+// Adapters require a TrainableLanguageModel, so load a TRAINABLE context.
+// A materialized ModelContext (from load(...)) is sealed and traps on adapter
+// application, so use loadTrainable(...) here.
+let context = try await LLMModelFactory.shared.loadTrainable(
     from: HubClient.default,
     using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
     configuration: .init(id: "mlx-community/Llama-3.2-3B-Instruct-4bit")
 )
 
-// Load and apply adapter
-// Note: adapter.load() throws, but container.update() closure is non-throwing
+// Load and apply adapter directly to the trainable model
 let adapter = try LoRAContainer.from(directory: adapterDir)
-await container.update { context in
-    do {
-        try adapter.load(into: context.model)
-    } catch {
-        // Handle adapter loading error
-        print("Failed to load adapter: \(error)")
-    }
-}
+try adapter.load(into: context.model)
 
-// Generate with adapted model
-let session = ChatSession(container)
+// Convert to an inference (Sendable, materialized) ModelContext to generate
+let inferenceContext = ModelContext(context)
+let session = ChatSession(inferenceContext)
 let response = try await session.respond(to: "Hello")
 ```
 
 ### Fuse for Deployment
 
 ```swift
-// Fuse adapter for faster inference
-// Note: adapter.fuse() throws, handle errors in closure
-await container.update { context in
-    do {
-        try adapter.fuse(with: context.model)
-    } catch {
-        print("Failed to fuse adapter: \(error)")
-    }
-}
+// Fuse adapter for faster inference (apply to the trainable model)
+try adapter.fuse(with: context.model)
 
 // Save fused model weights if desired
 // Model no longer has LoRA overhead
@@ -272,20 +260,12 @@ await container.update { context in
 ### Hot-swap Adapters
 
 ```swift
-// Remove current adapter (unload is non-throwing)
-await container.update { context in
-    adapter1.unload(from: context.model)
-}
+// Remove current adapter from the trainable model
+adapter1.unload(from: context.model)
 
 // Apply different adapter
 let adapter2 = try LoRAContainer.from(directory: adapter2Dir)
-await container.update { context in
-    do {
-        try adapter2.load(into: context.model)
-    } catch {
-        print("Failed to load adapter: \(error)")
-    }
-}
+try adapter2.load(into: context.model)
 ```
 
 ## Memory Considerations
