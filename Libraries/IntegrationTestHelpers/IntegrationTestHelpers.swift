@@ -828,7 +828,11 @@ public enum ToolCallTests {
             let lmInput = try await context.processor.prepare(input: input)
             let stream = try generate(
                 input: lmInput,
-                parameters: GenerateParameters(maxTokens: maxTokens),
+                // temperature: 0 (greedy) so tool-call generation is deterministic.
+                // The default sampling temperature makes these end-to-end checks
+                // flaky — the model may emit no tool call or malformed arguments on
+                // some runs (matches the temperature: 0 used by the coherence/MTP tests).
+                parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
                 context: context
             )
             var text = ""
