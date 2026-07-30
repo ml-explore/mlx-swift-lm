@@ -160,10 +160,24 @@ open class SwitchGLU: Module {
         super.init()
     }
 
+    /// Transform the expanded input ahead of the expert gather/sort.
+    ///
+    /// This pair of hooks exists so subclasses can wrap the expert
+    /// projections without copying `projectExperts`' dataflow — and
+    /// silently detaching from future changes to it, e.g. the gather/sort
+    /// threshold or the compiled activation product. `RotateSwitchGLU`
+    /// rotates activations here; the identity defaults add no graph nodes.
+    func transformInput(_ x: MLXArray) -> MLXArray { x }
+
+    /// Transform the activated hidden state ahead of `downProj`.
+    /// Identity by default — see `transformInput`.
+    func transformHidden(_ x: MLXArray) -> MLXArray { x }
+
     private func projectExperts(
         _ x: MLXArray, _ indices: MLXArray
     ) -> (output: MLXArray, inverseOrder: MLXArray?) {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
+        x = transformInput(x)
 
         let doSort = indices.size >= 64
 
@@ -176,12 +190,13 @@ open class SwitchGLU: Module {
 
         let xUp = upProj(x, idx, sortedIndices: doSort)
         let xGate = gateProj(x, idx, sortedIndices: doSort)
-        let activated =
+        var activated =
             if let activationProduct {
                 activationProduct(xGate, xUp)
             } else {
                 activation(xGate) * xUp
             }
+        activated = transformHidden(activated)
         x = downProj(
             activated,
             idx,

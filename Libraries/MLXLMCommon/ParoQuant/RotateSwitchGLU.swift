@@ -47,46 +47,20 @@ public class RotateSwitchGLU: SwitchGLU {
             inputDims: inputDims, hiddenDims: hiddenDims, numExperts: numExperts, bias: bias)
     }
 
-    /// `SwitchGLU`'s dataflow (including the ≥64-indices gather/sort fast
-    /// path) with the two shared rotations applied around the expert
-    /// projections. `gate_up_rot` runs *before* the gather/sort: the
-    /// rotation kernel is row-independent (rows never mix, see the
-    /// `PairwiseRotation` Metal source) and `gatherSort` only duplicates
-    /// rows, so `rotate(gather(x)) ≡ gather(rotate(x))` bitwise — while
-    /// rotating `L` rows instead of `L × topK`. `PairwiseRotation.rotate`
-    /// is shape-preserving over any leading shape and passes empty batches
+    /// `gate_up_rot` runs *before* the gather/sort: the rotation kernel is
+    /// row-independent (rows never mix, see the `PairwiseRotation` Metal
+    /// source) and `gatherSort` only duplicates rows, so
+    /// `rotate(gather(x)) ≡ gather(rotate(x))` bitwise — while rotating `L`
+    /// rows instead of `L × topK`. `PairwiseRotation.rotate` is
+    /// shape-preserving over any leading shape and passes empty batches
     /// through, so both the sorted (flattened) and unsorted (broadcast)
     /// layouts go through unchanged.
-    override public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
-        var x = MLX.expandedDimensions(x, axes: [-2, -3])
+    override func transformInput(_ x: MLXArray) -> MLXArray {
+        gateUpRot.rotate(x)
+    }
 
-        let doSort = indices.size >= 64
-
-        var idx = indices
-        var inverseOrder = MLXArray()
-
-        x = gateUpRot.rotate(x)
-
-        if doSort {
-            (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
-        }
-
-        let xUp = upProj(x, idx, sortedIndices: doSort)
-        let xGate = gateProj(x, idx, sortedIndices: doSort)
-        var activated =
-            if let activationProduct {
-                activationProduct(xGate, xUp)
-            } else {
-                activation(xGate) * xUp
-            }
-        activated = downRot.rotate(activated)
-
-        x = downProj(activated, idx, sortedIndices: doSort)
-
-        if doSort {
-            x = scatterUnsort(x: x, invOrder: inverseOrder, shape: indices.shape)
-        }
-
-        return MLX.squeezed(x, axis: -2)
+    /// Rotate the activated hidden state ahead of the `down_proj` experts.
+    override func transformHidden(_ x: MLXArray) -> MLXArray {
+        downRot.rotate(x)
     }
 }
