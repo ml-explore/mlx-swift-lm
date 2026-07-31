@@ -1203,10 +1203,17 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     private func computeLogits(_ hiddenStates: MLXArray) -> MLXArray {
-        if let lmHead {
-            return lmHead(hiddenStates)
-        }
-        return languageModel.embedTokens.asLinear(hiddenStates)
+        let logits =
+            if let lmHead {
+                lmHead(hiddenStates)
+            } else {
+                languageModel.embedTokens.asLinear(hiddenStates)
+            }
+        // Emit bf16 logits so greedy argmax ranking matches Python mlx-vlm,
+        // which keeps decode logits in bf16. Float32 accumulation can invent a
+        // spurious ranking among tokens that are exact ties in bf16 (observed:
+        // "4" vs "7" tied in bf16 on a solid-color parity image).
+        return logits.asType(.bfloat16)
     }
 
     /// Append per-row `imageNewline` tokens to a [H, W, D] feature map and flatten.
