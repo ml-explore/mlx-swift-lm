@@ -1003,17 +1003,13 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         let generation: GenerationRun
-                        /// Generate with the normal iterator, abandoning any draft
-                        /// cache: every caller below reaches this because
-                        /// speculation was refused, and a retained draft cache
-                        /// would then sit at an offset the main cache never visits.
+                        /// Every caller below reaches this because speculation was refused, so the
+                        /// draft cache is dropped: retaining it would leave it at an offset the
+                        /// main cache never visits.
                         func defaultGenerationWithoutDraft() throws -> GenerationRun {
                             draftKVCache = nil
-                            // Seed the iterator with the carried state; read
-                            // back the post-prefill state (prefill runs in the
-                            // iterator's init, and the rope delta does not
-                            // change during decode) so the next turn — or the
-                            // next tool restart — anchors correctly.
+                            // Seed the carried state and read back the post-prefill state so the
+                            // next turn, or the next tool restart, anchors correctly.
                             let iterator = try TokenIterator(
                                 input: input, model: model, cache: kvCache,
                                 state: lmState,
@@ -1030,15 +1026,12 @@ public final class ChatSession {
                             )
                         }
 
-                        // Carried model state is fine here: the iterator seeds it
-                        // and reads it back, and the anchors the vision models
-                        // carry position from the cache offset, which a rejected
-                        // proposal rewinds along with the KV rows. Media is not —
-                        // the draft model would have to prefill the same images.
+                        // Carried state is safe to speculate on: the anchors position from the
+                        // cache offset, which a rejected proposal rewinds along with the KV rows.
+                        // Media is not — the draft model would have to prefill the same images.
+                        // `input` may have been narrowed to a token-only suffix above, so test
+                        // the prepared input for media.
                         if let speculativeDecoding,
-                            // `input` may have been narrowed to a token-only suffix
-                            // above; the prepared input still shows whether this turn
-                            // carries media.
                             preparedInput.image == nil,
                             preparedInput.video == nil,
                             preparedInput.audio == nil,
@@ -1128,11 +1121,8 @@ public final class ChatSession {
                                         parameters: generateParameters,
                                         numDraftTokens: speculativeDecoding.numDraftTokens
                                     )
-                                    // Carry the main model's post-prefill state,
-                                    // as the standard path does. Without this a
-                                    // model that positions from a rope delta
-                                    // would lose its anchor after a speculative
-                                    // turn and mis-position the next one.
+                                    // Carry the post-prefill state, as the standard path does,
+                                    // so the next turn keeps its anchor.
                                     lmState = iterator.state
 
                                     generation = GenerationRun(

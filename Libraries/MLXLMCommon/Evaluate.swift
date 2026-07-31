@@ -828,18 +828,13 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// Model state carried by the main model, as ``TokenIterator/state``.
     ///
-    /// Seeded from `mainState`, updated by the prefill that runs during
-    /// initialization and by each verification pass, so a caller threading
-    /// state across turns can read it back. Read it from the same iterator
-    /// value you generate with: this is a struct, so a copy would not observe
+    /// Seeded from `mainState` and updated by prefill and each verification pass. Read it from
+    /// the same iterator value you generate with: this is a struct, so a copy would not observe
     /// later mutations.
     ///
-    /// > Note: a rejected proposal trims KV rows, so only state that a decode
-    /// > step does not rewrite survives speculation. The M-RoPE anchors that
-    /// > the vision models carry qualify: they position from the cache offset,
-    /// > which the same trim rewinds. State that snapshots a specific position
-    /// > (as the MTP drafter's hidden states do) does not, which is why that
-    /// > path has its own ``MTPSpeculativeTokenIterator``.
+    /// > Note: a rejected proposal trims KV rows, so only state a decode step does not rewrite
+    /// > survives speculation. The vision models' M-RoPE anchors qualify — they position from the
+    /// > cache offset, which the same trim rewinds.
     public internal(set) var state: LMOutput.State?
     var mainCache: [KVCache]
     var draftCache: [KVCache]

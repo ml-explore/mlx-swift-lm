@@ -1049,9 +1049,6 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         let inputIds = input.text.tokens
         let cacheOffset = cache.first?.offset ?? 0
 
-        // A warm cache without its anchor cannot be continued correctly: the
-        // remainder would be positioned as if the cached prefix held no images.
-        // Fail rather than silently changing the output.
         guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
             throw ContinuationStateError.missingState(
                 model: "GlmOcr", key: ropeDeltasKey.id)
@@ -1084,19 +1081,14 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         return .logits(result)
     }
 
-    /// Warm, windowed continuation — the path `prepare` also uses for long cold
-    /// prompts.
+    /// Warm, windowed continuation — the path `prepare` also uses for long cold prompts.
     ///
-    /// The vision tower and the image→token merge run **once** over the
-    /// remainder, and the remainder's M-RoPE positions are computed **once**
-    /// from the seeded position anchor (the cache offset plus the rope delta
-    /// carried in `state`), so a new image's diverging t/h/w indices start at
-    /// the anchor rather than at zero. The language model is then driven in
-    /// chunks of `windowSize`, bounding the attention scratch to
-    /// `[heads, chunk, L]` instead of `[heads, L, L]`.
+    /// The vision tower and image→token merge run once over the remainder, whose M-RoPE positions
+    /// are computed once from the position anchor (cache offset plus the rope delta in `state`),
+    /// so a new image's t/h/w indices start there rather than at zero. The language model is then
+    /// driven in `windowSize` chunks, bounding the attention scratch to `[heads, chunk, L]`.
     ///
-    /// The returned state carries `getRopeIndex` delta − cache offset, so a
-    /// caller threading state end to end continues the next turn correctly.
+    /// The returned state carries `getRopeIndex` delta − cache offset.
     private func prepareContinuation(
         _ input: LMInput,
         cache: [any KVCache],

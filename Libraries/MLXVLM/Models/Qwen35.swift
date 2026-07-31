@@ -1110,10 +1110,7 @@ public class Qwen35: Module, VLMModel {
         // The Position Anchor: token offset already in the cache (P) plus the
         // rope delta the cached images accumulated, carried in `state`.
         let cacheOffset = faCacheOffset(cache)
-        // A warm cache without its anchor cannot be continued correctly: the
-        // remainder would be positioned as if the cached prefix held no images.
-        // Fail rather than silently changing the output. A cold cache (P = 0)
-        // needs no anchor, so long cold prefills still route through here.
+        // A cold cache needs no anchor, so long cold prefills still route through here.
         guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
             throw ContinuationStateError.missingState(
                 model: "Qwen35", key: ropeDeltasKey.id)

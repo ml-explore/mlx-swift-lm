@@ -1685,11 +1685,8 @@ public func savePromptCache(
 ///
 /// Prefer ``loadPromptCacheSnapshot(url:)``, which also restores the model state a cache needs to
 /// be continued correctly. This tuple form has no slot for that state, so it rejects files that
-/// carry any rather than dropping it.
-///
-/// Models that position tokens from a carried anchor — the Qwen vision families, GLM-OCR — refuse
-/// to continue a warm cache that arrives without one, so a cache saved through this API cannot be
-/// used as a warm prefix for them.
+/// carry any rather than dropping it. Models that position from a carried anchor refuse a warm
+/// cache that arrives without one, so a cache saved through this API cannot warm them.
 ///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file

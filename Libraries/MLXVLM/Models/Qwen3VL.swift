@@ -1801,9 +1801,6 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
         let cacheOffset = cache.first?.offset ?? 0
 
-        // A warm cache without its anchor cannot be continued correctly: the
-        // remainder would be positioned as if the cached prefix held no images.
-        // Fail rather than silently changing the output.
         guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
             throw ContinuationStateError.missingState(
                 model: "Qwen3VL", key: ropeDeltasKey.id)
@@ -1842,24 +1839,16 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         return .logits(languageOutput)
     }
 
-    /// Warm, windowed continuation — the path `prepare` also uses for long cold
-    /// prompts.
+    /// Warm, windowed continuation — the path `prepare` also uses for long cold prompts.
     ///
-    /// The vision tower and the image→token merge run **once** over the
-    /// remainder, and the remainder's M-RoPE positions are computed **once**
-    /// from the seeded position anchor (the cache offset plus the rope delta
-    /// carried in `state`), so a new image's diverging t/h/w indices start at
-    /// the anchor rather than at zero. The language model is then driven in
-    /// chunks of `windowSize`, bounding the full-attention scratch to
-    /// `[heads, chunk, L]` instead of `[heads, L, L]`.
+    /// The vision tower and image→token merge run once over the remainder, whose M-RoPE positions
+    /// are computed once from the position anchor (cache offset plus the rope delta in `state`),
+    /// so a new image's t/h/w indices start there rather than at zero. The language model is then
+    /// driven in `windowSize` chunks, bounding the attention scratch to `[heads, chunk, L]`. The
+    /// visual mask and per-layer deepstack tensors slice in lockstep, deepstack rows by
+    /// visual-token count rather than by token index.
     ///
-    /// Chunking is what makes this more than a slice of the embeddings: the
-    /// visual mask and every per-layer deepstack tensor have to be sliced in
-    /// lockstep with them, the deepstack rows by visual-token count rather than
-    /// by token index.
-    ///
-    /// The returned state carries `getRopeIndex` delta − cache offset, so a
-    /// caller threading state end to end continues the next turn correctly.
+    /// The returned state carries `getRopeIndex` delta − cache offset.
     private func prepareContinuation(
         _ input: LMInput,
         inputIds: MLXArray,
