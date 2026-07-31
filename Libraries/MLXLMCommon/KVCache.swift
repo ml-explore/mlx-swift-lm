@@ -1595,6 +1595,11 @@ private func cacheClassName(_ cache: KVCache) -> String {
 /// Pass a snapshot to a `ChatSession` initializer that accepts a `promptCache` rather than
 /// unpacking it into the `cache:` initializer.
 ///
+/// A snapshot does not carry the chat transcript. A `ChatSession` restored from one appends each
+/// new message rather than re-rendering the conversation, so a later image-bearing turn builds a
+/// different prompt than it would in a session that still holds its history. Positions stay
+/// correct either way.
+///
 /// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
 /// caches before constructing multiple sessions from it.
 public struct PromptCacheSnapshot {

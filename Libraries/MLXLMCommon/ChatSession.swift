@@ -522,6 +522,12 @@ public final class ChatSession {
     /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
     ///
     /// Models that do not carry model state simply ignore it, so this works for any model.
+    ///
+    /// > Important: A snapshot carries the cache and model state, not the structured chat
+    /// > transcript, so this initializer uses fragment-based continuation. A later
+    /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
+    /// > re-rendering earlier messages. Positions stay correct; the prompt differs.
+    /// > Use a history initializer when later turns must re-render the full conversation.
     public convenience init(
         _ model: ModelContainer,
         instructions: String? = nil,
@@ -554,6 +560,12 @@ public final class ChatSession {
     /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
     ///
     /// Models that do not carry model state simply ignore it, so this works for any model.
+    ///
+    /// > Important: A snapshot carries the cache and model state, not the structured chat
+    /// > transcript, so this initializer uses fragment-based continuation. A later
+    /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
+    /// > re-rendering earlier messages. Positions stay correct; the prompt differs.
+    /// > Use a history initializer when later turns must re-render the full conversation.
     public convenience init(
         _ model: ModelContext,
         instructions: String? = nil,
