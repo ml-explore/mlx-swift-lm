@@ -896,12 +896,40 @@ public final class ChatSession {
                                 && draftCacheIsAligned
                                 && fullTokenIds.starts(with: cachedTokenIds)
 
-                            if extendsCachedPrefix && !containsNewMedia
-                                && fullTokenIds.count > cachedTokenIds.count
-                                && input.text.mask == nil
+                            // An append-only media turn — a new image on an otherwise
+                            // unchanged transcript — extends the cached prefix exactly as
+                            // a text turn does. It cannot use the plain token slice below:
+                            // `LMInput(tokens:)` drops the media payload. Ask the model to
+                            // split its own prepared input instead, since only the model
+                            // knows which part of that payload belongs to the suffix.
+                            //
+                            // A `nil` result — no conformance, or a split the model cannot
+                            // prove sound — leaves the previous rebuild behavior in place.
+                            // Nothing here runs unless the turn carries new media, so the
+                            // text and tool-continuation paths are unaffected.
+                            var appendOnlyMediaSuffix: LMInput?
+                            if containsNewMedia, extendsCachedPrefix,
+                                speculativeDecoding == nil,
+                                fullTokenIds.count > cachedTokenIds.count,
+                                !cachedTokenIds.isEmpty,
+                                let splitter = model as? PreparedInputSplitting
                             {
-                                let suffix = Array(fullTokenIds.dropFirst(cachedTokenIds.count))
-                                input = LMInput(tokens: MLXArray(suffix))
+                                appendOnlyMediaSuffix = splitter.splitPreparedInput(
+                                    preparedInput, droppingFirst: cachedTokenIds.count)
+                            }
+
+                            if extendsCachedPrefix
+                                && fullTokenIds.count > cachedTokenIds.count
+                                && ((!containsNewMedia && input.text.mask == nil)
+                                    || appendOnlyMediaSuffix != nil)
+                            {
+                                if let appendOnlyMediaSuffix {
+                                    input = appendOnlyMediaSuffix
+                                } else {
+                                    let suffix = Array(
+                                        fullTokenIds.dropFirst(cachedTokenIds.count))
+                                    input = LMInput(tokens: MLXArray(suffix))
+                                }
                                 reusedMainCacheWithoutDraft =
                                     speculativeDecoding != nil
                                     && !willFallBackBeforeLoadingDraft
