@@ -341,6 +341,7 @@ final class Qwen35GatedDeltaNet: Module {
             cache[0] = newConvState
             cache[1] = newRecState
             cache.advance(inputs.dim(1))
+            cache.offset += inputs.dim(1)
         }
         return out
     }
@@ -744,6 +745,7 @@ final class Qwen35DecoderLayer: Module {
         cache[0] = out[1]
         cache[1] = out[2]
         cache.advance(1)
+        cache.offset += 1
         return out[0]
     }
 
@@ -1020,6 +1022,7 @@ public class Qwen35TextModelInner: Module {
                 mambaCache[0] = outputs[1 + 2 * i]
                 mambaCache[1] = outputs[2 + 2 * i]
                 mambaCache.advance(1)
+                mambaCache.offset += 1
             }
 
             pendingAttention = []

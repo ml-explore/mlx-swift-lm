@@ -46,6 +46,18 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
             Qwen35TextConfiguration.self, from: Data(json.utf8))
     }
 
+    private func assertCacheOffsets(
+        _ cache: [KVCache], equal expected: Int,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            cache.allSatisfy { $0.offset == expected },
+            "expected every cache offset to equal \(expected), got \(cache.map(\.offset))",
+            file: file,
+            line: line
+        )
+    }
+
     /// Runs two decode steps (the first installs the compiled closures, the
     /// second replays them), releases the model, and asserts the
     /// closure-owning blocks deallocate.
@@ -84,6 +96,35 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
         // traces.
         try assertBlocksDeallocate(headDim: 32) { caches in
             caches.map { $0 is MambaCache ? $0 : QuantizedKVCache(groupSize: 32, bits: 8) }
+        }
+    }
+
+    func testCacheOffsetsAdvanceAcrossPrefillAndWholeStepDecode() throws {
+        let model = Qwen35TextModel(try tinyMoEConfiguration(headDim: 8))
+        let cache = model.newCache(parameters: nil)
+        let prompt = MLXArray([Int32(1), 2, 3, 4]).reshaped(1, 4)
+
+        eval(model(prompt, cache: cache))
+        assertCacheOffsets(cache, equal: 4)
+
+        let nextToken = MLXArray([Int32(5)]).reshaped(1, 1)
+        eval(model(nextToken, cache: cache))
+        assertCacheOffsets(cache, equal: 5)
+    }
+
+    func testCacheOffsetsAdvanceAcrossFallbackDecode() throws {
+        let model = Qwen35TextModel(try tinyMoEConfiguration(headDim: 32))
+        let cache = model.newCache(parameters: nil).map { cache in
+            cache is MambaCache
+                ? cache
+                : QuantizedKVCache(groupSize: 32, bits: 8)
+        }
+
+        // Quantized attention caches make the whole-step decode schedule
+        // ineligible. This exercises Qwen35DecoderLayer.decodeLinearLayer.
+        for (token, expectedOffset) in [(Int32(1), 1), (Int32(2), 2)] {
+            eval(model(MLXArray([token]).reshaped(1, 1), cache: cache))
+            assertCacheOffsets(cache, equal: expectedOffset)
         }
     }
 }

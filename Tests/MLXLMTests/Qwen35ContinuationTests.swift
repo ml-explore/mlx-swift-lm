@@ -144,6 +144,26 @@ final class Qwen35ContinuationTests: XCTestCase {
             "warm continuation diverged from full prefill (noise floor \(noiseFloor))")
     }
 
+    func testWarmTextContinuationKeepsCacheOffsetsAligned() throws {
+        MLXRandom.seed(17)
+        let model = try makeTinyModel()
+        let prefix = textTokens(40)
+        let suffix = textTokens(8, seed: 3)
+        let cache = model.newCache(parameters: nil)
+
+        _ = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: prefix)), cache: cache, state: nil,
+                windowSize: nil))
+        XCTAssertTrue(cache.allSatisfy { $0.offset == 40 })
+
+        _ = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: suffix)), cache: cache, state: nil,
+                windowSize: nil))
+        XCTAssertTrue(cache.allSatisfy { $0.offset == 48 })
+    }
+
     /// With an image in turn 1, the rope delta the image accumulated must be
     /// carried into turn 2's prefill (the ChatSession cross-turn state
     /// threading): two-turn with threaded state ≡ one-shot full prefill.

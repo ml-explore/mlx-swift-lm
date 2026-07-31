@@ -564,6 +564,7 @@ enum Qwen35Language {
             if let cache {
                 cache[1] = state
                 cache.advance(S)
+                cache.offset += S
             }
 
             out = norm(out, gate: z)
