@@ -26,6 +26,17 @@ enum PromptCacheReuseDecision: Equatable {
     /// turn may rebuild a draft cache from a reproducible prompt.
     case appendSuffixToMain(suffixStart: Int, representedTokens: [Int])
 
+    /// The cache already represents a usable prefix, but this turn introduces
+    /// new media, so a plain token slice would drop the payload that belongs
+    /// to the suffix. Ask the model to split its own prepared input at
+    /// `suffixStart`; afterwards the cache represents `representedTokens`.
+    ///
+    /// Only the model knows which part of a prepared input belongs to the
+    /// suffix, so this decision — like ``trimToCommonPrefix`` — can fail while
+    /// being applied. A model that declines the split must be downgraded to
+    /// ``rebuild`` before prefilling.
+    case appendMediaSuffix(suffixStart: Int, representedTokens: [Int])
+
     /// Rewind every cache by `trimCount` (down to `commonPrefixLength`), then
     /// feed `promptTokens[commonPrefixLength...]`.
     case trimToCommonPrefix(commonPrefixLength: Int, trimCount: Int)
@@ -37,7 +48,7 @@ enum PromptCacheReuseDecision: Equatable {
     /// `true` when a non-empty cached prefix is carried into this turn.
     var reusesCachedPrefix: Bool {
         switch self {
-        case .appendSuffix, .appendSuffixToMain, .trimToCommonPrefix:
+        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix:
             return true
         case .prefillAll, .rebuild:
             return false
@@ -88,6 +99,15 @@ struct PromptCacheTurn: Sendable {
     /// rules use this to avoid resuming from a private main-cache path with a
     /// missing or divergent draft cache.
     var usesSpeculativeDecoding: Bool = false
+
+    /// The model can split a prepared input into a media-carrying suffix, so an
+    /// append-only media turn has a way to reuse the cached prefix. The session
+    /// reports the capability here rather than the policy inspecting the model,
+    /// which keeps the decision table free of MLX and session types.
+    ///
+    /// Capability is not a guarantee: the split may still be declined for a
+    /// specific input, which the caller handles when applying the decision.
+    var canSplitPreparedMedia: Bool = false
 }
 
 /// What the caches currently hold.
@@ -135,6 +155,7 @@ struct PromptCacheReusePolicy: Sendable {
     /// Rules that apply to every model, in priority order.
     static let standardRules: [any PromptCacheReuseRule] = [
         ExtendCachedPrefixRule(),
+        AppendOnlyMediaRule(),
         RewindToCommonPrefixRule(),
     ]
 
@@ -176,6 +197,40 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
         }
 
         return .appendSuffix(
+            suffixStart: cache.cachedTokens.count, representedTokens: turn.promptTokens)
+    }
+}
+
+/// Appends the trailing tokens when a turn adds media to an otherwise unchanged
+/// transcript.
+///
+/// An append-only media turn extends the cached prefix exactly as a text turn
+/// does, so ``ExtendCachedPrefixRule`` would accept it but for its
+/// `carriesNewMedia` guard: a plain token slice drops the media payload that
+/// belongs to the suffix. The split itself is the model's job, so this rule only
+/// fires when the session reports the model can perform it.
+///
+/// Unlike ``ExtendCachedPrefixRule`` this rule does **not** require the absence
+/// of an attention mask. A VL processor pairs media with an all-ones mask as a
+/// matter of course, so refusing masks here would disable the path for exactly
+/// the inputs it exists to serve. Distinguishing that benign mask from a real
+/// padding mask needs the model's own layout knowledge, so the check belongs to
+/// the splitter, which refuses anything that is not all-ones.
+struct AppendOnlyMediaRule: PromptCacheReuseRule {
+    func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
+        guard turn.carriesNewMedia,
+            turn.canSplitPreparedMedia,
+            !turn.usesSpeculativeDecoding,
+            !cache.cachedTokens.isEmpty,
+            cache.mainCacheIsAligned,
+            cache.draftCacheIsAligned,
+            turn.promptTokens.count > cache.cachedTokens.count,
+            turn.promptTokens.starts(with: cache.cachedTokens)
+        else {
+            return nil
+        }
+
+        return .appendMediaSuffix(
             suffixStart: cache.cachedTokens.count, representedTokens: turn.promptTokens)
     }
 }
