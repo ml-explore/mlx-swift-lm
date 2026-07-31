@@ -16,10 +16,14 @@ let modelFactory: ModelFactory
 // e.g. LLMRegistry.llama3_8B_4bit
 let modelConfiguration: ModelConfiguration
 
-// e.g. TokenizersLoader() from MLXLMTokenizers
+// e.g. #hubDownloader() from MLXHuggingFace
+let downloader: any Downloader
+
+// e.g. #huggingFaceTokenizerLoader() from MLXHuggingFace
 let tokenizerLoader: any TokenizerLoader
 
 let container = try await modelFactory.loadContainer(
+    from: downloader,
     using: tokenizerLoader,
     configuration: modelConfiguration
 )

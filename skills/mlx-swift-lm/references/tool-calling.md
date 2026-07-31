@@ -29,13 +29,18 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | Format | Models | Example Output |
 |--------|--------|----------------|
 | `.json` | Llama, Qwen, most models | `<tool_call>{"name":"f","arguments":{...}}</tool_call>` |
-| `.lfm2` | LFM2 | `<\|tool_call_start\|>{"name":"f",...}<\|tool_call_end\|>` |
+| `.lfm2` | LFM2 | `<\|tool_call_start\|>[func(arg='value')]<\|tool_call_end\|>` |
 | `.xmlFunction` | Nemotron, Qwen3 Coder, Qwen3 Next | `<tool_call><function=name><parameter=k>v</parameter></function></tool_call>` |
 | `.qwen35` | Qwen 3.5 | Same `<tool_call>` frame as `.xmlFunction`, but also accepts a framed Qwen/Hermes JSON payload (`<tool_call>{"name":"f","arguments":{...}}</tool_call>`) that Qwen 3.5 sporadically emits instead of XML. Bare (unframed) JSON is not recovered. |
 | `.glm4` | GLM4 | `func<arg_key>k</arg_key><arg_value>v</arg_value>` |
-| `.gemma` | Gemma | `call:name{key:value}` |
+| `.gemma` | Gemma | `<start_function_call>call:name{key:value}<end_function_call>` |
+| `.gemma4` | Gemma4 | `<\|tool_call>call:name{key:<\|"\|>value<\|"\|>}<tool_call\|>` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
+| `.atem` | Muse Glimmer (Onyx ATEM) | `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>` |
+| `.mistral` | Mistral3 | `[TOOL_CALLS]get_weather [ARGS]{"location":"Tokyo"}` |
+| `.llama3` | Llama 3 | `<\|python_tag\|>{"name":"func","parameters":{...}}` |
+| `.gptOSS` | GPT-OSS | Full Harmony protocol, not a JSON dialect: `<\|channel\|>commentary to=functions.get_weather<\|message\|>{...}<\|call\|>` |
 
 ## Defining Tools
 

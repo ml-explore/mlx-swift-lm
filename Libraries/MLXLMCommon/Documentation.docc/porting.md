@@ -600,11 +600,12 @@ Now we can load the model using `llm-tool` or the `LLMEval` example application,
 ```swift
 let modelConfiguration = ModelConfiguration(id: "mlx-community/quantized-gemma-2b-it")
 
-// e.g. TokenizersLoader() from MLXLMTokenizers
+// e.g. #huggingFaceTokenizerLoader() from MLXHuggingFace
 let tokenizerLoader: any TokenizerLoader
 
 // This will download the weights and load the model
-let container = try await MLXModelFactory.shared.loadContainer(
+let container = try await LLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
     using: tokenizerLoader,
     configuration: modelConfiguration
 )
@@ -614,7 +615,7 @@ let generateParameters = GenerateParameters()
 let input = UserInput(prompt: "Are cherries sweet?")
 
 // Run inference
-let result = try await modelContainer.perform { [input] context in
+let result = try await container.perform { [input] context in
     // Convert the UserInput into LMInput
     let input = try context.processor.prepare(input: input)
 

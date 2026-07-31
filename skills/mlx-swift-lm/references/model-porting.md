@@ -406,8 +406,8 @@ and already runs on the adapter and quantization paths.
 
 ```swift
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: ModelConfiguration(id: "mlx-community/YourModel-4bit")
 )
 

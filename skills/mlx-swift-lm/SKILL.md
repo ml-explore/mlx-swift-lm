@@ -65,12 +65,13 @@ MLXEmbedders    - Embedding models and pooling utilities
 ```swift
 import MLXLLM
 import MLXLMCommon
-import MLXLMHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers   // from swift-tokenizers-mlx
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace     // HubClient (used by the macros)
+import Tokenizers      // AutoTokenizer (used by the tokenizer-loader macro)
 
 let modelContainer = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
@@ -89,12 +90,13 @@ for try await chunk in session.streamResponse(to: "Explain structured concurrenc
 ```swift
 import MLXVLM
 import MLXLMCommon
-import MLXLMHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers   // from swift-tokenizers-mlx
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
 
 let modelContainer = try await VLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 )
 
@@ -112,22 +114,25 @@ let response = try await session.respond(
 
 ```swift
 import MLXEmbedders
-import MLXEmbeddersHuggingFace  // from swift-huggingface-mlx
-import MLXLMTokenizers          // from swift-tokenizers-mlx
+import MLXLMCommon
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
 
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+let container = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: ModelConfiguration(id: "mlx-community/bge-small-en-v1.5-mlx")
 )
 
-let embeddings = await container.perform { model, tokenizer, pooler in
-    let tokens = tokenizer.encode(text: "Hello world")
+let embeddings = await container.perform { context in
+    let tokens = context.tokenizer.encode(text: "Hello world")
     let input = MLXArray(tokens).expandedDimensions(axis: 0)
-    let output = model(input)
-    let pooled = pooler(output, normalize: true)
+    let output = context.model(
+        input, positionIds: nil, tokenTypeIds: nil, attentionMask: nil)
+    let pooled = context.pooling(output, normalize: true)
     eval(pooled)
-    return pooled
+    return pooled.asArray(Float.self)  // MLXArray is not Sendable; convert before returning
 }
 ```
 
@@ -304,7 +309,7 @@ let response = try await session.respond(to: "What happens in this video?", vide
 
 ```swift
 let images: [UserInput.Image] = [.url(url1), .url(url2)]
-let response = try await session.respond(to: "Compare these two images", images: images, videos: [])
+let response = try await session.respond(to: "Compare these two images", images: images, videos: [], audios: [])
 ```
 
 ### VLM-Specific Processing
@@ -366,7 +371,7 @@ for await item in stream {
 
 - `ModelContainer` is `Sendable` and thread-safe.
 - `ChatSession` is not thread-safe; use one session per task/flow.
-- `MLXArray` is not `Sendable`; keep it inside one isolation domain or use `SendableBox` transfer patterns.
+- `MLXArray` is not `Sendable`; keep it inside one isolation domain, or `eval` and convert to a Sendable value (e.g. `asArray(Float.self)`) before crossing isolation boundaries.
 
 ### Memory Management
 
