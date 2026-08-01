@@ -1742,7 +1742,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
-        state _: LMOutput.State?,
+        state: LMOutput.State?,
         windowSize _: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
@@ -1810,7 +1810,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let languageOutput = languageModel(
             inputIds,
             cache: typedCache,
-            state: nil,
+            state: state,
             inputEmbeddings: inputEmbeddings,
             mask: nil,
             positionIds: nil,
