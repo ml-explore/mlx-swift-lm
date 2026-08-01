@@ -135,6 +135,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let prefillStart = Date.timeIntervalSinceReferenceDate
         try prepare(input: input, windowSize: parameters.prefillStepSize)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+
+        // The guard above ran against a fresh, zero-offset cache, where a
+        // rotating cache is trimmable vacuously. Re-check now that the prompt
+        // is in: one whose length leaves no room for a speculative round can
+        // never be rewound, so speculation is unavailable for this stream.
+        // `blockSize` bounds the first round's width.
+        standDownIfNoTrimHeadroom(
+            positions: blockSize,
+            reason:
+                "prompt fills the sliding window — MTP rewind unavailable; generating without speculation"
+        )
     }
 
     /// Prefill the main model with the prompt. The drafter has no cache to
@@ -241,6 +252,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let sharedKV = state[mtpSharedKVStatesKey]
         else {
             switchToPassthrough(reason: "main model did not emit drafter state")
+            return
+        }
+
+        // This round's verify pass commits `numDraft + 1` positions. If that
+        // would carry the sliding cache past its window, the rewind below
+        // would no-op and strand this round's rejected drafts in the cache —
+        // stand down now, while the cache is still rewindable.
+        if standDownIfNoTrimHeadroom(
+            positions: numDraft + 1,
+            reason:
+                "sliding cache wrapped mid-stream — MTP rewind unavailable; continuing without speculation"
+        ) {
             return
         }
 
@@ -382,6 +405,37 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         passthrough = true
     }
 
+    /// Stand down to passthrough if the main cache cannot absorb `positions`
+    /// more tokens and still be rewound.
+    ///
+    /// MTP's accept/reject step depends on `trimPromptCache`, and
+    /// ``RotatingKVCache/isTrimmable`` is `offset < maxCacheSize` — a sliding
+    /// window cache is untrimmable forever once it wraps. The wrap happens
+    /// *inside* the verify pass, so a check that merely asks "has it wrapped?"
+    /// fires a round too late: that round's rewind silently returns 0 (the
+    /// guard in `trimPromptCache` is all-or-nothing over the array, so even the
+    /// trimmable full-attention entries are skipped) and its rejected drafts
+    /// stay welded into every layer's cache. Standing down while headroom
+    /// remains keeps every rewind valid, so a passthrough-crossing stream
+    /// stays bit-exact to a plain autoregressive run.
+    @discardableResult
+    private mutating func standDownIfNoTrimHeadroom(
+        positions: Int, reason: String
+    ) -> Bool {
+        guard !passthrough else { return false }
+        let hasHeadroom = mainCache.allSatisfy { cache in
+            guard let maxSize = cache.maxSize else { return true }
+            return cache.offset + positions < maxSize
+        }
+        guard !hasHeadroom else { return false }
+        switchToPassthrough(reason: reason)
+        // Release the emitted snapshot: passthrough passes `state: nil` and
+        // never reads it again, and its sliding entries can span up to
+        // `maxCacheSize + S - 1` per layer.
+        mainState = nil
+        return true
+    }
+
     /// One single-token forward step against the main model, used in
     /// passthrough mode. The drafter is not invoked.
     private mutating func passthroughStep() -> Int? {
@@ -404,20 +458,26 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return nil
         }
 
+        // Drain the pending buffer first — before the passthrough branch. A
+        // stand-down at the end of `init` leaves the prepare-time bonus
+        // sitting here, already committed to the cache (`y` is the token
+        // after it). Short-circuiting to `passthroughStep()` would drop it and
+        // start the stream one position ahead of an equivalent autoregressive
+        // run. Rounds that flip passthrough mid-stream always clear the buffer
+        // first, so this reordering is a no-op for them.
+        if pendingIndex < pendingTokens.count {
+            let token = pendingTokens[pendingIndex]
+            pendingIndex += 1
+            telemetry.recordGeneratedToken()
+            return token
+        }
+
         if passthrough {
             if let token = passthroughStep() {
                 telemetry.recordGeneratedToken()
                 return token
             }
             return nil
-        }
-
-        // Drain the pending buffer first.
-        if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
         }
 
         // Run a new speculation round (may transition to passthrough).
