@@ -1746,7 +1746,12 @@ public func generateTokens(
 ///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
 ///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)``
 ///     per round; drafter instances hold no target-derived state and are safe
-///     to share across iterators.
+///     to share across iterators. Speculation requires a rewindable KV cache,
+///     so on a sliding-window model it is available only while total context
+///     (prompt plus generation) stays inside the window. Past that the
+///     iterator logs once, reports
+///     ``GenerateCompletionInfo/passthroughReason``, and finishes the stream
+///     with ordinary single-token generation.
 ///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
 ///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
@@ -1791,6 +1796,12 @@ public func generate(
 /// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
 /// but for MTP drafters. Yields raw token IDs instead of decoded text or
 /// tool calls.
+///
+/// Speculation requires a rewindable KV cache, so on a sliding-window model it
+/// is available only while total context (prompt plus generation) stays inside
+/// the window. Past that the iterator logs once, reports
+/// ``GenerateCompletionInfo/passthroughReason`` on the emitted `.info` event,
+/// and finishes the stream with ordinary single-token generation.
 public func generateTokens(
     input: LMInput,
     cache: [KVCache]? = nil,
