@@ -91,6 +91,7 @@ public enum VLMTypeRegistry {
         "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
         "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
         "qwen3_vl": create(Qwen3VLConfiguration.self, Qwen3VL.init),
+        "qwen3_vl_moe": create(Qwen3VLMoEConfiguration.self, Qwen3VLMoE.init),
         "qwen3_5": create(Qwen35Configuration.self, Qwen35.init),
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
         "idefics3": create(Idefics3Configuration.self, Idefics3.init),
@@ -456,9 +457,18 @@ public final class VLMModelFactory: GenericModelFactory {
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
 
-        // Auto-detect tool call format from model type if not explicitly set
+        // Auto-detect tool call format: ask the model, then fall back to model type
         if mutableConfiguration.toolCallFormat == nil {
-            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: modelType)
+            mutableConfiguration.toolCallFormat =
+                model.toolCallFormat
+                ?? ToolCallFormat.infer(from: modelType)
+        }
+        // Reasoning protocol: ask the model, then fall back to model_type + repo id.
+        if mutableConfiguration.reasoningConfig == nil {
+            mutableConfiguration.reasoningConfig =
+                model.reasoningConfig
+                ?? ReasoningConfig.infer(
+                    from: modelType, modelId: configuration.name, configData: configData)
         }
 
         // Load tokenizer from model directory (or alternate tokenizer repo),
@@ -518,7 +528,8 @@ public final class VLMModelFactory: GenericModelFactory {
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            reasoningConfig: mutableConfiguration.reasoningConfig)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,

@@ -235,7 +235,7 @@ public enum PrepareResult {
 /// - calls ``prepare(_:cache:state:windowSize:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
-public protocol LanguageModel: BaseLanguageModel {
+public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///

@@ -27,6 +27,167 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    /// Produces a transcript token stream where a rendered follow-up is an
+    /// exact extension of the prompt and generated tokens from the prior turn.
+    private struct PrefixPreservingTokenizer: Tokenizer {
+        let renderedLengthContinuation: AsyncStream<Int>.Continuation
+        var rewritesPrefixOnContinuation = false
+        var rewritesCachedTailOnContinuation = false
+
+        var bosToken: String? = nil
+        var eosToken: String? = nil
+        var unknownToken: String? = nil
+        var eosTokenId: Int? { 101 }
+        var unknownTokenId: Int? { 102 }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            text.unicodeScalars.map { scalar in
+                if (0xE000 ..< 0xE064).contains(Int(scalar.value)) {
+                    return Int(scalar.value) - 0xE000
+                }
+                return Int(scalar.value) % 80 + 1
+            }
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            String(
+                String.UnicodeScalarView(
+                    tokenIds.compactMap { UnicodeScalar(0xE000 + $0) }))
+        }
+
+        func convertTokenToId(_ token: String) -> Int? { nil }
+        func convertIdToToken(_ id: Int) -> String? {
+            UnicodeScalar(0xE000 + id).map(String.init)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            var tokens: [Int] = []
+            for message in messages {
+                let role = message["role"] as? String
+                let content = message["content"] as? String ?? ""
+                switch role {
+                case "system":
+                    tokens.append(96)
+                case "user":
+                    tokens.append(97)
+                case "tool":
+                    tokens.append(98)
+                case "assistant":
+                    tokens.append(94)
+                default:
+                    tokens.append(99)
+                }
+                tokens.append(contentsOf: encode(text: content, addSpecialTokens: false))
+                if role != "assistant" {
+                    tokens.append(95)
+                }
+            }
+            tokens.append(94)  // assistant generation marker
+            if rewritesPrefixOnContinuation {
+                tokens.insert(messages.count > 1 ? 93 : 92, at: 0)
+            }
+            if rewritesCachedTailOnContinuation, let marker = tokens.firstIndex(of: 94) {
+                tokens[marker] = messages.count > 1 ? 93 : 92
+            }
+
+            renderedLengthContinuation.yield(tokens.count)
+            return tokens
+        }
+    }
+
+    private struct MediaAwareInputProcessor: UserInputProcessor {
+        let tokenizer: Tokenizer
+        let configuration = ModelConfiguration(id: "test")
+        let messageGenerator = DefaultMessageGenerator()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = messageGenerator.generate(from: input)
+            let tokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: input.tools,
+                additionalContext: input.additionalContext)
+            let image =
+                input.images.isEmpty
+                ? nil : LMInput.ProcessedImage(pixels: MLXArray([Float(0)]))
+            return LMInput(text: .init(tokens: MLXArray(tokens)), image: image)
+        }
+    }
+
+    private struct MaskedInputProcessor: UserInputProcessor {
+        let tokenizer: Tokenizer
+        let configuration = ModelConfiguration(id: "test")
+        let messageGenerator = DefaultMessageGenerator()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let messages = messageGenerator.generate(from: input)
+            let tokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: input.tools,
+                additionalContext: input.additionalContext)
+            let mask = MLXArray(Array(repeating: 1, count: tokens.count))
+                .reshaped(1, tokens.count)
+            return LMInput(text: .init(tokens: MLXArray(tokens), mask: mask))
+        }
+    }
+
+    /// The synthetic text model does not consume attention masks itself.
+    /// Strip the mask only after `ChatSession` has made its cache-reuse
+    /// decision so the regression test can exercise that decision with a
+    /// valid masked processor input.
+    private final class MaskTolerantLanguageModel: Module, LanguageModel {
+        let base: any LanguageModel
+
+        init(_ base: any LanguageModel) {
+            self.base = base
+            super.init()
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        ) throws -> PrepareResult {
+            try base.prepare(
+                LMInput(tokens: input.text.tokens),
+                cache: cache,
+                state: state,
+                windowSize: windowSize)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            base.newCache(parameters: parameters)
+        }
+    }
+
+    private struct EmptyChatTemplateTokenizer: Tokenizer {
+        var bosToken: String? = nil
+        var eosToken: String? = nil
+        var unknownToken: String? = nil
+        var eosTokenId: Int? { 101 }
+        var unknownTokenId: Int? { 102 }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+        func convertTokenToId(_ token: String) -> Int? { nil }
+        func convertIdToToken(_ id: Int) -> String? { nil }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            []
+        }
+    }
+
     private struct UnexpectedDraftModelLoadError: Error {}
 
     private actor DraftModelLoadCounter {
@@ -41,7 +202,11 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
-    private static func makeModel(processor: TestInputProcessor = TestInputProcessor())
+    private static func makeModel(
+        processor: any UserInputProcessor,
+        configuration: ModelConfiguration,
+        tokenizer: any Tokenizer
+    )
         -> ModelContext
     {
         let config = Gemma3TextConfiguration(
@@ -62,14 +227,55 @@ public class ChatSessionTests: XCTestCase {
         eval(model)
 
         return .init(
-            configuration: processor.configuration,
+            configuration: configuration,
             model: model,
             processor: processor,
+            tokenizer: tokenizer)
+    }
+
+    private static func makeModel(processor: TestInputProcessor = TestInputProcessor())
+        -> ModelContext
+    {
+        makeModel(
+            processor: processor,
+            configuration: processor.configuration,
             tokenizer: processor.tokenizer)
     }
 
     private func model(processor: TestInputProcessor = TestInputProcessor()) -> ModelContext {
         Self.makeModel(processor: processor)
+    }
+
+    private func model(processor: MediaAwareInputProcessor) -> ModelContext {
+        Self.makeModel(
+            processor: processor,
+            configuration: processor.configuration,
+            tokenizer: processor.tokenizer)
+    }
+
+    private func model(processor: MaskedInputProcessor) -> ModelContext {
+        var context = Self.makeModel(
+            processor: processor,
+            configuration: processor.configuration,
+            tokenizer: processor.tokenizer)
+        context.model = MaskTolerantLanguageModel(context.model)
+        return context
+    }
+
+    private func collectGeneration(
+        _ stream: AsyncThrowingStream<Generation, Error>
+    ) async throws -> (text: String, info: GenerateCompletionInfo) {
+        var text = ""
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in stream {
+            if let chunk = item.chunk {
+                text += chunk
+            }
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+        return (text, try XCTUnwrap(completionInfo))
     }
 
     private let generationParameters = GenerateParameters(maxTokens: 50)
@@ -128,7 +334,111 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertGreaterThan(result.count, targetLength, result)
     }
 
-    func testStructuredContinuationAvoidsReplayingHistoryAcrossToolTurns() async throws {
+    func testChangingInstructionsUpdatesRetainedConversation() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: TestTokenizer(),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let session = ChatSession(
+            model(processor: processor),
+            instructions: "first instruction",
+            generateParameters: GenerateParameters(maxTokens: 1))
+
+        _ = try await session.respond(to: "first question")
+        session.instructions = "replacement instruction"
+        _ = try await session.respond(to: "second question")
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].map(\.role), [.system, .user])
+        XCTAssertEqual(calls[0].first?.content, "first instruction")
+        XCTAssertEqual(calls[1].map(\.role), [.system, .user, .assistant, .user])
+        XCTAssertEqual(calls[1].first?.content, "replacement instruction")
+        XCTAssertFalse(calls[1].contains { $0.content == "first instruction" })
+    }
+
+    func testEmptyGenerationRollsBackIncompleteTurn() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: TestTokenizer(),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 0))
+
+        let firstResponse = try await session.respond(to: "first question")
+        let secondResponse = try await session.respond(to: "second question")
+        XCTAssertEqual(firstResponse, "")
+        XCTAssertEqual(secondResponse, "")
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].map(\.role), [.user])
+        XCTAssertEqual(calls[1].map(\.role), [.user])
+        XCTAssertEqual(calls[1].first?.content, "second question")
+    }
+
+    func testInterruptedGenerationRollsBackIncompleteTurn() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: TestTokenizer(),
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 50))
+
+        for try await _ in session.streamResponse(to: "first question") {
+            break
+        }
+        await session.synchronize()
+
+        session.generateParameters = GenerateParameters(maxTokens: 1)
+        _ = try await session.respond(to: "second question")
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].map(\.role), [.user])
+        XCTAssertEqual(calls[1].map(\.role), [.user])
+        XCTAssertEqual(calls[1].first?.content, "second question")
+    }
+
+    func testEmptyPreparedInputThrowsClearError() async throws {
+        let tokenizer = EmptyChatTemplateTokenizer()
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 1))
+
+        do {
+            _ = try await session.respond(to: "ignored")
+            XCTFail("expected ChatSessionError.emptyPreparedInput")
+        } catch ChatSessionError.emptyPreparedInput {
+            // expected
+        }
+    }
+
+    func testStructuredContinuationRendersCompleteTranscriptAcrossToolTurns() async throws {
         let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
         let processor = TestInputProcessor(
             tokenizer: TestTokenizer(),
@@ -160,16 +470,232 @@ public class ChatSessionTests: XCTestCase {
             calls.append(call)
         }
 
-        XCTAssertEqual(calls.map(\.count), [history.count + 1, 1, 1])
+        XCTAssertEqual(
+            calls.map(\.count), [history.count + 1, history.count + 3, history.count + 5])
         XCTAssertEqual(calls[0].map(\.role), history.map(\.role) + [.tool])
-        XCTAssertEqual(calls[1].map(\.role), [.tool])
-        XCTAssertEqual(calls[2].map(\.role), [.user])
+        XCTAssertEqual(
+            calls[1].map(\.role),
+            history.map(\.role) + [.tool, .assistant, .tool])
+        XCTAssertEqual(
+            calls[2].map(\.role),
+            history.map(\.role) + [.tool, .assistant, .tool, .assistant, .user])
+    }
 
-        let actualPreparedMessageCount = calls.reduce(0) { $0 + $1.count }
-        let replayedHistoryPreparedMessageCount = continuations.indices.reduce(0) {
-            $0 + history.count + $1 + 1
+    func testLegacyStringContinuationPrefillsOnlyUncachedSuffix() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "second") {
+            if let info = item.info {
+                completionInfo = info
+            }
         }
-        XCTAssertLessThan(actualPreparedMessageCount, replayedHistoryPreparedMessageCount)
+
+        let info = try XCTUnwrap(completionInfo)
+        let secondRenderedLength = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(secondRenderedLength)
+        XCTAssertLessThan(info.promptTokenCount, fullSecondPromptLength)
+        XCTAssertEqual(
+            info.promptTokenCount,
+            fullSecondPromptLength - firstPromptLength - 3)
+    }
+
+    func testStructuredContinuationPrefillsOnlyUncachedSuffix() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: [.user("first")])
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: [.user("second")]) {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let info = try XCTUnwrap(completionInfo)
+        let secondRenderedLength = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(secondRenderedLength)
+        XCTAssertLessThan(info.promptTokenCount, fullSecondPromptLength)
+        XCTAssertEqual(
+            info.promptTokenCount,
+            fullSecondPromptLength - firstPromptLength - 3)
+    }
+
+    func testExactPrefixReuseRebuildsWhenPreparedInputHasMask() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MaskedInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        _ = await lengthIterator.next()
+
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+
+        XCTAssertEqual(second.info.promptTokenCount, secondRenderedLength)
+    }
+
+    func testContinuationRebuildsCacheWhenTemplateRewritesPrefix() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesPrefixOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        _ = await lengthIterator.next()
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "second") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let secondRenderedLength = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(secondRenderedLength)
+        XCTAssertEqual(completionInfo?.promptTokenCount, fullSecondPromptLength)
+    }
+
+    func testContinuationTrimsCacheToLongestCommonPrefix() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLengthValue = await lengthIterator.next()
+        let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "second") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let fullSecondPromptLengthValue = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+        let expectedCommonPrefixLength = firstRenderedLength - 1
+        XCTAssertEqual(
+            completionInfo?.promptTokenCount,
+            fullSecondPromptLength - expectedCommonPrefixLength)
+        XCTAssertLessThan(completionInfo?.promptTokenCount ?? .max, fullSecondPromptLength)
+    }
+
+    func testHistoricalMediaReusesSuffixButNewMediaRebuildsCache() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        let firstRenderedLengthValue = await lengthIterator.next()
+        let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
+
+        var textFollowUpInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "describe it") {
+            if let info = item.info {
+                textFollowUpInfo = info
+            }
+        }
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+        XCTAssertEqual(
+            textFollowUpInfo?.promptTokenCount,
+            secondRenderedLength - firstRenderedLength - 3)
+
+        var newMediaInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(
+            to: "now inspect this",
+            role: .user,
+            images: [.array(MLXArray([Float(1)]))],
+            videos: [])
+        {
+            if let info = item.info {
+                newMediaInfo = info
+            }
+        }
+        let thirdRenderedLengthValue = await lengthIterator.next()
+        let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
+        XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
+    }
+
+    func testLongestCommonPrefixTrimmingFallsBackForHistoricalMedia() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        _ = await lengthIterator.next()
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "describe it") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let fullSecondPromptLengthValue = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+        XCTAssertEqual(completionInfo?.promptTokenCount, fullSecondPromptLength)
     }
 
     func testChatSessionAsyncInterrupt() async throws {
@@ -290,6 +816,96 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    func testSpeculativeDecodingMemoryPolicyFallbackReusesMainCacheAcrossTurns() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2,
+                memoryPolicy: SpeculativeDecodingMemoryPolicy(
+                    limitBytes: 0,
+                    action: .fallbackToDefault)),
+            generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLengthValue = await lengthIterator.next()
+        let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "second") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+        XCTAssertEqual(
+            completionInfo?.promptTokenCount,
+            secondRenderedLength - firstRenderedLength - 3)
+        XCTAssertNil(completionInfo?.speculativeDecodingTelemetry)
+    }
+
+    func testActiveSpeculativeDecodingSafelyRebuildsAcrossTurns() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesPrefixOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let container = ModelContainer(context: model(processor: processor))
+        let speculativeDecoding = SpeculativeDecodingConfig(
+            draftModel: container,
+            numDraftTokens: 2)
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let session = ChatSession(
+            container,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: parameters)
+
+        let first = try await collectGeneration(session.streamDetails(to: "first"))
+        _ = await lengthIterator.next()
+        let firstTelemetry = try XCTUnwrap(first.info.speculativeDecodingTelemetry)
+        XCTAssertGreaterThan(firstTelemetry.roundCount, 0)
+        XCTAssertGreaterThan(firstTelemetry.draftTokenCount, 0)
+        XCTAssertEqual(firstTelemetry.emittedTokenCount, first.info.generationTokenCount)
+
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+        let secondTelemetry = try XCTUnwrap(second.info.speculativeDecodingTelemetry)
+        XCTAssertGreaterThan(secondTelemetry.roundCount, 0)
+        XCTAssertGreaterThan(secondTelemetry.draftTokenCount, 0)
+        XCTAssertEqual(secondTelemetry.emittedTokenCount, second.info.generationTokenCount)
+        XCTAssertEqual(second.info.promptTokenCount, secondRenderedLength)
+
+        let cleanSession = ChatSession(
+            container,
+            history: [.user("first"), .assistant(first.text)],
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: parameters)
+        let cleanSecond = try await collectGeneration(
+            cleanSession.streamDetails(to: "second"))
+        let cleanRenderedLengthValue = await lengthIterator.next()
+        let cleanRenderedLength = try XCTUnwrap(cleanRenderedLengthValue)
+
+        let cleanTelemetry = try XCTUnwrap(cleanSecond.info.speculativeDecodingTelemetry)
+        XCTAssertGreaterThan(cleanTelemetry.draftTokenCount, 0)
+        XCTAssertEqual(cleanTelemetry.emittedTokenCount, cleanSecond.info.generationTokenCount)
+        XCTAssertEqual(cleanSecond.info.promptTokenCount, cleanRenderedLength)
+        XCTAssertEqual(second.text, cleanSecond.text)
     }
 
     func testSpeculativeDecodingMemoryPolicyFailThrows() async throws {
