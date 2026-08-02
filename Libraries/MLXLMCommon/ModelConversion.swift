@@ -9,6 +9,32 @@ package let modelConversionSidecarPatterns = [
 ]
 package let modelConversionDownloadPatterns = ["*.safetensors"] + modelConversionSidecarPatterns
 
+/// How the quantization grid is derived from the source weights.
+///
+/// This selects a *derivation*, not a storage format: every calibration produces ordinary
+/// quantized layers that load and run without any decode-side support.
+public enum ModelConversionQuantizationCalibration: Sendable, Equatable {
+    /// Derive the grid from the weights, as MLX does by default.
+    case standard
+
+    /// Reproduce the `Q4_0` grid: symmetric, 32-element groups, scaled by the signed
+    /// element of largest magnitude.
+    ///
+    /// Use this for checkpoints whose weights were already trained against that grid.
+    /// Re-deriving a grid from such weights discards the alignment they were trained for;
+    /// reproducing it keeps them on their intended lattice.
+    ///
+    /// Requires 4 bits, a group size of 32, and ``QuantizationMode/affine``. Supplying a
+    /// conflicting value throws ``ModelConversionError/incompatibleCalibration(_:_:)``
+    /// rather than silently overriding it.
+    ///
+    /// Only `Linear` layers are calibrated. Other quantizable layers are still quantized to
+    /// the same 4-bit/group-32 affine grid, but derive it the standard way, because
+    /// `QuantizedEmbedding` has no initializer accepting precomputed scales and biases.
+    /// The stored format is identical either way, so this affects accuracy, not loadability.
+    case q4Zero
+}
+
 /// Quantization settings for one conversion pass or layer.
 public struct ModelConversionQuantization: Sendable, Equatable {
     /// Quantization bit depth.
@@ -24,10 +50,17 @@ public struct ModelConversionQuantization: Sendable, Equatable {
     /// Quantization mode.
     public var mode: QuantizationMode
 
-    public init(bits: Int? = nil, groupSize: Int? = nil, mode: QuantizationMode = .affine) {
+    /// How the quantization grid is derived. Defaults to ``ModelConversionQuantizationCalibration/standard``.
+    public var calibration: ModelConversionQuantizationCalibration
+
+    public init(
+        bits: Int? = nil, groupSize: Int? = nil, mode: QuantizationMode = .affine,
+        calibration: ModelConversionQuantizationCalibration = .standard
+    ) {
         self.bits = bits
         self.groupSize = groupSize
         self.mode = mode
+        self.calibration = calibration
     }
 }
 
@@ -75,15 +108,22 @@ public struct ModelConversionOptions: Sendable {
         set { quantization.mode = newValue }
     }
 
+    public var calibration: ModelConversionQuantizationCalibration {
+        get { quantization.calibration }
+        set { quantization.calibration = newValue }
+    }
+
     public init(
         bits: Int? = nil,
         groupSize: Int? = nil,
         mode: QuantizationMode = .affine,
+        calibration: ModelConversionQuantizationCalibration = .standard,
         maxShardSize: Int64 = 5 * 1024 * 1024 * 1024,
         overwriteExistingOutput: Bool = false,
         quantizationPredicate: ModelConversionQuantizationPredicate? = nil
     ) {
-        self.quantization = .init(bits: bits, groupSize: groupSize, mode: mode)
+        self.quantization = .init(
+            bits: bits, groupSize: groupSize, mode: mode, calibration: calibration)
         self.maxShardSize = maxShardSize
         self.overwriteExistingOutput = overwriteExistingOutput
         self.quantizationPredicate = quantizationPredicate
@@ -152,6 +192,8 @@ public enum ModelConversionError: LocalizedError, Equatable {
     case unsupportedPyTorchWeights(URL)
     case sourceAlreadyQuantized(URL)
     case invalidShardSize(Int64)
+    case incompatibleCalibration(
+        ModelConversionQuantizationCalibration, ModelConversionQuantization)
 
     public var errorDescription: String? {
         switch self {
@@ -167,6 +209,8 @@ public enum ModelConversionError: LocalizedError, Equatable {
             "The source model in \(directory.path) is already quantized. Re-quantizing is not supported by this conversion helper."
         case .invalidShardSize(let shardSize):
             "Shard size must be greater than zero, got \(shardSize)."
+        case .incompatibleCalibration(let calibration, let quantization):
+            "\(calibration) calibration requires bits 4, group size 32, and affine mode, but got bits \(quantization.bits.map(String.init) ?? "default"), group size \(quantization.groupSize.map(String.init) ?? "default"), mode \(quantization.mode)."
         }
     }
 }
@@ -191,6 +235,12 @@ public func convert(
     if perLayerQuantization != nil {
         throw ModelConversionError.sourceAlreadyQuantized(modelDirectory)
     }
+    try validateModelConversionCalibration(options.quantization)
+    // Resolved once, before any filesystem mutation, and reused below. Re-running the
+    // predicate after the output exists would let a stateful one pass preflight and then
+    // fail with a half-written model on disk.
+    let quantizationDecisions = try modelConversionQuantizationDecisions(
+        model: model, options: options)
     try validateModelConversionOutputDirectory(
         outputDirectory,
         modelDirectory: modelDirectory,
@@ -212,7 +262,8 @@ public func convert(
         perLayerQuantization: perLayerQuantization)
 
     progressHandler(.init(stage: .quantizing))
-    let quantizationResult = quantizeForModelConversion(model: model, options: options)
+    let quantizationResult = quantizeForModelConversion(
+        model: model, options: options, decisions: quantizationDecisions)
     eval(model)
 
     progressHandler(.init(stage: .savingWeights))
@@ -554,18 +605,16 @@ private func removeModelConversionWeights(in outputDirectory: URL) throws {
 
 private func quantizeForModelConversion(
     model: BaseLanguageModel,
-    options: ModelConversionOptions
+    options: ModelConversionOptions,
+    decisions: [(String, Module, ModelConversionQuantizationDecision)]
 ) -> ModelConversionQuantizationResult {
     var layerQuantization = [String: ModelConversionQuantizationDecision]()
     let defaultQuantization = options.quantization
     var effectiveDefaultQuantization = effectiveModelConversionQuantization(defaultQuantization)
 
     let updates =
-        model
-        .leafModules()
-        .flattened()
-        .compactMap { path, module -> (String, Module)? in
-            let decision = options.quantizationPredicate?(path, module) ?? .quantize()
+        decisions
+        .compactMap { path, module, decision -> (String, Module)? in
             let quantization: ModelConversionQuantization
             let usesDefaultQuantization: Bool
             switch decision {
@@ -609,6 +658,94 @@ private func quantizeForModelConversion(
         layerQuantization: layerQuantization)
 }
 
+/// Bits, group size, and mode that ``ModelConversionQuantizationCalibration/q4Zero`` requires.
+private let q4ZeroBits = 4
+private let q4ZeroGroupSize = 32
+
+/// Magnitude of the most-negative representable code. The grid spans `[-8, 7]`, so the scale
+/// is `extremum / -8` and the affine bias that recentres it is `-8 * scale`.
+private let q4ZeroNegativeExtent: Float = 8
+
+/// Validates that a quantization request is consistent with its calibration.
+///
+/// Called before any output directory is created or removed so an unusable request fails
+/// without touching the filesystem.
+func validateModelConversionCalibration(_ quantization: ModelConversionQuantization) throws {
+    switch quantization.calibration {
+    case .standard:
+        return
+    case .q4Zero:
+        let compatible =
+            (quantization.bits ?? q4ZeroBits) == q4ZeroBits
+            && (quantization.groupSize ?? q4ZeroGroupSize) == q4ZeroGroupSize
+            && quantization.mode == .affine
+        if !compatible {
+            throw ModelConversionError.incompatibleCalibration(.q4Zero, quantization)
+        }
+    }
+}
+
+/// Resolves every layer's quantization decision and validates it.
+///
+/// Runs before the output directory is created or removed, so a conflicting per-layer
+/// override fails without leaving a half-written model behind.
+func modelConversionQuantizationDecisions(
+    model: BaseLanguageModel,
+    options: ModelConversionOptions
+) throws -> [(String, Module, ModelConversionQuantizationDecision)] {
+    var resolved = [(String, Module, ModelConversionQuantizationDecision)]()
+    for (path, module) in model.leafModules().flattened() {
+        let decision = options.quantizationPredicate?(path, module) ?? .quantize()
+        if case .quantize(let override) = decision, let override {
+            try validateModelConversionCalibration(override)
+        }
+        resolved.append((path, module, decision))
+    }
+    return resolved
+}
+
+/// Reproduces the `Q4_0` grid for one weight tensor.
+///
+/// Per 32-element group along the input axis the scale comes from the **signed** element of
+/// largest magnitude, `d = extremum / -8`. Using `-max(abs(w))/8` instead flips the sign on
+/// every group whose extremum is negative — close to half of them — which silently produces a
+/// different grid rather than an error. `codeSignedExtremumIsNotAbsMax` pins that apart.
+///
+/// Returns MLX's affine triplet: packed 4-bit codes, `scales = d`, and `biases = -8 * d`.
+func q4ZeroQuantized(_ weight: MLXArray) -> (weight: MLXArray, scales: MLXArray, biases: MLXArray) {
+    let rows = weight.dim(0)
+    let columns = weight.dim(-1)
+    let groups = columns / q4ZeroGroupSize
+
+    let grouped = weight.reshaped(rows * groups, q4ZeroGroupSize).asType(.float32)
+
+    // Signed element of largest magnitude, per group.
+    let magnitudes = MLX.abs(grouped)
+    let extremumIndex = MLX.argMax(magnitudes, axis: -1, keepDims: true)
+    let extremum = MLX.takeAlong(grouped, extremumIndex, axis: -1)
+
+    let scales = extremum / -q4ZeroNegativeExtent
+    let isZero = scales .== 0
+    let inverse = MLX.where(
+        isZero, MLXArray(Float(0)), 1 / MLX.where(isZero, MLXArray(Float(1)), scales))
+
+    // `grouped * inverse` lands in [-8, 8], so adding 8.5 is always positive and floor()
+    // equals the reference encoder's trunc(). Rounding half-to-even would disagree on ties.
+    let offset = grouped * inverse + (q4ZeroNegativeExtent + 0.5)
+    let codes = MLX.clip(MLX.floor(offset), min: 0, max: 15).asType(.uint32)
+
+    // Pack 8 consecutive codes per uint32, low nibble first. The nibbles never overlap, so
+    // summing the shifted codes is exactly a bitwise OR.
+    let codesPerWord = 32 / q4ZeroBits
+    let packedGroups = codes.reshaped(rows, columns / codesPerWord, codesPerWord)
+    let shifts = (MLXArray(0 ..< codesPerWord) * q4ZeroBits).asType(.uint32).reshaped(
+        1, 1, codesPerWord)
+    let packed = MLX.sum(packedGroups << shifts, axis: 2).asType(.uint32)
+
+    let scaleGrid = scales.reshaped(rows, groups).asType(weight.dtype)
+    return (packed, scaleGrid, (scaleGrid * -q4ZeroNegativeExtent).asType(weight.dtype))
+}
+
 private func isConvertibleQuantizationTarget(_ module: Module, groupSize: Int) -> Bool {
     if module is Quantized {
         return false
@@ -634,6 +771,24 @@ private func quantizeLayerForModelConversion(
     let mode = quantization.mode
 
     if let linear = layer as? Linear {
+        if quantization.calibration == .q4Zero {
+            guard linear.weight.dim(-1) % q4ZeroGroupSize == 0 else { return nil }
+            let (weight, scales, biases) = q4ZeroQuantized(linear.weight)
+            let resolved = EffectiveModelConversionQuantization(
+                bits: q4ZeroBits, groupSize: q4ZeroGroupSize, mode: .affine)
+            return (
+                QuantizedLinear(
+                    weight: weight,
+                    bias: linear.bias,
+                    scales: scales,
+                    biases: biases,
+                    groupSize: q4ZeroGroupSize,
+                    bits: q4ZeroBits,
+                    mode: .affine),
+                resolved
+            )
+        }
+
         let (weight, scales, biases) = MLX.quantized(
             linear.weight, groupSize: quantization.groupSize, bits: quantization.bits, mode: mode)
         let actualQuantization =
@@ -678,7 +833,7 @@ private func quantizeLayerForModelConversion(
     return (quantized, effectiveQuantization)
 }
 
-private struct EffectiveModelConversionQuantization: Equatable {
+struct EffectiveModelConversionQuantization: Equatable {
     var bits: Int
     var groupSize: Int
     var mode: QuantizationMode
@@ -695,14 +850,21 @@ private struct ModelConversionQuantizationResult {
 
 extension ModelConversionQuantization {
     fileprivate var hasUnresolvedDefaults: Bool {
-        bits == nil || groupSize == nil
+        guard calibration == .standard else { return false }
+        return bits == nil || groupSize == nil
     }
 }
 
-private func effectiveModelConversionQuantization(
+func effectiveModelConversionQuantization(
     _ quantization: ModelConversionQuantization
 ) -> EffectiveModelConversionQuantization {
-    .init(
+    // A calibration fixes its own grid geometry. Falling through to the mode defaults here
+    // would resolve q4Zero to group size 64 and then skip linears whose input width is a
+    // multiple of 32 but not 64.
+    if quantization.calibration == .q4Zero {
+        return .init(bits: q4ZeroBits, groupSize: q4ZeroGroupSize, mode: .affine)
+    }
+    return .init(
         bits: quantization.bits ?? defaultModelConversionBits(for: quantization.mode),
         groupSize: quantization.groupSize
             ?? defaultModelConversionGroupSize(for: quantization.mode),
