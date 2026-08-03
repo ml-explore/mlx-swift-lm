@@ -408,24 +408,23 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// Stand down to passthrough if the main cache cannot absorb `positions`
     /// more tokens and still be rewound.
     ///
-    /// MTP's accept/reject step depends on `trimPromptCache`, and
-    /// ``RotatingKVCache/isTrimmable`` is `offset < maxCacheSize` — a sliding
-    /// window cache is untrimmable forever once it wraps. The wrap happens
-    /// *inside* the verify pass, so a check that merely asks "has it wrapped?"
-    /// fires a round too late: that round's rewind silently returns 0 (the
-    /// guard in `trimPromptCache` is all-or-nothing over the array, so even the
-    /// trimmable full-attention entries are skipped) and its rejected drafts
-    /// stay welded into every layer's cache. Standing down while headroom
-    /// remains keeps every rewind valid, so a passthrough-crossing stream
-    /// stays bit-exact to a plain autoregressive run.
+    /// MTP's accept/reject step depends on `trimPromptCache`, so each cache
+    /// predicts whether it will remain trimmable after the verify positions
+    /// are appended. The append happens *inside* the verify pass, so a check
+    /// that merely asks "is it trimmable now?" fires a round too late: that
+    /// round's rewind silently returns 0 (the guard in `trimPromptCache` is
+    /// all-or-nothing over the array, so even the trimmable full-attention
+    /// entries are skipped) and its rejected drafts stay welded into every
+    /// layer's cache. Standing down while headroom remains keeps every rewind
+    /// valid, so a passthrough-crossing stream stays bit-exact to a plain
+    /// autoregressive run.
     @discardableResult
     private mutating func standDownIfNoTrimHeadroom(
         positions: Int, reason: String
     ) -> Bool {
         guard !passthrough else { return false }
-        let hasHeadroom = mainCache.allSatisfy { cache in
-            guard let maxSize = cache.maxSize else { return true }
-            return cache.offset + positions < maxSize
+        let hasHeadroom = mainCache.allSatisfy {
+            $0.isTrimmable(after: positions)
         }
         guard !hasHeadroom else { return false }
         switchToPassthrough(reason: reason)

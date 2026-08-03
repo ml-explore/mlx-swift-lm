@@ -51,6 +51,102 @@ private final class LifecycleRecordingCache: BaseKVCache {
     }
 }
 
+/// A direct protocol conformer that deliberately relies on the
+/// `KVCache.isTrimmable(after:)` extension default.
+private final class ProtocolDefaultTrimmabilityCache: KVCache {
+    var offset = 0
+    var maxSize: Int? { nil }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+
+    var state: [MLXArray] {
+        get { [] }
+        set {}
+    }
+
+    var metaState: [String] {
+        get { [] }
+        set {}
+    }
+
+    var isTrimmable: Bool { true }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int {
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        return trimmed
+    }
+
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .none
+    }
+
+    func copy() -> any KVCache {
+        let copy = ProtocolDefaultTrimmabilityCache()
+        copy.offset = offset
+        return copy
+    }
+
+    func innerState() -> [MLXArray] { [] }
+}
+
+// MARK: - Predictive trimmability
+
+@Test func testRotatingKVCachePredictsStrictTrimBoundary() {
+    let cache = RotatingKVCache(maxSize: 8)
+    cache.offset = 3
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testRotatingKVCacheIsNotTrimmableAtOrPastWindow() {
+    let cache = RotatingKVCache(maxSize: 8)
+
+    cache.offset = 8
+    #expect(!cache.isTrimmable)
+    #expect(!cache.isTrimmable(after: 0))
+
+    cache.offset = 9
+    #expect(!cache.isTrimmable)
+    #expect(!cache.isTrimmable(after: 0))
+}
+
+@Test func testRotatingPredictiveTrimOverrideDispatchesThroughKVCache() {
+    let rotating = RotatingKVCache(maxSize: 8)
+    rotating.offset = 3
+    let cache: any KVCache = rotating
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testUnboundedCacheRemainsTrimmableAfterPositiveLookAhead() {
+    let cache: any KVCache = KVCacheSimple()
+
+    #expect(cache.isTrimmable(after: 1_000))
+}
+
+@Test func testCacheListDelegatesPredictiveTrimmabilityToChildren() {
+    let rotating = RotatingKVCache(maxSize: 8)
+    rotating.offset = 3
+    let cache: any KVCache = CacheList(KVCacheSimple(), rotating)
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testDirectKVCacheConformerUsesPredictiveTrimDefault() {
+    let cache: any KVCache = ProtocolDefaultTrimmabilityCache()
+
+    #expect(cache.isTrimmable(after: 1_000))
+}
+
 // MARK: - Original parameterized test (updated with value assertions)
 
 @Test(

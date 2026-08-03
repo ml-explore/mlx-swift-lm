@@ -65,6 +65,13 @@ public protocol KVCache: Evaluatable {
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
+    /// Predict whether this cache can still be trimmed after appending `positions`.
+    ///
+    /// - Parameter positions: The nonnegative number of sequence positions that
+    ///   would be appended.
+    /// - Returns: `true` when a subsequent rewind would remain valid.
+    func isTrimmable(after positions: Int) -> Bool
+
     /// trim n tokens from the cache, returning actual number trimmed
     @discardableResult
     func trim(_ n: Int) -> Int
@@ -99,6 +106,10 @@ public protocol KVCache: Evaluatable {
 extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
+    }
+
+    public func isTrimmable(after positions: Int) -> Bool {
+        isTrimmable
     }
 
     public func prepare(lengths: [Int]?) {}
@@ -203,6 +214,10 @@ open class BaseKVCache: KVCache {
     }
 
     open var isTrimmable: Bool { false }
+
+    open func isTrimmable(after positions: Int) -> Bool {
+        isTrimmable
+    }
 
     @discardableResult
     open func trim(_ n: Int) -> Int { 0 }
@@ -719,7 +734,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 
     public override var isTrimmable: Bool {
-        return offset < maxCacheSize
+        isTrimmable(after: 0)
+    }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        offset + positions < maxCacheSize
     }
 
     @discardableResult
@@ -1487,7 +1506,11 @@ public class CacheList: BaseKVCache {
     }
 
     public override var isTrimmable: Bool {
-        caches.allSatisfy { $0.isTrimmable }
+        isTrimmable(after: 0)
+    }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        caches.allSatisfy { $0.isTrimmable(after: positions) }
     }
 
     @discardableResult

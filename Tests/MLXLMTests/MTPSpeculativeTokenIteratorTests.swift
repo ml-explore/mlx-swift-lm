@@ -150,9 +150,8 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
 ///
 /// `wrapAt` is opt-in and defaults to nil (unbounded, always trimmable), which
 /// is the behavior every pre-existing test relies on. Setting it mirrors
-/// `RotatingKVCache`: `maxSize` reports the window and `isTrimmable` becomes
-/// `offset < wrapAt`, so a mock stream can cross the window the same way a real
-/// sliding-window cache does.
+/// `RotatingKVCache` through the predictive trimmability query, so a mock stream
+/// can cross the window the same way a real sliding-window cache does.
 private final class CountingKVCache: KVCache {
     var offset: Int = 0
     let wrapAt: Int?
@@ -172,8 +171,11 @@ private final class CountingKVCache: KVCache {
         set {}
     }
     var isTrimmable: Bool {
+        isTrimmable(after: 0)
+    }
+    func isTrimmable(after positions: Int) -> Bool {
         guard let wrapAt else { return true }
-        return offset < wrapAt
+        return offset + positions < wrapAt
     }
     @discardableResult
     func trim(_ n: Int) -> Int {
@@ -615,13 +617,12 @@ func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
 // MARK: - Stand-down when the sliding cache runs out of trim headroom
 //
 // MTP's accept/reject step rewinds the main cache with `trimPromptCache`, and
-// `RotatingKVCache.isTrimmable` is `offset < maxCacheSize` — a sliding-window
-// cache is untrimmable forever once it wraps. Before the stand-down existed the
-// iterator only checked trimmability at init, against a fresh zero-offset cache
-// where the check is vacuously true, so any stream whose total context crossed
-// the window kept drafting: the verify pass's sliding K/V grew to
-// `maxCacheSize + S - 1`, flowed into `sharedKV`, and the next `draftBlock`
-// tripped `precondition(slidingKvLen <= textCfg.slidingWindow)`.
+// `RotatingKVCache.isTrimmable(after:)` owns the strict sliding-window boundary.
+// Before the stand-down existed the iterator only checked trimmability at init,
+// against a fresh zero-offset cache where the check is vacuously true, so any
+// stream whose total context crossed the window kept drafting: the verify pass's
+// sliding K/V grew to `maxCacheSize + S - 1`, flowed into `sharedKV`, and the next
+// `draftBlock` tripped `precondition(slidingKvLen <= textCfg.slidingWindow)`.
 //
 // `CountingKVCache(wrapAt:)` mirrors that regime; the checks below pin both
 // entry points and the equivalence-to-greedy guarantee across the transition.
