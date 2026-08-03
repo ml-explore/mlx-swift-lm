@@ -9,8 +9,9 @@ import MLXLMCommon
 /// The configuration seam for ``MLXLanguageModel``: adjust the loaded,
 /// already-inferred ``ModelConfiguration`` for a model on a per-call basis.
 ///
-/// `LLMModelFactory._load` fully infers reasoning, tool-call format, and eos
-/// tokens (passing the load-bearing `modelId`) before the adapter runs, so the
+/// `LLMModelFactory._load` fully resolves reasoning, tool-call format, and eos
+/// tokens (consulting `ChatConventionsRegistry` with the load-bearing `modelId`,
+/// then the model's own declaration) before the adapter runs, so the
 /// configuration handed to ``resolve(_:for:)`` is already complete. A resolver
 /// patches a per-call copy; it does not perform inference.
 ///

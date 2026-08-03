@@ -945,3 +945,9 @@ extension Gemma4TextModel: LoRAModel {
         model.layers.map { $0.selfAttn }
     }
 }
+
+// MARK: - Chat conventions
+
+extension Gemma4TextModel {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
+}

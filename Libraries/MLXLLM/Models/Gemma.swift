@@ -230,3 +230,9 @@ extension GemmaModel: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension GemmaModel {
+    public var toolCallFormat: ToolCallFormat? { .gemma }
+}

@@ -1302,3 +1302,9 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
         case _downsampleFactor = "downsample_factor"
     }
 }
+
+// MARK: - Chat conventions
+
+extension LFM2VL {
+    public var toolCallFormat: ToolCallFormat? { .lfm2 }
+}

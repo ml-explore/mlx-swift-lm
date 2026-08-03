@@ -360,10 +360,5 @@ extension NanbeigeModel {
 
     // <think>/</think>, toggled via `enable_thinking` (template default true),
     // same contract as the Qwen3 family.
-    public var reasoningConfig: ReasoningConfig? {
-        ReasoningConfig(
-            startDelimiter: "<think>", endDelimiter: "</think>",
-            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-            isSpecialToken: true)
-    }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
 }

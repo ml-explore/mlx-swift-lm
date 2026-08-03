@@ -1302,3 +1302,11 @@ extension Qwen35 {
         return castCache(cache)
     }
 }
+
+// MARK: - Chat conventions
+
+// `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
+extension Qwen35 {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}

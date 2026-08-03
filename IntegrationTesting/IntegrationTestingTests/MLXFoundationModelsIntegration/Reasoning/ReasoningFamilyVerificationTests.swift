@@ -84,28 +84,18 @@ struct ReasoningFamilyVerificationTests {
         #expect(!tail.isEmpty)
     }
 
-    // MARK: - Factory-config parity (factory inference == ReasoningConfig.infer)
+    // MARK: - Factory-config parity (factory resolution == declared conventions)
 
-    /// `LLMModelFactory._load` fully infers reasoning before any resolver runs,
-    /// calling the same `ReasoningConfig.infer(from:modelId:configData:)` the
-    /// registry resolves through. With pass-through resolution the meaningful
-    /// pin is that `context.configuration.reasoningConfig` already equals the
-    /// inferred value — we read the configuration directly here.
-    @Test func qwen3FactoryConfigMatchesInferredReasoning() async throws {
+    /// `LLMModelFactory._load` resolves reasoning before any resolver runs, from
+    /// the model's own ``ChatConventionsProviding`` declaration (Qwen3 declares the
+    /// `enable_thinking` contract). With pass-through resolution the meaningful pin
+    /// is that `context.configuration.reasoningConfig` already carries it, so we
+    /// read the configuration directly here.
+    @Test func qwen3FactoryConfigMatchesDeclaredReasoning() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.qwen3)
         await container.perform { context in
-            let configData = try? Data(
-                contentsOf:
-                    testWeightsLocation(modelID: Self.qwen3)
-                    .appendingPathComponent("config.json"))
-            let modelType =
-                configData.flatMap {
-                    try? JSONDecoder.json5().decode(BaseConfiguration.self, from: $0).modelType
-                } ?? ""
-            let inferred = ReasoningConfig.infer(
-                from: modelType, modelId: Self.qwen3, configData: configData)
-            #expect(context.configuration.reasoningConfig == inferred)
+            #expect(context.configuration.reasoningConfig == .thinkTagsWithEnableThinking)
             #expect(context.configuration.reasoningConfig?.startDelimiter == "<think>")
             #expect(
                 context.configuration.reasoningConfig?.promptStrategy
@@ -114,9 +104,11 @@ struct ReasoningFamilyVerificationTests {
     }
 
     /// Pins that the factory bakes R1-Distill's always-on reasoning strategy
-    /// directly into `context.configuration` (R1-Distill is recognized only by
-    /// repo id). This is the value the default resolver passes through unchanged,
-    /// proving the adapter's deleted re-inference was never load-bearing.
+    /// directly into `context.configuration`. R1-Distill is recognized only by
+    /// repo id, so this exercises ``ChatConventionsRegistry`` and its built-in
+    /// ``DeepSeekR1ConventionsResolver`` rather than a model declaration. Note this
+    /// id is deliberately *not* in `LLMRegistry`, so it also proves the resolver
+    /// covers arbitrary distill repos, not just registered ones.
     @Test func r1DistillFactoryConfigReasoningIsAlwaysOn() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.r1Distill)

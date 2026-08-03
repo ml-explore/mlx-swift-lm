@@ -157,12 +157,15 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public let model: LlamaModelInner
 
+    let configuration: LlamaConfiguration
+
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: LlamaConfiguration) {
         self.vocabularySize = args.vocabularySize
         self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
         self.model = LlamaModelInner(args)
+        self.configuration = args
         if !args.tieWordEmbeddings {
             self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
         }
@@ -220,12 +223,18 @@ public struct LlamaConfiguration: Codable, Sendable {
     var attentionBias: Bool = false
     var mlpBias: Bool = false
 
+    /// The checkpoint's `model_type`. Load-bearing because this configuration
+    /// backs both the `llama` and `mistral` registry entries, and the Llama 3
+    /// tool-call format must not be inferred for Mistral checkpoints (Mistral-Nemo
+    /// shares Llama 3's large vocabulary).
+    var modelType: String?
+
     public init(
         hiddenSize: Int, hiddenLayers: Int, intermediateSize: Int, attentionHeads: Int,
         headDimensions: Int? = nil, rmsNormEps: Float, vocabularySize: Int, kvHeads: Int,
         maxPositionEmbeddings: Int? = nil, ropeTheta: Float = 10_000, ropeTraditional: Bool = false,
         ropeScaling: [String: StringOrNumber]? = nil, tieWordEmbeddings: Bool = true,
-        attentionBias: Bool = false, mlpBias: Bool = false
+        attentionBias: Bool = false, mlpBias: Bool = false, modelType: String? = nil
     ) {
         self.hiddenSize = hiddenSize
         self.hiddenLayers = hiddenLayers
@@ -242,6 +251,7 @@ public struct LlamaConfiguration: Codable, Sendable {
         self.tieWordEmbeddings = tieWordEmbeddings
         self.attentionBias = attentionBias
         self.mlpBias = mlpBias
+        self.modelType = modelType
     }
 
     var resolvedHeadDimensions: Int {
@@ -264,6 +274,7 @@ public struct LlamaConfiguration: Codable, Sendable {
         case tieWordEmbeddings = "tie_word_embeddings"
         case attentionBias = "attention_bias"
         case mlpBias = "mlp_bias"
+        case modelType = "model_type"
     }
 
     public init(from decoder: Swift.Decoder) throws {
@@ -299,6 +310,7 @@ public struct LlamaConfiguration: Codable, Sendable {
         if let mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) {
             self.mlpBias = mlpBias
         }
+        modelType = try container.decodeIfPresent(String.self, forKey: .modelType)
 
         if let ropeScaling {
             if ropeScaling["factor"] == nil {
@@ -334,5 +346,32 @@ public struct LlamaConfiguration: Codable, Sendable {
 extension LlamaModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
+    }
+}
+
+// MARK: - Chat conventions
+
+extension LlamaModel {
+    /// Llama 3 uses an inline `<|python_tag|>` JSON format; Llama 1/2 have no
+    /// tool-call convention. The distinction is not in `model_type` alone, so it
+    /// comes from two secondary signals in the checkpoint's own configuration.
+    ///
+    /// Gated on `model_type == "llama"` because this class also backs the
+    /// `mistral` registry entry, and Mistral-Nemo's vocabulary (131072) would
+    /// otherwise trip the Llama 3 vocabulary signal.
+    public var toolCallFormat: ToolCallFormat? {
+        guard configuration.modelType?.lowercased() == "llama" else { return nil }
+
+        // Signal 1: Llama 3 uses 128256 tokens, Llama 2 uses 32000.
+        if configuration.vocabularySize >= 128_000 {
+            return .llama3
+        }
+
+        // Signal 2: rope_scaling declaring the llama3 rope type.
+        if case .string("llama3") = configuration.ropeScaling?["rope_type"] {
+            return .llama3
+        }
+
+        return nil
     }
 }
