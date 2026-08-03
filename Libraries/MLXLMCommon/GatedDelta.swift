@@ -56,10 +56,20 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
             for (int t = 0; t < T; ++t) {
               if (\(maskSource)) {
                 float kv_mem = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {
-                  auto s_idx = n_per_t * dk_idx + i;
-                  state[i] = state[i] * g_[hv_idx];
-                  kv_mem += state[i] * k_[s_idx];
+                {
+                  // Preserve Kahan summation under Metal's default fast math.
+                  #pragma clang fp reassociate(off)
+                  #pragma clang fp contract(off)
+                  float kv_compensation = 0.0f;
+                  for (int i = 0; i < n_per_t; ++i) {
+                    auto s_idx = n_per_t * dk_idx + i;
+                    state[i] = state[i] * g_[hv_idx];
+                    auto product = state[i] * k_[s_idx];
+                    auto corrected = product - kv_compensation;
+                    auto next_sum = kv_mem + corrected;
+                    kv_compensation = (next_sum - kv_mem) - corrected;
+                    kv_mem = next_sum;
+                  }
                 }
                 kv_mem = simd_sum(kv_mem);
 
