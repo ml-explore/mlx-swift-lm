@@ -526,7 +526,9 @@ public final class ChatSession {
     /// > Important: A snapshot carries the cache and model state, not the structured chat
     /// > transcript, so this initializer uses fragment-based continuation. A later
     /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
-    /// > re-rendering earlier messages. Positions stay correct; the prompt differs.
+    /// > re-rendering earlier messages. Positions stay correct, but the prompt differs — and on
+    /// > vision encoders that attend across image boundaries (Qwen2-VL today) so do the new
+    /// > image's features, since it is encoded alone rather than beside the cached one.
     /// > Use a history initializer when later turns must re-render the full conversation.
     public convenience init(
         _ model: ModelContainer,
@@ -564,7 +566,9 @@ public final class ChatSession {
     /// > Important: A snapshot carries the cache and model state, not the structured chat
     /// > transcript, so this initializer uses fragment-based continuation. A later
     /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
-    /// > re-rendering earlier messages. Positions stay correct; the prompt differs.
+    /// > re-rendering earlier messages. Positions stay correct, but the prompt differs — and on
+    /// > vision encoders that attend across image boundaries (Qwen2-VL today) so do the new
+    /// > image's features, since it is encoded alone rather than beside the cached one.
     /// > Use a history initializer when later turns must re-render the full conversation.
     public convenience init(
         _ model: ModelContext,

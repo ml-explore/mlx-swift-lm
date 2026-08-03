@@ -1598,7 +1598,9 @@ private func cacheClassName(_ cache: KVCache) -> String {
 /// A snapshot does not carry the chat transcript. A `ChatSession` restored from one appends each
 /// new message rather than re-rendering the conversation, so a later image-bearing turn builds a
 /// different prompt than it would in a session that still holds its history. Positions stay
-/// correct either way.
+/// correct either way. On vision encoders that attend across image boundaries (Qwen2-VL today)
+/// the new image's features differ too, since it is encoded alone rather than beside the cached
+/// one; Qwen2.5-VL, Qwen3-VL, and GLM-OCR isolate each image and are unaffected.
 ///
 /// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
 /// caches before constructing multiple sessions from it.
