@@ -1,0 +1,27 @@
+{
+  "iterations" : 3,
+  "maxTokens" : 256,
+  "medianChars" : 64,
+  "medianSeconds" : 1.98,
+  "modelId" : "mlx-community\/Qwen2.5-3B-Instruct-4bit",
+  "perCharSeconds" : 0.030937500,
+  "prompt" : "Generate a JSON object with a name and age.",
+  "runs" : [
+    {
+      "characterCount" : 64,
+      "seconds" : 1.97,
+      "textDeltaCount" : 27
+    },
+    {
+      "characterCount" : 64,
+      "seconds" : 1.98,
+      "textDeltaCount" : 27
+    },
+    {
+      "characterCount" : 64,
+      "seconds" : 2.09,
+      "textDeltaCount" : 27
+    }
+  ],
+  "schema" : "{\n    \"type\": \"object\",\n    \"properties\": {\n        \"name\": { \"type\": \"string\", \"maxLength\": 20 },\n        \"active\": { \"type\": \"boolean\" },\n        \"color\": { \"type\": \"string\", \"enum\": [\"red\", \"green\", \"blue\"] }\n    },\n    \"required\": [\"name\", \"active\", \"color\"],\n    \"additionalProperties\": false\n}"
+}

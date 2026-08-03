@@ -25,13 +25,21 @@ import MLXLMCommon
 /// ```
 public enum Gemma4AssistantRegistration {
     public static func register() async {
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "gemma4_assistant",
-            creator: { data in
-                let config = try JSONDecoder().decode(
-                    Gemma4AssistantConfiguration.self, from: data)
-                return Gemma4AssistantDraftModel(config)
-            }
-        )
+        // `gemma4_assistant` (E-series, 26B-A4B, 31B drafters) and
+        // `gemma4_unified_assistant` (the 12B drafter, whose target is the
+        // `gemma4_unified` VLM) share the drafter implementation: the unified
+        // variant differs only in its `text_config` (`gemma4_unified_text`,
+        // `attention_k_eq_v`, `num_global_key_value_heads`), which
+        // `Gemma4TextConfiguration` already decodes.
+        for modelType in ["gemma4_assistant", "gemma4_unified_assistant"] {
+            await MTPDrafterTypeRegistry.shared.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder().decode(
+                        Gemma4AssistantConfiguration.self, from: data)
+                    return Gemma4AssistantDraftModel(config)
+                }
+            )
+        }
     }
 }

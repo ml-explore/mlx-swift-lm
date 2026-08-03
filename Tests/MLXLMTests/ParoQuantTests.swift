@@ -171,7 +171,7 @@ public class ParoQuantTests: XCTestCase {
         XCTAssertEqual(y4.shape, [4, 64])
     }
 
-    /// Regression gate for PR #164 C1 + C4 — the old implementation had a
+    /// Regression gate — the old implementation had a
     /// `nonisolated(unsafe)` kernel cache and an eval-time `CachedRotation?`
     /// field that mutated on the first forward pass. Both are unsafe under
     /// the multi-threaded usage that `ModelContainer.perform { ... }`

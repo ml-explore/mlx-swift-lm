@@ -681,3 +681,10 @@ extension Qwen3NextModel: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension Qwen3NextModel {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}

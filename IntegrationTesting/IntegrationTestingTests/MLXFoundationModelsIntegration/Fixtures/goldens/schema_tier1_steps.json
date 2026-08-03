@@ -1,0 +1,281 @@
+{
+  "document" : "{\"title\":\"T\",\"summary\":\"S\",\"conclusion\":\"C\"}",
+  "modelId" : "mlx-community\/gemma-3-270m-it-4bit",
+  "schema" : "{\n    \"type\": \"object\",\n    \"properties\": {\n        \"title\": { \"type\": \"string\" },\n        \"summary\": { \"type\": \"string\" },\n        \"conclusion\": { \"type\": \"string\" }\n    },\n    \"required\": [\"title\", \"summary\", \"conclusion\"],\n    \"additionalProperties\": false\n}",
+  "steps" : [
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 14937,
+      "ffTokenIds" : [
+        3250
+      ],
+      "maskAllowedCount" : 3,
+      "maskAllowedSample" : [
+        361,
+        14937,
+        236782
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "ea44bb92f02f2a27001d5fc1f1d1063fd8ea739f7a902633e3a5addcc234dc7f",
+      "maskTemperature" : 0,
+      "stepIndex" : 0
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 12375,
+      "ffTokenIds" : [
+
+
+      ],
+      "maskAllowedCount" : 6,
+      "maskAllowedSample" : [
+        272,
+        1083,
+        12375,
+        113958,
+        222158,
+        236775
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "3508b49815886a77c6661b71a14d6fa194702a284910c439bda62679ed6e2deb",
+      "maskTemperature" : 0,
+      "stepIndex" : 1
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 236774,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 252023,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "47f02dcdfbfe95e90a31e4dd3447b65a41c1b8e07ad117422ef77a609105b0c4",
+      "maskTemperature" : 0,
+      "stepIndex" : 2
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 4337,
+      "ffTokenIds" : [
+        6011
+      ],
+      "maskAllowedCount" : 252023,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "47f02dcdfbfe95e90a31e4dd3447b65a41c1b8e07ad117422ef77a609105b0c4",
+      "maskTemperature" : 0,
+      "stepIndex" : 3
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 12375,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 6,
+      "maskAllowedSample" : [
+        272,
+        1083,
+        12375,
+        113958,
+        222158,
+        236775
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "3508b49815886a77c6661b71a14d6fa194702a284910c439bda62679ed6e2deb",
+      "maskTemperature" : 0,
+      "stepIndex" : 4
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 236773,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 252023,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "47f02dcdfbfe95e90a31e4dd3447b65a41c1b8e07ad117422ef77a609105b0c4",
+      "maskTemperature" : 0,
+      "stepIndex" : 5
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 4337,
+      "ffTokenIds" : [
+        214889
+      ],
+      "maskAllowedCount" : 252023,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "47f02dcdfbfe95e90a31e4dd3447b65a41c1b8e07ad117422ef77a609105b0c4",
+      "maskTemperature" : 0,
+      "stepIndex" : 6
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 12375,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 4,
+      "maskAllowedSample" : [
+        272,
+        1083,
+        12375,
+        236775
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "4785c8658a28accbf6e63855e06f49760d9ce5e89faca9cbed944cfcb2cb829c",
+      "maskTemperature" : 0,
+      "stepIndex" : 7
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 236780,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 251977,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "e0f3d83b85309847ce8fdb69dd53d23e1dad13d12828779a5a71e1a9a380c1aa",
+      "maskTemperature" : 0,
+      "stepIndex" : 8
+    },
+    {
+      "commitIsStop" : false,
+      "committedTokenId" : 25938,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : 251977,
+      "maskAllowedSample" : [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "maskIsStop" : false,
+      "maskSha256" : "e0f3d83b85309847ce8fdb69dd53d23e1dad13d12828779a5a71e1a9a380c1aa",
+      "maskTemperature" : 0,
+      "stepIndex" : 9
+    },
+    {
+      "commitIsStop" : null,
+      "committedTokenId" : null,
+      "ffTokenIds" : [
+
+      ],
+      "maskAllowedCount" : -1,
+      "maskAllowedSample" : [
+
+      ],
+      "maskIsStop" : true,
+      "maskSha256" : "null",
+      "maskTemperature" : 0,
+      "stepIndex" : 10,
+      "terminal" : true
+    }
+  ],
+  "tier" : "tier1",
+  "vocabSize" : 262145
+}

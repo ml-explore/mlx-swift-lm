@@ -691,3 +691,90 @@ func testCacheListCopyIsIndependent() async throws {
         #expect(allClose(orig, saved).item(Bool.self))
     }
 }
+
+// MARK: - Quantized attention causal masking
+// Regression for the finfo.min mistranslation (masked fill was Float.leastNormalMagnitude ≈ 0).
+
+@Test
+func testQuantizedAttentionCausalMaskMatchesFullPrecision() throws {
+    MLXRandom.seed(0)
+
+    let (B, nKVHeads, L, D) = (1, 2, 4, 64)
+    let scale = 1.0 / Float(D).squareRoot()
+
+    // nRepeats 1 = MHA, 2 = GQA (exercises the 5-D reshape + .causal path that silently corrupts).
+    for nRepeats in [1, 2] {
+        let nQHeads = nKVHeads * nRepeats
+        let q = MLXRandom.normal([B, nQHeads, L, D])
+        let k = MLXRandom.normal([B, nKVHeads, L, D])
+        let v = MLXRandom.normal([B, nKVHeads, L, D])
+
+        // Reference: full-precision causal attention.
+        let reference = MLXFast.scaledDotProductAttention(
+            queries: q, keys: k, values: v, scale: scale, mask: .causal)
+
+        // Path under test: quantized cache + .causal.
+        let cache = QuantizedKVCache(groupSize: 64, bits: 8)
+        let (qK, qV) = cache.updateQuantized(keys: k, values: v)
+        let out = quantizedScaledDotProductAttention(
+            queries: q, quantizedKeys: qK, quantizedValues: qV,
+            scale: scale, mask: .causal,
+            groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+
+        #expect(out.shape == reference.shape)
+        // 8-bit quant error is << 0.1; the bug diverges by O(1).
+        let close = allClose(out, reference, rtol: 0.05, atol: 0.1).item(Bool.self)
+        #expect(
+            close, "quantized causal attention diverges from full precision (nRepeats=\(nRepeats))")
+    }
+}
+
+@Test("quantizedScaledDotProductAttention preserves the score dtype")
+func preservesScoreDtype() {
+    MLXRandom.seed(0)
+    let (B, H, L, D) = (1, 2, 4, 64)
+    let scale = 1.0 / Float(D).squareRoot()
+
+    // f32 passes even with a mis-typed fill; f16/bf16 are exactly what a
+    // float32 fill silently promotes — so assert the output keeps its dtype.
+    for dtype in [DType.float16, .bfloat16, .float32] {
+        let q = MLXRandom.normal([B, H, L, D]).asType(dtype)
+        let k = MLXRandom.normal([B, H, L, D]).asType(dtype)
+        let v = MLXRandom.normal([B, H, L, D]).asType(dtype)
+
+        let cache = QuantizedKVCache(groupSize: 64, bits: 8)
+        let (qK, qV) = cache.updateQuantized(keys: k, values: v)
+        let out = quantizedScaledDotProductAttention(
+            queries: q, quantizedKeys: qK, quantizedValues: qV,
+            scale: scale, mask: .causal,
+            groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+
+        #expect(out.dtype == dtype, "output promoted to \(out.dtype) for input \(dtype)")
+        #expect(out.asType(.float32).sum().item(Float.self).isFinite)  // no -inf → NaN
+    }
+}
+
+// MARK: - ropeOffset overridability
+
+/// A `BaseKVCache` subclass reporting a per-row RoPE offset, as a batched cache does.
+private final class BatchOffsetProbeCache: BaseKVCache {
+    override var ropeOffset: RoPEOffset { .batch(MLXArray([10, 20])) }
+
+    override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+}
+
+/// Models read `ropeOffset` through a `KVCache` reference, so a subclass override has to
+/// survive that dispatch. When `BaseKVCache` did not declare `ropeOffset`, the extension
+/// default was the witness and this resolved to `.scalar(0)`, silently ignoring the subclass.
+@Test func testSubclassRopeOffsetOverrideIsHonoredThroughKVCacheReference() {
+    let cache: any KVCache = BatchOffsetProbeCache()
+
+    guard case .batch(let offsets) = cache.ropeOffset else {
+        Issue.record(
+            "subclass ropeOffset override ignored — resolved to the .scalar extension default")
+        return
+    }
+    #expect(offsets.asArray(Int32.self) == [10, 20])
+}

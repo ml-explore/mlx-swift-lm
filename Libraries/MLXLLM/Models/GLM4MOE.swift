@@ -447,3 +447,9 @@ extension GLM4MoEModel: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension GLM4MoEModel {
+    public var toolCallFormat: ToolCallFormat? { .glm4 }
+}

@@ -54,7 +54,14 @@ struct Gemma4ChunkedPrefillTests {
             """
         let config = try JSONDecoder().decode(
             Gemma4Configuration.self, from: Data(json.utf8))
-        return Gemma4(config)
+        // Pin the initializer weights. Task-local rather than MLXRandom.seed:
+        // tests in this suite run concurrently and share the global RNG.
+        let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+            Gemma4(config)
+        }
+        // Run in f16, as real models do.
+        model.apply { $0.dtype.isFloatingPoint ? $0.asType(.float16) : $0 }
+        return model
     }
 
     /// Token ids well inside the tiny vocabulary.
@@ -94,15 +101,18 @@ struct Gemma4ChunkedPrefillTests {
         #expect(chunked.cacheOffsets == singlePass.cacheOffsets)
         #expect(chunked.cacheOffsets.allSatisfy { $0 == tokens.count })
 
-        let close = allClose(
-            chunked.logits, singlePass.logits, rtol: 1e-4, atol: 1e-5
-        ).item(Bool.self)
+        // Max absolute difference, not allClose: relative error is meaningless
+        // here because logits pass through zero.
+        let drift = abs(
+            chunked.logits.asType(.float32) - singlePass.logits.asType(.float32)
+        ).max()
+        eval(drift)
         #expect(
-            close,
+            drift.item(Float.self) < 5e-2,
             """
             Final-position logits differ between windowSize=\(chunkSize) and \
-            single-pass prefill — chunked prefill must be numerically \
-            equivalent under causal masking.
+            single-pass prefill by \(drift.item(Float.self)) — chunked prefill \
+            must be numerically equivalent under causal masking.
             """)
     }
 
@@ -131,11 +141,16 @@ struct Gemma4ChunkedPrefillTests {
         eval(output.logits)
         #expect(cache.allSatisfy { $0.offset == tokens.count })
 
-        // And it matches the batched run.
+        // And it matches the batched run. Same shapes and same chunking, so the
+        // two runs are bitwise equal; the tolerance only covers one f16 ulp,
+        // which is ~2e-3 at these logit magnitudes.
         let batched = try Self.prefillLogits(model: model, tokens: tokens, windowSize: 6)
-        let close = allClose(
-            output.logits[0..., -1, 0...], batched.logits, rtol: 1e-4, atol: 1e-5
-        ).item(Bool.self)
-        #expect(close, "1-D and [1, N] token inputs must produce identical logits.")
+        let drift = abs(
+            output.logits[0..., -1, 0...].asType(.float32) - batched.logits.asType(.float32)
+        ).max()
+        eval(drift)
+        #expect(
+            drift.item(Float.self) < 5e-3,
+            "1-D and [1, N] token inputs must produce identical logits.")
     }
 }

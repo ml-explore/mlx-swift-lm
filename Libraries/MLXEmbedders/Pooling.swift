@@ -33,6 +33,23 @@ public struct PoolingConfiguration: Codable {
         case poolingModeMaxTokens = "pooling_mode_max_tokens"
         case poolingModeLastToken = "pooling_mode_lasttoken"
     }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // `word_embedding_dimension` is always present in the sentence-transformers spec.
+        dimension = try container.decode(Int.self, forKey: .dimension)
+        // The `pooling_mode_*` flags are optional: some sentence-transformers configs (e.g.
+        // all-MiniLM-L6-v2) omit keys such as `pooling_mode_lasttoken`. An absent key means
+        // that mode is off, so default each missing flag to `false`.
+        poolingModeClsToken =
+            try container.decodeIfPresent(Bool.self, forKey: .poolingModeClsToken) ?? false
+        poolingModeMeanTokens =
+            try container.decodeIfPresent(Bool.self, forKey: .poolingModeMeanTokens) ?? false
+        poolingModeMaxTokens =
+            try container.decodeIfPresent(Bool.self, forKey: .poolingModeMaxTokens) ?? false
+        poolingModeLastToken =
+            try container.decodeIfPresent(Bool.self, forKey: .poolingModeLastToken) ?? false
+    }
 }
 
 /// Loads a `Pooling` module from a specific model directory.

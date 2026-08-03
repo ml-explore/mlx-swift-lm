@@ -61,4 +61,27 @@ struct EmbeddingPoolingTests {
         #expect(pooling.strategy == .last)
         #expect(pooling.dimension == nil)
     }
+
+    @Test("PoolingConfiguration decodes when optional pooling_mode flags are missing")
+    func testPoolingConfigurationDecodesWithMissingFlags() throws {
+        // all-MiniLM-L6-v2 shape: `pooling_mode_lasttoken` is absent from the config.
+        let config = try JSONDecoder().decode(
+            PoolingConfiguration.self,
+            from: Data(
+                """
+                {
+                  "word_embedding_dimension": 384,
+                  "pooling_mode_cls_token": false,
+                  "pooling_mode_mean_tokens": true,
+                  "pooling_mode_max_tokens": false
+                }
+                """.utf8))
+
+        #expect(config.dimension == 384)
+        #expect(config.poolingModeLastToken == false)
+
+        let pooling = Pooling(config: config)
+        #expect(pooling.strategy == .mean)
+        #expect(pooling.dimension == 384)
+    }
 }

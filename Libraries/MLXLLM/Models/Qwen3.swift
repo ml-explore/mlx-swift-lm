@@ -280,3 +280,9 @@ extension Qwen3Model: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension Qwen3Model {
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}

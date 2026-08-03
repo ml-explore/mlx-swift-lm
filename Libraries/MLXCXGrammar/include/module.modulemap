@@ -1,0 +1,4 @@
+module MLXCXGrammar {
+    header "xgrammar_c.h"
+    export *
+}

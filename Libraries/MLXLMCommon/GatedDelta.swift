@@ -56,10 +56,20 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
             for (int t = 0; t < T; ++t) {
               if (\(maskSource)) {
                 float kv_mem = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {
-                  auto s_idx = n_per_t * dk_idx + i;
-                  state[i] = state[i] * g_[hv_idx];
-                  kv_mem += state[i] * k_[s_idx];
+                {
+                  // Preserve Kahan summation under Metal's default fast math.
+                  #pragma clang fp reassociate(off)
+                  #pragma clang fp contract(off)
+                  float kv_compensation = 0.0f;
+                  for (int i = 0; i < n_per_t; ++i) {
+                    auto s_idx = n_per_t * dk_idx + i;
+                    state[i] = state[i] * g_[hv_idx];
+                    auto product = state[i] * k_[s_idx];
+                    auto corrected = product - kv_compensation;
+                    auto next_sum = kv_mem + corrected;
+                    kv_compensation = (next_sum - kv_mem) - corrected;
+                    kv_mem = next_sum;
+                  }
                 }
                 kv_mem = simd_sum(kv_mem);
 
@@ -298,7 +308,14 @@ public func gatedDeltaUpdate(
         state = state.asType(.float32)
     }
 
-    if GatedDeltaKernelManager.shared.kernel != nil {
+    // The fused kernel distributes Dk over exactly 32 simd lanes
+    // (`n_per_t = Dk / 32`, integer-truncating). A key head dim that is not a
+    // multiple of 32 would silently drop its trailing `Dk % 32` state
+    // dimensions and produce wrong output with no error. Stock Qwen3.5 uses
+    // Dk = 192 (a multiple of 32), but the value is config-driven, so route any
+    // non-multiple-of-32 Dk to the ops fallback, which handles an arbitrary key
+    // dimension correctly (slower, but never truncating).
+    if GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 

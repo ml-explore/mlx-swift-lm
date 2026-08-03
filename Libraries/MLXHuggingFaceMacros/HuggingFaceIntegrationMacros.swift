@@ -11,6 +11,7 @@ struct Macros: CompilerPlugin {
         TokenizerLoaderMacro.self,
         LoadContainerMacro.self,
         LoadContextMacro.self,
+        LanguageModelMacro.self,
     ]
 }
 
@@ -210,6 +211,65 @@ public struct LoadContextMacro: ExpressionMacro {
                 using: #huggingFaceTokenizerLoader(),
                 configuration: \(configuration),
                 progressHandler: \(raw: progress))
+            """
+    }
+}
+
+public struct LanguageModelMacro: ExpressionMacro {
+    public static func expansion(
+        of node: some FreestandingMacroExpansionSyntax,
+        in context: some MacroExpansionContext
+    ) throws -> ExprSyntax {
+        func argument(_ label: String) -> String? {
+            node.arguments.first(where: { $0.label?.text == label })?
+                .expression.description
+        }
+
+        guard let configuration = argument("configuration") else {
+            throw MacroExpansionError.message(
+                "#huggingFaceLanguageModel requires a configuration")
+        }
+
+        // Forward the caller's configuration verbatim, then forward
+        // capabilities / configurationResolver only when the caller supplied
+        // them so the MLXLanguageModel init's own defaults apply otherwise.
+        var arguments = ["configuration: \(configuration)"]
+        if let capabilities = argument("capabilities") {
+            arguments.append("capabilities: \(capabilities)")
+        }
+        if let resolver = argument("configurationResolver") {
+            arguments.append("configurationResolver: \(resolver)")
+        }
+        arguments.append(
+            """
+            weightsLocation: { id in
+                    let cache = HuggingFace.HubCache.default
+                    guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        return cache.cacheDirectory
+                    }
+                    if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                        let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                        return snapshot
+                    }
+                    return cache.repoDirectory(repo: repo, kind: .model)
+                }
+            """)
+        arguments.append(
+            """
+            load: { configuration, progressHandler in
+                    try await loadModelContainer(
+                        from: #hubDownloader(),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration,
+                        progressHandler: progressHandler)
+                }
+            """)
+
+        let argumentList = arguments.joined(separator: ",\n    ")
+        return
+            """
+            MLXLanguageModel(
+                \(raw: argumentList))
             """
     }
 }

@@ -33,6 +33,19 @@ public struct Qwen3VLProcessor: UserInputProcessor {
             .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
     }
 
+    /// Pixels for the default 1,280 vision-token budget (`1280 * factor²`),
+    /// clamped to `ceiling`. Overflow-safe: a pathological config (an absurd
+    /// `patch_size`/`merge_size`) yields `ceiling` instead of trapping on the
+    /// unchecked multiply, so bad model metadata degrades to the config ceiling
+    /// rather than crashing preprocess.
+    private static func defaultVisionTokenBudgetPixels(factor: Int, ceiling: Int) -> Int {
+        let (squared, squaredOverflow) = factor.multipliedReportingOverflow(by: factor)
+        guard !squaredOverflow else { return ceiling }
+        let (budget, budgetOverflow) = squared.multipliedReportingOverflow(by: 1280)
+        guard !budgetOverflow else { return ceiling }
+        return min(ceiling, budget)
+    }
+
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
@@ -43,12 +56,24 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         }
 
         let extent = first.extent.size
+        // The qwen3_5 ViT runs *global* O(patches²) attention with no windowing,
+        // so an uncapped full-resolution screenshot can allocate a tens-of-GB
+        // score matrix (a 7.74 MP screenshot → 30,240 patches → a 29 GB matrix).
+        // Several published configs ship a ~16 MP `longest_edge` that never
+        // clamps, so default each image to a 1,280 vision-token budget
+        // (1280 * factor² pixels ⇒ 1,280 tokens after the spatial merge, since
+        // tokens = pixels / factor²), mirroring the sibling Qwen25VL. An
+        // explicit `processing.maxPixels` overrides it.
+        let factor = config.patchSize * config.mergeSize
+        let maxPixels =
+            processing?.maxPixels
+            ?? Self.defaultVisionTokenBudgetPixels(factor: factor, ceiling: config.maxPixels)
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(extent.height),
             width: Int(extent.width),
-            factor: config.patchSize * config.mergeSize,
-            minPixels: config.size.minPixels,
-            maxPixels: config.size.maxPixels)
+            factor: factor,
+            minPixels: processing?.minPixels ?? config.minPixels,
+            maxPixels: maxPixels)
 
         let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
 
@@ -127,12 +152,21 @@ public struct Qwen3VLProcessor: UserInputProcessor {
                         try frame.image.asCIImage(), processing: input.processing)
                     if resizedSize == .zero {
                         let size = processed.extent.size
+                        // Same per-frame vision-token budget cap as the image
+                        // path: the global ViT is just as O(patches²) on a
+                        // video frame. Override-able via
+                        // `processing.maxPixels`.
+                        let factor = config.patchSize * config.mergeSize
+                        let maxPixels =
+                            input.processing.maxPixels
+                            ?? Self.defaultVisionTokenBudgetPixels(
+                                factor: factor, ceiling: config.maxPixels)
                         let (height, width) = try QwenVL.targetSize(
                             height: Int(size.height),
                             width: Int(size.width),
-                            factor: config.patchSize * config.mergeSize,
-                            minPixels: config.minPixels,
-                            maxPixels: config.maxPixels)
+                            factor: factor,
+                            minPixels: input.processing.minPixels ?? config.minPixels,
+                            maxPixels: maxPixels)
                         resizedSize = CGSize(width: width, height: height)
                     }
                     let finalImage = preprocess(image: processed, resizedSize: resizedSize)
@@ -315,7 +349,7 @@ public struct Qwen3VLConfiguration: Codable, Sendable {
         private let _inChannels: Int?
         public var inChannels: Int { _inChannels ?? 3 }
         private let _hiddenAct: String?
-        public var hiddenAct: String { _hiddenAct ?? "gelu" }
+        public var hiddenAct: String { _hiddenAct ?? "gelu_pytorch_tanh" }
         private let _deepstackVisualIndexes: [Int]?
         public var deepstackVisualIndexes: [Int] { _deepstackVisualIndexes ?? [] }
 
@@ -422,6 +456,17 @@ public struct Qwen3VLConfiguration: Codable, Sendable {
 
 enum Qwen3VLVision {
 
+    private static func geluApproximation(for hiddenAct: String) -> GELU.Approximation {
+        switch hiddenAct {
+        case "gelu_pytorch_tanh", "gelu_new":
+            .tanh
+        case "gelu_fast":
+            .fast
+        default:
+            .none
+        }
+    }
+
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let half = x.dim(-1) / 2
         let first = x[.ellipsis, 0 ..< half]
@@ -443,6 +488,33 @@ enum Qwen3VLVision {
 
         let rotated = (tensor * cosVals) + (rotateHalf(tensor) * sinVals)
         return rotated.asType(tensor.dtype)
+    }
+
+    /// The fused SDPA Metal kernel supports head dims 64/80/128; the vision tower's is 72
+    /// (1152/16), which otherwise falls back to composed ops that materialize the
+    /// [L, L] score matrix per head. Zero-padding Q/K/V to 80 preserves the math exactly
+    /// (padded dims contribute nothing to the dot products; `scale` is passed explicitly)
+    /// and dispatches the O(L)-memory fused kernel. Same trick as `gemma4EnsureFusedSDPA`
+    /// and mlx-vlm's Python `ensure_fused_sdpa`.
+    fileprivate static func ensureFusedSDPA(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float
+    ) -> MLXArray {
+        let fusedDims = [64, 80, 128]
+        let headDim = queries.dim(queries.ndim - 1)
+        let target = fusedDims.first(where: { headDim <= $0 }) ?? headDim
+
+        if target == headDim {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: .none)
+        }
+
+        let widths: [IntOrPair] = [0, 0, 0, .init((0, target - headDim))]
+        return MLXFast.scaledDotProductAttention(
+            queries: MLX.padded(queries, widths: widths),
+            keys: MLX.padded(keys, widths: widths),
+            values: MLX.padded(values, widths: widths),
+            scale: scale, mask: .none
+        )[.ellipsis, ..<headDim]
     }
 
     final class VisionRotaryEmbedding {
@@ -586,25 +658,26 @@ enum Qwen3VLVision {
             keys = keys.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
             values = values.reshaped(1, sequenceLength, numHeads, headDim).transposed(0, 2, 1, 3)
 
-            var mask = ones([1, sequenceLength, sequenceLength], dtype: queries.dtype)
-            mask = mask * MLXArray(-1e9, dtype: queries.dtype)
-
+            // Attention is block-diagonal over the images in `cuSeqlens`, so each image is
+            // attended independently instead of materializing a dense [L, L] additive mask
+            // over the joint sequence (memory O((sum L_i)^2) for math that never crosses an
+            // image boundary). Mirrors mlx-vlm's Python implementation.
             let seqlens = cuSeqlens.asArray(Int.self)
+            var attendedParts: [MLXArray] = []
             for idx in 1 ..< seqlens.count {
                 let start = seqlens[idx - 1]
                 let end = seqlens[idx]
-                mask[0..., start ..< end, start ..< end] = MLXArray(0, dtype: queries.dtype)
+                guard end > start else { continue }
+                attendedParts.append(
+                    Qwen3VLVision.ensureFusedSDPA(
+                        queries: queries[0..., 0..., start ..< end, 0...],
+                        keys: keys[0..., 0..., start ..< end, 0...],
+                        values: values[0..., 0..., start ..< end, 0...],
+                        scale: scale))
             }
-
-            let attended = MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
-                scale: scale,
-                mask: .array(mask)
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(sequenceLength, -1)
+            let attended = concatenated(attendedParts, axis: 2)
+                .transposed(0, 2, 1, 3)
+                .reshaped(sequenceLength, -1)
 
             return proj(attended)
         }
@@ -615,10 +688,11 @@ enum Qwen3VLVision {
         @ModuleInfo(key: "linear_fc2") var linear2: Linear
         @ModuleInfo(key: "act") var activation: GELU
 
-        init(dim: Int, hiddenDim: Int) {
+        init(dim: Int, hiddenDim: Int, hiddenAct: String) {
             _linear1.wrappedValue = Linear(dim, hiddenDim, bias: true)
             _linear2.wrappedValue = Linear(hiddenDim, dim, bias: true)
-            _activation.wrappedValue = GELU(approximation: .fast)
+            _activation.wrappedValue = GELU(
+                approximation: Qwen3VLVision.geluApproximation(for: hiddenAct))
         }
 
         func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -636,7 +710,10 @@ enum Qwen3VLVision {
             _norm1.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: 1e-6)
             _norm2.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: 1e-6)
             _attention.wrappedValue = Attention(dim: config.hiddenSize, numHeads: config.numHeads)
-            _mlp.wrappedValue = MLP(dim: config.hiddenSize, hiddenDim: config.intermediateSize)
+            _mlp.wrappedValue = MLP(
+                dim: config.hiddenSize,
+                hiddenDim: config.intermediateSize,
+                hiddenAct: config.hiddenAct)
         }
 
         func callAsFunction(
@@ -952,37 +1029,26 @@ enum Qwen3VLLanguage {
     final class RotaryEmbedding {
 
         private let invFreq: MLXArray
-        private let mropeSection: [Int]
+        private let mropeIndices: MLXArray
 
         init(headDim: Int, base: Double, ropeScaling: Qwen3VLConfiguration.RoPEScaling?) {
             var freq = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
             freq = freq / Float(headDim)
             let baseArray = MLXArray(Float(base))
             self.invFreq = 1.0 / pow(baseArray, freq)
-            self.mropeSection = ropeScaling?.mropeSection ?? [24, 20, 20]
+            let sections = ropeScaling?.mropeSection ?? [24, 20, 20]
+            var indices = [Int32](repeating: 0, count: freq.dim(0))
+            for (dimension, offset) in [(1, 1), (2, 2)] {
+                let end = min(sections[dimension] * 3, indices.count)
+                for index in stride(from: offset, to: end, by: 3) {
+                    indices[index] = Int32(dimension)
+                }
+            }
+            self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
         }
 
         private func applyInterleavedMRope(_ freqs: MLXArray) -> MLXArray {
-            let freqs_t = freqs[0, 0..., 0..., 0...]  // (bs, seq_len, head_dim // 2)
-
-            let dims = freqs_t.dim(-1)
-            var slices: [MLXArray] = []
-
-            for idx in 0 ..< dims {
-                var slice = freqs_t[0..., 0..., idx]
-
-                for (dimIndex, offset) in [(1, 1), (2, 2)] {
-                    let end = min(mropeSection[dimIndex] * 3, dims)
-                    if idx >= offset && idx < end && (idx - offset) % 3 == 0 {
-                        slice = freqs[dimIndex, 0..., 0..., idx]
-                        break
-                    }
-                }
-
-                slices.append(slice)
-            }
-
-            return stacked(slices, axis: -1)
+            takeAlong(freqs, mropeIndices, axis: 0).squeezed(axis: 0)
         }
 
         func callAsFunction(positionIds: MLXArray, dtype: MLX.DType) -> (MLXArray, MLXArray) {
@@ -1676,7 +1742,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
-        state _: LMOutput.State?,
+        state: LMOutput.State?,
         windowSize _: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
@@ -1744,7 +1810,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let languageOutput = languageModel(
             inputIds,
             cache: typedCache,
-            state: nil,
+            state: state,
             inputEmbeddings: inputEmbeddings,
             mask: nil,
             positionIds: nil,
@@ -1844,4 +1910,10 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
     }
+}
+
+// MARK: - Chat conventions
+
+extension Qwen3VL {
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
 }

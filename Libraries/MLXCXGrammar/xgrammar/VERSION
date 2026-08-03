@@ -1,0 +1,10 @@
+v0.1.30
+
+Pinned to the upstream release tag v0.1.30
+(resolved SHA d476a48dcd8fa3b5afeddbe850e73bb3b1dcf505, informational).
+
+This directory is a vendored snapshot of https://github.com/mlc-ai/xgrammar.
+Refresh with: scripts/sync-xgrammar-source.sh v0.1.30
+
+Do not edit files under this directory by hand -- changes will be overwritten
+at the next sync. Patches against upstream belong upstream.

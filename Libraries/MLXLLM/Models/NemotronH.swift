@@ -1002,3 +1002,9 @@ public struct NemotronHConfiguration: Codable, Sendable {
         self.timeStepLimitMax = timeStepLimitMax
     }
 }
+
+// MARK: - Chat conventions
+
+extension NemotronHModel {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+}

@@ -118,6 +118,9 @@ public struct ModelConfiguration: Sendable {
     /// Tool call format for this model (nil = default JSON format)
     public var toolCallFormat: ToolCallFormat?
 
+    /// Reasoning (chain-of-thought) protocol for this model (nil = non-reasoning model)
+    public var reasoningConfig: ReasoningConfig? = nil
+
     public init(
         id: String, revision: String = "main",
         tokenizerSource: TokenizerSource? = nil,
@@ -125,7 +128,8 @@ public struct ModelConfiguration: Sendable {
         extraEOSTokens: Set<String> = [],
         stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerSource = tokenizerSource
@@ -134,6 +138,7 @@ public struct ModelConfiguration: Sendable {
         self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 
     public init(
@@ -143,7 +148,8 @@ public struct ModelConfiguration: Sendable {
         extraEOSTokens: Set<String> = [],
         stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        reasoningConfig: ReasoningConfig? = nil
     ) {
         self.id = .directory(directory)
         self.tokenizerSource = tokenizerSource
@@ -152,6 +158,7 @@ public struct ModelConfiguration: Sendable {
         self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.reasoningConfig = reasoningConfig
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -170,7 +177,8 @@ public struct ModelConfiguration: Sendable {
             extraEOSTokens: extraEOSTokens,
             stopStrings: stopStrings,
             eosTokenIds: eosTokenIds,
-            toolCallFormat: toolCallFormat)
+            toolCallFormat: toolCallFormat,
+            reasoningConfig: reasoningConfig)
     }
 
 }

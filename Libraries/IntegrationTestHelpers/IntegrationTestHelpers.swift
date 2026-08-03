@@ -31,6 +31,43 @@ private func check(_ condition: Bool, _ message: String) throws {
     guard condition else { throw IntegrationTestFailure(message) }
 }
 
+// MARK: - Network Retry
+
+/// Transient network failures worth retrying on a flaky CI network — chiefly
+/// `-1005 networkConnectionLost`, which surfaced mid-download in CI.
+private func isTransientNetworkError(_ error: Error) -> Bool {
+    guard let urlError = error as? URLError else { return false }
+    switch urlError.code {
+    case .networkConnectionLost, .timedOut, .cannotConnectToHost,
+        .notConnectedToInternet, .dnsLookupFailed, .cannotFindHost,
+        .resourceUnavailable, .badServerResponse:
+        return true
+    default:
+        return false
+    }
+}
+
+/// Run `operation`, retrying a few times with linear backoff on transient
+/// network errors. Non-network errors (and the final attempt) rethrow.
+private func withNetworkRetry<T>(
+    _ label: String, attempts: Int = 3, _ operation: () async throws -> T
+) async throws -> T {
+    var lastError: Error?
+    for attempt in 1 ... attempts {
+        do {
+            return try await operation()
+        } catch {
+            lastError = error
+            guard isTransientNetworkError(error), attempt < attempts else { throw error }
+            print(
+                "Transient network error loading \(label) "
+                    + "(attempt \(attempt)/\(attempts)): \(error). Retrying…")
+            try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+        }
+    }
+    throw lastError ?? IntegrationTestFailure("\(label): retry loop exited unexpectedly")
+}
+
 // MARK: - Model IDs
 
 public enum IntegrationTestModelIDs {
@@ -72,16 +109,27 @@ public actor IntegrationTestModels {
         let tokenizerLoader = self.tokenizerLoader
         let task = Task {
             print("Loading LLM: \(key)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: configuration,
-                progressHandler: logProgress(key)
-            )
+            let container = try await withNetworkRetry(key) {
+                try await LLMModelFactory.shared.loadContainer(
+                    from: downloader, using: tokenizerLoader,
+                    configuration: configuration,
+                    progressHandler: logProgress(key)
+                )
+            }
             print("Loaded LLM: \(key)")
             return container
         }
         llmTasksByName[key] = task
         return try await task.value
+    }
+
+    /// Drop the cached container for `configuration` so ARC can free its
+    /// GPU-resident weights between tests. Pair with `GPU.clearCache()` at the
+    /// call site to release the freed buffers back to the system — without this,
+    /// loading many large models in one serialized run accumulates weights until
+    /// the process is jetsammed (Metal compiler XPC failures / crashes).
+    public func evictLLM(_ configuration: ModelConfiguration) {
+        llmTasksByName[configuration.name] = nil
     }
 
     /// Load an arbitrary VLM container, cached by `configuration.name` so the same
@@ -128,6 +176,15 @@ public actor IntegrationTestModels {
         }
         embeddingTask = task
         return try await task.value
+    }
+}
+
+// MARK: - Vision Test Images
+
+/// A solid-color square image for vision smoke tests.
+public enum VisionTestImages {
+    public static func solidColor(_ color: CIColor, size: CGFloat = 100) -> CIImage {
+        CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
     }
 }
 
@@ -181,8 +238,7 @@ public enum ChatSessionTests {
     public static func visionModel(container: LLModelContainer) async throws {
         #if canImport(CoreImage)
         let session = ChatSession(container, generateParameters: generateParameters)
-        let redImage = CIImage(color: .red).cropped(
-            to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let redImage = VisionTestImages.solidColor(.red)
 
         let result = try await streamAndCollect(
             session.streamResponse(
@@ -247,6 +303,69 @@ public enum ChatSessionTests {
                 "Expected a response after providing tool result, got empty string"
             )
         }
+    }
+
+    /// Exercises the structured continuation path used by clients that execute
+    /// tool calls outside `ChatSession` and feed the results back afterward.
+    ///
+    /// Conversation-aware templates must receive the original user query and
+    /// assistant tool call again on the result turn. Rendering only the new
+    /// `.tool` message reproduces the Qwen Jinja "No user query found" failure.
+    public static func structuredToolContinuation(container: LLModelContainer) async throws {
+        let session = ChatSession(
+            container,
+            instructions:
+                "Use the weather tool whenever weather is requested. After receiving its result, answer the user briefly.",
+            generateParameters: GenerateParameters(maxTokens: 150, temperature: 0),
+            additionalContext: ["enable_thinking": false],
+            tools: [weatherToolSchema]
+        )
+
+        var firstPassCalls: [ToolCall] = []
+        for try await generation in session.streamDetails(
+            to: "What's the weather in Tokyo? Use the weather tool.",
+            images: [],
+            videos: [])
+        {
+            if case .toolCall(let call) = generation {
+                firstPassCalls.append(call)
+            }
+        }
+
+        guard let call = firstPassCalls.first else {
+            throw IntegrationTestFailure("Expected the first pass to call get_weather")
+        }
+        try check(
+            call.function.name == "get_weather",
+            "Expected get_weather, got \(call.function.name)")
+
+        var followUpText = ""
+        var followUpCalls: [ToolCall] = []
+        var completion: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(to: [
+            .tool(
+                #"{"location":"Tokyo","temperature_celsius":24,"conditions":"clear"}"#,
+                id: call.id)
+        ]) {
+            switch generation {
+            case .chunk(let text):
+                followUpText += text
+            case .toolCall(let call):
+                followUpCalls.append(call)
+            case .info(let info):
+                completion = info
+            }
+        }
+
+        try check(
+            completion != nil,
+            "Expected structured tool continuation to complete generation")
+        try check(
+            !followUpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "Expected a final text response after the tool result")
+        try check(
+            followUpCalls.isEmpty,
+            "Expected the tool result to resolve the request, got another tool call")
     }
 
     public static func toolInvocation(container: LLModelContainer) async throws {
@@ -772,7 +891,11 @@ public enum ToolCallTests {
             let lmInput = try await context.processor.prepare(input: input)
             let stream = try generate(
                 input: lmInput,
-                parameters: GenerateParameters(maxTokens: maxTokens),
+                // temperature: 0 (greedy) so tool-call generation is deterministic.
+                // The default sampling temperature makes these end-to-end checks
+                // flaky — the model may emit no tool call or malformed arguments on
+                // some runs (matches the temperature: 0 used by the coherence/MTP tests).
+                parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
                 context: context
             )
             var text = ""
