@@ -610,7 +610,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.y = .init(tokens: prompt)
         self.cache = cache ?? model.newCache(parameters: parameters)
 
-        self.processor = parameters.processor()
+        self.processor = makeLogitProcessor(parameters: parameters, model: model)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
@@ -648,7 +648,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.y = input.text
         self.cache = cache ?? model.newCache(parameters: parameters)
 
-        self.processor = parameters.processor()
+        self.processor = makeLogitProcessor(parameters: parameters, model: model)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
@@ -882,7 +882,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
+        self.processor = makeLogitProcessor(parameters: parameters, model: mainModel)
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
