@@ -24,7 +24,7 @@ public enum ModelConversionQuantizationCalibration: Sendable, Equatable {
     /// Re-deriving a grid from such weights discards the alignment they were trained for;
     /// reproducing it keeps them on their intended lattice.
     ///
-    /// Requires 4 bits, a group size of 32, and ``QuantizationMode/affine``. Supplying a
+    /// Requires 4 bits, a group size of 32, and `QuantizationMode.affine`. Supplying a
     /// conflicting value throws ``ModelConversionError/incompatibleCalibration(_:_:)``
     /// rather than silently overriding it.
     ///
