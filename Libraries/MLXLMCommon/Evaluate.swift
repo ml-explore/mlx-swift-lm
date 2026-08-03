@@ -575,7 +575,7 @@ extension TokenIteratorProtocol {
 
 /// Generator of tokens.
 ///
-/// This is typically used via a call to ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>`.
+/// This is typically used via a call to ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>`.
 ///
 /// To use it directly:
 ///
@@ -624,7 +624,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     public var promptPrefillTime: TimeInterval = 0.0
 
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
-    /// replaced with ``init(input:model:cache:state:parameters:)``.
+    /// replaced with ``init(input:model:cache:state:parameters:components:)``.
     ///
     /// - Parameters:
     ///   - prompt: the prompt tokens
@@ -825,7 +825,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 
 /// Generator of tokens using speculative decoding.
 ///
-/// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// This is typically used via a call to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
 /// returning `AsyncStream<Generation>`.
 ///
 /// To use it directly:
@@ -1287,7 +1287,7 @@ private func runSynchronousGenerationLoop(
 
 /// Given prompt tokens generate text using the given model and parameters.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - promptTokens: tokenized prompt
@@ -1326,7 +1326,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1352,7 +1352,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1388,7 +1388,7 @@ public func generate(
 
 /// Generate tokens from an ``LMInput`` and a ``ModelContext``.
 ///
-/// Prefer using ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
+/// Prefer using ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` instead.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1414,7 +1414,7 @@ public func generate(
 
 /// Low-level token generation using a ``TokenIterator``.
 ///
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
+/// ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>` is the preferred call.
 ///
 /// - Parameters:
 ///   - input: prepared language model input
@@ -1524,7 +1524,7 @@ public func generate(
 /// This function uses a smaller draft model to propose tokens that are verified in batch
 /// by the main model, potentially accelerating generation. The resulting stream yields
 /// decoded text chunks, tool calls, and completion information. It has the same output as the
-/// non-speculative ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``.
+/// non-speculative ``generate(input:cache:parameters:context:components:wiredMemoryTicket:tools:)``.
 ///
 /// Both models must share the same tokenizer.
 ///
@@ -1726,7 +1726,7 @@ public func generateTokens(
 
 /// Generates raw token IDs asynchronously using speculative decoding with a draft model.
 ///
-/// This is similar to `generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)`,
+/// This is similar to `generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)`,
 /// but yields raw token IDs instead of decoded text/tool calls.
 ///
 /// Both models must share the same tokenizer.
@@ -1777,7 +1777,7 @@ public func generateTokens(
 
 /// Generates tokens asynchronously using MTP speculative decoding.
 ///
-/// Parallel to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// Parallel to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
 /// but for MTP drafters: the drafter shares K/V with the target model and
 /// produces a block of `blockSize - 1` candidate tokens per round in a
 /// single `draftBlock(...)` call. The drafter shares the target's
@@ -1837,7 +1837,7 @@ public func generate(
 /// Generates raw token IDs asynchronously using MTP speculative decoding.
 ///
 /// Parallels
-/// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
 /// but for MTP drafters. Yields raw token IDs instead of decoded text or
 /// tool calls.
 public func generateTokens(
