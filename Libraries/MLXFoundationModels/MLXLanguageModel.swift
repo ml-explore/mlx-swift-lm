@@ -562,7 +562,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
         self.load = load
@@ -683,7 +683,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             enum Destination: Sendable { case response, reasoning }
             case appendText(String, entryID: String?, destination: Destination)
             case toolCall(id: String, name: String, arguments: String)
-            case updateMetadata([String: any Sendable & Codable & Equatable], entryID: String?)
+            // `ConvertibleToGeneratedContent` is what the SDK's channel action
+            // takes, but it is not `Sendable`, so compose it with `Sendable`
+            // here to keep `GenerationEvent: Sendable`.
+            case updateMetadata(
+                [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?)
             case updateUsage(
                 input: LanguageModelExecutorGenerationChannel.Usage.Input,
                 output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -711,11 +715,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         static func emitMetadata(
-            _ values: [String: any Sendable & Codable & Equatable], entryID: String?,
+            _ values: [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
             generationObserver?(.updateMetadata(values, entryID: entryID))
-            await channel.send(.response(entryID: entryID, action: .updateMetadata(values)))
+            // The channel action takes the bare existential. Dictionary values
+            // do not convert implicitly between existential types, so widen
+            // explicitly.
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateMetadata(
+                        values.mapValues { $0 as any ConvertibleToGeneratedContent })))
         }
 
         static func emitUsage(
