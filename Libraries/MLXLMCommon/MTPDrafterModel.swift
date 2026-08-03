@@ -59,6 +59,44 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ) -> MLXArray
 }
 
+/// Tokens proposed by an MTP drafter together with the processed logits that
+/// defined each proposal distribution.
+///
+/// `processedLogits` has shape `[B, blockSize - 1, vocabularySize]`. Each row
+/// is captured after the drafter-side ``LogitProcessor`` and before the
+/// ``LogitSampler``. Keeping this information is what lets the verifier apply
+/// distribution-preserving speculative sampling instead of accepting only
+/// independently sampled exact-token matches.
+public struct MTPDraftBlockOutput {
+    public let tokens: MLXArray
+    public let processedLogits: MLXArray
+
+    public init(tokens: MLXArray, processedLogits: MLXArray) {
+        self.tokens = tokens
+        self.processedLogits = processedLogits
+    }
+}
+
+/// Optional refinement for MTP drafters that support exact speculative
+/// sampling.
+///
+/// The base ``MTPDrafterModel`` API is retained for source compatibility and
+/// for greedy-only custom drafters. Non-greedy MTP generation requires this
+/// refinement: without the drafter distribution `q`, no verifier can preserve
+/// the target distribution `p` on rejection.
+public protocol MTPDistributionDrafterModel: MTPDrafterModel {
+    func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput
+}
+
 /// Lightweight context for an MTP drafter — simpler than `ModelContext`
 /// because drafters have no tokenizer, no user input processor, no chat
 /// template.
