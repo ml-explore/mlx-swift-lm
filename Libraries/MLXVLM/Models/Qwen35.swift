@@ -227,7 +227,7 @@ public struct Qwen35Configuration: Codable, Sendable {
 
 // MARK: - Language
 
-enum Qwen35Language {
+public enum Qwen35Language {
 
     final class RotaryEmbedding {
         private let invFreq: MLXArray
@@ -447,7 +447,7 @@ enum Qwen35Language {
         }
     }
 
-    final class GatedDeltaNet: Module {
+    open class GatedDeltaNet: Module {
         let hiddenSize: Int
         let numVHeads: Int
         let numKHeads: Int
@@ -517,7 +517,7 @@ enum Qwen35Language {
         }
 
         @discardableResult
-        override func update(
+        open override func update(
             parameters: ModuleParameters, verify: VerifyUpdate,
             path: [String] = [], modulePath: [String] = []
         ) throws -> Self {
@@ -536,7 +536,7 @@ enum Qwen35Language {
                 parameters: parameters, verify: verify, path: path, modulePath: modulePath)
         }
 
-        override func updateModule(key: String, _ value: Any) throws {
+        open override func updateModule(key: String, _ value: Any) throws {
             let replacesInputProjection =
                 key == "in_proj_qkv" || key == "in_proj_z"
                 || key == "in_proj_b" || key == "in_proj_a"
@@ -704,7 +704,7 @@ enum Qwen35Language {
         }
     }
 
-    final class SparseMoeBlock: Module, UnaryLayer {
+    open class SparseMoeBlock: Module, UnaryLayer {
         let normTopkProb: Bool
         let numExperts: Int
         let topK: Int
@@ -735,7 +735,7 @@ enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(_ x: MLXArray) -> MLXArray {
+        open func callAsFunction(_ x: MLXArray) -> MLXArray {
             var gates = gate(x)
             gates = MLX.softmax(gates, axis: -1, precise: true)
 
@@ -752,7 +752,7 @@ enum Qwen35Language {
         }
     }
 
-    final class DecoderLayer: Module {
+    open class DecoderLayer: Module {
         let isLinear: Bool
 
         @ModuleInfo(key: "self_attn") var selfAttn: Attention?
@@ -815,7 +815,7 @@ enum Qwen35Language {
         }
     }
 
-    final class Model: Module {
+    open class Model: Module {
         @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
         @ModuleInfo(key: "layers") fileprivate var layers: [DecoderLayer]
         @ModuleInfo(key: "norm") var norm: RMSNorm
