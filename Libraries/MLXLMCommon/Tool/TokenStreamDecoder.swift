@@ -4,6 +4,8 @@
 enum TokenStreamEvent: Sendable {
     case response(String)
     case toolCall(ToolCall)
+    /// A tool-call-shaped model output rejected by parsing or authorization.
+    case rejectedToolCall(RejectedToolCall)
     case stop
 }
 
@@ -20,6 +22,11 @@ protocol TokenStreamDecoder {
     /// generation loop terminates.
     var receivesStopTokens: Bool { get }
 
+    /// Tool-call-shaped outputs rejected so far during this generation.
+    ///
+    /// Decoders whose response protocol never rejects tool calls report zero.
+    var rejectedToolCallCount: Int { get }
+
     /// Consumes one generated token. Returns `false` when decoding should stop
     /// because of either a semantic boundary or consumer termination.
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool
@@ -32,6 +39,7 @@ protocol TokenStreamDecoder {
 extension TokenStreamDecoder {
     var additionalStopTokenIDs: Set<Int> { [] }
     var receivesStopTokens: Bool { false }
+    var rejectedToolCallCount: Int { 0 }
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
@@ -51,12 +59,16 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
         self.stopStringFilter = StopStringFilter(stopStrings: stopStrings)
     }
 
+    var rejectedToolCallCount: Int { toolCallProcessor.rejectedToolCallCount }
+
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
         detokenizer.append(token: token)
         guard let chunk = detokenizer.next() else { return true }
 
         let result = stopStringFilter.process(chunk)
-        if let text = result.text, !emitProcessed(text, emit: emit) {
+        if let text = result.text,
+            !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
+        {
             return false
         }
         if result.stopped {
@@ -67,33 +79,29 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     }
 
     mutating func finish(emit: (TokenStreamEvent) -> Bool) -> Bool {
-        if let text = stopStringFilter.finish(), !emitProcessed(text, emit: emit) {
-            return false
-        }
-
-        if let response = toolCallProcessor.processEOS(returnBufferedText: true),
-            !response.isEmpty,
-            !emit(.response(response))
+        if let text = stopStringFilter.finish(),
+            !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
         {
             return false
         }
 
-        for toolCall in toolCallProcessor.drainToolCalls() {
-            guard emit(.toolCall(toolCall)) else { return false }
-        }
-        return true
+        return emitOutputs(toolCallProcessor.processEOSOutputs(), emit: emit)
     }
 
-    private func emitProcessed(
-        _ text: String,
+    /// Maps ordered processor outputs onto stream events, keeping response text,
+    /// accepted calls, and rejected calls in the order the model emitted them.
+    private func emitOutputs(
+        _ outputs: [ToolCallProcessor.Output],
         emit: (TokenStreamEvent) -> Bool
     ) -> Bool {
-        if let response = toolCallProcessor.processChunk(text), !emit(.response(response)) {
-            return false
-        }
-
-        for toolCall in toolCallProcessor.drainToolCalls() {
-            guard emit(.toolCall(toolCall)) else { return false }
+        for output in outputs {
+            let event: TokenStreamEvent =
+                switch output {
+                case .response(let text): .response(text)
+                case .toolCall(let call): .toolCall(call)
+                case .rejectedToolCall(let rejection): .rejectedToolCall(rejection)
+                }
+            guard emit(event) else { return false }
         }
         return true
     }

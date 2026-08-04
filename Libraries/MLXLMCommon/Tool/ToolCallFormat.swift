@@ -61,7 +61,7 @@ extension ToolCallParser {
 /// The raw string values can be used for JSON serialization or CLI parameters.
 ///
 /// Reference: https://github.com/ml-explore/mlx-lm/tree/main/mlx_lm/tool_parsers
-public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
+public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Default JSON format used by Llama, Qwen, and most models.
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
     case json
