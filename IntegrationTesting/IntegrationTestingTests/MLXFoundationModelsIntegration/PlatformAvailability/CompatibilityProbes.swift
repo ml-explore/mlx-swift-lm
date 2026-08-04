@@ -80,7 +80,7 @@ struct PlatformCompatibilityProbes {
             lmAvailable = true
             #if canImport(FoundationModels, _version: 2)
             // Touch the OS-27 surface to prove it is genuinely reachable here.
-            _ = LanguageModelCapabilities(capabilities: [])
+            _ = LanguageModelCapabilities([])
             _ = (any LanguageModel).self
             #endif
         }
