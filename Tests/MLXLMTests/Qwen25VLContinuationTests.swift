@@ -161,13 +161,13 @@ final class Qwen25VLContinuationTests: XCTestCase {
         let t1 = textTokens(40)
         let t2 = textTokens(8, seed: 3)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1))),
                 cache: cacheF, state: nil, prefill: .init()))
 
-        let cacheD = model.newCache(parameters: nil)
+        let cacheD = try model.newCache(parameters: nil)
         let (_, s0) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1)), cache: cacheD, state: nil, prefill: .init()))
@@ -181,7 +181,7 @@ final class Qwen25VLContinuationTests: XCTestCase {
         }
         let noiseFloor = maxAbsDiff(logitsD, logitsF)
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         _ = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
@@ -206,13 +206,13 @@ final class Qwen25VLContinuationTests: XCTestCase {
         let t2 = textTokens(8, seed: 9)
         let full = concatenated([t1, t2], axis: 1)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: full), image: image), cache: cacheF, state: nil,
                 prefill: .init()))
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
@@ -238,13 +238,13 @@ final class Qwen25VLContinuationTests: XCTestCase {
         let t3 = textTokens(8, seed: 6)
         let full = concatenated([t1, t2, t3], axis: 1)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: full), image: image), cache: cacheF, state: nil,
                 prefill: .init()))
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
@@ -267,12 +267,12 @@ final class Qwen25VLContinuationTests: XCTestCase {
         MLXRandom.seed(11)
         let prompt = textTokens(40)
 
-        let cacheS = model.newCache(parameters: nil)
+        let cacheS = try model.newCache(parameters: nil)
         let (logitsS, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, prefill: .init()))
 
-        let cacheC = model.newCache(parameters: nil)
+        let cacheC = try model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil,
@@ -293,13 +293,13 @@ final class Qwen25VLContinuationTests: XCTestCase {
         let prompt = concatenated(
             [textTokens(10), visionStart(), imageRun(), textTokens(12, seed: 7)], axis: 1)
 
-        let cacheS = model.newCache(parameters: nil)
+        let cacheS = try model.newCache(parameters: nil)
         let (logitsS, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheS, state: nil,
                 prefill: .init()))
 
-        let cacheC = model.newCache(parameters: nil)
+        let cacheC = try model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheC, state: nil,

@@ -559,6 +559,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override var maxSize: Int? { maxCacheSize }
 
+    /// Number of leading tokens that are never rotated out of the window.
+    var keepCount: Int { keep }
+
     public init(maxSize: Int, keep: Int = 0, step: Int = 256) {
         self.maxCacheSize = maxSize
         self.keep = keep
@@ -1464,7 +1467,7 @@ public class CacheList: BaseKVCache {
         super.init()
     }
 
-    /// Internal initializer for reconstruction from deserialized children
+    /// Internal initializer for reconstruction from deserialized children.
     internal init(caches: [KVCache]) {
         self.caches = caches
         super.init()
@@ -1562,7 +1565,7 @@ public class CacheList: BaseKVCache {
         return result
     }
 
-    /// Internal accessor for child caches (used by serialization)
+    /// Internal accessor for child caches (used by serialization and policy reporting).
     internal var children: [KVCache] { caches }
 
     // MARK: - Serialization
@@ -1971,38 +1974,40 @@ private func unflattenMetadata(_ flatMetadata: [String: String]) -> [Any] {
 ///
 /// This function will defer the cache construction to the model if it has a
 /// `newCache` method, otherwise it will make a default KV cache.
+///
+/// - Throws: ``KVCacheConfigurationError`` when the request or a model-defined
+///   cache size is invalid.
 public func makePromptCache(
     model: any LanguageModel,
     parameters: GenerateParameters? = nil
-) -> [KVCache] {
+) throws -> [KVCache] {
     // The model already conforms to LanguageModel which has newCache
     // If it also conforms to KVCacheDimensionProvider, the extension will provide the implementation
-    return model.newCache(parameters: parameters)
+    return try model.newCache(parameters: parameters)
 }
 
 /// Legacy function for backwards compatibility
 public func makePromptCache(
     model: any LanguageModel,
     maxKVSize: Int? = nil
-) -> [KVCache] {
+) throws -> [KVCache] {
     let parameters = maxKVSize.map { GenerateParameters(maxKVSize: $0) }
-    return makePromptCache(model: model, parameters: parameters)
+    return try makePromptCache(model: model, parameters: parameters)
 }
 
 /// Fallback function to create cache when layer count is known
 ///
 /// This function creates a default cache structure when the number of layers is known.
 /// Use this when `makePromptCache` cannot determine the layer count automatically.
+///
+/// - Throws: ``KVCacheConfigurationError`` when `maxKVSize` is invalid.
 public func makePromptCacheWithLayerCount(
     numLayers: Int,
     maxKVSize: Int? = nil
-) -> [KVCache] {
-    if let maxKVSize = maxKVSize {
-        return (0 ..< numLayers).map { _ in
-            RotatingKVCache(maxSize: maxKVSize, keep: 4)
-        }
-    } else {
-        return (0 ..< numLayers).map { _ in KVCacheSimple() }
+) throws -> [KVCache] {
+    let parameters = maxKVSize.map { GenerateParameters(maxKVSize: $0) }
+    return try (0 ..< numLayers).map { _ in
+        try makeAttentionKVCache(parameters: parameters)
     }
 }
 

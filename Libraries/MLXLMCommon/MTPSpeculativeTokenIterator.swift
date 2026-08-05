@@ -117,7 +117,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let kvCachePlan = try parameters.kvCachePlan()
         let mainCache = try kvCachePlan.validated(
-            mainCache ?? mainModel.newCache(parameters: parameters))
+            mainCache ?? (try mainModel.newCache(parameters: parameters)))
         guard canTrimPromptCache(mainCache) else {
             throw KVCacheError(
                 message: "MTP speculative decoding requires a trimmable main KV cache.")

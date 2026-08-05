@@ -350,7 +350,7 @@ func testDraftBlockAcceptsGemma4UnifiedTarget() throws {
     let target = Gemma4Unified(targetConfig)
 
     // Prime drafter state through the MTP entry point (what the iterator does).
-    let cache = target.newCache(parameters: nil)
+    let cache = try target.newCache(parameters: nil)
     var emitState = LMOutput.State()
     emitState[mtpEmitFlagKey] = true
     let tokens = MLXArray((0 ..< 8).map { Int32($0 % 32) }).reshaped([1, 8])

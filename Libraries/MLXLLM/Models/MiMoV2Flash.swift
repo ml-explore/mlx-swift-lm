@@ -458,13 +458,12 @@ public class MiMoV2FlashModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
-            if layer.isSlidingWindow {
-                return RotatingKVCache(maxSize: configuration.slidingWindowSize)
-            } else {
-                return KVCacheSimple()
-            }
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try model.layers.map { layer in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: configuration.slidingWindowSize,
+                usesSlidingWindow: layer.isSlidingWindow)
         }
     }
 }

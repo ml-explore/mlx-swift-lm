@@ -315,6 +315,26 @@ public final class ChatSession {
     /// Speculative decoding configuration, nil if disabled.
     public let speculativeDecoding: SpeculativeDecodingConfig?
 
+    /// Unified KV / recurrent-cache status for this session.
+    ///
+    /// If the session owns a realized cache, this reports its actual request,
+    /// topology, strategy state, and progress. Otherwise it reports the cache
+    /// planned by the current ``generateParameters``.
+    public func cacheStatus() async throws -> KVCacheStatus {
+        let parameters = generateParameters
+        if let realized = await cache.read({ cache -> KVCacheStatus? in
+            guard case .kvcache(let stored) = cache else { return nil }
+            return KVCacheStatus(
+                cache: stored.main.cache,
+                plan: stored.main.plan,
+                phase: .realized,
+                processedTokenCount: stored.main.processedTokenCount)
+        }) {
+            return realized
+        }
+        return try await model.cacheStatus(parameters: parameters)
+    }
+
     /// Initialize the `ChatSession`.
     ///
     /// - Parameters:
@@ -808,22 +828,54 @@ public final class ChatSession {
                     switch cache {
                     case .empty:
                         kvCache = KVCacheStorage(
-                            model.newCache(parameters: generateParameters), plan: kvCachePlan)
+                            try model.newCache(parameters: generateParameters), plan: kvCachePlan)
                         conversation = Conversation(messages: [], cachedTokens: [])
                         cache = .kvcache(
                             .init(main: kvCache, conversation: conversation))
 
                     case .kvcache(let stored):
-                        try stored.requirePlan(kvCachePlan)
-                        kvCache = stored.main
-                        draftKVCache = stored.draft
-                        lmState = stored.state
-                        conversation = stored.conversation
+                        let realizedStatus = KVCacheStatus(
+                            cache: stored.main.cache,
+                            plan: stored.main.plan,
+                            phase: .realized,
+                            processedTokenCount: stored.main.processedTokenCount)
+                        let desiredStatus = try model.cacheStatus(
+                            parameters: generateParameters)
+
+                        // The plan captures the typed/legacy strategy and capacity; the
+                        // realized layer kinds additionally catch layout changes the plan
+                        // alone cannot see.
+                        if var restored = stored.conversation,
+                            stored.main.plan != kvCachePlan
+                                || realizedStatus.layers.map(\.kind)
+                                    != desiredStatus.layers.map(\.kind)
+                        {
+                            // Cache-affecting generation parameters changed. Because a
+                            // structured transcript is retained, rebuild the cache from it
+                            // rather than silently continuing with the old cache policy.
+                            restored.cachedTokens.removeAll()
+                            restored.uncommittedTokens.removeAll()
+                            kvCache = KVCacheStorage(
+                                try model.newCache(parameters: generateParameters),
+                                plan: kvCachePlan)
+                            draftKVCache = nil
+                            lmState = nil
+                            conversation = restored
+                        } else {
+                            // Either the realized policy is unchanged, or this is a
+                            // restored raw cache with no transcript to rebuild from.
+                            // In the latter case, requirePlan rejects a changed policy.
+                            try stored.requirePlan(kvCachePlan)
+                            kvCache = stored.main
+                            draftKVCache = stored.draft
+                            lmState = stored.state
+                            conversation = stored.conversation
+                        }
 
                     case .history(let history):
                         // the KVCache is represented by a chat history
                         kvCache = KVCacheStorage(
-                            model.newCache(parameters: generateParameters), plan: kvCachePlan)
+                            try model.newCache(parameters: generateParameters), plan: kvCachePlan)
                         conversation = Conversation(messages: history, cachedTokens: [])
                         cache = .kvcache(
                             .init(main: kvCache, conversation: conversation))
@@ -992,7 +1044,7 @@ public final class ChatSession {
 
                             case .rebuild:
                                 kvCache = KVCacheStorage(
-                                    model.newCache(parameters: generateParameters),
+                                    try model.newCache(parameters: generateParameters),
                                     plan: kvCachePlan)
                                 draftKVCache = nil
                                 lmState = nil
@@ -1101,7 +1153,7 @@ public final class ChatSession {
                                         // speculation was admitted without a matching
                                         // draft cache. Rebuild both from the full input.
                                         kvCache = KVCacheStorage(
-                                            model.newCache(parameters: generateParameters),
+                                            try model.newCache(parameters: generateParameters),
                                             plan: kvCachePlan)
                                         draftKVCache = nil
                                         lmState = nil
@@ -1112,7 +1164,7 @@ public final class ChatSession {
                                     // exactly like the main model's KV cache.
                                     if draftKVCache == nil {
                                         draftKVCache = KVCacheStorage(
-                                            draftModel.newCache(
+                                            try draftModel.newCache(
                                                 parameters: generateParameters),
                                             plan: kvCachePlan)
                                         cache = .kvcache(
@@ -1280,10 +1332,11 @@ public final class ChatSession {
         await cache.read { _ in }
     }
 
-    /// Return the effective per-layer state of the configured KV-cache strategy.
+    /// Return the legacy runtime-only view of the configured KV-cache strategy.
     ///
     /// The report is `nil` until a typed or legacy cache configuration exists,
     /// or when the session currently stores history rather than a realized cache.
+    @available(*, deprecated, message: "Use cacheStatus() for unified cache diagnostics.")
     public func kvCacheRuntimeReport() async throws -> KVCacheRuntimeReport? {
         let kvCachePlan = try generateParameters.kvCachePlan()
         return try await cache.read { cache in
@@ -1366,7 +1419,7 @@ public enum ChatSessionError: LocalizedError {
         case .emptyPreparedInput:
             "The chat template produced no uncached tokens for generation."
         case .kvCacheConfigurationChanged:
-            "KV-cache configuration changed after the session cache was realized. Call clear() before continuing with the new configuration."
+            "KV-cache configuration changed after the session cache was realized. Clear the session or respond() to rebuild the cache from its retained transcript."
         }
     }
 }

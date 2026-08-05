@@ -162,8 +162,8 @@ public class ChatSessionTests: XCTestCase {
             base(input, cache: cache, state: state)
         }
 
-        func newCache(parameters: GenerateParameters?) -> [KVCache] {
-            base.newCache(parameters: parameters)
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
         }
     }
 
@@ -1251,7 +1251,7 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
-    func testChangingKVCacheConfigurationRequiresClearingRealizedCache() async throws {
+    func testCacheStatusPreservesTheRealizedRequestWhenParametersChange() async throws {
         let initialConfiguration = KVCacheConfiguration(
             strategy: .turboQuant(.qualityFirst))
         let session = ChatSession(
@@ -1261,15 +1261,10 @@ public class ChatSessionTests: XCTestCase {
 
         session.generateParameters.kvCache = KVCacheConfiguration(strategy: .fullPrecision)
 
-        do {
-            _ = try await session.kvCacheRuntimeReport()
-            XCTFail("Expected a realized cache to reject configuration changes")
-        } catch ChatSessionError.kvCacheConfigurationChanged(
-            let previous, let requested)
-        {
-            XCTAssertEqual(previous, initialConfiguration)
-            XCTAssertEqual(requested, KVCacheConfiguration(strategy: .fullPrecision))
-        }
+        let status = try await session.cacheStatus()
+        XCTAssertEqual(status.phase, .realized)
+        XCTAssertEqual(status.requestSource, .typed)
+        XCTAssertEqual(status.requestedConfiguration, initialConfiguration)
     }
 
     func testSessionRetainsCacheReplacementTriggeredDuringDecode() async throws {
@@ -1297,9 +1292,16 @@ public class ChatSessionTests: XCTestCase {
             return quantized.offset
         }
         let firstOffset = try XCTUnwrap(observedFirstOffset)
-        let optionalFirstReport = try await session.kvCacheRuntimeReport()
-        let firstReport = try XCTUnwrap(optionalFirstReport)
-        XCTAssertEqual(firstReport.processedTokenCount, firstOffset)
+        let firstStatus = try await session.cacheStatus()
+        XCTAssertEqual(firstStatus.processedTokenCount, firstOffset)
+        XCTAssertEqual(firstStatus.phase, .realized)
+        XCTAssertEqual(firstStatus.requestSource, .typed)
+        XCTAssertEqual(firstStatus.requestedStrategy, .affine)
+        XCTAssertGreaterThan(firstStatus.compressedLayerCount, 0)
+        XCTAssertTrue(
+            firstStatus.layers.contains {
+                $0.state == .active && $0.resolvedStrategy == .affine
+            })
 
         _ = try await session.respond(to: "hello again")
         try await session.withCache { cache in
@@ -1308,6 +1310,116 @@ public class ChatSessionTests: XCTestCase {
                 cache.first { $0 is QuantizedKVCache } as? QuantizedKVCache)
             XCTAssertGreaterThan(quantized.offset, firstOffset)
         }
+    }
+
+    func testModelContainerReportsCappedSlidingAndFullAttentionCaches() async throws {
+        let container = ModelContainer(context: model())
+        let parameters = GenerateParameters(maxTokens: 1, maxKVSize: 64)
+
+        let status = try await container.cacheStatus(parameters: parameters)
+
+        XCTAssertEqual(status.requestSource, .legacy)
+        XCTAssertEqual(status.requestedConfiguration?.capacity?.maxTokens, 64)
+        XCTAssertEqual(status.capacityDisposition, .fullyApplied)
+        XCTAssertEqual(status.layers.count, 8)
+        XCTAssertTrue(status.attentionMaxSizes.allSatisfy { $0 == 64 })
+    }
+
+    func testModelContainerPreservesNativeSlidingWindowForTypedCapacity() async throws {
+        let container = ModelContainer(context: model())
+        let capacity = try KVCacheConfiguration.Capacity(
+            maxTokens: 64, preservedPrefixTokens: 3)
+        let parameters = GenerateParameters(
+            maxTokens: 1,
+            kvCache: KVCacheConfiguration(capacity: capacity))
+
+        let status = try await container.cacheStatus(parameters: parameters)
+
+        XCTAssertEqual(status.requestSource, .typed)
+        XCTAssertEqual(status.requestedConfiguration?.capacity, capacity)
+        XCTAssertEqual(status.capacityDisposition, .fullyApplied)
+        XCTAssertEqual(status.capacityAppliedLayerCount, 1)
+        XCTAssertEqual(status.layers.count, 8)
+        XCTAssertEqual(
+            status.attentionMaxSizes.compactMap { $0 },
+            [512, 512, 512, 512, 512, 64, 512, 512])
+    }
+
+    func testSessionReportsRealizedRawCacheInsteadOfPlannedLayout() async throws {
+        let rawCache: [KVCache] = Array(repeating: 0, count: 8).map { _ in KVCacheSimple() }
+        let session = ChatSession(
+            model(),
+            cache: rawCache,
+            generateParameters: GenerateParameters(maxTokens: 1, maxKVSize: 64))
+
+        let status = try await session.cacheStatus()
+
+        XCTAssertEqual(status.phase, .realized)
+        XCTAssertEqual(status.requestSource, .legacy)
+        XCTAssertEqual(status.requestedConfiguration?.capacity?.maxTokens, 64)
+        XCTAssertEqual(status.capacityDisposition, .ignored)
+        XCTAssertTrue(status.attentionMaxSizes.allSatisfy { $0 == nil })
+    }
+
+    func testSessionRebuildsStructuredCacheWhenMaxKVSizeChanges() async throws {
+        let session = ChatSession(
+            model(), generateParameters: GenerateParameters(maxTokens: 1))
+
+        _ = try await session.respond(to: "first")
+        let initial = try await session.cacheStatus()
+        XCTAssertEqual(initial.capacityDisposition, .notRequested)
+        XCTAssertTrue(initial.attentionMaxSizes.contains(512))
+        XCTAssertTrue(initial.attentionMaxSizes.contains(nil))
+
+        session.generateParameters = GenerateParameters(maxTokens: 1, maxKVSize: 64)
+        let stale = try await session.cacheStatus()
+        XCTAssertEqual(stale.phase, .realized)
+        XCTAssertNil(stale.requestedConfiguration)
+
+        _ = try await session.respond(to: "second")
+        let limited = try await session.cacheStatus()
+        XCTAssertEqual(limited.capacityDisposition, .fullyApplied)
+        XCTAssertEqual(limited.requestSource, .legacy)
+        XCTAssertTrue(limited.attentionMaxSizes.allSatisfy { $0 == 64 })
+        await session.withCache { cache in
+            XCTAssertEqual(cache?.count, 8)
+            XCTAssertTrue(cache?.allSatisfy { $0.maxSize == 64 } == true)
+        }
+
+        session.generateParameters = GenerateParameters(maxTokens: 1)
+        _ = try await session.respond(to: "third")
+        let restored = try await session.cacheStatus()
+        XCTAssertEqual(restored.capacityDisposition, .notRequested)
+        XCTAssertTrue(restored.attentionMaxSizes.contains(512))
+        XCTAssertTrue(restored.attentionMaxSizes.contains(nil))
+    }
+
+    func testSessionRebuildsWhenTypedRequestRestoresNativeWindows() async throws {
+        let session = ChatSession(
+            model(),
+            generateParameters: GenerateParameters(maxTokens: 1, maxKVSize: 64))
+
+        _ = try await session.respond(to: "legacy")
+        let legacy = try await session.cacheStatus()
+        XCTAssertEqual(legacy.capacityDisposition, .fullyApplied)
+        XCTAssertEqual(legacy.requestSource, .legacy)
+        XCTAssertTrue(legacy.attentionMaxSizes.allSatisfy { $0 == 64 })
+
+        let capacity = try KVCacheConfiguration.Capacity(maxTokens: 64)
+        session.generateParameters = GenerateParameters(
+            maxTokens: 1,
+            kvCache: KVCacheConfiguration(
+                capacity: capacity,
+                compatibility: .allowPartial))
+
+        _ = try await session.respond(to: "typed")
+        let typed = try await session.cacheStatus()
+        XCTAssertEqual(typed.requestSource, .typed)
+        XCTAssertEqual(typed.capacityDisposition, .fullyApplied)
+        XCTAssertEqual(typed.capacityAppliedLayerCount, 1)
+        XCTAssertEqual(
+            typed.attentionMaxSizes.compactMap { $0 },
+            [512, 512, 512, 512, 512, 64, 512, 512])
     }
 
     /// something that looks like a view model

@@ -277,9 +277,29 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// Models may implement this simplified interface if they do not produce any ``LMOutput/State``
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
 
-    /// create a new array of ``KVCache``: automatic implementation if self
-    /// implements ``KVCacheDimensionProvider``
-    func newCache(parameters: GenerateParameters?) -> [KVCache]
+    /// Create a new array of ``KVCache`` appropriate for this model.
+    ///
+    /// Implementations must honor ``GenerateParameters/maxKVSize`` for any
+    /// attention layer that can be token-windowed. Hybrid attention / state-space
+    /// models apply the limit to attention caches only (see
+    /// ``makeAttentionKVCache(parameters:)``).
+    ///
+    /// - Throws: ``KVCacheConfigurationError`` when the request or a model-defined
+    ///   cache size is invalid.
+    ///
+    /// Automatic implementation if self implements ``KVCacheDimensionProvider``.
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache]
+
+    /// Authoritative planned status of the cache ``newCache(parameters:)`` produces.
+    ///
+    /// Use this from ``ModelContainer`` / ``ChatSession`` (or directly on the model)
+    /// to inspect topology, requested capacity, and strategy compatibility without
+    /// allocating or casting probe caches in application code.
+    ///
+    /// The default implementation derives the description from ``newCache(parameters:)``.
+    /// Models may override with a zero-allocation declarative path, but must stay
+    /// consistent with ``newCache(parameters:)``.
+    func cacheStatus(parameters: GenerateParameters?) throws -> KVCacheStatus
 }
 
 extension LanguageModel {
@@ -304,6 +324,19 @@ extension LanguageModel {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         fatalError("callAsFunction(inputs:cache:) not implemented for \(Self.self)")
     }
+
+    /// Default: classify the caches that ``newCache(parameters:)`` constructs.
+    ///
+    /// Empty caches allocate negligible state (no tensors until the first update),
+    /// so this is always consistent with the runtime path. Prefer a declarative
+    /// override only when construction itself is expensive.
+    public func cacheStatus(parameters: GenerateParameters?) throws -> KVCacheStatus {
+        let plan = try parameters?.kvCachePlan() ?? .disabled
+        return KVCacheStatus(
+            cache: try newCache(parameters: parameters),
+            plan: plan,
+            phase: .planned)
+    }
 }
 
 /// Optional protocol that can be implemented by ``LanguageModel`` and will
@@ -313,18 +346,17 @@ public protocol KVCacheDimensionProvider {
 }
 
 extension LanguageModel where Self: KVCacheDimensionProvider {
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         // Create one cache per layer (kvHeads.count = number of layers)
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
-
-        // Follow Python logic: use RotatingKVCache if a capacity is provided.
-        if let capacity = parameters?.effectiveKVCacheCapacity {
-            return (0 ..< numLayers).map { _ in
-                capacity.makeRotatingCache()
-            }
-        } else {
-            return (0 ..< numLayers).map { _ in KVCacheSimple() }
+        return try (0 ..< numLayers).map { _ in
+            try makeAttentionKVCache(parameters: parameters)
         }
     }
+
+    // Note: do not specialize ``cacheStatus(parameters:)`` here. Hybrid models
+    // commonly conform to ``KVCacheDimensionProvider`` while overriding ``newCache``;
+    // a kvHeads-based default would mis-report those layouts. The base
+    // ``LanguageModel`` implementation classifies the caches ``newCache`` builds.
 }

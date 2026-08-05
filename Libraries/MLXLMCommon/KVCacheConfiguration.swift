@@ -256,6 +256,7 @@ public struct TurboQuantKVCacheConfiguration: Sendable, Hashable {
 public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedError {
     case conflictingLegacyConfiguration
     case invalidCapacity(Int)
+    case invalidSlidingWindow(Int)
     case invalidPreservedPrefix(Int, capacity: Int)
     case invalidAffineBits(Int)
     case invalidGroupSize(Int)
@@ -271,6 +272,8 @@ public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedErro
             "Set either GenerateParameters.kvCache or the legacy KV-cache fields, not both."
         case .invalidCapacity(let value):
             "KV-cache capacity must be positive; received \(value)."
+        case .invalidSlidingWindow(let value):
+            "Model sliding-window size must be positive; received \(value)."
         case .invalidPreservedPrefix(let value, let capacity):
             "Preserved prefix \(value) must be non-negative and smaller than capacity \(capacity)."
         case .invalidAffineBits(let value):
@@ -291,30 +294,71 @@ public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedErro
     }
 }
 
-/// Effective per-layer state for a configured KV cache.
-public struct KVCacheRuntimeReport: Sendable, Hashable {
-    public struct Layer: Sendable, Hashable {
-        public enum State: Sendable, Hashable {
-            case active
-            case pending
-            case skipped
-            case notApplicable
-        }
-
-        public enum Reason: Sendable, Hashable {
-            case awaitingCompressionStart
-            case boundaryProtection
-            case slidingWindow
-            case unsupportedShape
-            case differentStrategy
-            case nonAttentionState
-        }
-
-        public let path: [Int]
-        public let state: State
-        public let resolvedStrategy: KVCacheStrategyIdentifier?
-        public let reason: Reason?
+/// Effective state of one leaf in a model's cache topology.
+///
+/// This is shared by the high-level ``KVCacheStatus`` API and the lower-level
+/// ``KVCacheRuntimeReport`` compatibility view.
+public struct KVCacheLayerStatus: Sendable, Hashable {
+    public enum State: Sendable, Hashable {
+        case active
+        case pending
+        case skipped
+        case notApplicable
     }
+
+    public enum Reason: Sendable, Hashable {
+        case awaitingCompressionStart
+        case boundaryProtection
+        case slidingWindow
+        case unsupportedShape
+        case differentStrategy
+        case nonAttentionState
+    }
+
+    /// Where an attention layer's resident-token bound originated.
+    public enum CapacitySource: Sendable, Hashable {
+        /// The attention cache grows without an explicit resident-token bound.
+        case unbounded
+        /// The model architecture defines the bound, such as sliding-window attention.
+        case modelDefined
+        /// The caller requested the bound through generation parameters.
+        case requested
+        /// A model-specific cache implementation defines the bound.
+        case implementationDefined
+    }
+
+    /// Stable path through top-level and composite cache entries.
+    public let path: [Int]
+    public let kind: CacheLayerKind
+    /// `nil` for recurrent or other non-attention state.
+    public let capacitySource: CapacitySource?
+    public let state: State
+    public let resolvedStrategy: KVCacheStrategyIdentifier?
+    public let reason: Reason?
+
+    package init(
+        path: [Int],
+        kind: CacheLayerKind,
+        capacitySource: CapacitySource?,
+        state: State,
+        resolvedStrategy: KVCacheStrategyIdentifier?,
+        reason: Reason?
+    ) {
+        self.path = path
+        self.kind = kind
+        self.capacitySource = capacitySource
+        self.state = state
+        self.resolvedStrategy = resolvedStrategy
+        self.reason = reason
+    }
+}
+
+/// Effective per-layer state for a configured KV cache.
+///
+/// Prefer ``KVCacheStatus`` for application diagnostics. This report remains
+/// useful when directly applying a configuration to a raw cache array.
+public struct KVCacheRuntimeReport: Sendable, Hashable {
+    public typealias Layer = KVCacheLayerStatus
 
     public let requestedConfiguration: KVCacheConfiguration
     public let layers: [Layer]

@@ -226,7 +226,7 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             tokenizer: tokenizer,
             messageGenerator: RecordingMessageGenerator(log: log))
         let parameters = GenerateParameters(maxTokens: 40)
-        let rawCache = context.model.newCache(parameters: parameters)
+        let rawCache = try context.model.newCache(parameters: parameters)
         let session = ChatSession(
             context,
             cache: rawCache,

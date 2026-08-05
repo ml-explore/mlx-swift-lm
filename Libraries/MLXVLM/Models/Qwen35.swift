@@ -907,8 +907,8 @@ public class Qwen35: Module, VLMModel {
         languageModel.model.layers
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.makeCache(capacity: parameters?.effectiveKVCacheCapacity)
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        languageModel.makeCache(capacity: try parameters?.effectiveKVCacheCapacity())
     }
 
     private func mergeInputIdsWithImageFeatures(

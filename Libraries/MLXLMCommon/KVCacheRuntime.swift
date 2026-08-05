@@ -148,15 +148,24 @@ public func kvCacheRuntimeReport(
     cache: [KVCache],
     configuration: KVCacheConfiguration
 ) -> KVCacheRuntimeReport {
-    let leaves = KVCacheTree.leaves(in: cache)
-    let protectedPaths = protectedPaths(for: leaves, configuration: configuration)
     return KVCacheRuntimeReport(
         requestedConfiguration: configuration,
-        layers: leaves.map {
-            $0.runtimeLayer(
-                configuration: configuration,
-                protectedPaths: protectedPaths)
-        })
+        layers: kvCacheLayerStatuses(cache: cache, configuration: configuration))
+}
+
+/// Build the shared per-layer view used by planned, realized, and compatibility reports.
+package func kvCacheLayerStatuses(
+    cache: [KVCache],
+    configuration: KVCacheConfiguration?
+) -> [KVCacheLayerStatus] {
+    let configuration = configuration ?? KVCacheConfiguration()
+    let leaves = KVCacheTree.leaves(in: cache)
+    let protectedPaths = protectedPaths(for: leaves, configuration: configuration)
+    return leaves.map {
+        $0.runtimeLayer(
+            configuration: configuration,
+            protectedPaths: protectedPaths)
+    }
 }
 
 private func protectedPaths(
@@ -174,17 +183,42 @@ extension KVCacheLeaf {
     fileprivate func runtimeLayer(
         configuration: KVCacheConfiguration,
         protectedPaths: Set<[Int]>
-    ) -> KVCacheRuntimeReport.Layer {
+    ) -> KVCacheLayerStatus {
         let requested = configuration.strategy.identifier
-        switch kind {
+        let layerKind = CacheLayerKind(cache: cache)
+        let capacitySource: KVCacheLayerStatus.CapacitySource? =
+            switch self.kind {
+            case .recurrent:
+                nil
+            case .rotating(let rotating):
+                rotating.capacityOrigin == .requested ? .requested : .modelDefined
+            default:
+                cache.maxSize == nil ? .unbounded : .implementationDefined
+            }
+
+        func status(
+            state: KVCacheLayerStatus.State,
+            resolvedStrategy: KVCacheStrategyIdentifier?,
+            reason: KVCacheLayerStatus.Reason?
+        ) -> KVCacheLayerStatus {
+            .init(
+                path: path,
+                kind: layerKind,
+                capacitySource: capacitySource,
+                state: state,
+                resolvedStrategy: resolvedStrategy,
+                reason: reason)
+        }
+
+        switch self.kind {
         case .recurrent:
-            return .init(
-                path: path, state: .notApplicable, resolvedStrategy: nil,
+            return status(
+                state: .notApplicable,
+                resolvedStrategy: nil,
                 reason: .nonAttentionState)
         case .turboQuant(let turbo):
             let matches = requested == .turboQuant
-            return .init(
-                path: path,
+            return status(
                 state: matches ? (turbo.isCompressed ? .active : .pending) : .skipped,
                 resolvedStrategy: .turboQuant,
                 reason: matches
@@ -194,38 +228,38 @@ extension KVCacheLeaf {
             let isBoundaryProtection =
                 requested == .turboQuant && protectedPaths.contains(path)
             let matches = requested == .affine || isBoundaryProtection
-            return .init(
-                path: path,
+            return status(
                 state: matches ? .active : .skipped,
                 resolvedStrategy: .affine,
                 reason: isBoundaryProtection
                     ? .boundaryProtection : (matches ? nil : .differentStrategy))
         case .rotating:
-            return .init(
-                path: path,
+            return status(
                 state: requested == .fullPrecision ? .active : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: requested == .fullPrecision ? nil : .slidingWindow)
         case .simple where requested == .fullPrecision:
-            return .init(
-                path: path, state: .active, resolvedStrategy: .fullPrecision, reason: nil)
+            return status(
+                state: .active,
+                resolvedStrategy: .fullPrecision,
+                reason: nil)
         case .simple:
             guard supports(configuration, protectedPaths: protectedPaths) == true else {
-                return .init(
-                    path: path,
+                return status(
                     state: .skipped,
                     resolvedStrategy: .fullPrecision,
                     reason: .unsupportedShape)
             }
             let compressionPending = cache.offset <= configuration.strategy.compressionStart
-            return .init(
-                path: path,
+            return status(
                 state: compressionPending ? .pending : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: compressionPending ? .awaitingCompressionStart : .unsupportedShape)
         case .unsupported:
-            return .init(
-                path: path, state: .skipped, resolvedStrategy: nil, reason: .unsupportedShape)
+            return status(
+                state: .skipped,
+                resolvedStrategy: nil,
+                reason: .unsupportedShape)
         }
     }
 }

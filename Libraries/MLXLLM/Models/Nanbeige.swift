@@ -213,14 +213,10 @@ public class NanbeigeModel: Module, LLMModel {
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         let count = model.cacheSlotCount
-        if let maxKVSize = parameters?.maxKVSize {
-            return (0 ..< count).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
-            }
-        } else {
-            return (0 ..< count).map { _ in KVCacheSimple() }
+        return try (0 ..< count).map { _ in
+            try makeAttentionKVCache(parameters: parameters)
         }
     }
 

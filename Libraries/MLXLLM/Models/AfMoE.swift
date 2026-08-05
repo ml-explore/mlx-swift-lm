@@ -557,14 +557,14 @@ public class AfMoEModel: Module, LLMModel, KVCacheDimensionProvider {
         return sanitizedWeights
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        // Create cache based on layer type (rotating for sliding attention, simple for full attention)
-        layerUsesSliding.map { usesSliding in
-            if usesSliding {
-                RotatingKVCache(maxSize: slidingWindow)
-            } else {
-                KVCacheSimple()
-            }
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        // Sliding-window layers are capped by maxKVSize when requested;
+        // full-attention layers use the requested limit directly.
+        try layerUsesSliding.map { usesSliding in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: slidingWindow,
+                usesSlidingWindow: usesSliding)
         }
     }
 }

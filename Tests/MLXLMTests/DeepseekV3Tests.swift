@@ -52,7 +52,7 @@ final class DeepseekV3Tests: XCTestCase {
     /// every subsequent token attended over duplicated keys.
     func testForwardPassUpdatesCacheExactlyOnce() throws {
         let model = DeepseekV3Model(try makeConfig())
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let tokenCount = 5
         let inputs = MLXArray(Array(Int32(1) ... Int32(tokenCount))).reshaped(1, tokenCount)
 
