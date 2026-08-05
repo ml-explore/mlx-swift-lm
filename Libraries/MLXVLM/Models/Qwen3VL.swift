@@ -1911,3 +1911,9 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
         return dictionary
     }
 }
+
+// MARK: - Chat conventions
+
+extension Qwen3VL {
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}

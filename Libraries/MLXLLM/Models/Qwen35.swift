@@ -1169,3 +1169,16 @@ extension Qwen35Model: LoRAModel {
         languageModel.model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+// `Qwen35MoEModel` subclasses `Qwen35Model` and inherits both declarations.
+extension Qwen35Model {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}
+
+extension Qwen35TextModel {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+}

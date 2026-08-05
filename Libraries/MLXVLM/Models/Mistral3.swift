@@ -1121,3 +1121,9 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         )
     }
 }
+
+// MARK: - Chat conventions
+
+extension Mistral3VLM {
+    public var toolCallFormat: ToolCallFormat? { .mistral }
+}

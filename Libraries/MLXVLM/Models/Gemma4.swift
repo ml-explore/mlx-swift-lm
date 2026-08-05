@@ -3361,3 +3361,13 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
     }
 }
+
+// MARK: - Chat conventions
+
+extension Gemma4 {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
+}
+
+extension Gemma4Unified {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
+}

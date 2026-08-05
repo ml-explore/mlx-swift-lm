@@ -113,53 +113,18 @@ public struct ReasoningConfig: Sendable, Equatable {
         self.isSpecialToken = isSpecialToken
     }
 
-    // MARK: - Inference
+    // MARK: - Presets
 
-    /// Infer a reasoning configuration from a model's `model_type` and repo id.
-    ///
-    /// Unlike ``ToolCallFormat/infer(from:configData:)``, `modelId` is
-    /// load-bearing: DeepSeek-R1-Distill models report `model_type == "qwen2"`
-    /// (or `"llama"`), indistinguishable from plain Qwen2.5/Llama by type alone,
-    /// and must be recognized by their repo id.
-    ///
-    /// - Parameters:
-    ///   - modelType: the `model_type` value from config.json.
-    ///   - modelId: the Hugging Face repo id (e.g. `mlx-community/Qwen3-4B-4bit`).
-    ///   - configData: raw config.json data for secondary signals (reserved; unused in v1).
-    /// - Returns: the inferred ``ReasoningConfig``, or `nil` for non-reasoning models.
-    public static func infer(
-        from modelType: String,
-        modelId: String? = nil,
-        configData: Data? = nil
-    ) -> ReasoningConfig? {
-        let type = modelType.lowercased()
-        let id = (modelId ?? "").lowercased()
+    /// `<think>`/`</think>`, toggled by the `enable_thinking` chat-template flag
+    /// (default on). The contract shared by the Qwen3 family and Nanbeige4.2+.
+    public static let thinkTagsWithEnableThinking = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+        isSpecialToken: true)
 
-        // Qwen3 family: <think>/</think>, thinking toggled via `enable_thinking`.
-        //
-        // Keyed on the model_type prefix, so a non-thinking Qwen3 variant (e.g.
-        // a future Qwen3-Coder) could match. This is accepted today; on-device
-        // verification and registry overrides refine specific models.
-        if type.hasPrefix("qwen3") {
-            return ReasoningConfig(
-                startDelimiter: "<think>", endDelimiter: "</think>",
-                promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-                isSpecialToken: true)
-        }
-
-        // DeepSeek-R1 (and R1-Distill): always-on <think>/</think>.
-        //
-        // R1-Distill reports its *base* model_type ("qwen2"/"llama"), so it must
-        // be recognized by repo id. (Plain DeepSeek-V3 shares R1's "deepseek_v3"
-        // model_type; this type is treated as reasoning, refined by registry overrides.)
-        if type == "deepseek_v3" || type == "deepseek_r1"
-            || id.contains("deepseek-r1") || id.contains("r1-distill")
-        {
-            return ReasoningConfig(
-                startDelimiter: "<think>", endDelimiter: "</think>",
-                promptStrategy: .alwaysOn)
-        }
-
-        return nil
-    }
+    /// Always-on `<think>`/`</think>` with no prompt-level off switch
+    /// (DeepSeek-R1 and its distills).
+    public static let alwaysOnThinking = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .alwaysOn)
 }

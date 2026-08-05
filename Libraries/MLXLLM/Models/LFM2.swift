@@ -414,3 +414,9 @@ extension LFM2Model: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension LFM2Model {
+    public var toolCallFormat: ToolCallFormat? { .lfm2 }
+}

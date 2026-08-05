@@ -492,3 +492,9 @@ extension Mistral3TextModel: LoRAModel {
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+
+extension Mistral3TextModel {
+    public var toolCallFormat: ToolCallFormat? { .mistral }
+}

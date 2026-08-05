@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+import Foundation
 import MLX
 import MLXLMCommon
 import XCTest
@@ -354,5 +355,121 @@ public class SampleTests: XCTestCase {
         let tokens = drawTopP(seed: nil, draws: 8)
         XCTAssertEqual(tokens.count, 8)
         for t in tokens { XCTAssertTrue((0 ..< 4).contains(t)) }
+    }
+
+    // MARK: - Custom logit processor
+
+    private struct ScaleProcessor: LogitProcessor {
+        let scale: Float
+        func prompt(_ prompt: MLXArray) {}
+        func process(logits: MLXArray) -> MLXArray { logits * scale }
+        func didSample(token: MLXArray) {}
+    }
+
+    /// Thread-safe counter for asserting how many times a `@Sendable` factory runs.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.withLock { count += 1 }
+        }
+
+        var value: Int {
+            lock.withLock { count }
+        }
+    }
+
+    func testGenerationComponentsComposition() {
+        // no penalties, no factory -> no processor
+        XCTAssertNil(GenerationComponents().logitProcessor(parameters: GenerateParameters()))
+
+        // factory alone -> the custom processor, unwrapped
+        let parameters = GenerateParameters()
+        var components = GenerationComponents()
+        components.logitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+        XCTAssertNotNil(components.logitProcessor(parameters: parameters) as? ScaleProcessor)
+
+        // penalties + factory -> chained
+        let penalized = GenerateParameters(presencePenalty: 0.5)
+        XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? ChainedLogitProcessor)
+    }
+
+    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/processor()``
+    /// exactly -- the guarantee that threading `components` everywhere is non-breaking.
+    func testEmptyGenerationComponentsMatchesParametersProcessor() {
+        let components = GenerationComponents()
+
+        // no penalties -> nil, same as processor()
+        let plain = GenerateParameters()
+        XCTAssertNil(plain.processor())
+        XCTAssertNil(components.logitProcessor(parameters: plain))
+
+        // penalties only -> the penalty processor, unwrapped (no chaining)
+        let penalized = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
+        XCTAssertNotNil(penalized.processor() as? PenaltyProcessor)
+        XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? PenaltyProcessor)
+    }
+
+    /// The factory must be invoked on every call so each generation gets a fresh,
+    /// independent (stateful) processor instance.
+    func testGenerationComponentsInvokesFactoryPerCall() {
+        let counter = CallCounter()
+        var components = GenerationComponents()
+        components.logitProcessorFactory = {
+            counter.increment()
+            return ScaleProcessor(scale: 2.0)
+        }
+
+        let parameters = GenerateParameters()
+        _ = components.logitProcessor(parameters: parameters)
+        _ = components.logitProcessor(parameters: parameters)
+
+        XCTAssertEqual(counter.value, 2)
+    }
+
+    func testGenerationComponentsAppliesCustomProcessorAfterPenalties() {
+        let parameters = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
+        var components = GenerationComponents()
+        components.logitProcessorFactory = { ScaleProcessor(scale: 2.0) }
+
+        var processor = components.logitProcessor(parameters: parameters)
+        XCTAssertNotNil(processor)
+
+        processor?.prompt(MLXArray([1]))
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let processed = processor?.process(logits: logits)
+        guard let values = processed?[0].asArray(Float.self) else {
+            XCTFail("Expected processed logits")
+            return
+        }
+
+        // penalty first, then scale: token 1 is (2.0 - 0.5) * 2 = 3.0
+        // (scale-then-penalty would give 2.0 * 2 - 0.5 = 3.5)
+        XCTAssertEqual(values[0], 2.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 6.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 8.0, accuracy: 1e-6)
+    }
+
+    func testChainedLogitProcessorForwardsPromptAndDidSample() {
+        var processor = ChainedLogitProcessor(processors: [
+            PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 5),
+            PresencePenaltyContext(presencePenalty: 0.25, presenceContextSize: 5),
+        ])
+
+        processor.prompt(MLXArray([1]))
+        processor.didSample(token: MLXArray([3]))
+
+        let logits =
+            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
+        let values = processor.process(logits: logits)[0].asArray(Float.self)
+
+        // both processors saw the prompt (token 1) and the sampled token (token 3)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(values[1], 1.25, accuracy: 1e-6)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
+        XCTAssertEqual(values[3], 3.25, accuracy: 1e-6)
     }
 }

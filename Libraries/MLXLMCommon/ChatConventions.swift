@@ -6,13 +6,15 @@ import Foundation
 
 /// A model's chat conventions: how it encodes tool calls and how it reasons.
 ///
-/// This knowledge lives with the model definition rather than in centralized
-/// `model_type` string tables (``ToolCallFormat/infer(from:configData:)`` and
-/// ``ReasoningConfig/infer(from:modelId:configData:)``). ``LanguageModel``
-/// conforms with `nil` defaults, so the model factories read `model.toolCallFormat`
-/// / `model.reasoningConfig` directly and fall back to the inference chains when a
-/// model declares nothing. A model opts in by overriding either property in an
-/// extension.
+/// This knowledge lives with the model definition rather than in a centralized
+/// `model_type` table. ``LanguageModel`` conforms with `nil` defaults, so the model
+/// factories read `model.toolCallFormat` / `model.reasoningConfig` directly. A model
+/// opts in by overriding either property in an extension.
+///
+/// For conventions that are not model-intrinsic (anything keyed on the repo id, such
+/// as DeepSeek-R1-Distill), register a ``ChatConventionsResolving`` with
+/// ``ChatConventionsRegistry`` instead. Resolvers take precedence over a model's own
+/// declaration; see ``ChatConventionsRegistry`` for the full resolution order.
 public protocol ChatConventionsProviding {
     /// The tool-call format this model emits, or `nil` for the JSON default.
     var toolCallFormat: ToolCallFormat? { get }

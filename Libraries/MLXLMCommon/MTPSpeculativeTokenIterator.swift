@@ -101,7 +101,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         drafter: any MTPDrafterModel,
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
-        blockSize: Int
+        blockSize: Int,
+        components: GenerationComponents = .init()
     ) throws {
         precondition(
             blockSize >= 2,
@@ -118,7 +119,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
+        self.processor = components.logitProcessor(parameters: parameters)
 
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
