@@ -29,8 +29,13 @@ xcodebuild test -scheme mlx-swift-lm-Package -destination 'platform=macOS' -skip
 ```
 
 Integration tests verify end-to-end model loading and generation. They require
-macOS with Metal and download models from Hugging Face Hub on first run. These
-tests do not run in CI.
+macOS with Metal and download models from Hugging Face Hub on first run. They
+are not part of the pull request checks, so they never block a merge. In
+`ml-explore/mlx-swift-lm` they run nightly on a self-hosted macOS runner
+(`.github/workflows/integration_tests.yml`), and failures are reported on a
+tracking issue labeled `ci-failure`. Because nothing runs them on your branch,
+run them locally when you change model loading, generation, or tokenizer
+behavior.
 
 Open `IntegrationTesting/IntegrationTesting.xcodeproj` in Xcode and run the
 test target (`Cmd+U` or via the Test Navigator), or use `xcodebuild`:
