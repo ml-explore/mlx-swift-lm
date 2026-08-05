@@ -68,17 +68,13 @@ public class SlidingWindowNoRepeatNGramProcessorTests: XCTestCase {
         XCTAssertTrue(values[2].isInfinite && values[2] < 0)
     }
 
-    func testGenerateParametersDisabledByDefault() {
-        XCTAssertNil(GenerateParameters().processor())
-        XCTAssertNil(GenerateParameters(noRepeatNgramSize: 0).processor())
-        XCTAssertNil(GenerateParameters(noRepeatNgramSize: nil).processor())
-    }
-
-    func testGenerateParametersEnablesNgramProcessor() {
-        var processor = GenerateParameters(
-            noRepeatNgramSize: 4,
-            noRepeatNgramWindowSize: 100
-        ).processor()
+    func testComponentsAttachNgramProcessor() {
+        let components = GenerationComponents(
+            logitProcessorFactory: {
+                SlidingWindowNoRepeatNGramProcessor(ngramSize: 4, windowSize: 100)
+            }
+        )
+        var processor = components.logitProcessor(parameters: GenerateParameters())
         XCTAssertNotNil(processor)
 
         processor?.prompt(MLXArray([1, 2, 3, 4, 1, 2, 3]))
@@ -92,22 +88,19 @@ public class SlidingWindowNoRepeatNGramProcessorTests: XCTestCase {
         XCTAssertEqual(values[0], 0.0, accuracy: 1e-6)
     }
 
-    func testDisabledPathLeavesLogitsUnchangedWhenOnlyTemperature() {
-        // Default generate params with temperature only → no processor → unchanged path.
-        let parameters = GenerateParameters(temperature: 0)
-        XCTAssertNil(parameters.processor())
-        XCTAssertTrue(parameters.sampler() is ArgMaxSampler)
-    }
-
     func testComposesWithRepetitionPenalty() {
-        var processor = GenerateParameters(
-            repetitionPenalty: 1.5,
-            repetitionContextSize: 10,
-            noRepeatNgramSize: 4,
-            noRepeatNgramWindowSize: 100
-        ).processor()
+        let components = GenerationComponents(
+            logitProcessorFactory: {
+                SlidingWindowNoRepeatNGramProcessor(ngramSize: 4, windowSize: 100)
+            }
+        )
+        var processor = components.logitProcessor(
+            parameters: GenerateParameters(
+                repetitionPenalty: 1.5,
+                repetitionContextSize: 10
+            ))
         XCTAssertNotNil(processor)
-        XCTAssertTrue(processor is SequentialLogitProcessor)
+        XCTAssertTrue(processor is ChainedLogitProcessor)
 
         processor?.prompt(MLXArray([1, 2, 3, 4, 1, 2, 3]))
         let logits = MLXArray([

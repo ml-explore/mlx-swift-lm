@@ -128,19 +128,6 @@ public struct GenerateParameters: Sendable {
     /// number of tokens to consider for frequency penalty
     public var frequencyContextSize: Int
 
-    /// Optional sliding-window no-repeat n-gram size. `nil` or `<= 0` disables
-    /// the processor (matches mlx-vlm / Unlimited-OCR default of off). When set
-    /// (e.g. `35` in Unlimited-OCR examples), ``GenerateParameters/processor()``
-    /// attaches ``SlidingWindowNoRepeatNGramProcessor``.
-    public var noRepeatNgramSize: Int?
-
-    /// Search window for ``noRepeatNgramSize``. Unlimited-OCR examples use
-    /// `128` (single image) or `1024` (multi-page/PDF).
-    public var noRepeatNgramWindowSize: Int
-
-    /// Token IDs never banned by the n-gram processor (e.g. EOS).
-    public var noRepeatNgramWhitelistTokenIds: Set<Int>
-
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -159,11 +146,7 @@ public struct GenerateParameters: Sendable {
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
         prefillStepSize: Int? = nil,
-        seed: UInt64? = nil,
-        noRepeatNgramSize: Int? = nil,
-        noRepeatNgramWindowSize: Int = SlidingWindowNoRepeatNGramProcessor
-            .unlimitedOCRSingleImageWindow,
-        noRepeatNgramWhitelistTokenIds: Set<Int> = []
+        seed: UInt64? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -183,9 +166,6 @@ public struct GenerateParameters: Sendable {
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
         self.seed = seed
-        self.noRepeatNgramSize = noRepeatNgramSize
-        self.noRepeatNgramWindowSize = noRepeatNgramWindowSize
-        self.noRepeatNgramWhitelistTokenIds = noRepeatNgramWhitelistTokenIds
     }
 
     public func sampler() -> LogitSampler {
@@ -234,67 +214,15 @@ public struct GenerateParameters: Sendable {
             frequencyContext = nil
         }
 
-        let penalty: PenaltyProcessor?
         if repetitionContext == nil && presenceContext == nil && frequencyContext == nil {
-            penalty = nil
-        } else {
-            penalty = PenaltyProcessor(
-                repetitionContext: repetitionContext,
-                presenceContext: presenceContext,
-                frequencyContext: frequencyContext
-            )
-        }
-
-        let ngram: SlidingWindowNoRepeatNGramProcessor?
-        if let noRepeatNgramSize, noRepeatNgramSize > 0, noRepeatNgramWindowSize > 0 {
-            ngram = SlidingWindowNoRepeatNGramProcessor(
-                ngramSize: noRepeatNgramSize,
-                windowSize: noRepeatNgramWindowSize,
-                whitelistTokenIds: noRepeatNgramWhitelistTokenIds
-            )
-        } else {
-            ngram = nil
-        }
-
-        switch (penalty, ngram) {
-        case (nil, nil):
             return nil
-        case (let penalty?, nil):
-            return penalty
-        case (nil, let ngram?):
-            return ngram
-        case (let penalty?, let ngram?):
-            return SequentialLogitProcessor([penalty, ngram])
         }
-    }
-}
 
-/// Chains logit processors in order (penalties, then hard n-gram bans, etc.).
-public struct SequentialLogitProcessor: LogitProcessor {
-    private var processors: [any LogitProcessor]
-
-    public init(_ processors: [any LogitProcessor]) {
-        self.processors = processors
-    }
-
-    public mutating func prompt(_ prompt: MLXArray) {
-        for i in processors.indices {
-            processors[i].prompt(prompt)
-        }
-    }
-
-    public func process(logits: MLXArray) -> MLXArray {
-        var result = logits
-        for processor in processors {
-            result = processor.process(logits: result)
-        }
-        return result
-    }
-
-    public mutating func didSample(token: MLXArray) {
-        for i in processors.indices {
-            processors[i].didSample(token: token)
-        }
+        return PenaltyProcessor(
+            repetitionContext: repetitionContext,
+            presenceContext: presenceContext,
+            frequencyContext: frequencyContext
+        )
     }
 }
 

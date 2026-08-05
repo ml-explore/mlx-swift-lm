@@ -58,12 +58,14 @@ let session = ChatSession(
     additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
 // Fused multipage (Python Unlimited: prompt + N pages @ 1024 base, one generation)
-var parameters = GenerateParameters(maxTokens: 8192, temperature: 0)
-parameters.noRepeatNgramSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRNgramSize
-parameters.noRepeatNgramWindowSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRMultiPageWindow
+let parameters = GenerateParameters(maxTokens: 8192, temperature: 0)
+let components = GenerationComponents(
+    logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRMultiPage() }
+)
 let text = try await ChatSession(
     container,
     generateParameters: parameters,
+    components: components,
     processing: .init(),
     additionalContext: DeepseekOCRProcessor.modeContext(.base)
 ).respond(

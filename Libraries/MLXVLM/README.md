@@ -140,14 +140,14 @@ See the top-level README section “DeepSeek-OCR / Unlimited-OCR crop modes”.
 repetition guard. It is **opt-in** (mlx-vlm / Unlimited defaults leave it off):
 
 ```swift
-var parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
-parameters.noRepeatNgramSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRNgramSize // 35
-parameters.noRepeatNgramWindowSize =
-    SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImageWindow // 128
-// Multi-page/PDF examples often use unlimitedOCRMultiPageWindow (1024).
+let parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
+let components = GenerationComponents(
+    logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage() }
+)
+// Multi-page/PDF examples often use .unlimitedOCRMultiPage() (window 1024).
 ```
 
-See `UnlimitedOCR` model docs and `GenerateParameters.noRepeatNgramSize`.
+See `UnlimitedOCR` model docs and `GenerationComponents.logitProcessorFactory`.
 
 See [llm-tool](../../Tools/llm-tool)
 

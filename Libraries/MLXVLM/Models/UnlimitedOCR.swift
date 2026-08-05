@@ -38,18 +38,18 @@ public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 /// ## Optional n-gram no-repeat
 ///
 /// Upstream Unlimited-OCR / mlx-vlm leave the sliding-window no-repeat n-gram
-/// logits processor **off** by default. Opt in via generate parameters:
+/// logits processor **off** by default. Opt in by attaching the processor
+/// through `GenerationComponents`:
 ///
 /// ```swift
-/// var parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
-/// parameters.noRepeatNgramSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRNgramSize // 35
-/// parameters.noRepeatNgramWindowSize = SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImageWindow // 128
-/// // multi-page/PDF examples often use unlimitedOCRMultiPageWindow (1024)
+/// let parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
+/// let components = GenerationComponents(
+///     logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage() }
+/// )
+/// // multi-page/PDF examples often use .unlimitedOCRMultiPage() (window 1024)
 /// ```
 ///
-/// Or attach `SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage()`
-/// through a custom `LogitProcessor` chain. Disabled (`noRepeatNgramSize` nil/0)
-/// matches Python Unlimited defaults.
+/// Leaving `components` empty matches Python Unlimited defaults (guard off).
 public final class UnlimitedOCR: DeepseekOCR {
 
     public override func newCache(parameters: GenerateParameters?) -> [KVCache] {

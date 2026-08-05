@@ -11,9 +11,15 @@ import MLX
 /// ending in token `t`, ban `t` by setting its logit to `-inf`.
 ///
 /// **Opt-in.** mlx-vlm and upstream Unlimited-OCR leave this off by default
-/// (`no_repeat_ngram_size=0`). Enable via ``GenerateParameters/noRepeatNgramSize``
-/// (typical Unlimited examples: `ngramSize=35`, `windowSize=128` single-image or
-/// `1024` multi-page/PDF) or construct this processor directly.
+/// (`no_repeat_ngram_size=0`). Enable by attaching it through
+/// ``GenerationComponents/logitProcessorFactory`` (typical Unlimited examples:
+/// `ngramSize=35`, `windowSize=128` single-image or `1024` multi-page/PDF):
+///
+/// ```swift
+/// let components = GenerationComponents(
+///     logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage() }
+/// )
+/// ```
 public struct SlidingWindowNoRepeatNGramProcessor: LogitProcessor {
 
     /// Upstream Unlimited-OCR example n-gram size when the guard is enabled.
