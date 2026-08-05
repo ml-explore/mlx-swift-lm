@@ -6,7 +6,6 @@
 import CoreImage
 import Foundation
 import FoundationModels
-import ImageIO
 import MLXLMCommon
 import os.log
 
