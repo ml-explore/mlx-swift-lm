@@ -190,6 +190,44 @@ private class Encoder: Module {
     }
 }
 
+// MARK: - BERT Encoder Model
+
+/// Shared BERT/RoBERTa encoder backbone used by embedding and reranker models.
+public class BertEncoderModel: Module {
+    /// The initial embedding layer (Word + Position + Type).
+    @ModuleInfo(key: "embeddings") fileprivate var embedder: BertEmbedding
+
+    /// The stack of Transformer layers.
+    @ModuleInfo(key: "encoder") fileprivate var encoder: Encoder
+
+    public var maxPositionEmbeddings: Int? {
+        _maxPositionEmbeddings > 0 ? _maxPositionEmbeddings : nil
+    }
+    private let _maxPositionEmbeddings: Int
+
+    public init(_ config: BertConfiguration) {
+        _maxPositionEmbeddings = config.maxPositionEmbeddings
+        _embedder.wrappedValue = BertEmbedding(config)
+        _encoder.wrappedValue = Encoder(config)
+    }
+
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> MLXArray {
+        encodedBertHiddenStates(
+            inputs,
+            maxPositionEmbeddings: _maxPositionEmbeddings,
+            embedder: embedder,
+            encoder: encoder,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+    }
+}
+
 // MARK: - Language Model Head
 
 /// The Task Head used for Masked Language Modeling (MLM).
@@ -235,6 +273,21 @@ private class LMHead: Module {
     }
 }
 
+/// Sequence-classification head used by BERT/RoBERTa reranker checkpoints.
+private class SequenceClassificationHead: Module {
+    @ModuleInfo(key: "dense") var dense: Linear
+    @ModuleInfo(key: "out_proj") var outProjection: Linear
+
+    init(_ config: BertConfiguration) {
+        _dense.wrappedValue = Linear(config.embedDim, config.embedDim, bias: true)
+        _outProjection.wrappedValue = Linear(config.embedDim, config.numLabels, bias: true)
+    }
+
+    func callAsFunction(_ hiddenStates: MLXArray) -> MLXArray {
+        outProjection(tanh(dense(hiddenStates[0..., 0])))
+    }
+}
+
 // MARK: - BERT Model
 
 /// The complete BERT model implementation.
@@ -246,25 +299,21 @@ private class LMHead: Module {
 /// 2. **Language Modeling**: Attaches an `LMHead` to predict masked tokens.
 public class BertModel: Module, EmbeddingModel {
 
+    /// Shared encoder backbone.
+    @ModuleInfo(key: "encoder_model") fileprivate var encoderModel: BertEncoderModel
+
     /// Optional head for Masked Language Modeling tasks.
     @ModuleInfo(key: "lm_head") fileprivate var lmHead: LMHead?
 
-    /// The initial embedding layer (Word + Position + Type).
-    @ModuleInfo(key: "embeddings") fileprivate var embedder: BertEmbedding
-
     /// A linear layer used to "pool" the [CLS] token into a single sentence vector.
     @ModuleInfo var pooler: Linear?
-
-    /// The stack of Transformer layers.
-    fileprivate let encoder: Encoder
 
     /// The total count of tokens in the model's vocabulary.
     public var vocabularySize: Int
 
     public var maxPositionEmbeddings: Int? {
-        _maxPositionEmbeddings > 0 ? _maxPositionEmbeddings : nil
+        encoderModel.maxPositionEmbeddings
     }
-    private let _maxPositionEmbeddings: Int
 
     /// Initializes a BERT model.
     /// - Parameters:
@@ -274,9 +323,7 @@ public class BertModel: Module, EmbeddingModel {
     public init(_ config: BertConfiguration, lmHead: Bool = false) {
         precondition(config.vocabularySize > 0)
         vocabularySize = config.vocabularySize
-        _maxPositionEmbeddings = config.maxPositionEmbeddings
-        encoder = Encoder(config)
-        _embedder.wrappedValue = BertEmbedding(config)
+        _encoderModel.wrappedValue = BertEncoderModel(config)
 
         if lmHead {
             _lmHead.wrappedValue = LMHead(config)
@@ -302,35 +349,11 @@ public class BertModel: Module, EmbeddingModel {
         tokenTypeIds: MLXArray? = nil,
         attentionMask: MLXArray? = nil
     ) -> EmbeddingModelOutput {
-        var inp = inputs
-        if inp.ndim == 1 {
-            inp = inp.reshaped(1, -1)
-        }
-        var mask = attentionMask
-        var typeIds = tokenTypeIds
-        var posIds = positionIds
-        if _maxPositionEmbeddings > 0, inp.dim(1) > _maxPositionEmbeddings {
-            print(
-                "Warning: Input length \(inp.dim(1)) exceeds maxPositionEmbeddings"
-                    + " (\(_maxPositionEmbeddings)), truncating."
-            )
-            inp = inp[0..., ..<_maxPositionEmbeddings]
-            mask = mask?[0..., ..<_maxPositionEmbeddings]
-            typeIds = typeIds?[0..., ..<_maxPositionEmbeddings]
-            posIds = posIds?[0..., ..<_maxPositionEmbeddings]
-        }
-        let embeddings = embedder(inp, positionIds: posIds, tokenTypeIds: typeIds)
-        if mask != nil {
-            // Cast mask to the same dtype as the embeddings output so it is
-            // compatible with scaled_dot_product_attention's type promotion
-            // rules. Using the embedding weight dtype can produce a mismatch
-            // when Linear layers are quantized to float16 but Embedding
-            // weights remain float32.
-            mask = mask!.asType(embeddings.dtype).expandedDimensions(axes: [
-                1, 2,
-            ]).log()
-        }
-        let outputs = encoder(embeddings, attentionMask: mask)
+        let outputs = encoderModel(
+            inputs,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
         if let lmHead {
             return EmbeddingModelOutput(hiddenStates: lmHead(outputs), pooledOutput: nil)
         } else {
@@ -344,8 +367,178 @@ public class BertModel: Module, EmbeddingModel {
     /// This is essential for loading pre-trained weights, as it renames keys
     /// like `attention.output.dense` to `attention.out_proj`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        weights.reduce(into: [:]) { result, item in
-            let key = item.key
+        sanitizeBertWeights(weights)
+    }
+}
+
+/// BERT/RoBERTa-style sequence-classification model used by encoder reranker checkpoints.
+public class BertRerankerModel: Module, RerankerModel {
+
+    /// Shared encoder backbone.
+    @ModuleInfo(key: "encoder_model") fileprivate var encoderModel: BertEncoderModel
+
+    /// Sequence-classification head that produces reranker logits.
+    @ModuleInfo(key: "classifier") fileprivate var classifier: SequenceClassificationHead
+
+    /// The total count of tokens in the model's vocabulary.
+    public var vocabularySize: Int
+
+    public var maxPositionEmbeddings: Int? {
+        encoderModel.maxPositionEmbeddings
+    }
+
+    public init(_ config: BertConfiguration) {
+        precondition(config.vocabularySize > 0)
+        vocabularySize = config.vocabularySize
+        _encoderModel.wrappedValue = BertEncoderModel(config)
+        _classifier.wrappedValue = SequenceClassificationHead(config)
+    }
+
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> EmbeddingModelOutput {
+        let outputs = encoderModel(
+            inputs,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+        return EmbeddingModelOutput(hiddenStates: outputs, pooledOutput: nil)
+    }
+
+    public func score(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> MLXArray {
+        let outputs = encoderModel(
+            inputs,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+        return classifier(outputs)
+    }
+
+    /// Maps external weight names (e.g., from Hugging Face) to this class's internal structure.
+    ///
+    /// This is essential for loading pre-trained weights, as it renames keys
+    /// like `attention.output.dense` to `attention.out_proj`.
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        sanitizeBertWeights(weights)
+    }
+}
+
+/// BERT sequence-classification model used by reranker checkpoints with pooled-output heads.
+public class BertSequenceClassificationRerankerModel: Module, RerankerModel {
+
+    /// Shared encoder backbone.
+    @ModuleInfo(key: "encoder_model") fileprivate var encoderModel: BertEncoderModel
+
+    /// A linear layer used to pool the [CLS] token before classification.
+    @ModuleInfo fileprivate var pooler: Linear
+
+    /// BERT classifier head that produces reranker logits from pooled output.
+    @ModuleInfo fileprivate var classifier: Linear
+
+    /// The total count of tokens in the model's vocabulary.
+    public var vocabularySize: Int
+
+    public var maxPositionEmbeddings: Int? {
+        encoderModel.maxPositionEmbeddings
+    }
+
+    public init(_ config: BertConfiguration) {
+        precondition(config.vocabularySize > 0)
+        vocabularySize = config.vocabularySize
+        _encoderModel.wrappedValue = BertEncoderModel(config)
+        _pooler.wrappedValue = Linear(config.embedDim, config.embedDim)
+        _classifier.wrappedValue = Linear(config.embedDim, config.numLabels, bias: true)
+    }
+
+    public func callAsFunction(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> EmbeddingModelOutput {
+        let outputs = encoderModel(
+            inputs,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+        return EmbeddingModelOutput(hiddenStates: outputs, pooledOutput: pooledOutput(outputs))
+    }
+
+    public func score(
+        _ inputs: MLXArray,
+        positionIds: MLXArray? = nil,
+        tokenTypeIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil
+    ) -> MLXArray {
+        let outputs = encoderModel(
+            inputs,
+            positionIds: positionIds,
+            tokenTypeIds: tokenTypeIds,
+            attentionMask: attentionMask)
+        return classifier(pooledOutput(outputs))
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        sanitizeBertWeights(weights)
+    }
+
+    private func pooledOutput(_ hiddenStates: MLXArray) -> MLXArray {
+        tanh(pooler(hiddenStates[0..., 0]))
+    }
+}
+
+private func encodedBertHiddenStates(
+    _ inputs: MLXArray,
+    maxPositionEmbeddings: Int,
+    embedder: BertEmbedding,
+    encoder: Encoder,
+    positionIds: MLXArray? = nil,
+    tokenTypeIds: MLXArray? = nil,
+    attentionMask: MLXArray? = nil
+) -> MLXArray {
+    var inp = inputs
+    if inp.ndim == 1 {
+        inp = inp.reshaped(1, -1)
+    }
+    var mask = attentionMask
+    var typeIds = tokenTypeIds
+    var posIds = positionIds
+    if maxPositionEmbeddings > 0, inp.dim(1) > maxPositionEmbeddings {
+        print(
+            "Warning: Input length \(inp.dim(1)) exceeds maxPositionEmbeddings"
+                + " (\(maxPositionEmbeddings)), truncating."
+        )
+        inp = inp[0..., ..<maxPositionEmbeddings]
+        mask = mask?[0..., ..<maxPositionEmbeddings]
+        typeIds = typeIds?[0..., ..<maxPositionEmbeddings]
+        posIds = posIds?[0..., ..<maxPositionEmbeddings]
+    }
+    let embeddings = embedder(inp, positionIds: posIds, tokenTypeIds: typeIds)
+    if mask != nil {
+        // Cast mask to the same dtype as the embeddings output so it is
+        // compatible with scaled_dot_product_attention's type promotion
+        // rules. Using the embedding weight dtype can produce a mismatch
+        // when Linear layers are quantized to float16 but Embedding
+        // weights remain float32.
+        mask = mask!.asType(embeddings.dtype).expandedDimensions(axes: [
+            1, 2,
+        ]).log()
+    }
+    return encoder(embeddings, attentionMask: mask)
+}
+
+private func sanitizeBertWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+    weights.reduce(into: [:]) { result, item in
+        let key = prefixBertEncoderWeightKey(
+            item.key
                 .replacingOccurrences(of: ".layer.", with: ".layers.")
                 .replacingOccurrences(of: ".self.key.", with: ".key_proj.")
                 .replacingOccurrences(of: ".self.query.", with: ".query_proj.")
@@ -372,10 +565,23 @@ public class BertModel: Module, EmbeddingModel {
                 )
                 .replacingOccurrences(of: "cls.predictions.bias", with: "lm_head.decoder.bias")
                 .replacingOccurrences(of: "bert.", with: "")
+                .replacingOccurrences(of: "roberta.", with: "")
+        )
 
-            result[key] = item.value
-        }.filter { key, _ in key != "embeddings.position_ids" }
+        result[key] = item.value
+    }.filter { key, _ in
+        key != "encoder_model.embeddings.position_ids" && key != "embeddings.position_ids"
     }
+}
+
+private func prefixBertEncoderWeightKey(_ key: String) -> String {
+    if key.hasPrefix("encoder_model.") {
+        return key
+    }
+    if key.hasPrefix("embeddings.") || key.hasPrefix("encoder.") {
+        return "encoder_model.\(key)"
+    }
+    return key
 }
 
 // MARK: - DistilBERT
@@ -397,32 +603,34 @@ public class DistilBertModel: BertModel {
     /// - Returns: A sanitized dictionary compatible with the `Module` property keys.
     public override func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, item in
-            let key = item.key
-                .replacingOccurrences(of: ".layer.", with: ".layers.")
-                // Architecture-specific remapping
-                .replacingOccurrences(of: "transformer.", with: "encoder.")
-                .replacingOccurrences(of: "embeddings.LayerNorm", with: "embeddings.norm")
-                // Attention mapping
-                .replacingOccurrences(of: ".attention.q_lin.", with: ".attention.query_proj.")
-                .replacingOccurrences(of: ".attention.k_lin.", with: ".attention.key_proj.")
-                .replacingOccurrences(of: ".attention.v_lin.", with: ".attention.value_proj.")
-                .replacingOccurrences(of: ".attention.out_lin.", with: ".attention.out_proj.")
-                // Layer Norm and Feed-Forward mapping
-                .replacingOccurrences(of: ".sa_layer_norm.", with: ".ln1.")
-                .replacingOccurrences(of: ".ffn.lin1.", with: ".linear1.")
-                .replacingOccurrences(of: ".ffn.lin2.", with: ".linear2.")
-                .replacingOccurrences(of: ".output_layer_norm.", with: ".ln2.")
-                // Language Modeling Head mapping
-                .replacingOccurrences(of: "vocab_transform", with: "lm_head.dense")
-                .replacingOccurrences(of: "vocab_layer_norm", with: "lm_head.ln")
-                .replacingOccurrences(of: "vocab_projector", with: "lm_head.decoder")
-                // Clean up model prefix
-                .replacingOccurrences(of: "distilbert.", with: "")
+            let key = prefixBertEncoderWeightKey(
+                item.key
+                    .replacingOccurrences(of: ".layer.", with: ".layers.")
+                    // Architecture-specific remapping
+                    .replacingOccurrences(of: "transformer.", with: "encoder.")
+                    .replacingOccurrences(of: "embeddings.LayerNorm", with: "embeddings.norm")
+                    // Attention mapping
+                    .replacingOccurrences(of: ".attention.q_lin.", with: ".attention.query_proj.")
+                    .replacingOccurrences(of: ".attention.k_lin.", with: ".attention.key_proj.")
+                    .replacingOccurrences(of: ".attention.v_lin.", with: ".attention.value_proj.")
+                    .replacingOccurrences(of: ".attention.out_lin.", with: ".attention.out_proj.")
+                    // Layer Norm and Feed-Forward mapping
+                    .replacingOccurrences(of: ".sa_layer_norm.", with: ".ln1.")
+                    .replacingOccurrences(of: ".ffn.lin1.", with: ".linear1.")
+                    .replacingOccurrences(of: ".ffn.lin2.", with: ".linear2.")
+                    .replacingOccurrences(of: ".output_layer_norm.", with: ".ln2.")
+                    // Language Modeling Head mapping
+                    .replacingOccurrences(of: "vocab_transform", with: "lm_head.dense")
+                    .replacingOccurrences(of: "vocab_layer_norm", with: "lm_head.ln")
+                    .replacingOccurrences(of: "vocab_projector", with: "lm_head.decoder")
+                    // Clean up model prefix
+                    .replacingOccurrences(of: "distilbert.", with: "")
+            )
 
             result[key] = item.value
         }.filter { key, _ in
             // We ignore position_ids because they are generated dynamically in MLX
-            key != "embeddings.position_ids"
+            key != "encoder_model.embeddings.position_ids" && key != "embeddings.position_ids"
         }
     }
 }
@@ -463,6 +671,16 @@ public struct BertConfiguration: Decodable, Sendable {
     /// The identifier for the model (e.g., "bert" or "distilbert").
     var modelType: String
 
+    /// Declared Hugging Face architecture names.
+    var architectures: [String] = []
+
+    /// Number of labels for sequence-classification heads.
+    var numLabels: Int = 1
+
+    var isSequenceClassification: Bool {
+        architectures.contains { $0.contains("ForSequenceClassification") }
+    }
+
     // MARK: - Decoding Keys
 
     enum CodingKeys: String, CodingKey {
@@ -471,6 +689,8 @@ public struct BertConfiguration: Decodable, Sendable {
         case vocabularySize = "vocab_size"
         case maxPositionEmbeddings = "max_position_embeddings"
         case modelType = "model_type"
+        case architectures
+        case numLabels = "num_labels"
     }
 
     /// Standard BERT naming conventions in JSON.
@@ -502,6 +722,8 @@ public struct BertConfiguration: Decodable, Sendable {
         maxPositionEmbeddings =
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 0
         modelType = try container.decode(String.self, forKey: .modelType)
+        architectures = try container.decodeIfPresent([String].self, forKey: .architectures) ?? []
+        numLabels = try container.decodeIfPresent(Int.self, forKey: .numLabels) ?? 1
 
         // Switch decoding logic based on model type
         if modelType == "distilbert" {
