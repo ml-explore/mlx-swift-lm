@@ -275,9 +275,10 @@ private final class CacheTrackingTransitionModel: Module, LanguageModel,
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
-        throws -> PrepareResult
-    {
+    func prepare(
+        _ input: MLXLMCommon.LMInput, cache: [any MLXLMCommon.KVCache],
+        state: MLXLMCommon.LMOutput.State?, prefill: MLXLMCommon.PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 
