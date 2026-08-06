@@ -1060,6 +1060,39 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(second.text, cleanSecond.text)
     }
 
+    func testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let session = ChatSession(
+            model(processor: processor),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2),
+            generateParameters: parameters)
+
+        _ = try await collectGeneration(session.streamDetails(to: "first"))
+        let firstRenderedLengthValue = await lengthIterator.next()
+        _ = try XCTUnwrap(firstRenderedLengthValue)
+        let optionalFirstProgress = await session.cacheProgress()
+        let firstProgress = try XCTUnwrap(optionalFirstProgress)
+        XCTAssertEqual(firstProgress.main, firstProgress.draft)
+
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+
+        XCTAssertNotNil(second.info.speculativeDecodingTelemetry)
+        XCTAssertEqual(
+            second.info.promptTokenCount,
+            secondRenderedLength - firstProgress.main)
+    }
+
     func testSpeculativeDecodingMemoryPolicyFailThrows() async throws {
         let draft = ModelContainer(context: model())
         let session = ChatSession(
@@ -1504,6 +1537,65 @@ public class ChatSessionTests: XCTestCase {
         await session.clear()
         await session.withCache { cache in
             XCTAssertNil(cache)
+        }
+    }
+
+    func testChangingKVCacheConfigurationRequiresClearingRealizedCache() async throws {
+        let initialConfiguration = KVCacheConfiguration(
+            strategy: .turboQuant(.qualityFirst))
+        let session = ChatSession(
+            model(),
+            cache: [KVCacheSimple()],
+            generateParameters: GenerateParameters(kvCache: initialConfiguration))
+
+        session.generateParameters.kvCache = KVCacheConfiguration(strategy: .fullPrecision)
+
+        do {
+            _ = try await session.kvCacheRuntimeReport()
+            XCTFail("Expected a realized cache to reject configuration changes")
+        } catch ChatSessionError.kvCacheConfigurationChanged(
+            let previous, let requested)
+        {
+            XCTAssertEqual(previous, initialConfiguration)
+            XCTAssertEqual(requested, KVCacheConfiguration(strategy: .fullPrecision))
+        }
+    }
+
+    func testSessionRetainsCacheReplacementTriggeredDuringDecode() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let affine = try AffineKVCacheConfiguration(
+            bits: 4, groupSize: 64, compressionStart: 8)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(
+                maxTokens: 3,
+                kvCache: KVCacheConfiguration(
+                    strategy: .affine(affine), compatibility: .allowPartial),
+                temperature: 0))
+
+        _ = try await session.respond(to: "hello")
+        let observedFirstOffset = try await session.withCache { cache in
+            let cache = try XCTUnwrap(cache)
+            let quantized = try XCTUnwrap(
+                cache.first { $0 is QuantizedKVCache } as? QuantizedKVCache)
+            return quantized.offset
+        }
+        let firstOffset = try XCTUnwrap(observedFirstOffset)
+        let optionalFirstReport = try await session.kvCacheRuntimeReport()
+        let firstReport = try XCTUnwrap(optionalFirstReport)
+        XCTAssertEqual(firstReport.processedTokenCount, firstOffset)
+
+        _ = try await session.respond(to: "hello again")
+        try await session.withCache { cache in
+            let cache = try XCTUnwrap(cache)
+            let quantized = try XCTUnwrap(
+                cache.first { $0 is QuantizedKVCache } as? QuantizedKVCache)
+            XCTAssertGreaterThan(quantized.offset, firstOffset)
         }
     }
 

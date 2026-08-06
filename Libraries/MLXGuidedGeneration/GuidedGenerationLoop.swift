@@ -56,6 +56,8 @@ public enum GuidedGenerationLoop {
     ///   - vocabSize: Number of tokens in the grammar's vocabulary. May differ
     ///     from the model's logit dimension (e.g. added special tokens beyond
     ///     the embedding size). Used to correctly interpret the grammar bitmask.
+    ///   - kvCache: Typed KV-cache capacity and compression configuration. Prefer
+    ///     this over the legacy scalar quantization parameters.
     ///   - kvBits: Bit width for KV-cache quantization, or nil to disable. When
     ///     set, the KV cache is quantized after each forward pass to reduce
     ///     memory use, mirroring the unconstrained `TokenIterator`. nil is a
@@ -86,6 +88,7 @@ public enum GuidedGenerationLoop {
         constraint: GrammarConstraint,
         maxTokens: Int,
         vocabSize: Int,
+        kvCache: KVCacheConfiguration? = nil,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
@@ -99,7 +102,15 @@ public enum GuidedGenerationLoop {
     ) throws -> Int {
         let model = context.model
         let diagnosticSink = GuidedGenerationDiagnosticSink.current
-        var cache = model.newCache(parameters: nil)
+        let generationParameters = GenerateParameters(
+            kvCache: kvCache,
+            kvBits: kvBits,
+            kvGroupSize: kvGroupSize,
+            quantizedKVStart: quantizedKVStart)
+        let kvCachePlan = try generationParameters.kvCachePlan()
+        let cacheStorage = try kvCachePlan.validated(
+            KVCacheStorage(
+                model.newCache(parameters: generationParameters), plan: kvCachePlan))
         var modelState: LMOutput.State?
 
         // Build EOS token set
@@ -110,16 +121,29 @@ public enum GuidedGenerationLoop {
 
         // Prefill prompt and get first set of logits
         var logits: MLXArray
-        switch try model.prepare(input, cache: cache, state: nil, windowSize: 512) {
+        let inputLength = input.text.cacheSequenceLength
+        switch try model.prepare(
+            input, cache: cacheStorage.cache, state: nil, windowSize: 512)
+        {
         case .tokens(let tokens):
-            let result = model(tokens[text: .newAxis], cache: cache, state: nil)
+            let remainingLength = tokens.cacheSequenceLength
+            precondition(
+                remainingLength <= inputLength,
+                "LanguageModel.prepare returned more tokens than it received")
+            cacheStorage.commitProcessedTokens(inputLength - remainingLength)
+            let result = model(
+                tokens[text: .newAxis], cache: cacheStorage.cache, state: nil)
+            cacheStorage.commitProcessedTokens(remainingLength)
             modelState = result.state
             logits = result.logits
 
         case .logits(let result):
+            cacheStorage.commitProcessedTokens(inputLength)
             modelState = result.state
             logits = result.logits
         }
+
+        try kvCachePlan.applyAndValidate(to: cacheStorage)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
         var tokenCount = 0
@@ -363,9 +387,10 @@ public enum GuidedGenerationLoop {
                     let tokenInput = LMInput.Text(tokens: MLXArray([ffToken]))
                     let result = model(
                         tokenInput[text: .newAxis],
-                        cache: cache.isEmpty ? nil : cache,
+                        cache: cacheStorage.cache.isEmpty ? nil : cacheStorage.cache,
                         state: modelState
                     )
+                    cacheStorage.commitProcessedTokens(tokenInput.cacheSequenceLength)
                     modelState = result.state
                     // Only need logits from the last FF token
                     if i == ffTokens.count - 1 {
@@ -375,9 +400,7 @@ public enum GuidedGenerationLoop {
 
                 // Quantize the KV cache after the forward pass(es), matching the
                 // unconstrained TokenIterator. No-op unless `kvBits` is set.
-                maybeQuantizeKVCache(
-                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
-                    quantizedKVStart: quantizedKVStart)
+                kvCachePlan.apply(to: cacheStorage)
 
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)
@@ -394,17 +417,16 @@ public enum GuidedGenerationLoop {
                 let nextInput = LMInput.Text(tokens: MLXArray([Int32(token)]))
                 let result = model(
                     nextInput[text: .newAxis],
-                    cache: cache.isEmpty ? nil : cache,
+                    cache: cacheStorage.cache.isEmpty ? nil : cacheStorage.cache,
                     state: modelState
                 )
+                cacheStorage.commitProcessedTokens(nextInput.cacheSequenceLength)
                 modelState = result.state
                 logits = result.logits
 
                 // Quantize the KV cache after the forward pass, matching the
                 // unconstrained TokenIterator. No-op unless `kvBits` is set.
-                maybeQuantizeKVCache(
-                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
-                    quantizedKVStart: quantizedKVStart)
+                kvCachePlan.apply(to: cacheStorage)
 
                 // Kick off GPU computation asynchronously
                 asyncEval(logits)

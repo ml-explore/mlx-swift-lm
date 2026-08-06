@@ -105,6 +105,13 @@ public struct LMInput {
             guard tokens.ndim == 2 else { return nil }
             return Array(repeating: tokens.dim(1), count: tokens.dim(0))
         }
+
+        /// Number of logical sequence positions consumed by one model call.
+        /// Batch dimensions do not duplicate the shared cache timeline.
+        @inline(__always)
+        package var cacheSequenceLength: Int {
+            tokens.ndim == 0 ? 0 : tokens.dim(-1)
+        }
     }
 
     /// Representation of prepared input image(s).
@@ -317,10 +324,10 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
 
-        // Follow Python logic: use RotatingKVCache if maxKVSize is provided
-        if let maxKVSize = parameters?.maxKVSize {
+        // Follow Python logic: use RotatingKVCache if a capacity is provided.
+        if let capacity = parameters?.effectiveKVCacheCapacity {
             return (0 ..< numLayers).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                capacity.makeRotatingCache()
             }
         } else {
             return (0 ..< numLayers).map { _ in KVCacheSimple() }
