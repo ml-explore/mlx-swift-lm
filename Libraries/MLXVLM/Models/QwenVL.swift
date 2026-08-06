@@ -255,4 +255,152 @@ public struct QwenVL {
         return (flattenedPatches, .init(gridT, gridH, gridW))
     }
 
+    // MARK: - Prepared input splitting
+
+    /// Split a Qwen VL prepared input at `prefixTokenCount`, keeping only the media
+    /// whose placeholder tokens fall in the suffix.
+    ///
+    /// Shared by ``Qwen25VL`` and ``Qwen2VL``, whose prepared-input layout is the
+    /// same: `pixels` is the images' patch rows concatenated along axis 0 in prompt
+    /// order, and `frames` carries one `THW` per image, so image *i* owns
+    /// `frames[i].product` rows and `frames[i].product / (mergeSize * mergeSize)`
+    /// placeholder tokens (see ``patchify(images:mergeSize:patchSize:temporalPatchSize:)``
+    /// and ``replacePaddingTokens(in:frames:paddingToken:mergeSize:tokenizer:)``).
+    ///
+    /// Returns `nil` — meaning "fall back to a full prefill" — unless every
+    /// assumption above is checked against the input actually handed in.
+    static func splitPreparedInput(
+        _ input: LMInput,
+        droppingFirst prefixTokenCount: Int,
+        imageTokenId: Int,
+        videoTokenId: Int,
+        mergeSize: Int
+    ) -> LMInput? {
+        // Audio is not part of the Qwen VL prepared-input contract.
+        guard input.audio == nil else { return nil }
+
+        // Images only. Video is refused for two reasons, both checked against the
+        // encoders rather than assumed:
+        //
+        //  * ``Qwen25VL``'s vision full-attention mask mis-accumulates `cuSeqlens`
+        //    for frames with `t > 1` — `cuSeqlens.last!` is read inside a `map`
+        //    that has not appended yet, so a 3-frame block yields `[16, 16, 16]`
+        //    rather than `[16, 32, 48]`. A video's rows are therefore not isolated
+        //    from the rest of the buffer, and dropping earlier rows changes the
+        //    features of the rows that are kept.
+        //  * Both models pass `videoGridTHW: nil` to `getRopeIndex`, which makes
+        //    video positions degenerate.
+        //
+        // Neither is this change's to fix, but either one makes a video split
+        // unsound, so it is not offered.
+        guard input.video == nil else { return nil }
+
+        // Only the processor's own `[1, seq]` layout. A rank-1 suffix would route
+        // back to the cold path in `prepare(_:cache:state:windowSize:)`, which
+        // computes positions from zero — silently wrong against a warm cache.
+        let tokens = input.text.tokens
+        guard tokens.ndim == 2, tokens.dim(0) == 1 else { return nil }
+
+        let ids = tokens.asArray(Int.self)
+        guard prefixTokenCount > 0, prefixTokenCount < ids.count else { return nil }
+
+        // The processor pairs media with an all-ones mask. Anything else is a real
+        // padding mask this routine will not reinterpret.
+        if let mask = input.text.mask {
+            guard mask.size == ids.count else { return nil }
+            guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {
+                return nil
+            }
+        }
+
+        var splitImage: LMInput.ProcessedImage?
+        if let image = input.image {
+            guard
+                let split = splitVisionPayload(
+                    pixels: image.pixels, positionIds: image.positionIds, frames: image.frames,
+                    ids: ids, prefixTokenCount: prefixTokenCount, padTokenId: imageTokenId,
+                    mergeSize: mergeSize)
+            else { return nil }
+            splitImage = LMInput.ProcessedImage(pixels: split.pixels, frames: split.frames)
+        }
+
+        // A video placeholder inside an image-only payload would mean the prompt
+        // carries media this routine is not accounting for.
+        guard !ids.contains(videoTokenId) else { return nil }
+
+        let suffixIds = Array(ids[prefixTokenCount...])
+        let suffixTokens = MLXArray(suffixIds).expandedDimensions(axis: 0)
+        let suffixMask = input.text.mask.map { mask in
+            ones([1, suffixIds.count]).asType(mask.dtype)
+        }
+
+        return LMInput(
+            text: .init(tokens: suffixTokens, mask: suffixMask),
+            image: splitImage)
+    }
+
+    /// Drop the leading media items that the cached prefix already covers.
+    ///
+    /// Returns `nil` when the payload cannot be attributed item-by-item, or when the
+    /// cut falls *inside* a media block — in that case the suffix would carry a
+    /// partial set of placeholders and neither the feature merge nor the position
+    /// walk would line up.
+    private static func splitVisionPayload(
+        pixels: MLXArray,
+        positionIds: MLXArray?,
+        frames: [THW]?,
+        ids: [Int],
+        prefixTokenCount: Int,
+        padTokenId: Int,
+        mergeSize: Int
+    ) -> (pixels: MLXArray, frames: [THW])? {
+        // Precomputed position ids describe the full prompt; slicing them is not
+        // attempted here.
+        guard positionIds == nil else { return nil }
+        guard let frames, !frames.isEmpty else { return nil }
+
+        let mergeLength = mergeSize * mergeSize
+        guard mergeLength > 0 else { return nil }
+
+        var prefixPadCount = 0
+        var totalPadCount = 0
+        for (index, id) in ids.enumerated() where id == padTokenId {
+            totalPadCount += 1
+            if index < prefixTokenCount { prefixPadCount += 1 }
+        }
+
+        var padCounts: [Int] = []
+        var rowCounts: [Int] = []
+        padCounts.reserveCapacity(frames.count)
+        rowCounts.reserveCapacity(frames.count)
+        for frame in frames {
+            guard frame.product > 0, frame.product % mergeLength == 0 else { return nil }
+            padCounts.append(frame.product / mergeLength)
+            rowCounts.append(frame.product)
+        }
+
+        // The payload must describe exactly the placeholders in the prompt, and the
+        // rows must account for the whole pixel buffer. If either is off, the layout
+        // is not the one documented above and nothing here may be assumed.
+        guard padCounts.reduce(0, +) == totalPadCount else { return nil }
+        guard pixels.ndim == 2, pixels.dim(0) == rowCounts.reduce(0, +) else { return nil }
+
+        var consumedPads = 0
+        var consumedRows = 0
+        var droppedItems = 0
+        while droppedItems < frames.count, consumedPads < prefixPadCount {
+            consumedPads += padCounts[droppedItems]
+            consumedRows += rowCounts[droppedItems]
+            droppedItems += 1
+        }
+        // Overshoot means the boundary landed inside a media block.
+        guard consumedPads == prefixPadCount else { return nil }
+
+        let remainingFrames = Array(frames[droppedItems...])
+        guard !remainingFrames.isEmpty else { return nil }
+
+        let remainingPixels = pixels[consumedRows ..< pixels.dim(0), 0...]
+        return (remainingPixels, remainingFrames)
+    }
+
 }

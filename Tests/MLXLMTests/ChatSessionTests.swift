@@ -167,6 +167,54 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    /// A model that opts into append-only media cache reuse.
+    ///
+    /// The synthetic text model underneath cannot consume a media payload, so the
+    /// split keeps the token suffix and the payload is stripped in `prepare` — the
+    /// same shape as `MaskTolerantLanguageModel`. What these tests measure is
+    /// `ChatSession`'s decision, which is made before the model is called.
+    private final class SplittingLanguageModel: Module, LanguageModel, PreparedInputSplitting {
+        let base: any LanguageModel
+        let declinesToSplit: Bool
+
+        init(_ base: any LanguageModel, declinesToSplit: Bool = false) {
+            self.base = base
+            self.declinesToSplit = declinesToSplit
+            super.init()
+        }
+
+        func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+            -> LMInput?
+        {
+            guard !declinesToSplit else { return nil }
+            let ids = input.text.tokens.asArray(Int.self)
+            guard prefixTokenCount > 0, prefixTokenCount < ids.count else { return nil }
+            return LMInput(
+                text: .init(tokens: MLXArray(Array(ids[prefixTokenCount...]))),
+                image: input.image)
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        ) throws -> PrepareResult {
+            try base.prepare(
+                LMInput(tokens: input.text.tokens),
+                cache: cache,
+                state: state,
+                windowSize: windowSize)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            base.newCache(parameters: parameters)
+        }
+    }
+
     private struct EmptyChatTemplateTokenizer: Tokenizer {
         var bosToken: String? = nil
         var eosToken: String? = nil
@@ -251,6 +299,20 @@ public class ChatSessionTests: XCTestCase {
             processor: processor,
             configuration: processor.configuration,
             tokenizer: processor.tokenizer)
+    }
+
+    private func model(
+        processor: MediaAwareInputProcessor, splitting: Bool, declinesToSplit: Bool = false
+    ) -> ModelContext {
+        var context = Self.makeModel(
+            processor: processor,
+            configuration: processor.configuration,
+            tokenizer: processor.tokenizer)
+        if splitting {
+            context.model = SplittingLanguageModel(
+                context.model, declinesToSplit: declinesToSplit)
+        }
+        return context
     }
 
     private func model(processor: MaskedInputProcessor) -> ModelContext {
@@ -784,6 +846,116 @@ public class ChatSessionTests: XCTestCase {
             components: GenerationComponents())
         let result = try await session.respond(to: "hello")
         XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    /// The append-only counterpart of
+    /// `testHistoricalMediaReusesSuffixButNewMediaRebuildsCache`: same transcript,
+    /// same turns, but a model that can split its own prepared input. The new-image
+    /// turn now prefills only the uncached suffix instead of the whole prompt.
+    func testAppendOnlyMediaReusesCacheWhenModelSplitsPreparedInput() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor, splitting: true),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        _ = await lengthIterator.next()
+
+        for try await _ in session.streamDetails(to: "describe it") {}
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+
+        var newMediaInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(
+            to: "now inspect this",
+            role: .user,
+            images: [.array(MLXArray([Float(1)]))],
+            videos: [])
+        {
+            if let info = item.info {
+                newMediaInfo = info
+            }
+        }
+        let thirdRenderedLengthValue = await lengthIterator.next()
+        let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
+
+        XCTAssertEqual(
+            newMediaInfo?.promptTokenCount,
+            thirdRenderedLength - secondRenderedLength - 3,
+            "an append-only media turn should prefill only the uncached suffix")
+    }
+
+    /// A model that declines the split keeps the pre-existing behavior, which is
+    /// also what every non-conforming model gets.
+    func testAppendOnlyMediaRebuildsWhenModelDeclinesToSplit() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor, splitting: true, declinesToSplit: true),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        _ = await lengthIterator.next()
+
+        for try await _ in session.streamDetails(to: "describe it") {}
+        _ = await lengthIterator.next()
+
+        var newMediaInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(
+            to: "now inspect this",
+            role: .user,
+            images: [.array(MLXArray([Float(1)]))],
+            videos: [])
+        {
+            if let info = item.info {
+                newMediaInfo = info
+            }
+        }
+        let thirdRenderedLengthValue = await lengthIterator.next()
+        let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
+
+        XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
+    }
+
+    /// Splitting is offered only where the transcript is *extended*. When the
+    /// template rewrites an already-cached tail the turn needs a rewind, and media
+    /// still forces a rebuild there — the guard PR #472 added is untouched.
+    func testLongestCommonPrefixTrimmingStillFallsBackForMediaWhenModelCanSplit()
+        async throws
+    {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor, splitting: true),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        _ = await lengthIterator.next()
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "describe it") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+        let fullSecondPromptLengthValue = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+        XCTAssertEqual(completionInfo?.promptTokenCount, fullSecondPromptLength)
     }
 
     func testChatSessionAsyncInterrupt() async throws {
