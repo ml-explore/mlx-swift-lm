@@ -116,13 +116,15 @@ package final class KVCacheStorage {
     package let plan: KVCachePlan
     package fileprivate(set) var isApplicationTerminal = false
 
+    private var openRound: KVCacheRound?
+
     /// Whether a staged round is presently writing provisionally against these entries.
     ///
     /// A round hands the model substitute caches and defers part of its writes, so the entries
     /// and the timeline are deliberately out of step until it commits. Operations that assume
     /// they are in step -- replacing entries, trimming, snapshotting -- are refused while one is
     /// open rather than silently reading a half-written position.
-    package internal(set) var roundIsOpen = false
+    package var roundIsOpen: Bool { openRound != nil }
     /// Authoritative logical position represented by this model cache.
     ///
     /// Individual cache entries retain their native offsets and metadata, but
@@ -165,6 +167,84 @@ package final class KVCacheStorage {
             "Cache trimmed beyond its processed-token timeline")
         processedTokenCount -= trimmed
         return trimmed
+    }
+
+    /// Open a staged round over these entries, or `nil` when one of them cannot take part.
+    ///
+    /// Every leaf is classified before anything is constructed, so a refusal leaves the entries
+    /// exactly as they were and the caller can fall back to unstaged decoding. Nested
+    /// ``CacheList`` topologies are refused too: they expand to more leaves than array slots, and
+    /// the caches handed back have to line up with the live array positionally.
+    ///
+    /// - Parameter maximumPositions: the widest write the round will make. Append-only leaves are
+    ///   admitted only if they can still be rewound after absorbing it.
+    package func beginRound(maximumPositions: Int) -> KVCacheRound? {
+        precondition(!roundIsOpen, "a staged round is already open on this storage")
+
+        let leaves = KVCacheTree.leaves(in: cache)
+        guard leaves.count == cache.count, leaves.allSatisfy({ $0.path.count == 1 }) else {
+            return nil
+        }
+
+        var strategies = [any KVCacheRoundStrategy]()
+        strategies.reserveCapacity(leaves.count)
+        for leaf in leaves {
+            guard
+                let strategy = KVCacheRoundStrategyFactory.make(
+                    for: leaf, maximumPositions: maximumPositions)
+            else { return nil }
+            strategies.append(strategy)
+        }
+
+        let round = KVCacheRound(strategies: strategies, maximumPositions: maximumPositions)
+        openRound = round
+        return round
+    }
+
+    /// Keep the first `retaining` positions the round wrote and drop the rest, advancing the
+    /// timeline by exactly that much.
+    ///
+    /// Leaf commit and timeline advance are one operation on purpose. A commit that moved leaf
+    /// K/V without moving the timeline -- or the reverse -- would recreate, one level up, the
+    /// split brain this storage exists to prevent.
+    @discardableResult
+    package func commit(_ round: KVCacheRound, retaining: Int) -> KVCacheRoundCommit {
+        precondition(openRound === round, "committing a round that is not open on this storage")
+        let written = round.writtenPositions
+        precondition(
+            retaining >= 0 && retaining <= written,
+            "cannot retain \(retaining) of \(written) written positions")
+
+        for strategy in round.strategies {
+            strategy.commit(retaining: retaining)
+        }
+        processedTokenCount += retaining
+        openRound = nil
+
+        assert(
+            nativeAttentionOffsetsAreAligned,
+            "committing a staged round left the leaves and the timeline out of step")
+
+        return KVCacheRoundCommit(
+            committedPositions: retaining,
+            discardedPositions: written - retaining,
+            emittedLengths: round.strategies.map(\.emittedLength))
+    }
+
+    /// Drop everything the round wrote.
+    @discardableResult
+    package func rollback(_ round: KVCacheRound) -> KVCacheRoundCommit {
+        commit(round, retaining: 0)
+    }
+
+    /// How much of the emitted sequence the given leaf can still describe, outside a round.
+    ///
+    /// The whole stream for a global layer; the trailing window for a sliding one. This is the
+    /// same quantity ``KVCacheRoundCommit/emittedLengths`` reports, for callers that need it
+    /// without a round in hand -- prefill, for instance.
+    package func emittedLength(forLeaf index: Int) -> Int {
+        guard cache.indices.contains(index) else { return processedTokenCount }
+        return Swift.min(processedTokenCount, cache[index].maxSize ?? .max)
     }
 
     /// Create an independent snapshot while preserving plan and progress.
