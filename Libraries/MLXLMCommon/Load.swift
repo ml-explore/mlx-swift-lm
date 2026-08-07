@@ -65,7 +65,8 @@ public func loadWeights(
         quantize(model: model) { path, module in
             if weights["\(path).scales"] != nil {
                 if let perLayerQuantization {
-                    return perLayerQuantization.quantization(layer: path)?.asTuple
+                    let configurationPath = model.quantizationConfigurationPath(for: path)
+                    return perLayerQuantization.quantization(layer: configurationPath)?.asTuple
                 } else {
                     return quantization?.asTuple
                 }

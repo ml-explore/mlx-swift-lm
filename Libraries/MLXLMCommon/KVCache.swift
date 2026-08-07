@@ -717,6 +717,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
+    var temporalState: [MLXArray] {
+        guard let keys = self.keys, let values = self.values else { return [] }
+        return [temporalOrder(keys), temporalOrder(values)]
+    }
+
     public override var metaState: [String] {
         get {
             return [

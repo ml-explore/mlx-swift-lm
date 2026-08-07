@@ -15,6 +15,13 @@ public protocol BaseLanguageModel: Module {
     /// Models can override this to inspect metadata (e.g. check `metadata["format"] == "mlx"`)
     /// and skip or customize sanitization accordingly.
     func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
+
+    /// Translate a runtime module path to the corresponding path in a checkpoint's
+    /// per-layer quantization configuration.
+    ///
+    /// Composite models that namespace sanitized weights can override this hook so
+    /// mixed-precision overrides continue to address the original checkpoint paths.
+    func quantizationConfigurationPath(for modulePath: String) -> String
 }
 
 /// Optional metadata a model wants written into converted safetensors.
@@ -34,6 +41,10 @@ extension BaseLanguageModel {
         MLXArray]
     {
         sanitize(weights: weights)
+    }
+
+    public func quantizationConfigurationPath(for modulePath: String) -> String {
+        modulePath
     }
 }
 
@@ -70,6 +81,7 @@ public struct LMInput {
     public let image: ProcessedImage?
     public let video: ProcessedVideo?
     public let audio: ProcessedAudio?
+    public let multimodalTokenTypes: MLXArray?
 
     /// Representation of tokenized input text.
     public struct Text {
@@ -175,11 +187,54 @@ public struct LMInput {
         video: LMInput.ProcessedVideo? = nil,
         audio: LMInput.ProcessedAudio? = nil
     ) {
+        self.init(
+            text: text,
+            image: image,
+            video: video,
+            audio: audio,
+            multimodalTokenTypes: nil)
+    }
+
+    public init(
+        text: LMInput.Text,
+        image: LMInput.ProcessedImage? = nil,
+        video: LMInput.ProcessedVideo? = nil,
+        audio: LMInput.ProcessedAudio? = nil,
+        multimodalTokenTypes: MLXArray?
+    ) {
         self.text = text
         self.image = image
         self.video = video
         self.audio = audio
+        self.multimodalTokenTypes = multimodalTokenTypes
     }
+}
+
+/// Validate the shape shared by block-diffusion streaming and return the logical
+/// prompt positions selected by an optional attention mask. A `nil` result means
+/// every prompt position is valid and no gather is needed.
+package func blockDiffusionPromptIndices(
+    mask: MLXArray?, sequenceLength: Int, batchSize: Int, modelName: String
+) throws -> MLXArray? {
+    guard batchSize == 1 else {
+        throw GenerateError.unsupportedBatchSize(modelName: modelName, batchSize: batchSize)
+    }
+    guard let mask else { return nil }
+
+    let values = mask.asType(.bool).flattened().asArray(Bool.self)
+    guard values.count == sequenceLength else {
+        throw GenerateError.invalidAttentionMask(
+            "expected \(sequenceLength) values for a batch-one prompt, got \(values.count).")
+    }
+    guard values.contains(true) else {
+        throw GenerateError.invalidAttentionMask("the prompt cannot be entirely masked.")
+    }
+    guard values.contains(false) else { return nil }
+
+    return MLXArray(
+        values.enumerated().compactMap { index, isValid in
+            isValid ? Int32(index) : nil
+        })
 }
 
 /// ``LanguageModel`` step output. This is consumed internally
@@ -234,6 +289,17 @@ public enum PrepareResult {
     case logits(LMOutput)
 }
 
+/// Feature flags that describe generation behavior supported by a language model.
+public struct LanguageModelCapabilities: OptionSet, Sendable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let blockDiffusion = Self(rawValue: 1 << 0)
+}
+
 /// Interface for all Language Models (e.g. LLM, VLM).
 ///
 /// The language model is typically called by the ``TokenIterator`` and it:
@@ -243,6 +309,9 @@ public enum PrepareResult {
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
+
+    /// Feature flags that describe generation behavior supported by the model.
+    var capabilities: LanguageModelCapabilities { get }
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
@@ -282,7 +351,76 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
+/// Optional interface for text diffusion models that generate a block of tokens
+/// at a time instead of predicting one next-token logit.
+public protocol BlockDiffusionLanguageModel: LanguageModel {
+    var diffusionCanvasLength: Int { get }
+    var diffusionMinimumCanvasLength: Int { get }
+    var diffusionMaxDenoisingSteps: Int { get }
+    var diffusionEntropyBound: Float { get }
+    var diffusionTemperatureMin: Float { get }
+    var diffusionTemperatureMax: Float { get }
+    var diffusionStabilityThreshold: Int { get }
+    var diffusionConfidenceThreshold: Float { get }
+    var diffusionVocabularySize: Int { get }
+    var diffusionDefaultMaxTokens: Int? { get }
+    var diffusionPrefersLogitsSelfConditioning: Bool { get }
+
+    func prepareDiffusion(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+    func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?)
+    func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningLogits: MLXArray?
+    ) -> MLXArray
+    func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningEmbeddings: MLXArray?
+    ) -> MLXArray
+    func diffusionSelfConditioningWeight() -> MLXArray?
+    func diffusionSelfConditioningEmbeddings(logits: MLXArray, weight: MLXArray?) -> MLXArray
+}
+
+extension BlockDiffusionLanguageModel {
+    public var diffusionMinimumCanvasLength: Int { 64 }
+    public var diffusionTemperatureMin: Float { 0.4 }
+    public var diffusionTemperatureMax: Float { 0.8 }
+    public var diffusionStabilityThreshold: Int { 1 }
+    public var diffusionConfidenceThreshold: Float { 0.005 }
+    public var diffusionDefaultMaxTokens: Int? { nil }
+    public var diffusionPrefersLogitsSelfConditioning: Bool { false }
+
+    public func diffusionLogits(
+        canvasTokens: MLXArray,
+        cache: [KVCache],
+        selfConditioningEmbeddings: MLXArray?
+    ) -> MLXArray {
+        diffusionLogits(
+            canvasTokens: canvasTokens,
+            cache: cache,
+            selfConditioningLogits: selfConditioningEmbeddings)
+    }
+
+    public func diffusionSelfConditioningWeight() -> MLXArray? {
+        nil
+    }
+
+    public func diffusionSelfConditioningEmbeddings(logits: MLXArray, weight: MLXArray?) -> MLXArray
+    {
+        logits
+    }
+}
+
 extension LanguageModel {
+    public var capabilities: LanguageModelCapabilities {
+        var capabilities: LanguageModelCapabilities = []
+        if self is any BlockDiffusionLanguageModel {
+            capabilities.insert(.blockDiffusion)
+        }
+        return capabilities
+    }
+
     @available(
         *, deprecated, renamed: "prepare(_:cache:state:prefill:)",
         message:
