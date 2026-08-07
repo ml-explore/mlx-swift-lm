@@ -602,6 +602,49 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
+    /// The trailing `tail` cache entries in chronological order, without mutating the cache.
+    ///
+    /// `update(keys:values:)` is the only other way to read a rotating cache's contents, and it
+    /// necessarily writes. This is the read-only counterpart: `keys`, `values`, `idx` and
+    /// `offset` are all left exactly as they were, so a caller can present the ring's history
+    /// alongside K/V it has not committed yet.
+    ///
+    /// The result is built by the same two steps the multi-token write path uses --
+    /// ``temporalOrder(_:)`` to linearize, then the front-trim that preserves the pinned `keep`
+    /// prefix -- so a view of length `n` holds exactly the entries a write that front-trimmed to
+    /// `n` rows would have presented. When the ring is already chronological (`idx` at the end of
+    /// the buffer, which is where every multi-token write leaves it) both steps degrade to
+    /// slices and nothing is copied.
+    ///
+    /// - Parameter tail: Maximum number of entries to return. Clamped to what the cache holds;
+    ///   a negative value returns an empty view.
+    /// - Returns: `(keys, values)` shaped `[B, kvHeads, min(tail, count), headDim]`, or `nil`
+    ///   before the first write.
+    public func logicalView(tail: Int) -> (MLXArray, MLXArray)? {
+        guard let keys = self.keys, let values = self.values else { return nil }
+
+        let orderedKeys = temporalOrder(keys)
+        let orderedValues = temporalOrder(values)
+
+        let available = orderedKeys.dim(2)
+        let bound = Swift.min(Swift.max(tail, 0), available)
+        let trimSize = available - bound
+        guard trimSize > 0 else { return (orderedKeys, orderedValues) }
+
+        // `keep == 0` is the sliding-window case (Gemma 3/3n/4, GPT-OSS, Exaone4): no pinned
+        // prefix to splice around, so the trailing window is one slice per array.
+        if keep == 0 {
+            return (
+                orderedKeys[.ellipsis, trimSize..., 0...],
+                orderedValues[.ellipsis, trimSize..., 0...]
+            )
+        }
+        return (
+            trim(trimSize: trimSize, orderedKeys),
+            trim(trimSize: trimSize, orderedValues)
+        )
+    }
+
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         if self.keys == nil {
             self.keys = keys
