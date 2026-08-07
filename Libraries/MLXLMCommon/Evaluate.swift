@@ -1970,10 +1970,11 @@ public func generateTokens(
 ///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
 ///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)``
 ///     per round; drafter instances hold no target-derived state and are safe
-///     to share across iterators. Speculation requires a rewindable KV cache,
-///     so on a sliding-window model it is available only while total context
-///     (prompt plus generation) stays inside the window. Past that the
-///     iterator logs once, reports
+///     to share across iterators. Speculative rounds are staged and committed
+///     rather than written and rewound, so a sliding-window model speculates
+///     for the whole stream rather than only while total context stays inside
+///     the window. If the target ever stops emitting drafter state — a KV
+///     cache that quantizes mid-stream, say — the iterator logs once, reports
 ///     ``GenerateCompletionInfo/passthroughReason``, and finishes the stream
 ///     with ordinary single-token generation.
 ///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
@@ -2024,9 +2025,11 @@ public func generate(
 /// but for MTP drafters. Yields raw token IDs instead of decoded text or
 /// tool calls.
 ///
-/// Speculation requires a rewindable KV cache, so on a sliding-window model it
-/// is available only while total context (prompt plus generation) stays inside
-/// the window. Past that the iterator logs once, reports
+/// Speculative rounds are staged and committed rather than written and rewound,
+/// so a sliding-window model speculates for the whole stream rather than only
+/// while total context stays inside the window. If the target ever stops
+/// emitting drafter state — a KV cache that quantizes mid-stream, say — the
+/// iterator logs once, reports
 /// ``GenerateCompletionInfo/passthroughReason`` on the emitted `.info` event,
 /// and finishes the stream with ordinary single-token generation.
 public func generateTokens(

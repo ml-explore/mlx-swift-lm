@@ -1184,7 +1184,10 @@ final class Gemma4TextBackbone: Module {
         perLayerInputs: MLXArray? = nil,
         tokenTypeIds: MLXArray? = nil,
         emitDrafterState: Bool = false
-    ) -> (hidden: MLXArray, sharedKV: [String: (MLXArray, MLXArray)]?) {
+    ) -> (
+        hidden: MLXArray, sharedKV: [String: (MLXArray, MLXArray)]?,
+        sharedKVSources: [String: Int]
+    ) {
         // Tolerate callers that hand us a 1D `(L,)` token array instead
         // of the canonical 2D `(B, L)` produced by `Gemma4Processor.prepare`.
         // The downstream `perLayerInputs` indexing path (`finalPerLayerInputs[
@@ -1319,7 +1322,7 @@ final class Gemma4TextBackbone: Module {
         let finalHidden = norm(h)
 
         guard emitDrafterState else {
-            return (finalHidden, nil)
+            return (finalHidden, nil, [:])
         }
 
         // Walk intermediates from the last layer backward; for each unique
@@ -1328,6 +1331,11 @@ final class Gemma4TextBackbone: Module {
         // signal to fall back to single-token generation (R8/R13 limitation,
         // documented).
         var sharedKV: [String: (MLXArray, MLXArray)] = [:]
+        // Which cache entry each emitted tuple came from. The consumer reconciles the emitted
+        // snapshot against the cache after a speculative commit, and it can only do that exactly
+        // if it knows the entry -- a sliding layer's snapshot is bounded by its ring, a global
+        // layer's is not, and the two are indistinguishable by length at the crossing.
+        var sharedKVSources: [String: Int] = [:]
         var seenTypes = Set<String>()
         let targetTypes: Set<String> = ["full_attention", "sliding_attention"]
         for idx in stride(from: layers.count - 1, through: 0, by: -1) {
@@ -1337,13 +1345,18 @@ final class Gemma4TextBackbone: Module {
             }
             if case .regular(let keys, let values) = intermediates[idx].kv {
                 sharedKV[layerType] = (keys, values)
+                // Recorded here rather than derived from `config.layerTypes`: the walk keeps
+                // descending past a quantized entry, so which layer supplies a type is a runtime
+                // fact.
+                sharedKVSources[layerType] = layerIdxToCacheIdx[idx]
                 seenTypes.insert(layerType)
             }
             if seenTypes == targetTypes { break }
         }
         // Treat partial coverage (e.g. only one layer_type populated, or
         // quantized cache for the other) as no-emit — iterator falls back.
-        return (finalHidden, seenTypes == targetTypes ? sharedKV : nil)
+        let complete = seenTypes == targetTypes
+        return (finalHidden, complete ? sharedKV : nil, complete ? sharedKVSources : [:])
     }
 }
 
@@ -1399,7 +1412,7 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         emitDrafterState: Bool = false
     ) -> LMOutput {
-        let (hidden, sharedKV) = model(
+        let (hidden, sharedKV, sharedKVSources) = model(
             inputs, inputsEmbeds: inputsEmbeds, mask: mask, cache: cache?.map { $0 as KVCache? },
             perLayerInputs: perLayerInputs,
             tokenTypeIds: tokenTypeIds,
@@ -1425,6 +1438,7 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         var state = LMOutput.State()
         state[mtpLastHiddenStatesKey] = hidden
         state[mtpSharedKVStatesKey] = sharedKV
+        state[mtpSharedKVSourceIndicesKey] = sharedKVSources
         return LMOutput(logits: softcappedLogits, state: state)
     }
 
