@@ -138,9 +138,11 @@ public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
 /// consumer knows the entry behind each tuple: a sliding layer's snapshot is bounded by its ring
 /// and a global layer's is not, and at the crossing the two are indistinguishable by length.
 ///
-/// `package` rather than `public`: unlike the keys above, both the writer and the reader live
-/// inside this package, so this adds no API.
-package let mtpSharedKVSourceIndicesKey =
+/// Public alongside its siblings, because it is part of the same contract rather than an
+/// implementation detail of one writer: a target that sets ``mtpSharedKVStatesKey`` is expected to
+/// set this too, and a snapshot that arrives without it is refused rather than reconciled against
+/// a guessed bound. A target outside this package cannot satisfy that contract without it.
+public let mtpSharedKVSourceIndicesKey =
     LMOutput.Key<[String: Int]>("mtp.sharedKVSourceIndices")
 
 // MARK: - Iterator stats surface
