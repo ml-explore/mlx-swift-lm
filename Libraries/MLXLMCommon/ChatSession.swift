@@ -1616,7 +1616,16 @@ public final class ChatSession {
                             requiresMainOnlyContinuation = true
                         }
 
-                        if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                        if let diffusionModel = model as? any BlockDiffusionLanguageModel {
+                            guard speculativeDecoding == nil else {
+                                throw GenerateError.unsupportedSpeculativeDecoding(
+                                    String(describing: type(of: model)))
+                            }
+                            let iterator = try BlockDiffusionTokenIterator(
+                                input: input, model: diffusionModel, cacheStorage: kvCache,
+                                parameters: generateParameters)
+                            generation = startGeneration(iterator)
+                        } else if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
                             if speculativeDecoding != nil {
                                 if !speculationIsEligibleForParameters {
                                     speculativeDecodingFallbackReason = .unsupportedSampling
@@ -1685,6 +1694,12 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
+
+                                guard !draftModel.capabilities.contains(.blockDiffusion) else {
+                                    throw GenerateError.unsupportedSpeculativeDecoding(
+                                        String(describing: type(of: draftModel)))
+                                }
+
                                 let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
                                     mainModel: model,
                                     draftModel: draftModel)

@@ -51,7 +51,7 @@ func gemma4DefaultTextRopeParameters() -> [String: [String: StringOrNumber]] {
     ]
 }
 
-private func gemma4MaskedScatter(
+func gemma4MaskedScatter(
     inputTensor: MLXArray, mask: MLXArray, source: MLXArray
 ) -> MLXArray {
     let flattenedInput = inputTensor.flattened()
@@ -1352,6 +1352,7 @@ package typealias Gemma4AudioConfiguration = MLXLMCommon.Gemma4AudioConfiguratio
 package typealias Gemma4VisionModel = MLXLMCommon.Gemma4VisionModel
 package typealias Gemma4AudioModel = MLXLMCommon.Gemma4AudioModel
 package typealias Gemma4MultimodalEmbedder = MLXLMCommon.Gemma4MultimodalEmbedder
+
 
 // MARK: - Model
 
