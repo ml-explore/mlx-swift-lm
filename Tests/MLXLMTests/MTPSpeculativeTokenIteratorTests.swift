@@ -112,6 +112,8 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
             emittedSharedKVSpans.append(kvSpan)
             var out = LMOutput.State()
             out[mtpLastHiddenStatesKey] = MLXArray.zeros([1, positions, 4])
+            // One cache entry stands in for both layer types here.
+            out[mtpSharedKVSourceIndicesKey] = ["full_attention": 0, "sliding_attention": 0]
             out[mtpSharedKVStatesKey] = [
                 "full_attention": (
                     MLXArray.zeros([1, 1, kvSpan, 4]),
@@ -552,7 +554,7 @@ func testMTPSharedKVSpanTrimmedAfterPartialAcceptance() throws {
     )
 }
 
-// MARK: - trimSharedKVState contract
+// MARK: - reconcileSharedKVState contract
 
 /// Builds a state carrying a sharedKV snapshot with distinguishable content
 /// (values encode their flat index) so prefix byte-identity is checkable
@@ -566,6 +568,7 @@ private func makeSharedKVState(span: Int) -> LMOutput.State {
     }
     var state = LMOutput.State()
     state[mtpLastHiddenStatesKey] = arange([1, 2, 4])
+    state[mtpSharedKVSourceIndicesKey] = ["full_attention": 0, "sliding_attention": 1]
     state[mtpSharedKVStatesKey] = [
         "full_attention": (arange([1, 1, span, 4]), arange([1, 1, span, 4])),
         "sliding_attention": (arange([1, 2, span, 2]), arange([1, 2, span, 2])),
@@ -573,10 +576,17 @@ private func makeSharedKVState(span: Int) -> LMOutput.State {
     return state
 }
 
+/// A snapshot with no source map is one the consumer cannot place against cache entries.
+private func makeSourcelessSharedKVState(span: Int) -> LMOutput.State {
+    var state = makeSharedKVState(span: span)
+    state[mtpSharedKVSourceIndicesKey] = nil
+    return state
+}
+
 @Test
 func testTrimSharedKVStateZeroTokensIsNoOp() throws {
     var state: LMOutput.State? = makeSharedKVState(span: 6)
-    trimSharedKVState(&state, numTokens: 0)
+    reconcileSharedKVState(&state, discarding: 0, lengths: { _ in Int.max })
 
     let kv = try #require(state?[mtpSharedKVStatesKey])
     let original = try #require(makeSharedKVState(span: 6)[mtpSharedKVStatesKey])
@@ -592,7 +602,7 @@ func testTrimSharedKVStateZeroTokensIsNoOp() throws {
 @Test
 func testTrimSharedKVStateTrimsTrailingRowsPreservingPrefix() throws {
     var state: LMOutput.State? = makeSharedKVState(span: 6)
-    trimSharedKVState(&state, numTokens: 2)
+    reconcileSharedKVState(&state, discarding: 2, lengths: { _ in Int.max })
 
     let kv = try #require(state?[mtpSharedKVStatesKey])
     let original = try #require(makeSharedKVState(span: 6)[mtpSharedKVStatesKey])
@@ -625,7 +635,7 @@ func testTrimSharedKVStateTrimsTrailingRowsPreservingPrefix() throws {
 func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
     // Nil state: must not crash, must stay nil.
     var nilState: LMOutput.State? = nil
-    trimSharedKVState(&nilState, numTokens: 3)
+    reconcileSharedKVState(&nilState, discarding: 3, lengths: { _ in Int.max })
     #expect(nilState == nil)
 
     // Present state without the sharedKV key (e.g. the quantization-onset
@@ -633,166 +643,659 @@ func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
     // keys alone.
     var keylessState: LMOutput.State? = LMOutput.State()
     keylessState?[mtpEmitFlagKey] = true
-    trimSharedKVState(&keylessState, numTokens: 3)
+    reconcileSharedKVState(&keylessState, discarding: 3, lengths: { _ in Int.max })
     #expect(keylessState?[mtpSharedKVStatesKey] == nil)
     #expect(keylessState?[mtpEmitFlagKey] == true)
 }
 
-// MARK: - Stand-down when the sliding cache runs out of trim headroom
+// MARK: - Speculating past the sliding window
 //
-// MTP's accept/reject step rewinds the main cache with `trimPromptCache`, and
-// `RotatingKVCache.isTrimmable(after:)` owns the strict sliding-window boundary.
-// Before the stand-down existed the iterator only checked trimmability at init,
-// against a fresh zero-offset cache where the check is vacuously true, so any
-// stream whose total context crossed the window kept drafting: the verify pass's
-// sliding K/V grew to `maxCacheSize + S - 1`, flowed into `sharedKV`, and the next
-// `draftBlock` tripped `precondition(slidingKvLen <= textCfg.slidingWindow)`.
+// MTP's accept/reject step used to rewind the main cache, and a `RotatingKVCache` cannot be
+// rewound once its ring has wrapped, so the iterator stood down to plain decoding as soon as the
+// stream's total context crossed the window (512 on Gemma 4 E2B/E4B). With a chat template and
+// any real system prompt that happened at prefill, so the drafter never fired at all.
 //
-// `CountingKVCache(wrapAt:)` mirrors that regime; the checks below pin both
-// entry points and the equivalence-to-greedy guarantee across the transition.
+// Rounds now run against `MTPCacheOverlay`: staged K/V beside the ring, only the accepted prefix
+// committed, nothing ever trimmed. These checks pin the behavior that replaced the stand-down --
+// speculation survives the crossing, and the stream stays token-identical to a plain
+// autoregressive run on both sides of it.
+//
+// Coverage boundary: these are bookkeeping tests. The mock's predictions are a function of
+// position, not of K/V content, so they pin offsets, spans, commit counts and token identity --
+// not whether the committed rows hold the right numbers. That is `MTPCacheOverlayTests`, which
+// drives real position-encoded K/V through the cache and compares attention against a
+// logical-order reference.
 
-/// A prompt that leaves no room for a speculative round stands down during
-/// `init` — the drafter is never called, and the stream still completes.
+/// A target whose prediction at every position is a pure function of that absolute position, so a
+/// speculative run and a greedy run must agree token for token no matter how the drafts land.
+/// (The older `MockMainModel` scripts by forward-call index, which only stays in step when every
+/// draft is accepted -- too weak to test an accept/reject path across a wrap.)
 ///
-/// The first-token assertion is the load-bearing one: `prepare` has already
-/// queued the prefill bonus in `pendingTokens` by the time the stand-down
-/// fires, and that token is already committed to the cache (`y` is the token
-/// after it). If `next()` short-circuits into `passthroughStep()` without
-/// draining the buffer, the bonus vanishes and the whole stream shifts a
-/// position relative to an equivalent autoregressive run.
-@Test
-func testMTPIteratorStandsDownWhenPromptFillsSlidingWindow() throws {
-    // Prompt of 8 against a window of 6: the cache is already past the window
-    // when prefill returns, so no rewind is possible for the rest of the run.
-    let mainLogitTokens: [Int32] = [
-        // Prefill follow-up call (length 8): only the final position is
-        // sampled; the rest are inert placeholders (< vocab=20).
-        0, 0, 0, 0, 0, 0, 0, 5,
-        // Passthrough single-token steps.
-        11, 12, 13,
-    ]
-    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
-    let drafter = MockDrafter(draftedTokenValue: 7)
-    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3, 4, 5, 6, 7, 8]))
-    let cache = CountingKVCache(wrapAt: 6)
+/// It writes real K/V through whatever caches it is handed and emits `sharedKV` from what those
+/// caches returned, clamped per layer type exactly as the Gemma 4 emit hook does. So the cache
+/// machinery under test is exercised rather than simulated.
+private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDimensionProvider {
+    static let vocabularySize = 32
 
-    var iter = try MTPSpeculativeTokenIterator(
-        input: input, mainModel: main, drafter: drafter, mainCache: [cache],
-        parameters: GenerateParameters(maxTokens: 4, temperature: 0), blockSize: 4
-    )
+    /// Which of `prepare`'s two shapes this model returns, and whether it emits drafter state
+    /// while doing so. The iterator reconciles the emitted snapshot at a different site in each
+    /// case, and the re-prime forward exists only for the middle one.
+    enum PrefillStyle {
+        /// `prepare` hands back the prompt; the iterator runs the final position itself.
+        case tokens
+        /// `prepare` evaluates the prompt and returns logits, carrying no drafter state -- so the
+        /// iterator follows up with a re-prime forward to obtain some.
+        case logits
+        /// `prepare` evaluates the prompt and threads drafter state through, so no re-prime.
+        case logitsWithDrafterState
+    }
 
-    let tokens = [iter.next(), iter.next(), iter.next(), iter.next(), iter.next()]
+    var kvHeads: [Int] { Array(repeating: 1, count: wideSlidingWindow == nil ? 2 : 3) }
+    let script: [Int32]
+    let slidingWindow: Int
+    let wideSlidingWindow: Int?
+    let omitDrafterState: Bool
+    /// Emit `mtpSharedKVStatesKey` without the source map that says which entry each tuple came
+    /// from -- a snapshot the consumer cannot place against the cache.
+    let omitSharedKVSources: Bool
+    let prefillStyle: PrefillStyle
 
-    // The prefill bonus must be yielded first, then passthrough tokens.
-    #expect(tokens[0] == 5, "prefill bonus was dropped by the init-time stand-down")
-    #expect(tokens[1] == 11)
-    #expect(tokens[2] == 12)
-    #expect(tokens[3] == 13)
-    #expect(tokens[4] == nil)
-    #expect(iter.tokenCount == 4)
+    private(set) var emittedSharedKVSpans: [[String: Int]] = []
+    private(set) var verifyChunkLengths: [Int] = []
+    private(set) var forwardCallCount = 0
 
-    #expect(
-        iter.passthroughReason
-            == "prompt fills the sliding window — MTP rewind unavailable; generating without speculation"
-    )
-    // Never speculated: no draft was ever requested.
-    #expect(drafter.draftBlockCallCount == 0)
-    #expect(iter.proposedCount == 0)
-    #expect(iter.acceptedCount == 0)
+    init(
+        script: [Int32], slidingWindow: Int, wideSlidingWindow: Int? = nil,
+        omitDrafterState: Bool = false, omitSharedKVSources: Bool = false,
+        prefillStyle: PrefillStyle = .tokens
+    ) {
+        self.script = script
+        self.slidingWindow = slidingWindow
+        self.wideSlidingWindow = wideSlidingWindow
+        self.omitDrafterState = omitDrafterState
+        self.omitSharedKVSources = omitSharedKVSources
+        self.prefillStyle = prefillStyle
+        super.init()
+    }
+
+    /// Layer 0 is global, layer 1 slides -- Gemma 4's topology in miniature. `wideSlidingWindow`
+    /// adds a third layer sliding at a different width, so a timeline between the two widths has
+    /// one ring wrapped and the other not.
+    func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        var cache: [KVCache] = [KVCacheSimple(), RotatingKVCache(maxSize: slidingWindow, keep: 0)]
+        if let wideSlidingWindow {
+            cache.append(RotatingKVCache(maxSize: wideSlidingWindow, keep: 0))
+        }
+        return cache
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    ) throws -> PrepareResult {
+        switch prefillStyle {
+        case .tokens:
+            return .tokens(input.text)
+        case .logits:
+            return .logits(callAsFunction(input.text, cache: cache, state: nil))
+        case .logitsWithDrafterState:
+            var emitting = LMOutput.State()
+            emitting[mtpEmitFlagKey] = true
+            return .logits(callAsFunction(input.text, cache: cache, state: emitting))
+        }
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        makeLogits(from: cache?.first?.offset ?? 0, positions: inputs.dim(-1))
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        forwardCallCount += 1
+        let positions = input.tokens.dim(-1)
+        // Read the base position before the caches move; every entry is at the same offset.
+        let base = cache?.first?.offset ?? 0
+        let logits = makeLogits(from: base, positions: positions)
+
+        guard let cache else { return LMOutput(logits: logits) }
+        if positions > 1 { verifyChunkLengths.append(positions) }
+
+        let (keys, values) = Self.positionedKV(base ..< (base + positions))
+        let presented = cache.map { $0.update(keys: keys, values: values) }
+
+        guard !omitDrafterState, state?[mtpEmitFlagKey] ?? false else {
+            return LMOutput(logits: logits)
+        }
+
+        // Emitted verbatim: presenting a sliding layer more than its window is what the write
+        // path does, and clamping it back is the consumer's job now, not the target's.
+        var sharedKV = [String: (MLXArray, MLXArray)]()
+        sharedKV["full_attention"] = presented[0]
+        sharedKV["sliding_attention"] = presented[1]
+        emittedSharedKVSpans.append(sharedKV.mapValues { $0.0.dim(-2) })
+
+        var out = LMOutput.State()
+        out[mtpLastHiddenStatesKey] = MLXArray.zeros([1, positions, 4])
+        if !omitSharedKVSources {
+            out[mtpSharedKVSourceIndicesKey] = ["full_attention": 0, "sliding_attention": 1]
+        }
+        out[mtpSharedKVStatesKey] = sharedKV
+        return LMOutput(logits: logits, state: out)
+    }
+
+    private func makeLogits(from base: Int, positions: Int) -> MLXArray {
+        let vocab = Self.vocabularySize
+        var data = [Float](repeating: 0, count: positions * vocab)
+        for i in 0 ..< positions {
+            data[i * vocab + Int(prediction(at: base + i))] = 100
+        }
+        return MLXArray(data, [1, positions, vocab])
+    }
+
+    /// The token this model predicts will follow absolute position `p`.
+    private func prediction(at p: Int) -> Int32 { script[p % script.count] }
+
+    private static func positionedKV(_ positions: Range<Int>) -> (MLXArray, MLXArray) {
+        let count = positions.count
+        let keys = MLXArray(
+            positions.flatMap { Array(repeating: Float($0), count: 4) }, [1, 1, count, 4])
+        return (keys, keys * -1)
+    }
+
 }
 
-/// A stream that speculates successfully and only later runs out of headroom
-/// stands down mid-stream, after real speculation has happened.
-@Test
-func testMTPIteratorStandsDownWhenSlidingCacheWrapsMidStream() throws {
-    // window=8, prompt=3, blockSize=4. Prefill leaves offset=3, so round 1 has
-    // headroom (3 + 4 < 8) and runs; its verify pass carries offset to 7, so
-    // round 2 (3 more positions) does not, and the iterator stands down before
-    // drafting rather than after the cache has already wrapped.
-    let mainLogitTokens: [Int32] = [
-        // Prefill follow-up (length 3): bonus 7.
-        0, 0, 7,
-        // Verify pass (length 4): all three drafts match, then correction 9.
-        7, 7, 7, 9,
-        // Passthrough single-token steps.
-        11, 12, 13,
-    ]
-    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
-    let drafter = MockDrafter(draftedTokenValue: 7)
-    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
-    let cache = CountingKVCache(wrapAt: 8)
+/// A script that mixes the drafted token with others, so rounds land on a spread of acceptance
+/// counts rather than always-accept or always-reject.
+private func mixedAcceptanceScript(drafted: Int32, length: Int = 512) -> [Int32] {
+    (0 ..< length).map { position in
+        // Runs of the drafted value separated by other tokens: acceptance varies round to round
+        // as the phase drifts against the block size.
+        (position % 7) < 3 ? drafted : Int32((position % 11) + 12)
+    }
+}
 
+private func runMTP(
+    model: PositionScriptedMainModel, drafter: MockDrafter, prompt: [Int32], maxTokens: Int,
+    blockSize: Int = 4
+) throws -> (tokens: [Int], iterator: MTPSpeculativeTokenIterator) {
     var iter = try MTPSpeculativeTokenIterator(
-        input: input, mainModel: main, drafter: drafter, mainCache: [cache],
-        parameters: GenerateParameters(maxTokens: 8, temperature: 0), blockSize: 4
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model,
+        drafter: drafter,
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
+        blockSize: blockSize
     )
-
-    var tokens: [Int] = []
+    var tokens = [Int]()
     while let token = iter.next() { tokens.append(token) }
-
-    #expect(tokens == [7, 7, 7, 7, 9, 11, 12, 13])
-
-    // It really speculated before standing down.
-    #expect(drafter.draftBlockCallCount == 1)
-    #expect(iter.proposedCount == 3)
-    #expect(iter.acceptedCount == 3)
-
-    #expect(
-        iter.passthroughReason
-            == "sliding cache wrapped mid-stream — MTP rewind unavailable; continuing without speculation"
-    )
+    return (tokens, iter)
 }
 
-/// Bit-exact equivalence to greedy survives the stand-down: a stream that
-/// speculates, crosses the window, and finishes in passthrough emits exactly
-/// the tokens a plain `TokenIterator` emits from the same model.
-///
-/// Note on the harness: `MockMainModel` addresses its script by a running
-/// per-forward-call index, not by absolute sequence position, and a rejected
-/// draft rewinds the cache without rewinding that index. The two arms
-/// therefore only stay in step while every draft is accepted — which is the
-/// regime scripted here (`MockDrafter` emits one constant value, and the
-/// verify positions hold that same value). A rejection would desynchronize the
-/// script rather than reveal a real divergence.
+private func runGreedy(
+    model: PositionScriptedMainModel, prompt: [Int32], maxTokens: Int
+) throws -> [Int] {
+    var iter = try TokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        model: model,
+        cache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    )
+    var tokens = [Int]()
+    while let token = iter.next() { tokens.append(token) }
+    return tokens
+}
+
+// MARK: - A snapshot the consumer cannot place is refused at prefill too
+//
+// Prefill emits, and it emits at three sites depending on which shape the target's `prepare`
+// returns. All three reconcile the snapshot against the cache, and all three have to act on a
+// refusal: the round-level `assert` that would otherwise catch it is compiled out in release,
+// leaving the drafter attending an unreconciled sliding snapshot.
+
+/// Shared body: a target that emits a snapshot with no source map must stand the drafter down
+/// during `init`, and the stream must still come out token-identical to plain greedy decoding.
+private func expectSourcelessPrefillStandsDown(
+    _ style: PositionScriptedMainModel.PrefillStyle,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let window = 8
+    let prompt = Array(1 ... Int32(window * 3))
+    func makeModel() -> PositionScriptedMainModel {
+        PositionScriptedMainModel(
+            script: mixedAcceptanceScript(drafted: 7), slidingWindow: window,
+            omitSharedKVSources: true, prefillStyle: style)
+    }
+
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let (tokens, iter) = try runMTP(
+        model: makeModel(), drafter: drafter, prompt: prompt, maxTokens: 24)
+
+    #expect(
+        iter.passthroughReason == MTPSpeculativeTokenIterator.missingSharedKVSourcesReason,
+        "a sourceless snapshot at prefill did not stand the drafter down",
+        sourceLocation: sourceLocation)
+    #expect(
+        drafter.draftBlockCallCount == 0, "the drafter ran against an unreconciled snapshot",
+        sourceLocation: sourceLocation)
+    #expect(
+        tokens.count == 24, "the stream did not complete in passthrough",
+        sourceLocation: sourceLocation)
+
+    let greedy = try runGreedy(model: makeModel(), prompt: prompt, maxTokens: 24)
+    #expect(
+        tokens == greedy, "standing down at prefill changed the emitted stream",
+        sourceLocation: sourceLocation)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareReturnsTokens() throws {
+    try expectSourcelessPrefillStandsDown(.tokens)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareReturnsLogits() throws {
+    try expectSourcelessPrefillStandsDown(.logits)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareEmitsDrafterState() throws {
+    try expectSourcelessPrefillStandsDown(.logitsWithDrafterState)
+}
+
+/// The re-prime forward exists only to obtain drafter state. Once prefill's own state has been
+/// refused there is nothing to obtain, so it is skipped rather than run and thrown away.
+@Test func testSourcelessPrefillSkipsTheRePrimeForward() throws {
+    let window = 8
+    let prompt = Array(1 ... Int32(window * 3))
+
+    let refused = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window,
+        omitSharedKVSources: true, prefillStyle: .logitsWithDrafterState)
+    var refusedIterator = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: refused, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: refused.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: 4, temperature: 0), blockSize: 4)
+    #expect(
+        refused.forwardCallCount == 1,
+        "prefill ran \(refused.forwardCallCount) forwards; the re-prime should have been skipped")
+    #expect(
+        refusedIterator.passthroughReason
+            == MTPSpeculativeTokenIterator.missingSharedKVSourcesReason)
+    #expect(refusedIterator.next() != nil)
+}
+
+/// The regression that started this: a prompt longer than the sliding window used to stand the
+/// drafter down at init, so it never fired for the whole stream.
 @Test
-func testMTPIteratorMatchesGreedyAcrossMidStreamStandDown() throws {
-    let mainLogitTokens: [Int32] = [
-        0, 0, 7,
-        7, 7, 7, 9,
-        11, 12, 13,
-        // Greedy consumes one script entry per emitted token, so it reads one
-        // position further than the speculative arm on the final step.
-        0,
-    ]
-    let promptTokens = MLXArray([Int32(1), 2, 3])
-    let parameters = GenerateParameters(maxTokens: 8, temperature: 0)
+func testMTPIteratorSpeculatesWhenThePromptExceedsTheSlidingWindow() throws {
+    let window = 8
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
 
-    var mtpTokens: [Int] = []
-    do {
-        let main = MockMainModel(nextLogitTokens: mainLogitTokens)
-        var iter = try MTPSpeculativeTokenIterator(
-            input: LMInput(tokens: promptTokens), mainModel: main,
-            drafter: MockDrafter(draftedTokenValue: 7),
-            mainCache: [CountingKVCache(wrapAt: 8)],
-            parameters: parameters, blockSize: 4
-        )
-        while let token = iter.next() { mtpTokens.append(token) }
-        #expect(iter.passthroughReason != nil, "the run must actually cross the window")
-        #expect(iter.acceptedCount > 0, "the run must actually speculate first")
-    }
+    let (tokens, iter) = try runMTP(
+        model: model, drafter: drafter, prompt: Array(1 ... Int32(window * 3)), maxTokens: 16)
 
-    var greedyTokens: [Int] = []
-    do {
-        let main = MockMainModel(nextLogitTokens: mainLogitTokens)
-        var iter = try TokenIterator(
-            input: LMInput(tokens: promptTokens), model: main,
-            cache: [CountingKVCache(wrapAt: 8)],
-            parameters: parameters
-        )
-        while let token = iter.next() { greedyTokens.append(token) }
-    }
+    #expect(tokens.count == 16)
+    #expect(iter.passthroughReason == nil, "the drafter stood down on a long prompt")
+    #expect(drafter.draftBlockCallCount > 0, "the drafter never fired")
+    #expect(iter.proposedCount > 0)
+}
 
+/// ...and a stream that crosses the window mid-generation used to stand down at the crossing.
+@Test
+func testMTPIteratorKeepsSpeculatingAcrossTheWindowCrossing() throws {
+    let window = 8
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
+
+    // Prompt sits under the window; generation runs several multiples past it.
+    let (tokens, iter) = try runMTP(
+        model: model, drafter: drafter, prompt: [1, 2, 3], maxTokens: window * 5)
+
+    #expect(tokens.count == window * 5)
+    #expect(iter.passthroughReason == nil, "the drafter stood down at the crossing")
+
+    // Rounds kept running after the crossing rather than stopping at it.
+    let roundsBeforeCrossing = (window - 3) / 4 + 1
+    #expect(
+        drafter.draftBlockCallCount > roundsBeforeCrossing,
+        "speculation stopped at the window: \(drafter.draftBlockCallCount) rounds")
+    #expect(iter.acceptedCount > 0, "no draft was ever accepted")
+}
+
+/// Invariant: speculation is an optimization, so the emitted stream has to be the one a plain
+/// autoregressive run produces -- before, across, and long after the window crossing.
+@Test(arguments: [
+    // (prompt length, generated tokens) with window 8: below, at, above, and far past.
+    (3, 40), (7, 40), (8, 40), (9, 40), (20, 64),
+])
+func testMTPIteratorMatchesGreedyAcrossTheWindow(promptLength: Int, maxTokens: Int) throws {
+    let window = 8
+    let script = mixedAcceptanceScript(drafted: 7)
+    let prompt = Array(1 ... Int32(promptLength))
+
+    let model = PositionScriptedMainModel(script: script, slidingWindow: window)
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let (mtpTokens, iter) = try runMTP(
+        model: model, drafter: drafter, prompt: prompt, maxTokens: maxTokens)
+
+    let greedyTokens = try runGreedy(
+        model: PositionScriptedMainModel(script: script, slidingWindow: window),
+        prompt: prompt, maxTokens: maxTokens)
+
+    #expect(iter.passthroughReason == nil, "the run fell back instead of speculating")
+    #expect(iter.acceptedCount > 0, "the run never accepted a draft, so it proves little")
+    #expect(
+        iter.proposedCount > iter.acceptedCount,
+        "the run never rejected a draft, so the commit path is untested here")
     #expect(
         mtpTokens == greedyTokens,
-        "MTP diverged from greedy across the stand-down: \(mtpTokens) vs \(greedyTokens)")
+        "prompt \(promptLength): MTP diverged from greedy\n  \(mtpTokens)\n  \(greedyTokens)")
+}
+
+/// The drafter attends over `sharedKV` bidirectionally and preconditions on the sliding entry
+/// fitting its window (`Gemma4Assistant.forwardHidden`). A round presents the target up to
+/// `window + blockSize - 1` sliding entries, so the hand-off has to be clamped -- this is the
+/// check that the clamp is actually reaching the drafter.
+@Test
+func testDrafterSeesExactlyTheWindowItCanAttendOver() throws {
+    let window = 8
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
+
+    let (_, iter) = try runMTP(
+        model: model, drafter: drafter, prompt: [1, 2, 3], maxTokens: window * 6)
+    #expect(iter.passthroughReason == nil)
+    #expect(drafter.receivedSharedKVSpans.count > 1)
+
+    // Exact, not merely bounded: the commit that decided what the cache kept also clamped the
+    // snapshot, so the drafter sees the whole window rather than the window minus that round's
+    // rejects. `queryOffset` is the timeline the iterator handed the drafter.
+    for (round, spans) in drafter.receivedSharedKVSpans.enumerated() {
+        let sliding = try #require(spans["sliding_attention"])
+        let timeline = drafter.receivedQueryOffsets[round]
+        #expect(
+            sliding == Swift.min(timeline, window),
+            "round \(round): drafter got \(sliding) sliding entries at timeline \(timeline)")
+        #expect(try #require(spans["full_attention"]) == timeline, "round \(round): global span")
+    }
+}
+
+/// A cache the overlay cannot stage or rewind is refused at init rather than silently producing
+/// a wrong stream.
+@Test
+func testMTPIteratorRejectsACacheItCannotStage() {
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: 8)
+    #expect(throws: KVCacheError.self) {
+        _ = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(1), 2, 3])),
+            mainModel: model,
+            drafter: MockDrafter(),
+            mainCache: [MambaCache()],
+            parameters: GenerateParameters(maxTokens: 4, temperature: 0),
+            blockSize: 4)
+    }
+}
+
+/// If an entry stops being stageable mid-stream the round falls back stickily, and the stream
+/// still completes.
+@Test
+func testMTPIteratorFallsBackWhenACacheStopsBeingStageable() throws {
+    let cache = CountingKVCache(wrapAt: 8)
+    let main = MockMainModel(nextLogitTokens: [0, 0, 7, 7, 7, 7, 9, 11, 12, 13, 14])
+    let drafter = MockDrafter(draftedTokenValue: 7)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray([Int32(1), 2, 3])),
+        mainModel: main, drafter: drafter, mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 8, temperature: 0), blockSize: 4)
+
+    var tokens = [Int]()
+    while let token = iter.next() { tokens.append(token) }
+
+    #expect(tokens.count == 8, "the stream did not complete")
+    #expect(
+        iter.passthroughReason
+            == "main KV cache cannot stage a speculative round; continuing without speculation")
+}
+
+/// The block size is clamped to what the narrowest sliding layer can present rather than
+/// trapping, because it is a tuning knob rather than a correctness input.
+@Test
+func testBlockSizeIsClampedToTheNarrowestSlidingWindow() throws {
+    let cache: [KVCache] = [KVCacheSimple(), RotatingKVCache(maxSize: 8, keep: 0)]
+    #expect(MTPSpeculativeTokenIterator.maximumBlockSize(for: cache) == 9)
+    #expect(
+        MTPSpeculativeTokenIterator.maximumBlockSize(for: [KVCacheSimple()]) == .max,
+        "nothing slides, so nothing bounds the round")
+    #expect(
+        MTPSpeculativeTokenIterator.maximumBlockSize(for: [RotatingKVCache(maxSize: 1)]) == 2,
+        "the clamp must never fall below the blockSize >= 2 precondition")
+
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: 8)
+    let (tokens, iter) = try runMTP(
+        model: model, drafter: MockDrafter(draftedTokenValue: 7), prompt: [1, 2, 3],
+        maxTokens: 24, blockSize: 64)
+    #expect(iter.blockSize == 9, "blockSize was not clamped to the window")
+    #expect(tokens.count == 24)
+}
+
+/// A round wider than the window still decodes correctly; the clamp exists for the stats, not
+/// for correctness, so bypassing it must not change the stream.
+@Test
+func testStreamMatchesGreedyWhenTheRoundIsWiderThanTheWindow() throws {
+    let window = 4
+    let script = mixedAcceptanceScript(drafted: 7)
+    let prompt: [Int32] = [1, 2, 3]
+
+    let model = PositionScriptedMainModel(script: script, slidingWindow: window)
+    let (mtpTokens, iter) = try runMTP(
+        model: model, drafter: MockDrafter(draftedTokenValue: 7), prompt: prompt,
+        maxTokens: 32, blockSize: 5)
+    #expect(iter.blockSize == 5, "this case is only interesting at blockSize == window + 1")
+
+    let greedyTokens = try runGreedy(
+        model: PositionScriptedMainModel(script: script, slidingWindow: window),
+        prompt: prompt, maxTokens: 32)
+    #expect(mtpTokens == greedyTokens)
+}
+
+/// The head clamp is the other half of reconciliation: a sliding layer is presented more than its
+/// window on purpose, and what the drafter may attend over is bounded by what the layer can still
+/// describe.
+@Test
+func testReconcileSharedKVStateClampsTheHeadToWhatTheLeafDescribes() throws {
+    var state: LMOutput.State? = makeSharedKVState(span: 10)
+    // Leaf 0 is global and unbounded; leaf 1 slides with a 4-entry window.
+    reconcileSharedKVState(&state, discarding: 0, lengths: { $0 == 0 ? Int.max : 4 })
+
+    let sharedKV = try #require(state?[mtpSharedKVStatesKey])
+    #expect(try #require(sharedKV["full_attention"]).0.dim(-2) == 10, "global entry was clamped")
+    #expect(try #require(sharedKV["sliding_attention"]).0.dim(-2) == 4)
+}
+
+/// Tail first, then head. Clamping first would leave a sliding entry short by the rejected count
+/// every round, which is a silent acceptance-rate loss rather than a failure.
+@Test
+func testReconcileSharedKVStateDropsTheTailBeforeClampingTheHead() throws {
+    var state: LMOutput.State? = makeSharedKVState(span: 10)
+    reconcileSharedKVState(&state, discarding: 3, lengths: { $0 == 0 ? Int.max : 4 })
+
+    let sharedKV = try #require(state?[mtpSharedKVStatesKey])
+    #expect(try #require(sharedKV["full_attention"]).0.dim(-2) == 7)
+    // 10 - 3 rejected = 7 true rows, of which the window keeps the last 4 — not 4 - 3 = 1.
+    #expect(try #require(sharedKV["sliding_attention"]).0.dim(-2) == 4)
+}
+
+/// Without a source map the snapshot cannot be placed against cache entries, so reconciliation
+/// refuses rather than guessing a bound. The iterator reads that as a reason to stop speculating.
+@Test
+func testReconcileSharedKVStateRefusesWithoutSourceIndices() throws {
+    var state: LMOutput.State? = makeSourcelessSharedKVState(span: 6)
+    #expect(reconcileSharedKVState(&state, discarding: 2, lengths: { _ in Int.max }) == false)
+
+    let sharedKV = try #require(state?[mtpSharedKVStatesKey])
+    #expect(
+        try #require(sharedKV["full_attention"]).0.dim(-2) == 6,
+        "a refused reconciliation must leave the snapshot untouched")
+}
+
+/// An absent snapshot is not a refusal — the quantization-onset round emits none.
+@Test
+func testReconcileSharedKVStateAcceptsAnAbsentSnapshot() throws {
+    var state: LMOutput.State? = LMOutput.State()
+    state?[mtpEmitFlagKey] = true
+    #expect(reconcileSharedKVState(&state, discarding: 3, lengths: { _ in Int.max }))
+    #expect(state?[mtpSharedKVStatesKey] == nil)
+    #expect(state?[mtpEmitFlagKey] == true)
+}
+
+// MARK: - The timeline tracks what was emitted
+//
+// `KVCacheStorage.processedTokenCount` is the authoritative position, and `ChatSession`
+// reconciles its token ledger against it rather than against per-entry offsets. So it has to
+// describe exactly the tokens the consumer saw — including when the consumer stops partway
+// through a round's accepted prefix, which is where the old rewind silently gave up past a
+// sliding window.
+//
+// The `- 1` is not slack: the last verifier sample is never cached in its own round. It is the
+// input to the next one.
+
+@Test
+func testEveryRoundLeavesTheLeavesInStepWithTheTimeline() throws {
+    let window = 8
+    let prompt: [Int32] = [1, 2, 3]
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: window * 6, temperature: 0), blockSize: 4)
+
+    var emitted = 0
+    while iter.next() != nil {
+        emitted += 1
+        #expect(
+            iter.mainCacheStorage.nativeAttentionOffsetsAreAligned,
+            "leaves drifted from the timeline after token \(emitted)")
+    }
+    iter.finalizeGeneration()
+
+    #expect(iter.passthroughReason == nil)
+    #expect(emitted == window * 6)
+    #expect(iter.mainCacheStorage.processedTokenCount == prompt.count + emitted - 1)
+    #expect(iter.mainCacheStorage.nativeAttentionOffsetsAreAligned)
+}
+
+/// A consumer that stops partway through a round — a stop token, a stop string, cancellation —
+/// leaves committed positions undrained. They have to come back out, past the wrap too.
+@Test(arguments: [1, 2, 3, 5, 8, 13])
+func testStoppingEarlyLeavesTheTimelineAtWhatWasEmitted(stopAfter: Int) throws {
+    let window = 8
+    let prompt: [Int32] = [1, 2, 3]
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: window * 6, temperature: 0), blockSize: 4)
+
+    var emitted = 0
+    while emitted < stopAfter, iter.next() != nil {
+        emitted += 1
+    }
+    iter.finalizeGeneration()
+
+    #expect(emitted == stopAfter)
+    // The `- 1` applies only when the last token emitted was a verifier sample, whose K/V is
+    // deliberately not cached in its own round. Stopping mid-buffer ends on an accepted draft
+    // instead, which *is* cached — so the timeline lands on one of two adjacent values. The half
+    // that matters is the upper bound: describing more than the consumer saw is the failure the
+    // old rewind produced silently past the window.
+    let timeline = iter.mainCacheStorage.processedTokenCount
+    #expect(
+        timeline <= prompt.count + emitted,
+        "timeline \(timeline) describes tokens beyond the \(emitted) the consumer saw")
+    #expect(
+        timeline >= prompt.count + emitted - 1,
+        "timeline \(timeline) dropped tokens the consumer did see")
+    #expect(iter.mainCacheStorage.nativeAttentionOffsetsAreAligned)
+}
+
+/// The same stop, on a topology whose sliding layers have different widths. At a timeline between
+/// them the narrow ring has wrapped and the wide one has not, so one commit produces a restore
+/// point for the first and a plain trim record for the second — and the trim has to reach the live
+/// ring rather than the round's staged wrapper, whose `trim(_:)` is a deliberate no-op.
+@Test(arguments: [8, 11, 13])
+func testStoppingEarlyOnMixedWidthSlidingLayers(stopAfter: Int) throws {
+    let prompt: [Int32] = [1, 2, 3]
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: 8, wideSlidingWindow: 64)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: 48, temperature: 0), blockSize: 4)
+
+    var emitted = 0
+    while emitted < stopAfter, iter.next() != nil { emitted += 1 }
+    iter.finalizeGeneration()
+
+    #expect(emitted == stopAfter)
+
+    // The premise, asserted rather than assumed: these stop points are past the narrow window and
+    // well inside the wide one, so the two layers really did take different commit records.
+    let leaves = iter.mainCacheStorage.cache
+    #expect(leaves.count == 3)
+    #expect(
+        (leaves[1] as? RotatingKVCache)?.isTrimmable == false,
+        "the narrow ring should have wrapped by \(stopAfter) tokens")
+    #expect(
+        (leaves[2] as? RotatingKVCache)?.isTrimmable == true,
+        "the wide ring should not have wrapped by \(stopAfter) tokens")
+
+    let timeline = iter.mainCacheStorage.processedTokenCount
+    #expect(
+        timeline <= prompt.count + emitted,
+        "timeline \(timeline) describes tokens beyond the \(emitted) the consumer saw")
+    #expect(timeline >= prompt.count + emitted - 1)
+    #expect(
+        iter.mainCacheStorage.nativeAttentionOffsetsAreAligned,
+        "the wide sliding layer stayed ahead of the timeline")
+}
+
+/// `discardGeneratedToken` is telemetry only: a stop token that is not delivered was still
+/// returned by `next()` and is genuinely in the cache, so it must not move the retain count.
+@Test
+func testDiscardingAGeneratedTokenDoesNotMoveTheTimeline() throws {
+    let window = 8
+    let prompt: [Int32] = [1, 2, 3]
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: window * 4, temperature: 0), blockSize: 4)
+
+    var emitted = 0
+    while emitted < 11, iter.next() != nil { emitted += 1 }
+    iter.discardGeneratedToken()
+    iter.finalizeGeneration()
+
+    // Same two-sided bound as above, and the point is that discarding did not shift it: the
+    // discarded token was returned by `next()` and is genuinely part of the model's context.
+    let timeline = iter.mainCacheStorage.processedTokenCount
+    #expect(timeline <= prompt.count + emitted)
+    #expect(timeline >= prompt.count + emitted - 1)
+    #expect(iter.mainCacheStorage.nativeAttentionOffsetsAreAligned)
 }

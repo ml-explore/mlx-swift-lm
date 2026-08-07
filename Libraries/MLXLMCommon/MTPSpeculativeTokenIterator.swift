@@ -118,11 +118,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let kvCachePlan = try parameters.kvCachePlan()
         let mainCache = try kvCachePlan.validated(
             mainCache ?? mainModel.newCache(parameters: parameters))
-        guard canTrimPromptCache(mainCache) else {
-            throw KVCacheError(
-                message: "MTP speculative decoding requires a trimmable main KV cache.")
-        }
-
         self.y = input.text
         self.mainModel = mainModel
         self.drafter = drafter
@@ -133,22 +128,49 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.processor = components.logitProcessor(parameters: parameters)
 
         self.maxTokens = parameters.maxTokens
-        self.blockSize = blockSize
+        // A round presents `blockSize` positions at once, and a sliding layer can only show a
+        // query the `maxSize` entries before it. Past that the extra drafts still decode
+        // correctly -- masks are position-relative and the staged view is clamped -- but the
+        // deepest ones attend over less context than the verifier gave them, so acceptance
+        // stops meaning what the stats say it means. Clamp rather than trap: the block size is
+        // a tuning knob, not a correctness input.
+        let effectiveBlockSize = Swift.min(blockSize, Self.maximumBlockSize(for: mainCache))
+        self.blockSize = effectiveBlockSize
+
+        // Probe by opening a round at the width rounds will actually use and discarding it,
+        // rather than duplicating the leaf classification as a predicate that could drift from
+        // it. Rounds open their own: dynamic compression can replace entries between them.
+        guard let probe = self.mainCacheStorage.beginRound(maximumPositions: effectiveBlockSize)
+        else {
+            throw KVCacheError(
+                message: "MTP speculative decoding requires a stageable main KV cache.")
+        }
+        self.mainCacheStorage.rollback(probe)
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         try prepare(input: input, prefill: parameters.prefill)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+    }
 
-        // The guard above ran against a fresh, zero-offset cache, where a
-        // rotating cache is trimmable vacuously. Re-check now that the prompt
-        // is in: one whose length leaves no room for a speculative round can
-        // never be rewound, so speculation is unavailable for this stream.
-        // `blockSize` bounds the first round's width.
-        standDownIfNoTrimHeadroom(
-            positions: blockSize,
-            reason:
-                "prompt fills the sliding window — MTP rewind unavailable; generating without speculation"
-        )
+    static let missingSharedKVSourcesReason =
+        "main model did not report which cache entries its shared K/V came from; continuing "
+        + "without speculation"
+
+    /// The tightest sliding window among the cache's layers, or `nil` when no layer slides.
+    static func narrowestSlidingWindow(in cache: [KVCache]) -> Int? {
+        KVCacheTree.leaves(in: cache)
+            .compactMap { leaf -> Int? in
+                guard case .rotating(let rotating) = leaf.kind else { return nil }
+                return rotating.maxSize
+            }
+            .min()
+    }
+
+    /// The widest round the narrowest sliding layer can present coherently: one bonus plus a
+    /// window's worth of drafts. Unbounded when no layer slides.
+    static func maximumBlockSize(for cache: [KVCache]) -> Int {
+        guard let narrowest = narrowestSlidingWindow(in: cache) else { return .max }
+        return Swift.max(2, narrowest + 1)
     }
 
     /// Prefill the main model with the prompt. The drafter has no cache to
@@ -183,6 +205,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             mainState = result.state
+            // Prefill emits too, and a multi-token prefill presents a sliding layer more than its
+            // window just as a verify pass does. Nothing was rejected here, so only the head
+            // clamp applies -- but a snapshot that cannot be placed against the entries at all is
+            // refused here for the same reason it is mid-stream, and before anything reads it.
+            if !reconcileSharedKVState(
+                &mainState, discarding: 0,
+                lengths: mainCacheStorage.emittedLength(forLeaf:))
+            {
+                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                mainState = nil
+            }
             // Yield the bonus to the iterator's consumer. Without this,
             // the iterator silently starts 1 position ahead of an
             // equivalent autoregressive run, violating speculative
@@ -205,16 +238,33 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             mainState = prefillResult.state
+            let placeable = reconcileSharedKVState(
+                &mainState, discarding: 0,
+                lengths: mainCacheStorage.emittedLength(forLeaf:))
+            if !placeable {
+                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                mainState = nil
+            }
 
             // If prefill didn't emit drafter state, do one more forward call
             // with the just-sampled bonus token to prime the state. The cost
-            // is one extra token's forward pass; acceptable.
-            if mainState?[mtpLastHiddenStatesKey] == nil
-                || mainState?[mtpSharedKVStatesKey] == nil
+            // is one extra token's forward pass; acceptable. Skipped once the
+            // snapshot has been refused: it exists only to obtain drafter
+            // state, and this stream has stopped having a use for any.
+            if placeable,
+                mainState?[mtpLastHiddenStatesKey] == nil
+                    || mainState?[mtpSharedKVStatesKey] == nil
             {
                 let primed = mainModel(y[text: .newAxis], cache: mainCache, state: prefillState)
                 mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
                 mainState = primed.state
+                if !reconcileSharedKVState(
+                    &mainState, discarding: 0,
+                    lengths: mainCacheStorage.emittedLength(forLeaf:))
+                {
+                    switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                    mainState = nil
+                }
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
                 // we must re-pick the bonus from the new step's logits).
@@ -275,15 +325,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        // This round's verify pass commits `numDraft + 1` positions. If that
-        // would carry the sliding cache past its window, the rewind below
-        // would no-op and strand this round's rejected drafts in the cache —
-        // stand down now, while the cache is still rewindable.
-        if standDownIfNoTrimHeadroom(
-            positions: numDraft + 1,
-            reason:
-                "sliding cache wrapped mid-stream — MTP rewind unavailable; continuing without speculation"
-        ) {
+        // Run the verify pass against staged caches so the live ones only ever
+        // see the tokens that are accepted. Cache types are re-classified every
+        // round because dynamic quantization can replace entries between them.
+        guard let round = mainCacheStorage.beginRound(maximumPositions: numDraft + 1) else {
+            switchToPassthrough(
+                reason: "main KV cache cannot stage a speculative round; continuing without "
+                    + "speculation")
+            mainState = nil
             return
         }
 
@@ -300,16 +349,22 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let cacheOffset = mainCacheStorage.processedTokenCount
 
-        // Invariant: the span the drafter attends over describes exactly the
-        // true sequence — the rewind site trims the emitted snapshot in
-        // lockstep with the cache. `dim()` is shape metadata (no eval, no GPU
-        // sync). The check stands down if the cache ever leaves the trimmable
-        // regime (post-wrap sliding window), where the rewind machinery
-        // itself no-ops.
+        // Invariant: the snapshot the drafter attends over describes the emitted sequence and
+        // nothing else. A global layer's entry spans the whole stream; a sliding layer's spans
+        // its window. Both are exact, because the commit that decided what the cache kept also
+        // reconciled the snapshot. `dim()` is shape metadata (no eval, no GPU sync).
         assert(
-            sharedKV.allSatisfy { $0.value.0.dim(-2) == cacheOffset }
-                || !canTrimPromptCache(mainCache),
-            "stale sharedKV: spans \(sharedKV.mapValues { $0.0.dim(-2) }) != main cache offset \(cacheOffset)"
+            {
+                guard let sources = state[mtpSharedKVSourceIndicesKey] else { return false }
+                return sharedKV.allSatisfy { key, entry in
+                    guard let leaf = sources[key] else { return false }
+                    return entry.0.dim(-2) == mainCacheStorage.emittedLength(forLeaf: leaf)
+                }
+            }(),
+            """
+            stale sharedKV: spans \(sharedKV.mapValues { $0.0.dim(-2) }) do not match the \
+            emitted lengths implied by a timeline of \(cacheOffset)
+            """
         )
 
         let bonusToken = y.tokens
@@ -333,8 +388,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyInput = LMInput.Text(tokens: verifyTokens)
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
         let mainResult = mainModel(
-            verifyInput[text: .newAxis], cache: mainCache, state: verifyState)
-        mainCacheStorage.commitProcessedTokens(verifyInput.cacheSequenceLength)
+            verifyInput[text: .newAxis], cache: round.caches, state: verifyState)
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
@@ -393,17 +447,27 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             draftModelCalls: 1
         )
 
-        // Rewind the main cache and the emitted sharedKV snapshot by the
-        // rejected count, in lockstep. The drafter has no cache of its own,
-        // but the verify pass's state emission spans the full verify chunk —
-        // stale tail rows must not survive into the next round's draftBlock.
-        // Trimming the snapshot by the amount the cache actually trimmed
-        // keeps the two consistent even if the cache ever reports itself
-        // untrimmable (post-wrap sliding window), where trimPromptCache
-        // no-ops and returns 0.
+        // Commit the bonus plus the accepted drafts and drop the rest. Staged
+        // layers never held the rejected rows at all; written-through layers
+        // clamp back over them. Either way every entry advances by exactly
+        // this count, which is what the model-wide processed-token timeline
+        // records.
         let rejected = numDraft - accepted
-        let trimmed = mainCacheStorage.trim(rejected)
-        trimSharedKVState(&mainState, numTokens: trimmed)
+        let commit = mainCacheStorage.commit(round, retaining: accepted + 1)
+
+        // The emitted snapshot is reconciled by the same commit that decided what the cache
+        // keeps. Otherwise the cache can be right while the next `draftBlock` still attends over
+        // a rejected tail.
+        guard
+            reconcileSharedKVState(
+                &mainState, discarding: rejected,
+                lengths: { commit.emittedLengths[$0] })
+        else {
+            switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+            mainState = nil
+            y = .init(tokens: finalToken)
+            return
+        }
 
         // Dynamic cache quantization may convert `.regular` K/V to `.quantized`,
         // at which point the target's emit-hook returns sharedKV: nil and the
@@ -425,36 +489,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
         passthroughReason = reason
         passthrough = true
-    }
-
-    /// Stand down to passthrough if the main cache cannot absorb `positions`
-    /// more tokens and still be rewound.
-    ///
-    /// MTP's accept/reject step depends on `trimPromptCache`, so each cache
-    /// predicts whether it will remain trimmable after the verify positions
-    /// are appended. The append happens *inside* the verify pass, so a check
-    /// that merely asks "is it trimmable now?" fires a round too late: that
-    /// round's rewind silently returns 0 (the guard in `trimPromptCache` is
-    /// all-or-nothing over the array, so even the trimmable full-attention
-    /// entries are skipped) and its rejected drafts stay welded into every
-    /// layer's cache. Standing down while headroom remains keeps every rewind
-    /// valid, so a passthrough-crossing stream stays bit-exact to a plain
-    /// autoregressive run.
-    @discardableResult
-    private mutating func standDownIfNoTrimHeadroom(
-        positions: Int, reason: String
-    ) -> Bool {
-        guard !passthrough else { return false }
-        let hasHeadroom = mainCache.allSatisfy {
-            $0.isTrimmable(after: positions)
-        }
-        guard !hasHeadroom else { return false }
-        switchToPassthrough(reason: reason)
-        // Release the emitted snapshot: passthrough passes `state: nil` and
-        // never reads it again, and its sliding entries can span up to
-        // `maxCacheSize + S - 1` per layer.
-        mainState = nil
-        return true
     }
 
     /// One single-token forward step against the main model, used in
@@ -533,11 +567,17 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         let lookahead = committedPendingTokenCount - consumed
         guard lookahead > 0 else { return }
 
-        // Trim through the storage so the model-wide processed-token timeline
-        // rewinds with the cache; `ChatSession` reconciles its ledger against
-        // that timeline, not against per-entry offsets.
-        let trimmed = mainCacheStorage.trim(lookahead)
-        trimSharedKVState(&mainState, numTokens: trimmed)
+        // A round commits its accepted prefix before the consumer has drained it, so a stop token
+        // partway through -- or a consumer that walks away -- leaves positions in the cache that
+        // were never emitted. Taking them back through the round that committed them is exact
+        // even past a sliding window, where a plain trim is not: the commit kept what it takes to
+        // put a wrapped ring back and replay the part that was emitted.
+        let rewound = mainCacheStorage.rewindLastRound(lookahead)
+        // The only site that ignores the result, and the only one that can: the stream is over,
+        // so nothing reads the snapshot after this. Everywhere else a refusal stops speculation.
+        reconcileSharedKVState(
+            &mainState, discarding: rewound,
+            lengths: mainCacheStorage.emittedLength(forLeaf:))
     }
 }
 
@@ -567,32 +607,47 @@ extension MTPSpeculativeTokenIterator {
     }
 }
 
-/// Rewinds the emitted MTP shared-K/V snapshot by `numTokens` trailing
-/// sequence positions, mirroring `trimPromptCache` on the main cache.
+/// Bring the emitted MTP shared-K/V snapshot into line with what the cache actually kept.
 ///
-/// The verify pass emits K/V spanning the full `[bonus, d_1 ... d_numDraft]`
-/// chunk — materialized before acceptance is known. After a partial
-/// acceptance, the rejected tail rows describe tokens that are not part of
-/// the sequence; without this trim, the next round's `draftBlock` would
-/// cross-attend over them. (PR #308 review: discussion_r3391133046,
-/// discussion_r3391147261.)
+/// The verify pass emits K/V spanning its whole chunk, materialized before acceptance is known,
+/// and a sliding layer is presented more than its window on purpose so every query in the chunk
+/// still sees a full one. The drafter has no cache of its own and attends over this snapshot
+/// bidirectionally, so both excesses have to go: the rejected tail, then the head beyond what the
+/// layer can still describe.
 ///
-/// No-op when `numTokens <= 0`, when `state` is nil, or when the key is
-/// absent (e.g. the quantization-onset round, whose fresh verify state
-/// carries no sharedKV). Cost is metadata-only: the slices are lazy views
-/// consumed by the next `draftBlock` like the rest of the round's inputs;
-/// no `eval`. Iterator-internal — `trimPromptCache` is public because
-/// caches are a public surface, but this snapshot is the iterator's own
-/// cross-round state.
-func trimSharedKVState(_ state: inout LMOutput.State?, numTokens: Int) {
-    guard numTokens > 0,
-        let sharedKV = state?[mtpSharedKVStatesKey]
-    else { return }
-    state?[mtpSharedKVStatesKey] = sharedKV.mapValues { kv in
-        let newLen = kv.0.dim(-2) - numTokens
-        return (
-            kv.0[.ellipsis, ..<newLen, 0...],
-            kv.1[.ellipsis, ..<newLen, 0...]
+/// Order matters. Dropping the tail first and clamping the head second leaves a sliding entry
+/// with a full window; clamping first would leave it `discarding` rows short, every round.
+///
+/// - Parameters:
+///   - discarding: trailing positions the commit did not keep.
+///   - lengths: for the cache entry behind a given key, how much of the emitted sequence it still
+///     describes — the whole stream for a global layer, the trailing window for a sliding one.
+///
+/// No-op when `state` is nil or carries no snapshot (the quantization-onset round emits none).
+/// Returns `false` when the snapshot cannot be placed against cache entries at all, which is a
+/// signal to stop speculating rather than reconcile against a guess. Cost is metadata-only: every
+/// slice is a lazy view consumed by the next `draftBlock` like the rest of the round's inputs.
+@discardableResult
+func reconcileSharedKVState(
+    _ state: inout LMOutput.State?, discarding: Int, lengths: (Int) -> Int
+) -> Bool {
+    guard let sharedKV = state?[mtpSharedKVStatesKey] else { return true }
+    guard let sources = state?[mtpSharedKVSourceIndicesKey],
+        sharedKV.keys.allSatisfy({ sources[$0] != nil })
+    else { return false }
+
+    state?[mtpSharedKVStatesKey] = sharedKV.reduce(into: [:]) { result, entry in
+        let (key, kv) = entry
+        var length = kv.0.dim(-2)
+        if discarding > 0 {
+            length = Swift.max(0, length - discarding)
+        }
+        let bound = lengths(sources[key]!)
+        let start = Swift.max(0, length - bound)
+        result[key] = (
+            kv.0[.ellipsis, start ..< length, 0...],
+            kv.1[.ellipsis, start ..< length, 0...]
         )
     }
+    return true
 }

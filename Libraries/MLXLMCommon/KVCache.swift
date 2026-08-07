@@ -602,6 +602,58 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
+    /// The trailing `tail` cache entries in chronological order, without mutating the cache.
+    ///
+    /// `update(keys:values:)` is the only other way to read a rotating cache's contents, and it
+    /// necessarily writes. This is the read-only counterpart: `keys`, `values`, `idx` and
+    /// `offset` are all left exactly as they were, so a caller can present the ring's history
+    /// alongside K/V it has not committed yet.
+    ///
+    /// The result is built by the same two steps the multi-token write path uses --
+    /// ``temporalOrder(_:)`` to linearize, then the front-trim that preserves the pinned `keep`
+    /// prefix -- so a view of length `n` holds exactly the entries a write that front-trimmed to
+    /// `n` rows would have presented. When the ring is already chronological (`idx` at the end of
+    /// the buffer, which is where every multi-token write leaves it) both steps degrade to
+    /// slices and nothing is copied.
+    ///
+    /// The pinned `keep` prefix is a floor, not just a splice point: a `tail` below it still
+    /// comes back, because those entries are not evictable and a view that dropped them would be
+    /// a context this ring can never present. With `keep == 0` -- every sliding-window model --
+    /// the floor is zero and the length is exactly `min(tail, count)`.
+    ///
+    /// - Parameter tail: Requested number of trailing entries. Clamped to what the cache holds;
+    ///   a negative value is read as zero.
+    /// - Returns: `(keys, values)` shaped `[B, kvHeads, n, headDim]` where
+    ///   `n == max(min(tail, count), min(keep, count))`, or `nil` before the first write.
+    package func logicalView(tail: Int) -> (MLXArray, MLXArray)? {
+        guard let keys = self.keys, let values = self.values else { return nil }
+
+        let orderedKeys = temporalOrder(keys)
+        let orderedValues = temporalOrder(values)
+
+        let available = orderedKeys.dim(2)
+        // Raising the bound to the pinned prefix is what keeps the front-trim's second slice in
+        // range; stated here rather than left to slice clamping, since the length it produces is
+        // the documented contract.
+        let requested = Swift.min(Swift.max(tail, 0), available)
+        let bound = Swift.max(requested, Swift.min(keep, available))
+        let trimSize = available - bound
+        guard trimSize > 0 else { return (orderedKeys, orderedValues) }
+
+        // `keep == 0` is the sliding-window case (Gemma 3/3n/4, GPT-OSS, Exaone4): no pinned
+        // prefix to splice around, so the trailing window is one slice per array.
+        if keep == 0 {
+            return (
+                orderedKeys[.ellipsis, trimSize..., 0...],
+                orderedValues[.ellipsis, trimSize..., 0...]
+            )
+        }
+        return (
+            trim(trimSize: trimSize, orderedKeys),
+            trim(trimSize: trimSize, orderedValues)
+        )
+    }
+
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         if self.keys == nil {
             self.keys = keys
