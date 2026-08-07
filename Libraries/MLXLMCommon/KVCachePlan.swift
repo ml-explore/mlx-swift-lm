@@ -110,6 +110,9 @@ package final class KVCacheStorage {
             precondition(
                 !roundIsOpen,
                 "the realized cache was replaced while a staged round was open")
+            // A rewind record names slots, and a replacement changes what those slots hold --
+            // so it invalidates the record rather than being restored into blindly.
+            lastRound = nil
             isApplicationTerminal = false
         }
     }
@@ -118,11 +121,19 @@ package final class KVCacheStorage {
 
     private var openRound: KVCacheRound?
 
+    /// How to take one leaf's share of a commit back, addressed by slot rather than by object.
+    ///
+    /// `point == nil` means a plain `trim(_:)` undoes it exactly, which is true for every leaf
+    /// that had not wrapped when the commit ran.
+    private struct LeafRewind {
+        let slot: Int
+        let point: (any KVCacheLeafRestorePoint)?
+    }
+
     /// What it would take to undo the most recent commit, kept only until the next write.
     private struct CompletedRound {
         let committedPositions: Int
-        let restorePoints: [any KVCacheLeafRestorePoint]
-        let trimmableLeaves: [KVCache]
+        let leaves: [LeafRewind]
     }
     private var lastRound: CompletedRound?
 
@@ -201,7 +212,7 @@ package final class KVCacheStorage {
         for leaf in leaves {
             guard
                 let strategy = KVCacheRoundStrategyFactory.make(
-                    for: leaf, maximumPositions: maximumPositions)
+                    for: leaf, slot: leaf.path[0], maximumPositions: maximumPositions)
             else { return nil }
             strategies.append(strategy)
         }
@@ -227,26 +238,25 @@ package final class KVCacheStorage {
             "cannot retain \(retaining) of \(written) written positions")
 
         // Built before the commit, because that is the last moment the pre-commit contents of a
-        // wrapped ring still exist.
-        var restorePoints = [any KVCacheLeafRestorePoint]()
-        var trimmableLeaves = [KVCache]()
+        // wrapped ring still exist. Records name slots: the object a rotating strategy presents
+        // is a round-scoped wrapper that outlives nothing, and its `trim(_:)` is a no-op.
+        var rewinds = [LeafRewind]()
+        rewinds.reserveCapacity(round.strategies.count)
         for strategy in round.strategies {
-            if let point = strategy.makeRestorePoint(retaining: retaining) {
-                restorePoints.append(point)
-            } else {
-                trimmableLeaves.append(strategy.presented)
-            }
+            rewinds.append(
+                LeafRewind(
+                    slot: strategy.slot,
+                    point: strategy.makeRestorePoint(retaining: retaining)))
             strategy.commit(retaining: retaining)
         }
         processedTokenCount += retaining
         openRound = nil
+        // Nothing to keep when every leaf can be undone by a trim: that is the path `trim(_:)`
+        // already takes, and recording a round would only widen what a rewind means.
         lastRound =
-            restorePoints.isEmpty
-            ? nil
-            : CompletedRound(
-                committedPositions: retaining,
-                restorePoints: restorePoints,
-                trimmableLeaves: trimmableLeaves)
+            rewinds.contains { $0.point != nil }
+            ? CompletedRound(committedPositions: retaining, leaves: rewinds)
+            : nil
 
         assert(
             nativeAttentionOffsetsAreAligned,
@@ -272,7 +282,8 @@ package final class KVCacheStorage {
     /// so the commit left behind what it takes to put that leaf back and replay the part that was
     /// emitted. Either way this is exact, and it is the only rewind left on the staged path.
     ///
-    /// Only the most recent commit can be taken back: any write after it invalidates the record.
+    /// Only the most recent commit can be taken back: any write after it invalidates the record,
+    /// and so does replacing an entry, since the record names slots rather than objects.
     @discardableResult
     package func rewindLastRound(_ count: Int) -> Int {
         precondition(count >= 0, "Rewind count cannot be negative")
@@ -283,11 +294,31 @@ package final class KVCacheStorage {
         let rewound = Swift.min(count, last.committedPositions)
         guard rewound > 0 else { return 0 }
 
-        for point in last.restorePoints {
-            point.restore(retaining: last.committedPositions - rewound)
+        // Resolve and check every slot before touching one. A rewind that undid some leaves and
+        // not others would leave the entries further out of step than doing nothing does, so a
+        // record that cannot be applied in full falls back to the plain trim instead.
+        let leaves = last.leaves.map { record -> (record: LeafRewind, leaf: KVCache)? in
+            guard cache.indices.contains(record.slot) else { return nil }
+            let leaf = cache[record.slot]
+            if let point = record.point {
+                return point.canRestore(into: leaf) ? (record, leaf) : nil
+            }
+            return leaf.isTrimmable ? (record, leaf) : nil
         }
-        for leaf in last.trimmableLeaves {
-            leaf.trim(rewound)
+        guard leaves.allSatisfy({ $0 != nil }) else { return trim(count) }
+
+        for (record, leaf) in leaves.compactMap({ $0 }) {
+            if let point = record.point {
+                point.restore(into: leaf, retaining: last.committedPositions - rewound)
+            } else {
+                let trimmed = leaf.trim(rewound)
+                precondition(
+                    trimmed == rewound,
+                    """
+                    entry \(record.slot) took back \(trimmed) of \(rewound) positions; a commit \
+                    admits a leaf only if a trim can undo it exactly
+                    """)
+            }
         }
         processedTokenCount -= rewound
         lastRound = nil

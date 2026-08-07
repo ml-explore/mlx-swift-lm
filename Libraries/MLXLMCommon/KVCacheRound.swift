@@ -15,6 +15,13 @@ import MLX
 /// leaf before constructing anything, and a single leaf that cannot commit exactly abandons the
 /// round with nothing touched.
 package protocol KVCacheRoundStrategy: AnyObject {
+    /// Which entry of the storage's array this leaf occupies.
+    ///
+    /// The slot is the leaf's stable identity, and the only one worth recording: ``presented`` is
+    /// round-scoped for a staged leaf, and dynamic compression can replace the live object at any
+    /// point outside a round. Anything that has to find this leaf again looks it up here.
+    var slot: Int { get }
+
     /// The cache to hand the model in this leaf's slot for the duration of the round.
     var presented: KVCache { get }
 
@@ -49,9 +56,19 @@ extension KVCacheRoundStrategy {
 /// through a round's accepted prefix, a consumer that walked away. Those have to come back out of
 /// the cache, and for a wrapped ring `trim(_:)` cannot do it: the append already evicted the
 /// entries the rewind would need to restore.
+///
+/// Deliberately holds no reference to the cache it was made from. The leaf is resolved from the
+/// storage at rewind time and passed in, so a record can never write into an object the storage
+/// has stopped owning.
 package protocol KVCacheLeafRestorePoint {
-    /// Restore the pre-commit contents, then re-apply the first `retaining` committed positions.
-    func restore(retaining: Int)
+    /// Whether `leaf` is something this record can be applied to.
+    func canRestore(into leaf: KVCache) -> Bool
+
+    /// Restore `leaf`'s pre-commit contents, then re-apply the first `retaining` committed
+    /// positions. Returns `false` if `leaf` is not a cache this record was made from, in which
+    /// case nothing is written.
+    @discardableResult
+    func restore(into leaf: KVCache, retaining: Int) -> Bool
 }
 
 extension KVCacheRoundStrategy {
@@ -68,10 +85,12 @@ extension KVCacheRoundStrategy {
 /// layer's presentation is its whole history, so staging one would cost a concatenation across
 /// the full context on every round.
 final class AppendOnlyRoundStrategy: KVCacheRoundStrategy {
+    let slot: Int
     let live: KVCache
     private let startOffset: Int
 
-    init(live: KVCache) {
+    init(slot: Int, live: KVCache) {
+        self.slot = slot
         self.live = live
         self.startOffset = live.offset
     }
@@ -92,10 +111,12 @@ final class AppendOnlyRoundStrategy: KVCacheRoundStrategy {
 
 /// A rotating leaf: staged beside the ring, which stays physically untouched until commit.
 final class RotatingRoundStrategy: KVCacheRoundStrategy {
+    let slot: Int
     let live: RotatingKVCache
     let staged: RotatingStagedKVCache
 
-    init(live: RotatingKVCache) {
+    init(slot: Int, live: RotatingKVCache) {
+        self.slot = slot
         self.live = live
         self.staged = RotatingStagedKVCache(live: live)
     }
@@ -117,7 +138,6 @@ final class RotatingRoundStrategy: KVCacheRoundStrategy {
         let snapshot = live.state
         guard snapshot.count == 2 else { return nil }
         return RotatingRestorePoint(
-            live: live,
             // Detached the same way `RotatingKVCache.copy()` detaches: a full-range slice shares
             // the node but is a new object, and an in-place write rebinds the *receiver*. Holding
             // `live.state` directly would hold the very objects the commit is about to rebind.
@@ -133,20 +153,24 @@ final class RotatingRoundStrategy: KVCacheRoundStrategy {
 /// while the snapshot is alive the next ring write cannot donate its buffer. It is dropped as
 /// soon as another round opens.
 struct RotatingRestorePoint: KVCacheLeafRestorePoint {
-    let live: RotatingKVCache
     let state: [MLXArray]
     let metaState: [String]
     let replay: (MLXArray, MLXArray)?
 
-    func restore(retaining: Int) {
+    func canRestore(into leaf: KVCache) -> Bool { leaf is RotatingKVCache }
+
+    @discardableResult
+    func restore(into leaf: KVCache, retaining: Int) -> Bool {
+        guard let live = leaf as? RotatingKVCache else { return false }
         // Order matters and mirrors `copy()`: the state setter deliberately leaves `offset`
         // alone, because `idx` and `offset` both arrive with the metadata.
         live.state = state
         live.metaState = metaState
-        guard retaining > 0, let replay else { return }
+        guard retaining > 0, let replay else { return true }
         _ = live.update(
             keys: replay.0[.ellipsis, ..<retaining, 0...],
             values: replay.1[.ellipsis, ..<retaining, 0...])
+        return true
     }
 }
 
@@ -157,8 +181,10 @@ struct RotatingRestorePoint: KVCacheLeafRestorePoint {
 /// ceiling worth naming — a conformer from outside this package cannot opt into staging. It gets
 /// write-through if it can prove it stays trimmable, and refusal otherwise.
 enum KVCacheRoundStrategyFactory {
+    /// - Parameter slot: the leaf's index in the storage's array, which the strategy carries so a
+    ///   later rewind can resolve the live entry rather than trust a captured object.
     static func make(
-        for leaf: KVCacheLeaf, maximumPositions: Int
+        for leaf: KVCacheLeaf, slot: Int, maximumPositions: Int
     ) -> (any KVCacheRoundStrategy)? {
         // Recurrent state has no rewindable position and no staged form, and deliberately does
         // not participate in the shared timeline at all.
@@ -166,7 +192,7 @@ enum KVCacheRoundStrategyFactory {
 
         switch leaf.kind {
         case .rotating(let rotating):
-            return RotatingRoundStrategy(live: rotating)
+            return RotatingRoundStrategy(slot: slot, live: rotating)
         case .recurrent:
             return nil
         case .simple, .affine, .turboQuant, .unsupported:
@@ -174,7 +200,7 @@ enum KVCacheRoundStrategyFactory {
             // positions -- asked with the round's real width, because the entry that matters is
             // one that is trimmable now and would stop being trimmable during the round.
             guard leaf.cache.isTrimmable(after: maximumPositions) else { return nil }
-            return AppendOnlyRoundStrategy(live: leaf.cache)
+            return AppendOnlyRoundStrategy(slot: slot, live: leaf.cache)
         }
     }
 }

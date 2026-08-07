@@ -748,3 +748,63 @@ func testRewindBelowTheWrapMatchesEmittedOnlyReplay(rewinding: Int) throws {
     #expect(live.processedTokenCount == 25)
     #expect(live.nativeAttentionOffsetsAreAligned)
 }
+
+/// Two sliding layers at different widths: at a timeline between them one has wrapped and one has
+/// not, so the same commit produces a restore point for the first and a plain trim record for the
+/// second. The trim has to reach the *live* ring — the round presented a staged wrapper whose
+/// `trim(_:)` is deliberately a no-op, and rewinding through that moves the timeline while the
+/// leaf stays put.
+@Test func testRewindReachesTheLiveRingWhenOnlySomeLayersWrapped() throws {
+    let narrow = RotatingKVCache(maxSize: 4, keep: 0)
+    let wide = RotatingKVCache(maxSize: 16, keep: 0)
+    let live = KVCacheStorage([narrow, wide], plan: .disabled)
+
+    let (k, v) = positionedKV(0 ..< 6)
+    for leaf in live.cache { _ = leaf.update(keys: k, values: v) }
+    live.commitProcessedTokens(6)
+    #expect(narrow.isTrimmable == false, "the narrow ring must have wrapped")
+    #expect(wide.isTrimmable, "the wide ring must not have wrapped")
+
+    let oracle = live.copy()
+
+    let staged = try #require(StagedRound(live, width: 3))
+    stageRound(staged, 6 ..< 9)
+    staged.commit(accepted: 3)
+
+    #expect(live.rewindLastRound(2) == 2)
+
+    let (ok, ov) = positionedKV(6 ..< 7)
+    for leaf in oracle.cache { _ = leaf.update(keys: ok, values: ov) }
+    oracle.commitProcessedTokens(1)
+
+    expectStoragesEquivalent(live, oracle, "mixed-width rewind")
+}
+
+/// Dynamic compression can replace an entry between a commit and a rewind. The record refers to a
+/// cache slot, not to the object the commit happened to hold, so a replacement invalidates it and
+/// the rewind falls back to the plain trim rather than restoring into a leaf the storage no longer
+/// owns.
+@Test func testRewindIsRefusedAfterTheCacheIsReplaced() throws {
+    let original = RotatingKVCache(maxSize: 8, keep: 0)
+    let live = KVCacheStorage([original], plan: .disabled)
+    let (k, v) = positionedKV(0 ..< 20)
+    _ = original.update(keys: k, values: v)
+    live.commitProcessedTokens(20)
+
+    let staged = try #require(StagedRound(live, width: 4))
+    stageRound(staged, 20 ..< 24)
+    staged.commit(accepted: 4)
+    #expect(live.processedTokenCount == 24)
+
+    // Stand in for a compression pass: an equivalent leaf, a different object.
+    let replacement = try #require(original.copy() as? RotatingKVCache)
+    let replacementBefore = RingSnapshot(replacement)
+    live.replace(with: [replacement])
+
+    // The ring has wrapped, so the fallback trim takes nothing back rather than restoring a
+    // snapshot into a cache that is no longer the one at this slot.
+    #expect(live.rewindLastRound(2) == 0)
+    #expect(live.processedTokenCount == 24)
+    #expect(live.nativeAttentionOffsetsAreAligned)
+    replacementBefore.expectUnchanged(replacement, "after a rewind against a replaced entry")
+}

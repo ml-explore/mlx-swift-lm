@@ -677,24 +677,35 @@ func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
 private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDimensionProvider {
     static let vocabularySize = 32
 
-    var kvHeads: [Int] { [1, 1] }
+    var kvHeads: [Int] { Array(repeating: 1, count: wideSlidingWindow == nil ? 2 : 3) }
     let script: [Int32]
     let slidingWindow: Int
+    let wideSlidingWindow: Int?
     let omitDrafterState: Bool
 
     private(set) var emittedSharedKVSpans: [[String: Int]] = []
     private(set) var verifyChunkLengths: [Int] = []
 
-    init(script: [Int32], slidingWindow: Int, omitDrafterState: Bool = false) {
+    init(
+        script: [Int32], slidingWindow: Int, wideSlidingWindow: Int? = nil,
+        omitDrafterState: Bool = false
+    ) {
         self.script = script
         self.slidingWindow = slidingWindow
+        self.wideSlidingWindow = wideSlidingWindow
         self.omitDrafterState = omitDrafterState
         super.init()
     }
 
-    /// Layer 0 is global, layer 1 slides -- Gemma 4's topology in miniature.
+    /// Layer 0 is global, layer 1 slides -- Gemma 4's topology in miniature. `wideSlidingWindow`
+    /// adds a third layer sliding at a different width, so a timeline between the two widths has
+    /// one ring wrapped and the other not.
     func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        [KVCacheSimple(), RotatingKVCache(maxSize: slidingWindow, keep: 0)]
+        var cache: [KVCache] = [KVCacheSimple(), RotatingKVCache(maxSize: slidingWindow, keep: 0)]
+        if let wideSlidingWindow {
+            cache.append(RotatingKVCache(maxSize: wideSlidingWindow, keep: 0))
+        }
+        return cache
     }
 
     func prepare(
@@ -1106,6 +1117,49 @@ func testStoppingEarlyLeavesTheTimelineAtWhatWasEmitted(stopAfter: Int) throws {
         timeline >= prompt.count + emitted - 1,
         "timeline \(timeline) dropped tokens the consumer did see")
     #expect(iter.mainCacheStorage.nativeAttentionOffsetsAreAligned)
+}
+
+/// The same stop, on a topology whose sliding layers have different widths. At a timeline between
+/// them the narrow ring has wrapped and the wide one has not, so one commit produces a restore
+/// point for the first and a plain trim record for the second — and the trim has to reach the live
+/// ring rather than the round's staged wrapper, whose `trim(_:)` is a deliberate no-op.
+@Test(arguments: [8, 11, 13])
+func testStoppingEarlyOnMixedWidthSlidingLayers(stopAfter: Int) throws {
+    let prompt: [Int32] = [1, 2, 3]
+    let model = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: 8, wideSlidingWindow: 64)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: model, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: model.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: 48, temperature: 0), blockSize: 4)
+
+    var emitted = 0
+    while emitted < stopAfter, iter.next() != nil { emitted += 1 }
+    iter.finalizeGeneration()
+
+    #expect(emitted == stopAfter)
+
+    // The premise, asserted rather than assumed: these stop points are past the narrow window and
+    // well inside the wide one, so the two layers really did take different commit records.
+    let leaves = iter.mainCacheStorage.cache
+    #expect(leaves.count == 3)
+    #expect(
+        (leaves[1] as? RotatingKVCache)?.isTrimmable == false,
+        "the narrow ring should have wrapped by \(stopAfter) tokens")
+    #expect(
+        (leaves[2] as? RotatingKVCache)?.isTrimmable == true,
+        "the wide ring should not have wrapped by \(stopAfter) tokens")
+
+    let timeline = iter.mainCacheStorage.processedTokenCount
+    #expect(
+        timeline <= prompt.count + emitted,
+        "timeline \(timeline) describes tokens beyond the \(emitted) the consumer saw")
+    #expect(timeline >= prompt.count + emitted - 1)
+    #expect(
+        iter.mainCacheStorage.nativeAttentionOffsetsAreAligned,
+        "the wide sliding layer stayed ahead of the timeline")
 }
 
 /// `discardGeneratedToken` is telemetry only: a stop token that is not delivered was still
