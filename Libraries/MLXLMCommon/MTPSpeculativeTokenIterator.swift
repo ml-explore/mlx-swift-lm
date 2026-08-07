@@ -207,10 +207,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             mainState = result.state
             // Prefill emits too, and a multi-token prefill presents a sliding layer more than its
             // window just as a verify pass does. Nothing was rejected here, so only the head
-            // clamp applies.
-            reconcileSharedKVState(
+            // clamp applies -- but a snapshot that cannot be placed against the entries at all is
+            // refused here for the same reason it is mid-stream, and before anything reads it.
+            if !reconcileSharedKVState(
                 &mainState, discarding: 0,
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
+            {
+                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                mainState = nil
+            }
             // Yield the bonus to the iterator's consumer. Without this,
             // the iterator silently starts 1 position ahead of an
             // equivalent autoregressive run, violating speculative
@@ -233,22 +238,33 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             mainState = prefillResult.state
-            reconcileSharedKVState(
+            let placeable = reconcileSharedKVState(
                 &mainState, discarding: 0,
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
+            if !placeable {
+                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                mainState = nil
+            }
 
             // If prefill didn't emit drafter state, do one more forward call
             // with the just-sampled bonus token to prime the state. The cost
-            // is one extra token's forward pass; acceptable.
-            if mainState?[mtpLastHiddenStatesKey] == nil
-                || mainState?[mtpSharedKVStatesKey] == nil
+            // is one extra token's forward pass; acceptable. Skipped once the
+            // snapshot has been refused: it exists only to obtain drafter
+            // state, and this stream has stopped having a use for any.
+            if placeable,
+                mainState?[mtpLastHiddenStatesKey] == nil
+                    || mainState?[mtpSharedKVStatesKey] == nil
             {
                 let primed = mainModel(y[text: .newAxis], cache: mainCache, state: prefillState)
                 mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
                 mainState = primed.state
-                reconcileSharedKVState(
+                if !reconcileSharedKVState(
                     &mainState, discarding: 0,
                     lengths: mainCacheStorage.emittedLength(forLeaf:))
+                {
+                    switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+                    mainState = nil
+                }
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
                 // we must re-pick the bonus from the new step's logits).
@@ -557,6 +573,8 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         // even past a sliding window, where a plain trim is not: the commit kept what it takes to
         // put a wrapped ring back and replay the part that was emitted.
         let rewound = mainCacheStorage.rewindLastRound(lookahead)
+        // The only site that ignores the result, and the only one that can: the stream is over,
+        // so nothing reads the snapshot after this. Everywhere else a refusal stops speculation.
         reconcileSharedKVState(
             &mainState, discarding: rewound,
             lengths: mainCacheStorage.emittedLength(forLeaf:))

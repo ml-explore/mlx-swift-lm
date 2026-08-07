@@ -677,23 +677,44 @@ func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
 private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDimensionProvider {
     static let vocabularySize = 32
 
+    /// Which of `prepare`'s two shapes this model returns, and whether it emits drafter state
+    /// while doing so. The iterator reconciles the emitted snapshot at a different site in each
+    /// case, and the re-prime forward exists only for the middle one.
+    enum PrefillStyle {
+        /// `prepare` hands back the prompt; the iterator runs the final position itself.
+        case tokens
+        /// `prepare` evaluates the prompt and returns logits, carrying no drafter state -- so the
+        /// iterator follows up with a re-prime forward to obtain some.
+        case logits
+        /// `prepare` evaluates the prompt and threads drafter state through, so no re-prime.
+        case logitsWithDrafterState
+    }
+
     var kvHeads: [Int] { Array(repeating: 1, count: wideSlidingWindow == nil ? 2 : 3) }
     let script: [Int32]
     let slidingWindow: Int
     let wideSlidingWindow: Int?
     let omitDrafterState: Bool
+    /// Emit `mtpSharedKVStatesKey` without the source map that says which entry each tuple came
+    /// from -- a snapshot the consumer cannot place against the cache.
+    let omitSharedKVSources: Bool
+    let prefillStyle: PrefillStyle
 
     private(set) var emittedSharedKVSpans: [[String: Int]] = []
     private(set) var verifyChunkLengths: [Int] = []
+    private(set) var forwardCallCount = 0
 
     init(
         script: [Int32], slidingWindow: Int, wideSlidingWindow: Int? = nil,
-        omitDrafterState: Bool = false
+        omitDrafterState: Bool = false, omitSharedKVSources: Bool = false,
+        prefillStyle: PrefillStyle = .tokens
     ) {
         self.script = script
         self.slidingWindow = slidingWindow
         self.wideSlidingWindow = wideSlidingWindow
         self.omitDrafterState = omitDrafterState
+        self.omitSharedKVSources = omitSharedKVSources
+        self.prefillStyle = prefillStyle
         super.init()
     }
 
@@ -711,7 +732,16 @@ private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDim
     func prepare(
         _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
     ) throws -> PrepareResult {
-        .tokens(input.text)
+        switch prefillStyle {
+        case .tokens:
+            return .tokens(input.text)
+        case .logits:
+            return .logits(callAsFunction(input.text, cache: cache, state: nil))
+        case .logitsWithDrafterState:
+            var emitting = LMOutput.State()
+            emitting[mtpEmitFlagKey] = true
+            return .logits(callAsFunction(input.text, cache: cache, state: emitting))
+        }
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
@@ -721,6 +751,7 @@ private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDim
     func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        forwardCallCount += 1
         let positions = input.tokens.dim(-1)
         // Read the base position before the caches move; every entry is at the same offset.
         let base = cache?.first?.offset ?? 0
@@ -745,7 +776,9 @@ private final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDim
 
         var out = LMOutput.State()
         out[mtpLastHiddenStatesKey] = MLXArray.zeros([1, positions, 4])
-        out[mtpSharedKVSourceIndicesKey] = ["full_attention": 0, "sliding_attention": 1]
+        if !omitSharedKVSources {
+            out[mtpSharedKVSourceIndicesKey] = ["full_attention": 0, "sliding_attention": 1]
+        }
         out[mtpSharedKVStatesKey] = sharedKV
         return LMOutput(logits: logits, state: out)
     }
@@ -810,6 +843,83 @@ private func runGreedy(
     var tokens = [Int]()
     while let token = iter.next() { tokens.append(token) }
     return tokens
+}
+
+// MARK: - A snapshot the consumer cannot place is refused at prefill too
+//
+// Prefill emits, and it emits at three sites depending on which shape the target's `prepare`
+// returns. All three reconcile the snapshot against the cache, and all three have to act on a
+// refusal: the round-level `assert` that would otherwise catch it is compiled out in release,
+// leaving the drafter attending an unreconciled sliding snapshot.
+
+/// Shared body: a target that emits a snapshot with no source map must stand the drafter down
+/// during `init`, and the stream must still come out token-identical to plain greedy decoding.
+private func expectSourcelessPrefillStandsDown(
+    _ style: PositionScriptedMainModel.PrefillStyle,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let window = 8
+    let prompt = Array(1 ... Int32(window * 3))
+    func makeModel() -> PositionScriptedMainModel {
+        PositionScriptedMainModel(
+            script: mixedAcceptanceScript(drafted: 7), slidingWindow: window,
+            omitSharedKVSources: true, prefillStyle: style)
+    }
+
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let (tokens, iter) = try runMTP(
+        model: makeModel(), drafter: drafter, prompt: prompt, maxTokens: 24)
+
+    #expect(
+        iter.passthroughReason == MTPSpeculativeTokenIterator.missingSharedKVSourcesReason,
+        "a sourceless snapshot at prefill did not stand the drafter down",
+        sourceLocation: sourceLocation)
+    #expect(
+        drafter.draftBlockCallCount == 0, "the drafter ran against an unreconciled snapshot",
+        sourceLocation: sourceLocation)
+    #expect(
+        tokens.count == 24, "the stream did not complete in passthrough",
+        sourceLocation: sourceLocation)
+
+    let greedy = try runGreedy(model: makeModel(), prompt: prompt, maxTokens: 24)
+    #expect(
+        tokens == greedy, "standing down at prefill changed the emitted stream",
+        sourceLocation: sourceLocation)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareReturnsTokens() throws {
+    try expectSourcelessPrefillStandsDown(.tokens)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareReturnsLogits() throws {
+    try expectSourcelessPrefillStandsDown(.logits)
+}
+
+@Test func testSourcelessPrefillStandsDownWhenPrepareEmitsDrafterState() throws {
+    try expectSourcelessPrefillStandsDown(.logitsWithDrafterState)
+}
+
+/// The re-prime forward exists only to obtain drafter state. Once prefill's own state has been
+/// refused there is nothing to obtain, so it is skipped rather than run and thrown away.
+@Test func testSourcelessPrefillSkipsTheRePrimeForward() throws {
+    let window = 8
+    let prompt = Array(1 ... Int32(window * 3))
+
+    let refused = PositionScriptedMainModel(
+        script: mixedAcceptanceScript(drafted: 7), slidingWindow: window,
+        omitSharedKVSources: true, prefillStyle: .logitsWithDrafterState)
+    var refusedIterator = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)),
+        mainModel: refused, drafter: MockDrafter(draftedTokenValue: 7),
+        mainCache: refused.newCache(parameters: nil),
+        parameters: GenerateParameters(maxTokens: 4, temperature: 0), blockSize: 4)
+    #expect(
+        refused.forwardCallCount == 1,
+        "prefill ran \(refused.forwardCallCount) forwards; the re-prime should have been skipped")
+    #expect(
+        refusedIterator.passthroughReason
+            == MTPSpeculativeTokenIterator.missingSharedKVSourcesReason)
+    #expect(refusedIterator.next() != nil)
 }
 
 /// The regression that started this: a prompt longer than the sliding window used to stand the
