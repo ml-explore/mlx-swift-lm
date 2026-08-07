@@ -1030,9 +1030,10 @@ public class Qwen35: Module, VLMModel {
         let inputIds = input.text.tokens
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
         let cacheOffset = faCacheOffset(cache)
-        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
-            throw ContinuationStateError.unsupportedBatchContinuation(model: "Qwen35")
-        }
+        // Resolved before the routing decision so a warm cache fails closed on either path.
+        let positionOffset = try QwenVL.continuationAnchor(
+            model: "Qwen35", key: ropeDeltasKey, cacheOffset: cacheOffset,
+            batchSize: inputIds2D.dim(0), state: state)
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
@@ -1048,7 +1049,8 @@ public class Qwen35: Module, VLMModel {
             cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
             return try prepareContinuation(
-                input, inputIds: inputIds2D, cache: cache, state: state, prefill: prefill)
+                input, inputIds: inputIds2D, cache: cache, cacheOffset: cacheOffset,
+                positionOffset: positionOffset, prefill: prefill)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1103,25 +1105,12 @@ public class Qwen35: Module, VLMModel {
         _ input: LMInput,
         inputIds: MLXArray,
         cache: [any KVCache],
-        state: LMOutput.State?,
+        cacheOffset: Int,
+        positionOffset: Int,
         prefill: PrefillParameters
     ) throws -> PrepareResult {
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
-
-        // The Position Anchor: token offset already in the cache (P) plus the
-        // rope delta the cached images accumulated, carried in `state`.
-        let cacheOffset = faCacheOffset(cache)
-        // A cold cache needs no anchor, so long cold prefills still route through here.
-        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
-            throw ContinuationStateError.missingState(
-                model: "Qwen35", key: ropeDeltasKey.id)
-        }
-        var anchorRopeDelta = 0
-        if let seeded = state?[ropeDeltasKey] {
-            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
-        }
-        let positionOffset = cacheOffset + anchorRopeDelta
 
         // Vision tower + image→token merge — once, over the whole remainder;
         // chunks slice the merged embeddings below.
@@ -1152,18 +1141,26 @@ public class Qwen35: Module, VLMModel {
         // un-evaluated graph while letting the GPU run window i as the CPU
         // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
-        let processed = try prefill.forEachChunk(total: remainderLength) { range in
-            _ = languageModel(
+
+        /// One forward over `range`, slicing positions and embeddings in lockstep.
+        func forward(_ range: Range<Int>) -> LMOutput {
+            languageModel(
                 inputIds[0..., range],
                 inputsEmbeds: inputEmbeddings.map { $0[0..., range, 0...] },
                 cache: typedCache,
                 state: nil,
                 mask: nil,
                 positionIds: positionIds[0..., 0..., range],
+                // Never the pixels: a non-nil value here clears the carried
+                // anchor and restarts positions at zero.
                 pixelValues: nil,
                 imageGridTHW: nil,
                 videoGridTHW: nil
             )
+        }
+
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = forward(range)
             if let typedCache {
                 asyncEval(typedCache)
             }
@@ -1172,18 +1169,7 @@ public class Qwen35: Module, VLMModel {
             eval(typedCache)
         }
 
-        let tailRange = processed ..< remainderLength
-        let lastLogits = languageModel(
-            inputIds[0..., tailRange],
-            inputsEmbeds: inputEmbeddings.map { $0[0..., tailRange, 0...] },
-            cache: typedCache,
-            state: nil,
-            mask: nil,
-            positionIds: positionIds[0..., 0..., tailRange],
-            pixelValues: nil,
-            imageGridTHW: nil,
-            videoGridTHW: nil
-        ).logits
+        let lastLogits = forward(processed ..< remainderLength).logits
         prefill.progress?(remainderLength, remainderLength)
 
         // Seed the post-image text tail's anchor. The vendor's flat-continuation
@@ -1191,10 +1177,11 @@ public class Qwen35: Module, VLMModel {
         // after this remainder `tailCacheOffset = P + remainderLength`, so the
         // delta the tail needs is the offset-frame `getRopeIndex` delta minus
         // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
-        var resumeState = LMOutput.State()
-        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
-
-        return .logits(LMOutput(logits: lastLogits, state: resumeState))
+        return .logits(
+            LMOutput(
+                logits: lastLogits,
+                state: QwenVL.continuationResumeState(
+                    ropeDeltas: ropeDeltas, cacheOffset: cacheOffset, key: ropeDeltasKey)))
     }
 
     public func callAsFunction(

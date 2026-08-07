@@ -1856,36 +1856,39 @@ private func loadPromptCacheState(
     }
 
     var serializedArrays: [String: MLXArray] = [:]
-    var expectedMetadataKeys = Set([promptCacheStateVersionKey, promptCacheStateCountKey])
-    var expectedTensorKeys = Set<String>()
     for index in 0 ..< count {
-        let keyMetadataKey = promptCacheStateEntryKey(index)
         let tensorKey = promptCacheStateTensorKey(index)
-        guard let key = metadata[keyMetadataKey], let array = arrays.removeValue(forKey: tensorKey)
+        guard let key = metadata[promptCacheStateEntryKey(index)],
+            let array = arrays.removeValue(forKey: tensorKey)
         else {
             throw KVCacheError(message: "Invalid prompt cache state entry at index \(index)")
         }
         guard serializedArrays.updateValue(array, forKey: key) == nil else {
             throw KVCacheError(message: "Duplicate prompt cache state key: \(key)")
         }
-        expectedMetadataKeys.insert(keyMetadataKey)
-        expectedTensorKeys.insert(tensorKey)
     }
 
-    guard Set(stateMetadata.keys) == expectedMetadataKeys else {
+    // The loop proved every expected entry is present; counting rejects the leftovers — a
+    // reserved-namespace key this reader does not know about means the file was written by
+    // something else, so refuse it rather than silently dropping part of the state.
+    guard stateMetadata.count == count + 2 else {
         throw KVCacheError(message: "Unexpected prompt cache state metadata")
     }
-    guard Set(stateTensorKeys) == expectedTensorKeys else {
+    guard stateTensorKeys.count == count else {
         throw KVCacheError(message: "Unexpected prompt cache state tensors")
     }
 
-    var userMetadata = metadata
-    for key in stateMetadata.keys {
-        userMetadata.removeValue(forKey: key)
-    }
+    let userMetadata = metadata.filter { !$0.key.hasPrefix(promptCacheStateMetadataPrefix) }
     return (LMOutput.State(serializedArrays: serializedArrays), userMetadata)
 }
 
+/// Prefixes the stored cache class name when the file carries model state.
+///
+/// The marker is redundant for this reader — the state metadata already says whether state is
+/// present — and exists for older ones. A reader predating model state would ignore the
+/// `__mlx_lm_state_` metadata entirely and restore the cache without its continuation anchor,
+/// which positions new tokens as if the cached prefix held no images. Poisoning the class name
+/// makes that reader fail with "Unknown cache class" instead of continuing at the wrong offsets.
 private func promptCacheClassName(_ className: String, hasState: Bool) -> String {
     hasState ? "\(promptCacheStateClassPrefix)\(className)" : className
 }
@@ -1920,7 +1923,9 @@ private let promptCacheStateMetadataPrefix = "__mlx_lm_state_"
 private let promptCacheStateVersionKey = "__mlx_lm_state_version"
 private let promptCacheStateCountKey = "__mlx_lm_state_count"
 private let promptCacheStateTensorPrefix = "__mlx_lm_state_tensor_"
-private let promptCacheStateClassPrefix = "__mlx_lm_state_v1__:"
+// Derived so the format version lives in exactly one place.
+private let promptCacheStateClassPrefix =
+    "__mlx_lm_state_v\(promptCacheStateFormatVersion)__:"
 
 /// Reconstruct a single cache from its class name, state arrays, and metaState.
 ///

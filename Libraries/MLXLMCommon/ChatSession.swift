@@ -645,20 +645,8 @@ public final class ChatSession {
 
     /// Initialize the `ChatSession` with a prompt cache and the model state that belongs with it.
     ///
-    /// This is the preferred way to start a session from a saved cache: the snapshot keeps the KV
-    /// arrays and the model state together, so neither can be dropped. Read one from disk with
-    /// ``loadPromptCacheSnapshot(url:)``, or build one in process with
-    /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
-    ///
-    /// Models that do not carry model state simply ignore it, so this works for any model.
-    ///
-    /// > Important: A snapshot carries the cache and model state, not the structured chat
-    /// > transcript, so this initializer uses fragment-based continuation. A later
-    /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
-    /// > re-rendering earlier messages. Positions stay correct, but the prompt differs — and on
-    /// > vision encoders that attend across image boundaries (Qwen2-VL today) so do the new
-    /// > image's features, since it is encoded alone rather than beside the cached one.
-    /// > Use a history initializer when later turns must re-render the full conversation.
+    /// See ``init(_:instructions:promptCache:speculativeDecoding:generateParameters:components:processing:additionalContext:tools:toolDispatch:)-(ModelContainer,_,_,_,_,_,_,_,_,_)``
+    /// for the continuation behavior a snapshot implies.
     public convenience init(
         _ model: ModelContext,
         instructions: String? = nil,
@@ -1003,6 +991,11 @@ public final class ChatSession {
 
                         var reusedMainCacheWithoutDraft = false
                         var requiresMainOnlyContinuation = false
+                        // Read off the prepared input, not `input`: the latter may be narrowed to
+                        // a token-only suffix below, which would hide media the model still sees.
+                        let carriesPreparedMedia =
+                            preparedInput.image != nil || preparedInput.video != nil
+                            || preparedInput.audio != nil
                         if var currentConversation = conversation {
                             let promptTokenIds = input.text.tokens.asArray(Int.self)
                             let cachedTokenIds = currentConversation.cachedTokens
@@ -1029,8 +1022,7 @@ public final class ChatSession {
                             let turn = PromptCacheTurn(
                                 promptTokens: promptTokenIds,
                                 carriesNewMedia: containsNewMedia,
-                                carriesPreparedMedia: input.image != nil || input.video != nil
-                                    || input.audio != nil,
+                                carriesPreparedMedia: carriesPreparedMedia,
                                 carriesAttentionMask: input.text.mask != nil,
                                 carriesModelState: lmState != nil,
                                 isToolResultContinuation: isToolResultContinuation,
@@ -1148,19 +1140,16 @@ public final class ChatSession {
                         // Carried model state is safe to speculate on: the anchors position from
                         // the cache offset, which a rejected proposal rewinds along with the KV
                         // rows. Media is not — the draft would have to prefill the same images.
-                        // `input` may have been narrowed to a token-only suffix above, so test the
-                        // prepared input for media.
                         //
-                        // A warm main cache with no draft cache is admitted only when
+                        // A warm main cache with no draft cache is recoverable only when
                         // `reusedMainCacheWithoutDraft` says both can be rebuilt from the full
                         // input below. Without that ledger — a session restored from a snapshot —
                         // there is nothing to re-prefill the draft from, and handing mismatched
                         // caches to the iterator would throw rather than fall back.
-                        if preparedInput.image != nil || preparedInput.video != nil
-                            || preparedInput.audio != nil
-                            || !(draftKVCache != nil || kvCache.processedTokenCount == 0
-                                || reusedMainCacheWithoutDraft)
-                        {
+                        let draftCacheIsRecoverable =
+                            draftKVCache != nil || kvCache.processedTokenCount == 0
+                            || reusedMainCacheWithoutDraft
+                        if carriesPreparedMedia || !draftCacheIsRecoverable {
                             // Drop the draft cache as `.appendSuffixToMain` does: retaining it
                             // would leave it at an offset the main cache never visits.
                             draftKVCache = nil

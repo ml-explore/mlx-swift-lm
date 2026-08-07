@@ -1012,23 +1012,28 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
             return (languageModel.model.embedTokens(inputIds), nil, MLXArray(Int32(0)))
         }
 
-        let inputEmbeds = languageModel.model.embedTokens(inputIds)
-
-        var hiddenStates = self.visionModel(pixelValues, frames: frames)
-
-        if hiddenStates.ndim == 2 {
-            hiddenStates = hiddenStates[.newAxis, 0..., 0...]
-        }
-
-        let merged = QwenVL.mergeInputIdsWithImageFeatures(
-            inputIds: inputIds, inputEmbeds: inputEmbeds, imageFeatures: hiddenStates,
-            imageTokenId: config.baseConfiguration.imageTokenId,
-            videoTokenId: config.baseConfiguration.videoTokenId)
+        let merged = mergedVisionEmbeds(
+            inputIds: inputIds, pixelValues: pixelValues, frames: frames)
 
         let (positionIds, ropeDeltas) = getRopeIndex(
             inputIds: inputIds, imageGridThw: frames)
 
         return (merged, positionIds, ropeDeltas)
+    }
+
+    /// Token embeddings for `inputIds` with the image features written over the image tokens.
+    private func mergedVisionEmbeds(inputIds: MLXArray, pixelValues: MLXArray, frames: [THW])
+        -> MLXArray
+    {
+        var hiddenStates = self.visionModel(pixelValues, frames: frames)
+        if hiddenStates.ndim == 2 {
+            hiddenStates = hiddenStates[.newAxis, 0..., 0...]
+        }
+        return QwenVL.mergeInputIdsWithImageFeatures(
+            inputIds: inputIds, inputEmbeds: languageModel.model.embedTokens(inputIds),
+            imageFeatures: hiddenStates,
+            imageTokenId: config.baseConfiguration.imageTokenId,
+            videoTokenId: config.baseConfiguration.videoTokenId)
     }
 
     /// The pixels and grids for one call's inputs, in the dtype the vision
@@ -1053,24 +1058,18 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         // rather than inflating the rank on the text-only path.
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
         let cacheOffset = cache.first?.offset ?? 0
-
-        // The carried anchor is a single scalar, so it cannot describe several rows resuming at
-        // different positions. Independent of the missing-state guard below: that one covers an
-        // absent anchor, this one covers an anchor that cannot span the batch.
-        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
-            throw ContinuationStateError.unsupportedBatchContinuation(model: "GlmOcr")
-        }
-
-        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
-            throw ContinuationStateError.missingState(
-                model: "GlmOcr", key: ropeDeltasKey.id)
-        }
+        // Resolved before the routing decision so a warm cache fails closed on either path.
+        let positionOffset = try QwenVL.continuationAnchor(
+            model: "GlmOcr", key: ropeDeltasKey, cacheOffset: cacheOffset,
+            batchSize: inputIds2D.dim(0), state: state)
 
         let window = prefill.resolvedStepSize()
-        let tokenCount = inputIds.dim(-1)
-        if inputIds.ndim <= 2, tokenCount > 0, cacheOffset > 0 || tokenCount > window {
+        if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
+            cacheOffset > 0 || inputIds2D.dim(-1) > window
+        {
             return try prepareContinuation(
-                input, cache: cache, state: state, cacheOffset: cacheOffset, prefill: prefill)
+                input, inputIds: inputIds2D, cache: cache, cacheOffset: cacheOffset,
+                positionOffset: positionOffset, prefill: prefill)
         }
 
         let vision = visionInputs(input)
@@ -1100,66 +1099,52 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     /// The returned state carries `getRopeIndex` delta − cache offset.
     private func prepareContinuation(
         _ input: LMInput,
+        inputIds: MLXArray,
         cache: [any KVCache],
-        state: LMOutput.State?,
         cacheOffset: Int,
+        positionOffset: Int,
         prefill: PrefillParameters
     ) throws -> PrepareResult {
-        let rawInputIds = input.text.tokens
-        // getRopeIndex and the image merge both index a [batch, seq] layout.
-        let inputIds = rawInputIds.ndim == 1 ? rawInputIds[.newAxis, 0...] : rawInputIds
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
 
-        var anchorRopeDelta = 0
-        if let seeded = state?[ropeDeltasKey] {
-            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
-        }
-        let positionOffset = cacheOffset + anchorRopeDelta
-
+        // Only an image-bearing remainder needs embeddings for the whole span, since the merge
+        // writes image features across it. A text-only remainder lets each chunk embed its own
+        // slice, so peak memory stays chunk-sized rather than remainder-sized.
         let vision = visionInputs(input)
-        var embeds = languageModel.model.embedTokens(inputIds)
-        if let vision {
-            var hiddenStates = visionModel(vision.pixels, frames: vision.frames)
-            if hiddenStates.ndim == 2 {
-                hiddenStates = hiddenStates[.newAxis, 0..., 0...]
-            }
-            embeds = QwenVL.mergeInputIdsWithImageFeatures(
-                inputIds: inputIds, inputEmbeds: embeds, imageFeatures: hiddenStates,
-                imageTokenId: config.baseConfiguration.imageTokenId,
-                videoTokenId: config.baseConfiguration.videoTokenId)
+        let embeds = vision.map {
+            mergedVisionEmbeds(inputIds: inputIds, pixelValues: $0.pixels, frames: $0.frames)
         }
 
         let (positionIds, ropeDeltas) = getRopeIndex(
             inputIds: inputIds, imageGridThw: vision?.frames, positionOffset: positionOffset)
 
-        let processed = try prefill.forEachChunk(total: remainderLength) { range in
-            _ = languageModel(
-                nil,
+        /// One forward over `range`, slicing positions and embeddings in lockstep.
+        func forward(_ range: Range<Int>) -> LMOutput {
+            languageModel(
+                embeds == nil ? inputIds[0..., range] : nil,
                 cache: cache,
                 state: nil,
-                inputEmbedding: embeds[0..., range, 0...],
+                inputEmbedding: embeds?[0..., range, 0...],
                 positionIds: positionIds[0..., 0..., range])
+        }
+
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = forward(range)
             asyncEval(cache)
         }
         if processed > 0 {
             eval(cache)
         }
 
-        let tailRange = processed ..< remainderLength
-        let lastLogits = languageModel(
-            nil,
-            cache: cache,
-            state: nil,
-            inputEmbedding: embeds[0..., tailRange, 0...],
-            positionIds: positionIds[0..., 0..., tailRange]
-        ).logits
+        let lastLogits = forward(processed ..< remainderLength).logits
         prefill.progress?(remainderLength, remainderLength)
 
-        var resumeState = LMOutput.State()
-        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
-
-        return .logits(LMOutput(logits: lastLogits, state: resumeState))
+        return .logits(
+            LMOutput(
+                logits: lastLogits,
+                state: QwenVL.continuationResumeState(
+                    ropeDeltas: ropeDeltas, cacheOffset: cacheOffset, key: ropeDeltasKey)))
     }
 
     public func callAsFunction(

@@ -1670,40 +1670,26 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     ) throws -> (MLXArray, [Int]) {
         let imageMask = (inputIds .== MLXArray(imageTokenIndex))
         let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        var specialMask = (imageMask .|| videoMask)
+        let specialMask = (imageMask .|| videoMask)
 
-        // Deepstack features are indexed by token position, before the token
-        // mask is broadcast across hidden dimensions for the scatter below.
-        // This also counts the special tokens, so no separate sum is needed.
+        // Flat positions of the visual tokens, the same indexing `applyDeepstack` scatters
+        // by. Everything below derives from these: broadcasting the mask across the hidden
+        // dimension only to read it back would download `batch * seq * hidden` bools.
         let visualIndices = nonZero(specialMask)
 
-        specialMask = expandedDimensions(specialMask, axis: -1)
-        let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
-
-        let nImageFeatures = imageFeatures.dim(0)
-        let nImageMaskElements = maskExpanded.sum().item(Int.self)
-        let imageFeatureSize = imageFeatures.size
-
-        guard nImageMaskElements == imageFeatureSize else {
+        let hiddenSize = inputEmbeds.dim(-1)
+        guard visualIndices.count * hiddenSize == imageFeatures.size else {
             throw Qwen3VLError.featureTokenMismatch(
-                expected: visualIndices.count, actual: nImageFeatures)
+                expected: visualIndices.count, actual: imageFeatures.dim(0))
         }
+        guard !visualIndices.isEmpty else { return (inputEmbeds, visualIndices) }
 
-        let originalShape = inputEmbeds.shape
-        let flattenedEmbeds = inputEmbeds.flattened()
-        let flattenedFeatures = imageFeatures.flattened()
-        let flattenedMask = maskExpanded.flattened()
+        // Scatter over a [batch * seq, hidden] view so one row index places a whole embedding.
+        let result = inputEmbeds.reshaped([-1, hiddenSize])
+        result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
+            imageFeatures.reshaped([visualIndices.count, hiddenSize])
 
-        let indices = nonZero(flattenedMask.asType(.bool))
-
-        var result = flattenedEmbeds
-        if !indices.isEmpty && indices.count == flattenedFeatures.size {
-            let indexArray = MLXArray(indices.map { UInt32($0) })
-            result[indexArray] = flattenedFeatures
-        }
-
-        result = result.reshaped(originalShape)
-        return (result, visualIndices)
+        return (result.reshaped(inputEmbeds.shape), visualIndices)
     }
 
     private func nonZero(_ mask: MLXArray) -> [Int] {
@@ -1815,22 +1801,18 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         // before choosing a warm path rather than falling through and trapping.
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
         let cacheOffset = cache.first?.offset ?? 0
-
-        guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
-            throw ContinuationStateError.missingState(
-                model: "Qwen3VL", key: ropeDeltasKey.id)
-        }
-        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
-            throw ContinuationStateError.unsupportedBatchContinuation(model: "Qwen3VL")
-        }
+        // Resolved before the routing decision so a warm cache fails closed on either path.
+        let positionOffset = try QwenVL.continuationAnchor(
+            model: "Qwen3VL", key: ropeDeltasKey, cacheOffset: cacheOffset,
+            batchSize: inputIds2D.dim(0), state: state)
 
         let window = prefill.resolvedStepSize()
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
             cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
             return try prepareContinuation(
-                input, inputIds: inputIds2D, cache: cache, state: state, cacheOffset: cacheOffset,
-                prefill: prefill)
+                input, inputIds: inputIds2D, cache: cache, cacheOffset: cacheOffset,
+                positionOffset: positionOffset, prefill: prefill)
         }
 
         let vision = try visionInputs(input)
@@ -1870,18 +1852,12 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput,
         inputIds: MLXArray,
         cache: [any KVCache],
-        state: LMOutput.State?,
         cacheOffset: Int,
+        positionOffset: Int,
         prefill: PrefillParameters
     ) throws -> PrepareResult {
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
-
-        var anchorRopeDelta = 0
-        if let seeded = state?[ropeDeltasKey] {
-            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
-        }
-        let positionOffset = cacheOffset + anchorRopeDelta
 
         let vision = try visionInputs(input)
 
@@ -1959,10 +1935,11 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let lastLogits = forward(processed ..< remainderLength).logits
         prefill.progress?(remainderLength, remainderLength)
 
-        var resumeState = LMOutput.State()
-        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
-
-        return .logits(LMOutput(logits: lastLogits, state: resumeState))
+        return .logits(
+            LMOutput(
+                logits: lastLogits,
+                state: QwenVL.continuationResumeState(
+                    ropeDeltas: ropeDeltas, cacheOffset: cacheOffset, key: ropeDeltasKey)))
     }
 
     public func callAsFunction(

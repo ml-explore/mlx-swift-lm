@@ -62,37 +62,20 @@ final class GlmOcrContinuationTests: XCTestCase {
         return GlmOcr(config)
     }
 
-    /// One image with grid THW (1, 4, 4) and merge size 2 — four merged tokens
-    /// in the text stream.
-    private func makeImage() -> LMInput.ProcessedImage {
-        LMInput.ProcessedImage(
-            pixels: MLXRandom.normal([16, 3 * 2 * 16 * 16]), frames: [THW(1, 4, 4)])
-    }
+    /// The shared continuation equivalences, configured for GLM-OCR: image token 500, and no
+    /// vision-start marker — its template emits none.
+    private let continuation = ContinuationAssertions(imageTokenId: 500)
 
-    private func imageRun() -> MLXArray {
-        MLXArray([Int32](repeating: 500, count: 4)).expandedDimensions(axis: 0)
-    }
-
-    /// Deterministic pseudo-random plain-text tokens, away from the special
-    /// ids (500...502).
+    private func makeImage() -> LMInput.ProcessedImage { continuation.image() }
+    private func imageRun() -> MLXArray { continuation.imageRun() }
     private func textTokens(_ count: Int, seed: Int32 = 0) -> MLXArray {
-        var values: [Int32] = []
-        for i in 0 ..< count {
-            let value: Int = (i * 13 + 7 + Int(seed)) % 480
-            values.append(Int32(value))
-        }
-        return MLXArray(values).expandedDimensions(axis: 0)
+        continuation.textTokens(count, seed: seed)
     }
-
     private func lastLogits(_ result: PrepareResult) throws -> (MLXArray, LMOutput.State?) {
-        guard case .logits(let out) = result else {
-            throw XCTSkip("expected .logits from prepare")
-        }
-        return (out.logits[0..., -1, 0...], out.state)
+        try continuation.lastLogits(result)
     }
-
     private func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
-        abs(a - b).max().item(Float.self)
+        continuation.maxAbsDiff(a, b)
     }
 
     private let ropeDeltasKey = LMOutput.Key<MLXArray>("glmocr.ropeDeltas")
@@ -100,145 +83,25 @@ final class GlmOcrContinuationTests: XCTestCase {
     // MARK: - Warm continuation
 
     func testWarmTextContinuationMatchesFullPrefill() throws {
-        MLXRandom.seed(7)
-        let model = try makeTinyModel()
-        let t1 = textTokens(40)
-        let t2 = textTokens(8, seed: 3)
-
-        let cacheF = model.newCache(parameters: nil)
-        let (logitsF, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1))),
-                cache: cacheF, state: nil, prefill: .init()))
-
-        let cacheW = model.newCache(parameters: nil)
-        let (_, s1) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
-        let (logitsW, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
-            "warm continuation diverged from full prefill")
+        try continuation.assertWarmTextContinuation(try makeTinyModel())
     }
 
-    /// With an image in turn 1, the rope delta the image accumulated must be
-    /// carried into turn 2's prefill.
     func testWarmImageContinuationMatchesFullPrefill() throws {
-        MLXRandom.seed(5)
-        let model = try makeTinyModel()
-        let image = makeImage()
-
-        let t1 = concatenated([textTokens(10), imageRun(), textTokens(8, seed: 5)], axis: 1)
-        let t2 = textTokens(8, seed: 9)
-
-        let cacheF = model.newCache(parameters: nil)
-        let (logitsF, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: cacheF, state: nil, prefill: .init()))
-
-        let cacheW = model.newCache(parameters: nil)
-        let (_, s1) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
-                prefill: .init()))
-        let (logitsW, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
-            "state-threaded warm continuation diverged from full prefill")
+        try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
-    /// An image in the middle turn: the continuation must place the new image
-    /// at the anchor and hand back a resume state positioning the next turn.
     func testImageMidContinuationResumeState() throws {
-        MLXRandom.seed(13)
-        let model = try makeTinyModel()
-        let image = makeImage()
-
-        let t1 = textTokens(12)
-        let t2 = concatenated(
-            [textTokens(4, seed: 2), imageRun(), textTokens(6, seed: 4)], axis: 1)
-        let t3 = textTokens(8, seed: 6)
-
-        let cacheF = model.newCache(parameters: nil)
-        let (logitsF, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: concatenated([t1, t2, t3], axis: 1)), image: image),
-                cache: cacheF, state: nil, prefill: .init()))
-
-        let cacheW = model.newCache(parameters: nil)
-        let (_, s1) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
-        let (_, s2) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2), image: image), cache: cacheW, state: s1,
-                prefill: .init()))
-        let (logitsW, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t3)), cache: cacheW, state: s2, prefill: .init()))
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
-            "post-image resume state positioned the following turn wrong")
+        try continuation.assertImageMidContinuationResumeState(try makeTinyModel())
     }
 
     // MARK: - Windowed prefill
 
     func testWindowedPrefillMatchesSingleShot() throws {
-        MLXRandom.seed(11)
-        let model = try makeTinyModel()
-        let prompt = textTokens(40)
-
-        let cacheS = model.newCache(parameters: nil)
-        let (logitsS, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, prefill: .init()))
-
-        let cacheC = model.newCache(parameters: nil)
-        let (logitsC, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil,
-                prefill: .init(stepSize: 8)))
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsC, logitsS), 1e-3,
-            "windowed prefill diverged from single-shot")
+        try continuation.assertWindowedTextPrefill(try makeTinyModel())
     }
 
-    /// An image run straddling a window boundary: embeddings and positions must
-    /// be sliced in lockstep per chunk.
     func testWindowedImagePrefillMatchesSingleShot() throws {
-        MLXRandom.seed(17)
-        let model = try makeTinyModel()
-        let image = makeImage()
-
-        // The run of 4 image tokens starts at index 6 with a window of 8, so it
-        // spans the boundary between the first and second chunk.
-        let prompt = concatenated(
-            [textTokens(6), imageRun(), textTokens(30, seed: 3)], axis: 1)
-
-        let cacheS = model.newCache(parameters: nil)
-        let (logitsS, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: prompt), image: image), cache: cacheS, state: nil,
-                prefill: .init()))
-
-        let cacheC = model.newCache(parameters: nil)
-        let (logitsC, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: prompt), image: image), cache: cacheC, state: nil,
-                prefill: .init(stepSize: 8)))
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsC, logitsS), 1e-3,
-            "windowed image prefill diverged from single-shot")
+        try continuation.assertWindowedImagePrefill(try makeTinyModel())
     }
 
     // MARK: - Fail-closed continuation state
