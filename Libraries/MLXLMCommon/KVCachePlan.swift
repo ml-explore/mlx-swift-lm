@@ -22,6 +22,7 @@ package struct KVCachePlan: Sendable, Equatable {
 
     package func validated(_ storage: KVCacheStorage) throws -> KVCacheStorage {
         precondition(storage.plan == self, "KVCacheStorage used with a different plan")
+        precondition(!storage.roundIsOpen, "validated(_:) ran inside a staged round")
         storage.cache = try validated(storage.cache)
         return storage
     }
@@ -37,6 +38,7 @@ package struct KVCachePlan: Sendable, Equatable {
     /// unsupported state, later decode steps only compare the completed plan.
     package func apply(to storage: KVCacheStorage) {
         precondition(storage.plan == self, "KVCacheStorage used with a different plan")
+        precondition(!storage.roundIsOpen, "apply(to:) ran inside a staged round")
         guard !storage.isApplicationTerminal else { return }
         guard let configuration else {
             storage.isApplicationTerminal = true
@@ -63,6 +65,7 @@ package struct KVCachePlan: Sendable, Equatable {
         to storage: KVCacheStorage
     ) throws -> KVCacheApplicationResult? {
         precondition(storage.plan == self, "KVCacheStorage used with a different plan")
+        precondition(!storage.roundIsOpen, "applyAndValidate(to:) ran inside a staged round")
         guard !storage.isApplicationTerminal else { return nil }
         guard let configuration else {
             storage.isApplicationTerminal = true
@@ -103,10 +106,23 @@ package struct KVCachePlan: Sendable, Equatable {
 /// permit unsynchronized mutation of both the cache and its progress state.
 package final class KVCacheStorage {
     package var cache: [KVCache] {
-        didSet { isApplicationTerminal = false }
+        didSet {
+            precondition(
+                !roundIsOpen,
+                "the realized cache was replaced while a staged round was open")
+            isApplicationTerminal = false
+        }
     }
     package let plan: KVCachePlan
     package fileprivate(set) var isApplicationTerminal = false
+
+    /// Whether a staged round is presently writing provisionally against these entries.
+    ///
+    /// A round hands the model substitute caches and defers part of its writes, so the entries
+    /// and the timeline are deliberately out of step until it commits. Operations that assume
+    /// they are in step -- replacing entries, trimming, snapshotting -- are refused while one is
+    /// open rather than silently reading a half-written position.
+    package internal(set) var roundIsOpen = false
     /// Authoritative logical position represented by this model cache.
     ///
     /// Individual cache entries retain their native offsets and metadata, but
@@ -142,6 +158,7 @@ package final class KVCacheStorage {
     @discardableResult
     package func trim(_ count: Int) -> Int {
         precondition(count >= 0, "Trim count cannot be negative")
+        precondition(!roundIsOpen, "cannot trim while a staged round is open")
         let trimmed = trimPromptCache(cache, numTokens: count)
         precondition(
             trimmed <= processedTokenCount,
@@ -152,6 +169,7 @@ package final class KVCacheStorage {
 
     /// Create an independent snapshot while preserving plan and progress.
     package func copy() -> KVCacheStorage {
+        precondition(!roundIsOpen, "cannot snapshot while a staged round is open")
         let copy = KVCacheStorage(
             cache.map { $0.copy() },
             plan: plan,
