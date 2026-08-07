@@ -564,6 +564,10 @@ enum Qwen35Language {
             if let cache {
                 cache[1] = state
                 cache.advance(S)
+                // Advances the cache position, and snapshots the new state when
+                // the caller has opted into `rewindDepth`. A no-op branch
+                // otherwise, which is the default.
+                cache.checkpoint(advancing: S)
             }
 
             out = norm(out, gate: z)

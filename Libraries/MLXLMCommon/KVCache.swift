@@ -1443,7 +1443,56 @@ public class ArraysCache: BaseKVCache {
 }
 
 /// Simple cache for Mamba-style state space models
+///
+/// ## Rewindability
+///
+/// A recurrent state has no rows to drop: token `t`'s contribution has already
+/// been folded into token `t+1`'s state, so there is nothing to slice off the
+/// end. `trim(_:)` therefore cannot be implemented the way `KVCacheSimple`
+/// implements it, and `MambaCache` reports `isTrimmable == false` by default.
+///
+/// That default is what blocks speculative decoding on hybrid SSM/attention
+/// models: ``MTPSpeculativeTokenIterator`` requires
+/// ``canTrimPromptCache(_:)``, which is an `allSatisfy` over every layer's
+/// cache, so a single non-trimmable entry disables speculation for the whole
+/// model.
+///
+/// Opting in to ``rewindDepth`` makes the cache rewindable by keeping a bounded
+/// history of past states and restoring one on `trim`. With `rewindDepth == 0`
+/// — the default — nothing is recorded, nothing is allocated, and behaviour is
+/// identical to before this capability existed.
+///
+/// Callers must set `rewindDepth` to at least the deepest rewind they will
+/// request (for speculative decoding, `blockSize - 1`).
 public class MambaCache: ArraysCache {
+
+    /// Bounded history of past cache slots, oldest first, tagged with the token
+    /// position each snapshot represents.
+    ///
+    /// The slots are stored rather than ``state`` because `state` drops empty
+    /// slots: a `MambaCache` whose conv slot is unused (`convKernelSize == 1`)
+    /// has `state == [ssm]`, and restoring that through the `state` setter would
+    /// resize the cache from two slots to one.
+    private var rewindHistory: [(position: Int, slots: [MLXArray?])] = []
+
+    /// Token position this cache has advanced to, maintained independently of
+    /// ``BaseKVCache/offset``.
+    ///
+    /// `ArraysCache` never advances `offset` — `advance(_:)` only decrements
+    /// `lengths`/`leftPadding` — and models using this cache do not maintain it
+    /// either. Tracking position here keeps rewind self-contained instead of
+    /// making it depend on a field nothing currently sets.
+    private var rewindPosition: Int = 0
+
+    /// How many tokens of rewind history to retain. `0` (the default) disables
+    /// rewinding entirely.
+    ///
+    /// Memory cost is `rewindDepth + 1` copies of the cache slots. For
+    /// Qwen3.5/3.6 GDN that is ~2.06 MiB per linear-attention layer
+    /// (recurrent `[1, 32, 128, 128]` f32 plus conv `[1, 4, 8192]` bf16), so
+    /// ~61.9 MiB per retained step across 30 such layers.
+    public var rewindDepth: Int = 0
+
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
     }
@@ -1451,7 +1500,59 @@ public class MambaCache: ArraysCache {
     public override func copy() -> any KVCache {
         let new = MambaCache()
         copyContents(to: new)
+        new.rewindDepth = rewindDepth
+        new.rewindHistory = rewindHistory
+        new.rewindPosition = rewindPosition
         return new
+    }
+
+    /// Advance the cache position and snapshot the new state if rewinding is
+    /// enabled.
+    ///
+    /// Call this once per forward pass, after the new state has been written,
+    /// passing the number of tokens the pass consumed. With `rewindDepth == 0`
+    /// this is a single branch and records nothing.
+    ///
+    /// A prefill pass of `S` tokens produces one snapshot at position `S`, so a
+    /// rewind can land on any decode step but not inside a prefill — which is
+    /// the only granularity speculative decoding needs.
+    public func checkpoint(advancing tokens: Int) {
+        rewindPosition += tokens
+        guard rewindDepth > 0 else { return }
+        rewindHistory.append((rewindPosition, cache.map { $0?[.ellipsis] }))
+        let capacity = rewindDepth + 1
+        if rewindHistory.count > capacity {
+            rewindHistory.removeFirst(rewindHistory.count - capacity)
+        }
+    }
+
+    /// `true` only when a rewind has been opted into and a snapshot exists.
+    ///
+    /// Deliberately conservative: `trimPromptCache(_:numTokens:)` does not treat
+    /// a `0` return as an error, so advertising trimmability without the history
+    /// to honour it would leave rejected tokens folded into the SSM state — a
+    /// silent correctness bug rather than a slow path.
+    public override var isTrimmable: Bool {
+        rewindDepth > 0 && !rewindHistory.isEmpty
+    }
+
+    /// Restore the state as it was `n` tokens ago.
+    ///
+    /// Returns `n` on success and `0` if no snapshot lands exactly on the target
+    /// position, leaving the cache untouched. The rewind is exact or refused —
+    /// never approximate — because an SSM state that disagrees with the
+    /// attention caches by even one token yields wrong output with no error.
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, rewindDepth > 0 else { return 0 }
+        let target = rewindPosition - n
+        guard target >= 0,
+            let index = rewindHistory.lastIndex(where: { $0.position == target })
+        else { return 0 }
+        cache = rewindHistory[index].slots
+        rewindPosition = target
+        rewindHistory.removeSubrange(rewindHistory.index(after: index)...)
+        return n
     }
 }
 
