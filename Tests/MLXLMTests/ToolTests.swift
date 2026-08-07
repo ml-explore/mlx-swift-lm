@@ -3,6 +3,165 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    private func toolSchemas(_ names: String...) -> [[String: any Sendable]] {
+        names.map { name in
+            ["function": ["name": name] as [String: any Sendable]]
+        }
+    }
+
+    @Test("Rejected tool-call preview is bounded and omitted from error descriptions")
+    func rejectedToolCallDiagnosticPrivacy() throws {
+        let rawText = "secret-" + String(repeating: "🧪", count: 20) + "-tail"
+        let toolName = "secret-model-provided-name"
+        let rejection = RejectedToolCall(
+            reason: .malformedSyntax,
+            format: .json,
+            toolName: toolName,
+            rawText: rawText,
+            detail: "Could not parse payload.",
+            previewByteLimit: 24)
+
+        #expect(rejection.rawTextByteCount == rawText.utf8.count)
+        #expect(rejection.isPreviewTruncated)
+        #expect(rejection.rawTextPreview.hasPrefix("secret-"))
+        #expect(rejection.rawTextPreview.hasSuffix("-tail"))
+
+        let message = try #require(RejectedToolCallError(rejection).errorDescription)
+        #expect(!message.contains("secret"))
+        #expect(!message.contains(toolName))
+        #expect(message.contains(RejectedToolCall.Reason.malformedSyntax.rawValue))
+    }
+
+    @Test("Lampo Qwen hybrid protocol is rejected at every chunk boundary")
+    func lampoHybridProtocolRejectedAtEveryChunkBoundary() throws {
+        let payload = """
+            <tool_call>
+            <|im_start|>mcp_filo_7bb95d18__read_file>
+            <parameter=path>
+            /Users/alessiopollero/dev/Lampo/Lampo/Lampo.docc/Lampo.md
+            </parameter>
+            </mcp:parameter>
+            </mcp:tool>
+            </mcp:thought>
+            """
+
+        for splitOffset in 0 ... payload.count {
+            let split = payload.index(payload.startIndex, offsetBy: splitOffset)
+            let processor = ToolCallProcessor(
+                format: .xmlFunction,
+                tools: toolSchemas("mcp_filo_7bb95d18__read_file"))
+            var outputs = processor.processChunkOutputs(String(payload[..<split]))
+            outputs += processor.processChunkOutputs(String(payload[split...]))
+            outputs += processor.processEOSOutputs()
+
+            let rejections = outputs.compactMap { output -> RejectedToolCall? in
+                guard case .rejectedToolCall(let rejection) = output else { return nil }
+                return rejection
+            }
+            #expect(rejections.count == 1)
+            let rejection = try #require(rejections.first)
+            #expect(rejection.reason == .incompleteOutput)
+            #expect(rejection.format == .xmlFunction)
+            #expect(!outputs.contains { if case .response = $0 { true } else { false } })
+            #expect(processor.rejectedToolCallCount == 1)
+        }
+    }
+
+    @Test("Rejected and accepted calls retain source order")
+    func rejectedAndAcceptedCallsRetainSourceOrder() throws {
+        let processor = ToolCallProcessor(format: .json, tools: toolSchemas("allowed"))
+        let outputs = processor.processChunkOutputs(
+            #"before<tool_call>{"name":"unknown","arguments":{}}</tool_call>between<tool_call>{"name":"allowed","arguments":{}}</tool_call>after"#
+        )
+
+        #expect(outputs.count == 5)
+        #expect(outputs[0] == .response("before"))
+        guard case .rejectedToolCall(let rejection) = outputs[1] else {
+            Issue.record("Expected an undeclared-tool rejection")
+            return
+        }
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "unknown")
+        #expect(outputs[2] == .response("between"))
+        guard case .toolCall(let call) = outputs[3] else {
+            Issue.record("Expected the declared call")
+            return
+        }
+        #expect(call.function.name == "allowed")
+        #expect(outputs[4] == .response("after"))
+    }
+
+    @Test("LFM2 EOS orders response before an unfinished second call")
+    func lfm2EOSOrdersIncompleteSecondCall() {
+        let processor = ToolCallProcessor(format: .lfm2, tools: toolSchemas("get_weather"))
+        #expect(
+            processor.processChunkOutputs(
+                "<|tool_call_start|>[get_weather()]between <|tool_call_start|>[get_weather("
+            ).isEmpty)
+
+        let outputs = processor.processEOSOutputs()
+        #expect(outputs.count == 3)
+        guard outputs.count == 3 else { return }
+        guard case .toolCall = outputs[0] else {
+            Issue.record("Expected the completed first call")
+            return
+        }
+        #expect(outputs[1] == .response("between "))
+        guard case .rejectedToolCall(let rejection) = outputs[2] else {
+            Issue.record("Expected an incomplete second call")
+            return
+        }
+        #expect(rejection.reason == .incompleteOutput)
+    }
+
+    @Test("LFM2 EOS preserves events around a malformed inter-call marker")
+    func lfm2EOSOrdersMalformedInterCallMarker() {
+        let processor = ToolCallProcessor(format: .lfm2, tools: toolSchemas("get_weather"))
+        #expect(
+            processor.processChunkOutputs(
+                "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after <|tool_call_start|>[get_weather()]"
+            ).isEmpty)
+
+        let outputs = processor.processEOSOutputs()
+        #expect(outputs.count == 5)
+        guard outputs.count == 5 else { return }
+        guard case .toolCall = outputs[0] else {
+            Issue.record("Expected the completed first call")
+            return
+        }
+        #expect(outputs[1] == .response("before "))
+        guard case .rejectedToolCall(let rejection) = outputs[2] else {
+            Issue.record("Expected a malformed marker rejection")
+            return
+        }
+        #expect(rejection.reason == .malformedSyntax)
+        #expect(outputs[3] == .response(" after "))
+        guard case .toolCall = outputs[4] else {
+            Issue.record("Expected the completed second call")
+            return
+        }
+    }
+
+    @Test("Tagged JSON rejection reasons distinguish name and argument failures")
+    func taggedJSONRejectionReasonsAreSpecific() throws {
+        let cases: [(String, RejectedToolCall.Reason)] = [
+            (#"<tool_call>{"arguments":{}}</tool_call>"#, .missingToolName),
+            (#"<tool_call>{"name":"allowed","arguments":[]}</tool_call>"#, .invalidArguments),
+            (#"<tool_call>{"name":}</tool_call>"#, .malformedSyntax),
+        ]
+
+        for (payload, expectedReason) in cases {
+            let processor = ToolCallProcessor(format: .json, tools: toolSchemas("allowed"))
+            let outputs = processor.processChunkOutputs(payload)
+            #expect(outputs.count == 1)
+            guard case .rejectedToolCall(let rejection)? = outputs.first else {
+                Issue.record("Expected a rejection for \(payload)")
+                continue
+            }
+            #expect(rejection.reason == expectedReason)
+        }
+    }
+
     @Test("ChatConventionsProviding defaults to nil for both properties")
     func chatConventionsOptInDefaults() {
         struct Bare: ChatConventionsProviding {}
@@ -291,8 +450,8 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Osaka"))
     }
 
-    @Test("Test JSON Format via ToolCallProcessor - Invalid Bare JSON Flushes At EOS")
-    func testJSONFormatProcessorInvalidBareJSONFlushesAtEOS() {
+    @Test("Test JSON Format via ToolCallProcessor - Incomplete Bare Tool Rejects At EOS")
+    func testJSONFormatProcessorIncompleteBareToolRejectsAtEOS() throws {
         let processor = ToolCallProcessor(format: .json)
         let chunk = "{\"name\": \"get_weather\", \"arguments\": "
 
@@ -300,8 +459,12 @@ struct ToolTests {
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
         #expect(output == nil)
-        #expect(eosOutput == chunk)
+        #expect(eosOutput == nil)
         #expect(processor.toolCalls.isEmpty)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .incompleteOutput)
     }
 
     @Test("Test JSON Format via ToolCallProcessor - Non Tool JSON Stays Text")
@@ -364,10 +527,8 @@ struct ToolTests {
         #expect(processor.toolCalls.isEmpty)
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tool Name Stays Text When Tools Are Provided"
-    )
-    func testJSONFormatProcessorUnknownToolNameStaysTextWithTools() {
+    @Test("Test JSON Format via ToolCallProcessor - Unknown Tool Name Is Rejected")
+    func testJSONFormatProcessorUnknownToolNameIsRejected() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -385,9 +546,14 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(output == chunk)
+        #expect(output == nil)
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.isEmpty)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "not_declared")
     }
 
     @Test("Test JSON Format via ToolCallProcessor - Recovers Tagged Tool Call After Brace Text")
@@ -415,10 +581,8 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool Preserved And Continues Parsing"
-    )
-    func testJSONFormatProcessorUnknownTaggedToolPreservedAndContinuesParsing() throws {
+    @Test("Test JSON Processor - Unknown Tagged Tool Rejected And Continues Parsing")
+    func testJSONFormatProcessorUnknownTaggedToolRejectedAndContinuesParsing() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -437,18 +601,20 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(output == "<tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(output == nil)
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.count == 1)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
 
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "get_weather")
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool With Leading Text Preserved"
-    )
-    func testJSONFormatProcessorUnknownTaggedToolWithLeadingTextPreserved() throws {
+    @Test("Test JSON Processor - Unknown Tagged Tool Preserves Only Leading Text")
+    func testJSONFormatProcessorUnknownTaggedToolPreservesOnlyLeadingText() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -467,10 +633,13 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(
-            output == "Preface <tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(output == "Preface ")
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.count == 1)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
 
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "get_weather")

@@ -712,6 +712,191 @@ public class ChatSessionTests: XCTestCase {
         func didSample(token: MLXArray) {}
     }
 
+    private struct LiteralTokenizer: Tokenizer {
+        let tokenByCharacter: [Character: Int]
+        let characterByToken: [Int: Character]
+
+        init(output: String) {
+            let characters = Array(Set(output)).sorted { String($0) < String($1) }
+            tokenByCharacter = Dictionary(
+                uniqueKeysWithValues: characters.enumerated().map { ($0.element, $0.offset + 1) })
+            characterByToken = Dictionary(
+                uniqueKeysWithValues: tokenByCharacter.map { ($0.value, $0.key) })
+        }
+
+        var bosToken: String? { nil }
+        var eosToken: String? { nil }
+        var unknownToken: String? { nil }
+        var eosTokenId: Int? { 99 }
+        var unknownTokenId: Int? { 98 }
+
+        func tokens(for output: String) -> [Int] {
+            output.compactMap { tokenByCharacter[$0] }
+        }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] { [97] }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            String(tokenIds.compactMap { characterByToken[$0] })
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            token.count == 1 ? token.first.flatMap { tokenByCharacter[$0] } : nil
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            characterByToken[id].map(String.init)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            [97]
+        }
+    }
+
+    private final class TokenSequenceState: @unchecked Sendable {
+        private let lock = NSLock()
+        private let tokens: [Int32]
+        private var index = 0
+
+        init(tokens: [Int]) {
+            self.tokens = tokens.map(Int32.init)
+        }
+
+        var current: Int32 {
+            lock.withLock { tokens[min(index, tokens.count - 1)] }
+        }
+
+        func advance() {
+            lock.withLock { index = min(index + 1, tokens.count - 1) }
+        }
+    }
+
+    private struct ForceTokenSequenceProcessor: LogitProcessor {
+        let state: TokenSequenceState
+
+        func prompt(_ prompt: MLXArray) {}
+
+        func process(logits: MLXArray) -> MLXArray {
+            let indices = MLXArray(0 ..< Int32(logits.dim(-1)))
+            return MLX.where(
+                indices .== MLXArray(state.current), logits, MLXArray(-Float.infinity))
+        }
+
+        func didSample(token: MLXArray) {
+            state.advance()
+        }
+    }
+
+    private func rejectionSession(
+        output: String,
+        messageGenerator: any MessageGenerator = DefaultMessageGenerator(),
+        tools: [ToolSpec]? = nil,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
+    ) -> ChatSession {
+        let tokenizer = LiteralTokenizer(output: output)
+        let configuration = ModelConfiguration(
+            id: "rejected-tool-call-test",
+            eosTokenIds: [99],
+            toolCallFormat: .json)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: configuration,
+            messageGenerator: messageGenerator)
+        let outputTokens = tokenizer.tokens(for: output) + [99]
+        let components = GenerationComponents {
+            ForceTokenSequenceProcessor(state: TokenSequenceState(tokens: outputTokens))
+        }
+        return ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(
+                maxTokens: outputTokens.count + 1, temperature: 0),
+            components: components,
+            tools: tools,
+            toolDispatch: toolDispatch)
+    }
+
+    func testStreamDetailsEmitsRejectedToolCallAndCompletionCount() async throws {
+        let session = rejectionSession(output: #"<tool_call>{"#)
+        var rejection: RejectedToolCall?
+        var info: GenerateCompletionInfo?
+        var chunks: [String] = []
+
+        for try await event in session.streamDetails(to: "trigger") {
+            if let value = event.rejectedToolCall { rejection = value }
+            if let value = event.info { info = value }
+            if let value = event.chunk { chunks.append(value) }
+        }
+
+        XCTAssertEqual(rejection?.reason, .incompleteOutput)
+        XCTAssertEqual(info?.rejectedToolCallCount, 1)
+        XCTAssertTrue(chunks.isEmpty)
+    }
+
+    func testTextStreamThrowsRejectedToolCallError() async throws {
+        let session = rejectionSession(output: #"<tool_call>{"#)
+
+        do {
+            for try await _ in session.streamResponse(to: "trigger") {}
+            XCTFail("Expected RejectedToolCallError")
+        } catch let error as RejectedToolCallError {
+            XCTAssertEqual(error.rejection.reason, .incompleteOutput)
+        }
+    }
+
+    func testRejectedGenerationIsNotCommittedToConversation() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let session = rejectionSession(
+            output: #"<tool_call>{"#,
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+
+        for prompt in ["first", "second"] {
+            do {
+                for try await _ in session.streamResponse(to: prompt) {}
+                XCTFail("Expected RejectedToolCallError")
+            } catch is RejectedToolCallError {
+                // Expected. The next request must start from a clean transcript.
+            }
+        }
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages { calls.append(call) }
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0], [.init(role: .user, content: "first")])
+        XCTAssertEqual(calls[1], [.init(role: .user, content: "second")])
+    }
+
+    func testRejectedGenerationPreventsPartialToolDispatch() async throws {
+        let dispatchCount = CallCounter()
+        let output =
+            #"<tool_call>{"name":"allowed","arguments":{}}</tool_call><tool_call>{"#
+        let tools: [ToolSpec] = [
+            [
+                "type": "function",
+                "function": ["name": "allowed"] as [String: any Sendable],
+            ]
+        ]
+        let session = rejectionSession(
+            output: output,
+            tools: tools,
+            toolDispatch: { _ in
+                dispatchCount.increment()
+                return "should not execute"
+            })
+
+        do {
+            for try await _ in session.streamDetails(to: "trigger") {}
+            XCTFail("Expected RejectedToolCallError")
+        } catch let error as RejectedToolCallError {
+            XCTAssertEqual(error.rejection.reason, .incompleteOutput)
+        }
+        XCTAssertEqual(dispatchCount.value, 0)
+    }
+
     /// Thread-safe counter for asserting how many times a `@Sendable` factory runs.
     private final class CallCounter: @unchecked Sendable {
         private let lock = NSLock()

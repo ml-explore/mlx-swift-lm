@@ -9,6 +9,7 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
     private var parser: HarmonyFrameParser
     private var router: HarmonyOutputRouter
     private var stopStringFilter: StopStringFilter
+    private(set) var rejectedToolCallCount = 0
     let additionalStopTokenIDs: Set<Int>
     let receivesStopTokens = true
 
@@ -73,12 +74,24 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
             case .toolCall(let call):
                 // A non-text event is a hard boundary: a stop string cannot
                 // span across a tool call.
-                if let text = stopStringFilter.finish(), !emit(.response(text)) {
-                    return false
-                }
+                guard flushResponseBoundary(emit: emit) else { return false }
                 guard emit(.toolCall(call)) else { return false }
+
+            case .rejectedToolCall(let rejection):
+                // Rejections are semantic boundaries for the same reason as
+                // accepted calls: response stop strings cannot span protocol.
+                rejectedToolCallCount += 1
+                guard flushResponseBoundary(emit: emit) else { return false }
+                guard emit(.rejectedToolCall(rejection)) else { return false }
             }
         }
         return true
+    }
+
+    private mutating func flushResponseBoundary(
+        emit: (TokenStreamEvent) -> Bool
+    ) -> Bool {
+        guard let text = stopStringFilter.finish() else { return true }
+        return emit(.response(text))
     }
 }

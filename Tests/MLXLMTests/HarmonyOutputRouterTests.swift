@@ -6,7 +6,7 @@ import Testing
 @testable import MLXLMCommon
 
 /// Router policy: final → response, analysis dropped, allowlisted commentary → tool call,
-/// one call per turn, strict JSON, no undeclared names.
+/// one call per turn, strict JSON, and typed rejections for invalid function calls.
 struct HarmonyOutputRouterTests {
 
     @Test("final payload streams as response; analysis is dropped")
@@ -50,6 +50,11 @@ struct HarmonyOutputRouterTests {
             allowed: ["get_weather"])
 
         #expect(events.compactMap(\.toolCall).isEmpty)
+        let rejection = try #require(events.compactMap(\.rejectedToolCall).first)
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.format == .gptOSS)
+        #expect(rejection.toolName == "secret")
+        #expect(rejection.rawTextPreview == #"{"x":1}"#)
     }
 
     @Test("bare recipients are not treated as function-namespace calls")
@@ -62,6 +67,21 @@ struct HarmonyOutputRouterTests {
             allowed: ["get_weather"])
 
         #expect(events.compactMap(\.toolCall).isEmpty)
+        #expect(events.compactMap(\.rejectedToolCall).isEmpty)
+    }
+
+    @Test("empty function recipient is rejected as a missing tool name")
+    func missingFunctionNameRejected() throws {
+        let events = try route(
+            [
+                "<|channel|>", "commentary to=functions.",
+                "<|message|>", #"{"city":"Paris"}"#, "<|call|>",
+            ],
+            allowed: ["get_weather"])
+
+        let rejection = try #require(events.compactMap(\.rejectedToolCall).first)
+        #expect(rejection.reason == .missingToolName)
+        #expect(rejection.toolName == nil)
     }
 
     @Test("analysis recipient is never dispatched")
@@ -103,6 +123,7 @@ struct HarmonyOutputRouterTests {
             allowed: ["get_weather"])
 
         #expect(events.compactMap(\.toolCall).isEmpty)
+        #expect(events.compactMap(\.rejectedToolCall).first?.reason == .invalidArguments)
     }
 
     @Test("tool-shaped frames require the call commit token")
@@ -115,6 +136,7 @@ struct HarmonyOutputRouterTests {
                 ],
                 allowed: ["get_weather"])
             #expect(events.compactMap(\.toolCall).isEmpty)
+            #expect(events.compactMap(\.rejectedToolCall).first?.reason == .malformedSyntax)
         }
 
         let truncated = try route(
@@ -124,6 +146,7 @@ struct HarmonyOutputRouterTests {
             ],
             allowed: ["get_weather"])
         #expect(truncated.compactMap(\.toolCall).isEmpty)
+        #expect(truncated.compactMap(\.rejectedToolCall).first?.reason == .incompleteOutput)
     }
 
     @Test("code-fenced JSON is not silently unwrapped")
@@ -136,6 +159,7 @@ struct HarmonyOutputRouterTests {
             allowed: ["get_weather"])
 
         #expect(events.compactMap(\.toolCall).isEmpty)
+        #expect(events.compactMap(\.rejectedToolCall).first?.reason == .invalidArguments)
     }
 
     @Test("recipient-less commentary is user-visible response text")
@@ -149,6 +173,44 @@ struct HarmonyOutputRouterTests {
 
         #expect(events.compactMap(\.response).joined() == "plan stepsdone")
     }
+
+    @Test("stream adapter surfaces and counts Harmony rejections")
+    func adapterSurfacesAndCountsRejections() throws {
+        let pieces = [
+            "<|channel|>", "commentary to=functions.secret",
+            "<|message|>", #"{"x":1}"#, "<|call|>",
+            "<|channel|>", "commentary to=functions.allowed",
+            "<|message|>", "not json", "<|call|>",
+        ]
+        let tokenizer = RouterDeterministicTokenizer(tokens: pieces + routerControlTokens)
+        let tools: [[String: any Sendable]] = [
+            ["function": ["name": "allowed"] as [String: any Sendable]]
+        ]
+        var adapter = try #require(
+            HarmonyStreamAdapter(tokenizer: tokenizer, tools: tools, stopStrings: []))
+        var streamEvents: [TokenStreamEvent] = []
+
+        for piece in pieces {
+            let id = try #require(tokenizer.convertTokenToId(piece))
+            #expect(
+                adapter.push(id) {
+                    streamEvents.append($0)
+                    return true
+                })
+        }
+        #expect(
+            adapter.finish {
+                streamEvents.append($0)
+                return true
+            })
+
+        let rejections = streamEvents.compactMap { event -> RejectedToolCall? in
+            guard case .rejectedToolCall(let rejection) = event else { return nil }
+            return rejection
+        }
+        #expect(rejections.map(\.reason) == [.undeclaredTool, .invalidArguments])
+        #expect(adapter.rejectedToolCallCount == 2)
+    }
 }
 
 // MARK: - Helpers
@@ -160,6 +222,10 @@ extension HarmonyOutputRouter.Event {
     }
     fileprivate var toolCall: ToolCall? {
         if case .toolCall(let call) = self { return call }
+        return nil
+    }
+    fileprivate var rejectedToolCall: RejectedToolCall? {
+        if case .rejectedToolCall(let rejection) = self { return rejection }
         return nil
     }
 }

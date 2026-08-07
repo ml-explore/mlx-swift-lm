@@ -21,6 +21,7 @@ package struct HarmonyOutputRouter {
     package enum Event: Sendable, Equatable {
         case response(String)
         case toolCall(ToolCall)
+        case rejectedToolCall(RejectedToolCall)
     }
 
     /// Declared tool names the caller is willing to dispatch. `nil` means no
@@ -81,24 +82,37 @@ package struct HarmonyOutputRouter {
             // Commentary preambles stream through the payload path.
             return []
         }
+        let payload = decodePayload(frame.payloadTokenIds)
+        guard let name = canonicalFunctionName(recipient) else {
+            guard recipient.trimmingCharacters(in: .whitespacesAndNewlines) == "functions." else {
+                return []
+            }
+            return [
+                .rejectedToolCall(
+                    rejection(.missingToolName, name: nil, rawText: payload))
+            ]
+        }
+
         guard frame.terminator == .call else {
-            // A JSON-shaped commentary frame is not committed as a tool call
-            // until the model emits Harmony's dedicated call stop token.
-            return []
+            let reason: RejectedToolCall.Reason =
+                frame.terminator == .incomplete ? .incompleteOutput : .malformedSyntax
+            return [.rejectedToolCall(rejection(reason, name: name, rawText: payload))]
         }
         guard !hasEmittedToolCall else {
             // One committed tool call per generation turn.
             return []
         }
-
-        guard let name = canonicalFunctionName(recipient) else { return [] }
-        guard isAllowed(name) else { return [] }
-
-        let payload = decodePayload(frame.payloadTokenIds)
         guard let arguments = strictJSONObject(payload) else {
-            // Malformed arguments: reject the call rather than inventing `{}`
-            // or applying recovery heuristics.
-            return []
+            return [
+                .rejectedToolCall(
+                    rejection(.invalidArguments, name: name, rawText: payload))
+            ]
+        }
+        guard isAllowed(name) else {
+            return [
+                .rejectedToolCall(
+                    rejection(.undeclaredTool, name: name, rawText: payload))
+            ]
         }
 
         hasEmittedToolCall = true
@@ -106,6 +120,19 @@ package struct HarmonyOutputRouter {
             function: .init(name: name, arguments: arguments),
             id: ToolCallFormat.gptOSS.generateToolCallID())
         return [.toolCall(toolCall)]
+    }
+
+    private func rejection(
+        _ reason: RejectedToolCall.Reason,
+        name: String?,
+        rawText: String
+    ) -> RejectedToolCall {
+        RejectedToolCall(
+            reason: reason,
+            format: .gptOSS,
+            toolName: name,
+            rawText: rawText,
+            detail: reason.diagnosticDetail)
     }
 
     private func isAllowed(_ name: String) -> Bool {

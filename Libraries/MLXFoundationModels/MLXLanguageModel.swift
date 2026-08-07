@@ -1475,6 +1475,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private struct AllowedToolGenerationResult {
             var responseText = ""
             var toolCalls: [MLXLMCommon.ToolCall] = []
+            var rejectedToolCalls: [RejectedToolCall] = []
             var completionInfo: GenerateCompletionInfo?
             var reasoningTokenCount = 0
             var endedInsideReasoning = false
@@ -1546,6 +1547,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     into: channel)
             }
             result.endedInsideReasoning = router.isInsideReasoning
+            if let rejection = result.rejectedToolCalls.first {
+                throw RejectedToolCallError(rejection)
+            }
             return result
         }
 
@@ -1562,6 +1566,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     result.responseText += text
                 case .toolCall(let call):
                     result.toolCalls.append(call)
+                case .rejectedToolCall(let rejection):
+                    result.rejectedToolCalls.append(rejection)
                 }
             }
             return reasoningChunks
@@ -1721,6 +1727,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         entryID: entryID, into: channel)
                 case .toolCall(_):
                     break
+                case .rejectedToolCall(let rejection):
+                    throw RejectedToolCallError(rejection)
                 }
             }
         }

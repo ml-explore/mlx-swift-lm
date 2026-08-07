@@ -19,6 +19,13 @@ struct AllowedToolOutputRouterTests {
         ]
     ]
 
+    private func rejectionReason(
+        _ event: AllowedToolOutputRouter.Event?
+    ) -> RejectedToolCall.Reason? {
+        guard case .rejectedToolCall(let rejection) = event else { return nil }
+        return rejection.reason
+    }
+
     @Test func plainTextRemainsAResponse() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(router.process("Hello") == [.response("Hello")])
@@ -62,7 +69,7 @@ struct AllowedToolOutputRouterTests {
             router.process(
                 #"<tool_call>{{"name":"get_weather","arguments":{"location":"Tokyo"}}}}oops"#
             ).isEmpty)
-        #expect(router.finish().isEmpty)
+        #expect(rejectionReason(router.finish().first) == .incompleteOutput)
     }
 
     @Test func eosDoesNotRecoverQwenJSONCallWithOnlyOneRedundantTrailingBrace() {
@@ -71,7 +78,7 @@ struct AllowedToolOutputRouterTests {
             router.process(
                 #"<tool_call>{{"name":"get_weather","arguments":{"location":"Tokyo"}}}"#
             ).isEmpty)
-        #expect(router.finish().isEmpty)
+        #expect(rejectionReason(router.finish().first) == .incompleteOutput)
     }
 
     @Test func splitToolCallIsBufferedUntilComplete() {
@@ -143,7 +150,8 @@ struct AllowedToolOutputRouterTests {
 
     @Test func malformedTaggedToolSyntaxNeverLeaksAsResponseText() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(router.process(#"<tool_call>{"name":}</tool_call>"#).isEmpty)
+        let events = router.process(#"<tool_call>{"name":}</tool_call>"#)
+        #expect(rejectionReason(events.first) == .malformedSyntax)
         #expect(router.finish().isEmpty)
     }
 
@@ -196,17 +204,20 @@ struct AllowedToolOutputRouterTests {
     @Test func partialOrMismatchedProtocolAtEOSNeverLeaksAsResponseText() {
         var partialRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(partialRouter.process("<tool_cal").isEmpty)
-        #expect(partialRouter.finish().isEmpty)
+        #expect(rejectionReason(partialRouter.finish().first) == .incompleteOutput)
 
         var mismatchedRouter = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(mismatchedRouter.process("<tool_callx>").isEmpty)
+        #expect(
+            rejectionReason(mismatchedRouter.process("<tool_callx>").first)
+                == .malformedSyntax)
         #expect(mismatchedRouter.finish().isEmpty)
     }
 
-    @Test func callsOutsideEnabledToolDefinitionsAreSuppressed() {
+    @Test func callsOutsideEnabledToolDefinitionsAreRejected() {
         var router = AllowedToolOutputRouter(format: .llama3, tools: tools)
-        #expect(
-            router.process(#"<|python_tag|>{"name":"delete_everything","arguments":{}}"#).isEmpty)
+        let events = router.process(
+            #"<|python_tag|>{"name":"delete_everything","arguments":{}}"#)
+        #expect(rejectionReason(events.first) == .undeclaredTool)
         #expect(router.finish().isEmpty)
     }
 
@@ -250,7 +261,11 @@ struct AllowedToolOutputRouterTests {
 
     @Test func malformedProtocolSuppressesOnlyTheMarkerSpan() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(router.process("before <tool_callx> after") == [.response("before  after")])
+        let events = router.process("before <tool_callx> after")
+        #expect(events.count == 3)
+        #expect(events[0] == .response("before "))
+        #expect(rejectionReason(events[1]) == .malformedSyntax)
+        #expect(events[2] == .response(" after"))
     }
 
     @Test func eosRecoversLFM2NestedArrayAndStringBracketArguments() {
@@ -338,13 +353,21 @@ struct AllowedToolOutputRouterTests {
 
         var partialRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(partialRouter.process("before <tool_cal") == [.response("before ")])
-        #expect(partialRouter.finish().isEmpty)
+        #expect(rejectionReason(partialRouter.finish().first) == .incompleteOutput)
 
         var mismatchRouter = AllowedToolOutputRouter(format: .json, tools: tools)
-        #expect(mismatchRouter.process("before <tool_callx> after") == [.response("before  after")])
+        let mismatchEvents = mismatchRouter.process("before <tool_callx> after")
+        #expect(mismatchEvents.count == 3)
+        #expect(mismatchEvents[0] == .response("before "))
+        #expect(rejectionReason(mismatchEvents[1]) == .malformedSyntax)
+        #expect(mismatchEvents[2] == .response(" after"))
 
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
-        #expect(mistralRouter.process("before [TOOL_CALLX] after") == [.response("before  after")])
+        let mistralEvents = mistralRouter.process("before [TOOL_CALLX] after")
+        #expect(mistralEvents.count == 3)
+        #expect(mistralEvents[0] == .response("before "))
+        #expect(rejectionReason(mistralEvents[1]) == .malformedSyntax)
+        #expect(mistralEvents[2] == .response(" after"))
     }
 
     @Test func specializedEOSPathsSanitizeOnlyMalformedResidualMarkers() {
@@ -354,13 +377,15 @@ struct AllowedToolOutputRouterTests {
                 #"[TOOL_CALLS]get_weather[ARGS]{"location":"Rome"}before [TOOL_CALLX] after"#
             ).isEmpty)
         let mistralEvents = mistralRouter.finish()
-        #expect(mistralEvents.count == 2)
-        guard mistralEvents.count == 2 else { return }
+        #expect(mistralEvents.count == 4)
+        guard mistralEvents.count == 4 else { return }
         guard case .toolCall = mistralEvents[0] else {
             Issue.record("Expected the recovered Mistral call")
             return
         }
-        #expect(mistralEvents[1] == .response("before  after"))
+        #expect(mistralEvents[1] == .response("before "))
+        #expect(rejectionReason(mistralEvents[2]) == .malformedSyntax)
+        #expect(mistralEvents[3] == .response(" after"))
 
         var lfmRouter = AllowedToolOutputRouter(format: .lfm2, tools: tools)
         #expect(
@@ -368,13 +393,15 @@ struct AllowedToolOutputRouterTests {
                 "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after"
             ).isEmpty)
         let lfmEvents = lfmRouter.finish()
-        #expect(lfmEvents.count == 2)
-        guard lfmEvents.count == 2 else { return }
+        #expect(lfmEvents.count == 4)
+        guard lfmEvents.count == 4 else { return }
         guard case .toolCall = lfmEvents[0] else {
             Issue.record("Expected the recovered LFM2 call")
             return
         }
-        #expect(lfmEvents[1] == .response("before  after"))
+        #expect(lfmEvents[1] == .response("before "))
+        #expect(rejectionReason(lfmEvents[2]) == .malformedSyntax)
+        #expect(lfmEvents[3] == .response(" after"))
     }
 
     @Test func eosRecoversLFM2SingleQuotedEscapedBracketArguments() {
@@ -398,19 +425,19 @@ struct AllowedToolOutputRouterTests {
     @Test func eosSuppressesUnclosedExactProtocolTails() {
         var jsonRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(jsonRouter.process(#"before <tool_call>{"name":"#) == [.response("before ")])
-        #expect(jsonRouter.finish().isEmpty)
+        #expect(rejectionReason(jsonRouter.finish().first) == .incompleteOutput)
 
         var lfmRouter = AllowedToolOutputRouter(format: .lfm2, tools: tools)
         #expect(
             lfmRouter.process("before <|tool_call_start|>[get_weather(")
                 == [.response("before ")])
-        #expect(lfmRouter.finish().isEmpty)
+        #expect(rejectionReason(lfmRouter.finish().last) == .incompleteOutput)
 
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
         #expect(
             mistralRouter.process("before [TOOL_CALLS]get_weather[ARGS]{")
                 == [.response("before ")])
-        #expect(mistralRouter.finish().isEmpty)
+        #expect(rejectionReason(mistralRouter.finish().last) == .incompleteOutput)
     }
 
     @Test func responseBeforeIncompleteBareJSONSecondCallIsOrdered() {
@@ -442,13 +469,14 @@ struct AllowedToolOutputRouterTests {
             ).isEmpty)
 
         let events = router.finish()
-        #expect(events.count == 2)
-        guard events.count == 2 else { return }
+        #expect(events.count == 3)
+        guard events.count == 3 else { return }
         guard case .toolCall = events[0] else {
             Issue.record("Expected the completed first LFM2 call")
             return
         }
         #expect(events[1] == .response("between "))
+        #expect(rejectionReason(events[2]) == .incompleteOutput)
     }
 
     @Test func eosSanitizesLFM2InterCallResponsePrefix() {
@@ -459,14 +487,16 @@ struct AllowedToolOutputRouterTests {
             ).isEmpty)
 
         let events = router.finish()
-        #expect(events.count == 3)
-        guard events.count == 3 else { return }
+        #expect(events.count == 5)
+        guard events.count == 5 else { return }
         guard case .toolCall = events[0] else {
             Issue.record("Expected the first LFM2 call")
             return
         }
-        #expect(events[1] == .response("before  after "))
-        guard case .toolCall = events[2] else {
+        #expect(events[1] == .response("before "))
+        #expect(rejectionReason(events[2]) == .malformedSyntax)
+        #expect(events[3] == .response(" after "))
+        guard case .toolCall = events[4] else {
             Issue.record("Expected the second LFM2 call")
             return
         }

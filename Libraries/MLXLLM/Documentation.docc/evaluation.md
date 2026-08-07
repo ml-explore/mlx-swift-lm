@@ -49,7 +49,8 @@ and then append one or more `.tool` messages without rebuilding the whole
 conversation history:
 
 ```swift
-var toolResults: [Chat.Message] = []
+var pendingToolCalls: [ToolCall] = []
+var rejectedToolCall: RejectedToolCall?
 
 for try await item in session.streamDetails(
     to: "What is the weather in Paris?",
@@ -57,9 +58,21 @@ for try await item in session.streamDetails(
     videos: []
 ) {
     if case .toolCall(let toolCall) = item {
-        let toolResult = try await callTool(toolCall)
-        toolResults.append(.tool(toolResult))
+        pendingToolCalls.append(toolCall)
     }
+    if case .rejectedToolCall(let rejection) = item {
+        rejectedToolCall = rejection
+    }
+}
+
+if let rejectedToolCall {
+    throw RejectedToolCallError(rejectedToolCall)
+}
+
+var toolResults: [Chat.Message] = []
+for toolCall in pendingToolCalls {
+    let toolResult = try await callTool(toolCall)
+    toolResults.append(.tool(toolResult))
 }
 
 if !toolResults.isEmpty {
@@ -67,6 +80,18 @@ if !toolResults.isEmpty {
     print(answer)
 }
 ```
+
+`Generation.toolCall` contains only parsed and authorized calls that may be
+considered for dispatch. Tool-call-shaped output that is malformed, incomplete,
+or names an undeclared function is emitted separately as
+`Generation.rejectedToolCall`; rejected protocol is never returned as a normal
+response chunk. `rawTextPreview` is bounded for diagnostics but can contain
+sensitive argument values, so applications should not log or persist it
+automatically.
+
+The example buffers accepted calls until the generation finishes. This makes
+dispatch atomic at the turn level: if a later call in the same model output is
+rejected, no earlier call has already caused an external side effect.
 
 When `ChatSession` builds its cache from messages, it retains the structured
 transcript and renders the complete conversation for every continuation, as
