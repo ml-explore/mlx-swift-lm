@@ -97,7 +97,7 @@ public enum WiredMemoryUtils {
         var cache = try kvCachePlan.validated(model.newCache(parameters: parameters))
 
         switch try model.prepare(
-            input, cache: cache, state: nil, windowSize: parameters.prefillStepSize)
+            input, cache: cache, state: nil, prefill: parameters.prefill)
         {
         case .tokens(let tokens):
             let result = model(
@@ -163,7 +163,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: tokenCount,
-            prefillStepSize: parameters.prefillStepSize ?? 512
+            prefillStepSize: parameters.prefill.resolvedStepSize()
         )
     }
 
@@ -207,7 +207,7 @@ public enum WiredMemoryUtils {
             workspaceBytes: workspace,
             peakActiveBytes: peakActive,
             tokenCount: input.text.tokens.size,
-            prefillStepSize: parameters.prefillStepSize ?? 512
+            prefillStepSize: parameters.prefill.resolvedStepSize()
         )
     }
 

@@ -870,7 +870,7 @@ public class PixtralVLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -883,22 +883,18 @@ public class PixtralVLM: Module, VLMModel, KVCacheDimensionProvider {
             pixelValues: pixelValues
         )
 
-        let prefillStepSize = windowSize ?? 512
         let totalPositions = embeddings.dim(1)
-        var processed = 0
-        while totalPositions - processed > 1 {
-            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-            let range = processed ..< (processed + chunkLength)
+        let processed = try prefill.forEachChunk(total: totalPositions) { range in
             _ = languageModel(
                 inputIds[0..., range], cache: cache,
                 inputsEmbeds: embeddings[0..., range, 0...])
             asyncEval(cache)
-            processed += chunkLength
         }
-        eval(cache)
+        if processed > 0 { eval(cache) }
         let logits = languageModel(
             inputIds[0..., processed...], cache: cache,
             inputsEmbeds: embeddings[0..., processed..., 0...])
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(.init(logits: logits))
     }
 

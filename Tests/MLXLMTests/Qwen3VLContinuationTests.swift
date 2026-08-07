@@ -123,15 +123,15 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1))),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -152,17 +152,17 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (fullLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: fullCache, state: nil, windowSize: nil))
+                cache: fullCache, state: nil, prefill: .init()))
 
         let warmCache = model.newCache(parameters: nil)
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         let (warmLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2[0])), cache: warmCache, state: state,
-                windowSize: nil))
+                prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(warmLogits, fullLogits), 1e-3,
@@ -184,16 +184,16 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -217,19 +217,19 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2, t3], axis: 1)), image: image),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
         let (_, s2) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2), image: image), cache: cacheW, state: s1,
-                windowSize: nil))
+                prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t3)), cache: cacheW, state: s2, windowSize: nil))
+                LMInput(text: .init(tokens: t3)), cache: cacheW, state: s2, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -240,6 +240,43 @@ final class Qwen3VLContinuationTests: XCTestCase {
 
     /// Windowed (chunked) prefill must produce the same first-token logits as
     /// the single-shot forward on plain text.
+    /// `LanguageModel.prepare` documents that an implementation returning `.logits` owns its whole
+    /// progress sequence, including the terminal `(total, total)`. Both routes through `prepare`
+    /// return `.logits`, so both owe the contract: the windowed continuation (which delegates the
+    /// per-chunk reports to `forEachChunk`) and the single-shot path.
+    func testPrefillProgressReachesTheTotal() throws {
+        MLXRandom.seed(29)
+        let model = try makeTinyModel()
+
+        func events(for prompt: MLXArray, stepSize: Int?) throws -> [[Int]] {
+            final class Log: @unchecked Sendable { var events: [[Int]] = [] }
+            let log = Log()
+            var prefill = PrefillParameters(stepSize: stepSize)
+            prefill.progress = { log.events.append([$0, $1]) }
+            _ = try model.prepare(
+                LMInput(text: .init(tokens: prompt)),
+                cache: model.newCache(parameters: nil), state: nil, prefill: prefill)
+            return log.events
+        }
+
+        let prompt = textTokens(40)
+        for (label, stepSize) in [("windowed", 8), ("single-shot", 1024)] {
+            let events = try events(for: prompt, stepSize: stepSize)
+            XCTAssertEqual(
+                events.last, [40, 40], "\(label) prefill must end at (total, total)")
+            XCTAssertEqual(
+                events.map { $0[0] }, events.map { $0[0] }.sorted(),
+                "\(label) progress must be monotone")
+            XCTAssertTrue(
+                events.allSatisfy { $0[1] == 40 },
+                "\(label) progress must report a stable total")
+        }
+
+        XCTAssertGreaterThan(
+            try events(for: prompt, stepSize: 8).count, 1,
+            "a windowed prefill should report more than just the terminal event")
+    }
+
     func testWindowedPrefillMatchesSingleShot() throws {
         MLXRandom.seed(11)
         let model = try makeTinyModel()
@@ -248,12 +285,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let cacheS = model.newCache(parameters: nil)
         let (logitsS, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, prefill: .init()))
 
         let cacheC = model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil, windowSize: 8))
+                LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil,
+                prefill: .init(stepSize: 8)))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsC, logitsS), 1e-3,
@@ -278,13 +316,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (logitsS, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheS, state: nil,
-                windowSize: nil))
+                prefill: .init()))
 
         let cacheC = model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheC, state: nil,
-                windowSize: 8))
+                prefill: .init(stepSize: 8)))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsC, logitsS), 1e-3,
@@ -308,11 +346,11 @@ final class Qwen3VLContinuationTests: XCTestCase {
 
         let singleCache = model.newCache(parameters: nil)
         let (singleLogits, _) = try lastLogits(
-            model.prepare(input, cache: singleCache, state: nil, windowSize: nil))
+            model.prepare(input, cache: singleCache, state: nil, prefill: .init()))
 
         let windowedCache = model.newCache(parameters: nil)
         let (windowedLogits, _) = try lastLogits(
-            model.prepare(input, cache: windowedCache, state: nil, windowSize: 8))
+            model.prepare(input, cache: windowedCache, state: nil, prefill: .init(stepSize: 8)))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(windowedLogits, singleLogits), 1e-3,
@@ -332,13 +370,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
         XCTAssertNoThrow(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
-                windowSize: 8),
+                prefill: .init(stepSize: 8)),
             "a long cold prefill carries no anchor and must not throw")
 
         XCTAssertThrowsError(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(6, seed: 2))), cache: cache, state: nil,
-                windowSize: nil)
+                prefill: .init())
         ) { error in
             guard
                 case ContinuationStateError.missingState(_, let key)? =
@@ -360,7 +398,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
 
         guard let anchor = state?[LMOutput.Key<MLXArray>("qwen35vl.ropeDeltas")] else {
             return XCTFail("cold text-only prefill returned no rope delta")
@@ -385,7 +423,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (_, savedState) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         XCTAssertNotNil(savedState)
 
         let url = FileManager.default.temporaryDirectory
@@ -398,11 +436,11 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let (warmLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2)), cache: warmCache, state: savedState,
-                windowSize: nil))
+                prefill: .init()))
         let (restoredLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2)), cache: snapshot.cache, state: snapshot.state,
-                windowSize: nil))
+                prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(restoredLogits, warmLogits), 1e-6,
@@ -413,6 +451,6 @@ final class Qwen3VLContinuationTests: XCTestCase {
         let keptCache = try loadPromptCacheSnapshot(url: url).cache
         XCTAssertThrowsError(
             try model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil, prefill: .init()))
     }
 }

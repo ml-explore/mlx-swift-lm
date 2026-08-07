@@ -157,6 +157,11 @@ public final class ChatSession {
         /// nonzero progress is an invalidated ledger and forces a rebuild.
         var cachedTokens: [Int]
 
+        /// Tokens returned by the previous generation but not yet represented
+        /// by `cachedTokens`. This is normally empty; a speculative round can
+        /// leave its final verifier sample here.
+        var uncommittedTokens: [Int] = []
+
         @discardableResult
         mutating func record(
             _ assistant: AssistantGeneration,
@@ -169,6 +174,7 @@ public final class ChatSession {
                 // contain generated or lookahead tokens, so invalidate
                 // the ledger and rebuild from the retained messages.
                 cachedTokens.removeAll()
+                uncommittedTokens.removeAll()
                 return false
             }
 
@@ -176,14 +182,17 @@ public final class ChatSession {
             if processedTokenCount >= cachedTokenCount,
                 processedTokenCount - cachedTokenCount <= generatedTokens.count
             {
+                let committedGeneratedTokenCount = processedTokenCount - cachedTokenCount
                 cachedTokens.append(
-                    contentsOf: generatedTokens.prefix(
-                        processedTokenCount - cachedTokenCount))
+                    contentsOf: generatedTokens.prefix(committedGeneratedTokenCount))
+                uncommittedTokens = Array(
+                    generatedTokens.dropFirst(committedGeneratedTokenCount))
             } else {
                 // The iterator/cache relationship could not be proven
                 // (for example, a speculative iterator retained
                 // un-emitted lookahead).
                 cachedTokens.removeAll()
+                uncommittedTokens.removeAll()
             }
 
             messages.append(
@@ -925,8 +934,18 @@ public final class ChatSession {
 
                     var pendingMessages = inputMessages.consume()
 
+                    // How this model's generated token stream relates to a chat
+                    // template re-render is a property of its response protocol,
+                    // not of the session.
+                    let promptCachePolicy = PromptCacheReusePolicy(
+                        protocolRules: modelConfiguration.toolCallFormat?
+                            .promptCacheReuseRules(tokenizer: tokenizer) ?? [])
+
                     // loop can restart on tool calls
                     restart: while !pendingMessages.isEmpty {
+                        let isToolResultContinuation =
+                            pendingMessages.contains { $0.role == .tool }
+                            && conversation?.messages.last?.tool?.calls?.isEmpty == false
                         let templateMessages: [Chat.Message]
                         let conversationMessageCountBeforePending: Int?
                         if var currentConversation = conversation {
@@ -944,6 +963,17 @@ public final class ChatSession {
                         }
                         let containsNewMedia = pendingMessages.contains {
                             !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty
+                        }
+                        let structuredToolCallCount = templateMessages.reduce(into: 0) {
+                            count, message in
+                            // GPT-OSS renders at most one call from each
+                            // assistant message. Other protocols ignore this
+                            // model-specific boundary count.
+                            if message.role == .assistant,
+                                message.tool?.calls?.isEmpty == false
+                            {
+                                count += 1
+                            }
                         }
 
                         let userInput = UserInput(
@@ -972,8 +1002,9 @@ public final class ChatSession {
                             } ?? false
 
                         var reusedMainCacheWithoutDraft = false
+                        var requiresMainOnlyContinuation = false
                         if var currentConversation = conversation {
-                            let fullTokenIds = input.text.tokens.asArray(Int.self)
+                            let promptTokenIds = input.text.tokens.asArray(Int.self)
                             let cachedTokenIds = currentConversation.cachedTokens
                             assert(
                                 kvCache.nativeAttentionOffsetsAreAligned,
@@ -994,91 +1025,98 @@ public final class ChatSession {
                                 // from `preparedInput`; a fallback can keep this suffix.
                                 draftCacheIsAligned = true
                             }
-                            let extendsCachedPrefix =
-                                mainCacheIsAligned
-                                && draftCacheIsAligned
-                                && fullTokenIds.starts(with: cachedTokenIds)
 
-                            if extendsCachedPrefix && !containsNewMedia
-                                && fullTokenIds.count > cachedTokenIds.count
-                                && input.text.mask == nil
+                            let turn = PromptCacheTurn(
+                                promptTokens: promptTokenIds,
+                                carriesNewMedia: containsNewMedia,
+                                carriesPreparedMedia: input.image != nil || input.video != nil
+                                    || input.audio != nil,
+                                carriesAttentionMask: input.text.mask != nil,
+                                carriesModelState: lmState != nil,
+                                isToolResultContinuation: isToolResultContinuation,
+                                previousGenerationUncommittedTokens:
+                                    currentConversation.uncommittedTokens,
+                                structuredToolCallCount: structuredToolCallCount,
+                                usesSpeculativeDecoding: speculativeDecoding != nil)
+                            let cacheState = PromptCacheState(
+                                cachedTokens: cachedTokenIds,
+                                processedTokenCount: kvCache.processedTokenCount,
+                                mainCacheIsAligned: mainCacheIsAligned,
+                                hasDraftCache: draftKVCache != nil,
+                                draftCacheIsAligned: draftCacheIsAligned,
+                                isTrimmable: canTrimPromptCache(kvCache.cache)
+                                    && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
+
+                            var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
+
+                            // Rewinding is the one decision that can fail while being
+                            // applied: a cache may trim fewer tokens than requested.
+                            // Verify and downgrade to a rebuild before prefilling.
+                            if case .trimToCommonPrefix(let commonPrefixLength, let trimCount) =
+                                decision
                             {
-                                let suffix = Array(fullTokenIds.dropFirst(cachedTokenIds.count))
-                                input = LMInput(tokens: MLXArray(suffix))
-                                reusedMainCacheWithoutDraft =
-                                    speculativeDecoding != nil
-                                    && !willFallBackBeforeLoadingDraft
-                                    && draftKVCache == nil
-                                    && !cachedTokenIds.isEmpty
-                            } else if kvCache.processedTokenCount != 0 {
-                                let commonPrefixCount = zip(fullTokenIds, cachedTokenIds)
-                                    .prefix { $0 == $1 }
-                                    .count
-                                let trimCount = cachedTokenIds.count - commonPrefixCount
-                                let hasPreparedMedia =
-                                    input.image != nil || input.video != nil || input.audio != nil
-                                let canReuseCommonPrefix =
-                                    commonPrefixCount > 0
-                                    && commonPrefixCount < fullTokenIds.count
-                                    && trimCount > 0
-                                    && mainCacheIsAligned
-                                    && draftCacheIsAligned
-                                    && !containsNewMedia
-                                    && !hasPreparedMedia
-                                    && input.text.mask == nil
-                                    && lmState == nil
-                                    && canTrimPromptCache(kvCache.cache)
-                                    && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true)
+                                let mainTrimmed = kvCache.trim(trimCount)
+                                let draftTrimmed = draftKVCache.map { $0.trim(trimCount) }
+                                let mainTrimIsAligned =
+                                    mainTrimmed == trimCount
+                                    && kvCache.processedTokenCount == commonPrefixLength
+                                let draftTrimIsAligned =
+                                    draftKVCache.map { draftCache in
+                                        draftTrimmed == trimCount
+                                            && draftCache.processedTokenCount == commonPrefixLength
+                                    } ?? true
 
-                                if canReuseCommonPrefix {
-                                    let mainTrimmed = kvCache.trim(trimCount)
-                                    let draftTrimmed = draftKVCache.map {
-                                        $0.trim(trimCount)
-                                    }
-                                    let mainTrimIsAligned =
-                                        mainTrimmed == trimCount
-                                        && kvCache.processedTokenCount == commonPrefixCount
-                                    let draftTrimIsAligned: Bool
-                                    if let draftKVCache {
-                                        draftTrimIsAligned =
-                                            draftTrimmed == trimCount
-                                            && draftKVCache.processedTokenCount
-                                                == commonPrefixCount
-                                    } else {
-                                        draftTrimIsAligned = true
-                                    }
-
-                                    if mainTrimIsAligned && draftTrimIsAligned {
-                                        input = LMInput(
-                                            tokens: MLXArray(
-                                                Array(
-                                                    fullTokenIds.dropFirst(
-                                                        commonPrefixCount))))
-                                        reusedMainCacheWithoutDraft =
-                                            speculativeDecoding != nil
-                                            && !willFallBackBeforeLoadingDraft
-                                            && draftKVCache == nil
-                                    } else {
-                                        kvCache = KVCacheStorage(
-                                            model.newCache(parameters: generateParameters),
-                                            plan: kvCachePlan)
-                                        draftKVCache = nil
-                                        lmState = nil
-                                    }
-                                } else {
-                                    // The template changed an already-cached portion of the
-                                    // transcript, or this input carries state/media that cannot
-                                    // be rewound safely. Rebuild rather than combining a
-                                    // mismatched prompt with stale model state.
-                                    kvCache = KVCacheStorage(
-                                        model.newCache(parameters: generateParameters),
-                                        plan: kvCachePlan)
-                                    draftKVCache = nil
-                                    lmState = nil
+                                if !(mainTrimIsAligned && draftTrimIsAligned) {
+                                    decision = .rebuild
                                 }
                             }
 
-                            currentConversation.cachedTokens = fullTokenIds
+                            switch decision {
+                            case .prefillAll:
+                                break
+
+                            case .appendSuffix(let suffixStart, _):
+                                input = LMInput(
+                                    tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+
+                            case .appendSuffixToMain(let suffixStart, _):
+                                input = LMInput(
+                                    tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+                                // The draft does not represent the same private
+                                // Harmony path. Preserve the authoritative main
+                                // cache and use it alone for this continuation.
+                                draftKVCache = nil
+                                requiresMainOnlyContinuation = true
+
+                            case .trimToCommonPrefix(let commonPrefixLength, _):
+                                input = LMInput(
+                                    tokens: MLXArray(
+                                        Array(promptTokenIds.dropFirst(commonPrefixLength))))
+
+                            case .rebuild:
+                                kvCache = KVCacheStorage(
+                                    model.newCache(parameters: generateParameters),
+                                    plan: kvCachePlan)
+                                draftKVCache = nil
+                                lmState = nil
+                            }
+
+                            reusedMainCacheWithoutDraft =
+                                decision.reusesCachedPrefix
+                                && speculativeDecoding != nil
+                                && !willFallBackBeforeLoadingDraft
+                                && draftKVCache == nil
+
+                            // Usually the rendered prompt, but a protocol rule may
+                            // keep generated tokens the cold render cannot reproduce.
+                            switch decision {
+                            case .appendSuffix(_, let representedTokens),
+                                .appendSuffixToMain(_, let representedTokens):
+                                currentConversation.cachedTokens = representedTokens
+                            case .prefillAll, .trimToCommonPrefix, .rebuild:
+                                currentConversation.cachedTokens = promptTokenIds
+                            }
+                            currentConversation.uncommittedTokens.removeAll()
                             conversation = currentConversation
                         }
 
@@ -1088,11 +1126,7 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         let generation: GenerationRun
-                        /// Every caller below reaches this because speculation was refused, so the
-                        /// draft cache is dropped: retaining it would leave it at an offset the
-                        /// main cache never visits.
-                        func defaultGenerationWithoutDraft() throws -> GenerationRun {
-                            draftKVCache = nil
+                        func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
                             let iterator = try TokenIterator(
@@ -1111,23 +1145,31 @@ public final class ChatSession {
                             )
                         }
 
-                        // Carried state is safe to speculate on: the anchors position from the
-                        // cache offset, which a rejected proposal rewinds along with the KV rows.
-                        // Media is not — the draft model would have to prefill the same images.
-                        // `input` may have been narrowed to a token-only suffix above, so test
-                        // the prepared input for media.
-                        if let speculativeDecoding,
-                            preparedInput.image == nil,
-                            preparedInput.video == nil,
-                            preparedInput.audio == nil,
-                            // A warm main cache with no draft cache is admitted only when
-                            // `reusedMainCacheWithoutDraft` says the transcript can rebuild both
-                            // from the full input below. Without that ledger — a session restored
-                            // from a snapshot — there is nothing to re-prefill the draft from, and
-                            // handing mismatched caches to the iterator would throw, not fall back.
-                            draftKVCache != nil || kvCache.processedTokenCount == 0
-                                || reusedMainCacheWithoutDraft
+                        // Carried model state is safe to speculate on: the anchors position from
+                        // the cache offset, which a rejected proposal rewinds along with the KV
+                        // rows. Media is not — the draft would have to prefill the same images.
+                        // `input` may have been narrowed to a token-only suffix above, so test the
+                        // prepared input for media.
+                        //
+                        // A warm main cache with no draft cache is admitted only when
+                        // `reusedMainCacheWithoutDraft` says both can be rebuilt from the full
+                        // input below. Without that ledger — a session restored from a snapshot —
+                        // there is nothing to re-prefill the draft from, and handing mismatched
+                        // caches to the iterator would throw rather than fall back.
+                        if preparedInput.image != nil || preparedInput.video != nil
+                            || preparedInput.audio != nil
+                            || !(draftKVCache != nil || kvCache.processedTokenCount == 0
+                                || reusedMainCacheWithoutDraft)
                         {
+                            // Drop the draft cache as `.appendSuffixToMain` does: retaining it
+                            // would leave it at an offset the main cache never visits.
+                            draftKVCache = nil
+                            requiresMainOnlyContinuation = true
+                        }
+
+                        if speculativeDecoding != nil, requiresMainOnlyContinuation {
+                            generation = try defaultGeneration()
+                        } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {
                                 if !memoryEvaluation.shouldUseSpeculativeDecoding {
@@ -1141,7 +1183,7 @@ public final class ChatSession {
                             }
 
                             if shouldFallBackBeforeLoadingDraft {
-                                generation = try defaultGenerationWithoutDraft()
+                                generation = try defaultGeneration()
                             } else {
                                 let cachedDraftContainer = await loadedDraftModel.read { $0 }
                                 let draftContainer: ModelContainer
@@ -1166,7 +1208,7 @@ public final class ChatSession {
                                             evaluation: memoryEvaluation)
                                     }
 
-                                    generation = try defaultGenerationWithoutDraft()
+                                    generation = try defaultGeneration()
                                 } else {
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
@@ -1229,7 +1271,7 @@ public final class ChatSession {
                             }
                         } else {
                             // Standard path for stateful, media, or unsynchronized cache input.
-                            generation = try defaultGenerationWithoutDraft()
+                            generation = try defaultGeneration()
                         }
 
                         var pendingToolCalls: [ToolCall] = []

@@ -4,6 +4,8 @@ import MLXLMCommon
 import MLXVLM
 import XCTest
 
+@testable import MLXLLM
+
 func assertEqual(
     _ v1: Any, _ v2: Any, path: [String] = [], file: StaticString = #filePath, line: UInt = #line
 ) {
@@ -385,6 +387,64 @@ public class UserInputTests: XCTestCase {
             videos: [.url(videoURL)])
         XCTAssertEqual(input.videos.count, 1)
         XCTAssertEqual(input.images.count, 0)
+    }
+
+    // MARK: - GPT-OSS Message Generator Tests
+
+    public func testGPTOSSMessageGeneratorSerializesStructuredToolCalls() {
+        let call = ToolCall(
+            function: .init(
+                name: "web_search", arguments: ["query": "latest news Dubai"]),
+            id: "call_1")
+        let chat: [Chat.Message] = [
+            .assistant("", toolCalls: [call]),
+            .tool("{\"results\":[]}", id: "call_1"),
+        ]
+
+        let messages = GPTOSSMessageGenerator().generate(messages: chat)
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["role"] as? String, "assistant")
+
+        guard let toolCalls = messages[0]["tool_calls"] as? [[String: any Sendable]] else {
+            XCTFail("Missing assistant.tool_calls")
+            return
+        }
+        XCTAssertEqual(toolCalls.count, 1)
+
+        guard let function = toolCalls[0]["function"] as? [String: any Sendable] else {
+            XCTFail("Missing function payload")
+            return
+        }
+        XCTAssertEqual(function["name"] as? String, "web_search")
+
+        guard let arguments = function["arguments"] as? [String: any Sendable] else {
+            XCTFail("Missing function.arguments")
+            return
+        }
+        XCTAssertEqual(arguments["query"] as? String, "latest news Dubai")
+
+        XCTAssertEqual(messages[1]["role"] as? String, "tool")
+        XCTAssertEqual(messages[1]["content"] as? String, "{\"results\":[]}")
+        XCTAssertEqual(messages[1]["tool_call_id"] as? String, "call_1")
+    }
+
+    public func testGPTOSSMessageGeneratorDoesNotInferToolCallsFromContent() {
+        let jsonish = "{\"name\":\"functions.web_search\",\"arguments\":{\"query\":\"x\"}}"
+        let messages = GPTOSSMessageGenerator().generate(messages: [.assistant(jsonish)])
+        XCTAssertNil(messages[0]["tool_calls"])
+        XCTAssertEqual(messages[0]["content"] as? String, jsonish)
+    }
+
+    public func testGPTOSSMessageGeneratorKeepsPlainAssistantContent() {
+        let chat: [Chat.Message] = [.assistant("I will look that up.")]
+
+        let messages = GPTOSSMessageGenerator().generate(messages: chat)
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0]["role"] as? String, "assistant")
+        XCTAssertEqual(messages[0]["content"] as? String, "I will look that up.")
+        XCTAssertNil(messages[0]["tool_calls"])
     }
 
 }

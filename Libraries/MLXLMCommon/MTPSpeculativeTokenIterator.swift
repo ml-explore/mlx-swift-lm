@@ -57,6 +57,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
+    /// Number of pending tokens already represented by `mainCache`. The last
+    /// verifier sample is not committed until a later forward pass.
+    private var committedPendingTokenCount = 0
 
     /// Set to `true` when the iterator detects that the target can no
     /// longer emit drafter state (typically due to KV cache quantization
@@ -133,7 +136,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.blockSize = blockSize
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
-        try prepare(input: input, windowSize: parameters.prefillStepSize)
+        try prepare(input: input, prefill: parameters.prefill)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
 
         // The guard above ran against a fresh, zero-offset cache, where a
@@ -150,7 +153,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// Prefill the main model with the prompt. The drafter has no cache to
     /// prime; its first-round inputs come from the prefill's `LMOutput.state`.
-    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         let inputLength = input.text.cacheSequenceLength
 
@@ -161,7 +164,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // passing `prefillState` into `prepare` — the emit flag is meant for
         // exactly one position, not the whole prompt.
 
-        switch try mainModel.prepare(input, cache: mainCache, state: nil, windowSize: windowSize)
+        switch try mainModel.prepare(input, cache: mainCache, state: nil, prefill: prefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength
@@ -185,6 +188,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // equivalent autoregressive run, violating speculative
             // decoding's bit-exact-equivalence-to-greedy guarantee.
             pendingTokens.append(token.item(Int.self))
+
+            // the model reported per-chunk progress; the bonus forward above
+            // consumed the remainder of the prompt
+            let total = input.text.tokens.size
+            prefill.progress?(total, total)
         case .logits(let prefillResult):
             mainCacheStorage.commitProcessedTokens(inputLength)
             // Some `prepare` implementations evaluate the final position
@@ -222,6 +230,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 // to the first speculateRound.
                 pendingTokens.append(token.item(Int.self))
                 pendingTokens.append(newToken.item(Int.self))
+                committedPendingTokenCount = 1
             } else {
                 // Prefill state already carried drafter keys; the single
                 // bonus is the input to the first speculateRound.
@@ -372,6 +381,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let finalToken = mainTokens[accepted ... accepted]
         processor?.didSample(token: finalToken)
         pendingTokens.append(mainTokensList[accepted])
+        committedPendingTokenCount = accepted
 
         proposedCount += numDraft
         acceptedCount += accepted
@@ -495,6 +505,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
+        committedPendingTokenCount = 0
         autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
@@ -512,6 +523,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         pendingIndex += 1
         telemetry.recordGeneratedToken()
         return token
+    }
+
+}
+
+extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
+    mutating func finalizeGeneration() {
+        let consumed = Swift.min(pendingIndex, committedPendingTokenCount)
+        let lookahead = committedPendingTokenCount - consumed
+        guard lookahead > 0 else { return }
+
+        // Trim through the storage so the model-wide processed-token timeline
+        // rewinds with the cache; `ChatSession` reconciles its ledger against
+        // that timeline, not against per-entry offsets.
+        let trimmed = mainCacheStorage.trim(lookahead)
+        trimSharedKVState(&mainState, numTokens: trimmed)
     }
 }
 

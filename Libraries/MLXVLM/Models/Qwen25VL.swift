@@ -971,17 +971,18 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
         let inputIds = input.text.tokens
 
-        let window = windowSize ?? 512
+        let window = prefill.resolvedStepSize()
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
             faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
         {
-            return try prepareContinuation(input, cache: cache, state: state, windowSize: window)
+            return try prepareContinuation(input, cache: cache, state: state, prefill: prefill)
         }
 
         let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
@@ -1006,11 +1007,13 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         let result = languageModel(
             embeds == nil ? inputIds2D : nil, cache: cache, state: state, inputEmbedding: embeds)
 
+        let total = inputIds2D.dim(-1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 
     private func prepareContinuation(
-        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
         let remainderLength = inputIds.dim(-1)
@@ -1039,30 +1042,26 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             visionStartTokenId: config.baseConfiguration.visionStartTokenId,
             positionOffset: positionOffset)
 
-        let step = max(1, windowSize)
-        var lastLogits = MLXArray(0)
-        var start = 0
-        repeat {
-            try Task.checkCancellation()
-            let end = min(start + step, remainderLength)
-            let chunkPositions = positionIds[0..., 0..., start ..< end]
-            let output: LMOutput
-            if let embeds {
-                let chunkEmbeds = embeds[0..., start ..< end, 0...]
-                output = languageModel(
-                    nil, cache: cache, state: nil, inputEmbedding: chunkEmbeds,
-                    positionIds: chunkPositions)
-            } else {
-                let chunkInputs = inputIds[0..., start ..< end]
-                output = languageModel(
-                    chunkInputs, cache: cache, state: nil, inputEmbedding: nil,
-                    positionIds: chunkPositions)
-            }
-            lastLogits = output.logits
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            let chunkEmbeds = embeds.map { $0[0..., range, 0...] }
+            _ = languageModel(
+                chunkEmbeds == nil ? inputIds[0..., range] : nil,
+                cache: cache, state: nil, inputEmbedding: chunkEmbeds,
+                positionIds: positionIds[0..., 0..., range])
             asyncEval(cache)
-            start = end
-        } while start < remainderLength
-        eval(cache)
+        }
+        if processed > 0 {
+            eval(cache)
+        }
+
+        let tailRange = processed ..< remainderLength
+        let tailEmbeds = embeds.map { $0[0..., tailRange, 0...] }
+        let lastLogits = languageModel(
+            tailEmbeds == nil ? inputIds[0..., tailRange] : nil,
+            cache: cache, state: nil, inputEmbedding: tailEmbeds,
+            positionIds: positionIds[0..., 0..., tailRange]
+        ).logits
+        prefill.progress?(remainderLength, remainderLength)
 
         var resumeState = LMOutput.State()
         resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))

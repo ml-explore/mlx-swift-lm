@@ -69,7 +69,9 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    )
         throws -> PrepareResult
     {
         // Return `.tokens(...)`; the iterator's `prepare` will follow up with

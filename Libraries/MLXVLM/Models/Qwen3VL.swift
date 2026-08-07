@@ -1807,7 +1807,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize: Int?
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
         // Text-only follow-up processors may return rank-1 tokens. The language
@@ -1824,13 +1824,13 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             throw ContinuationStateError.unsupportedBatchContinuation(model: "Qwen3VL")
         }
 
-        let window = windowSize ?? 512
+        let window = prefill.resolvedStepSize()
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
             cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
             return try prepareContinuation(
                 input, inputIds: inputIds2D, cache: cache, state: state, cacheOffset: cacheOffset,
-                windowSize: window)
+                prefill: prefill)
         }
 
         let vision = try visionInputs(input)
@@ -1851,6 +1851,8 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             imageGridTHW: vision.imageFrames,
             videoGridTHW: vision.videoFrames)
 
+        let total = inputIds.dim(-1)
+        prefill.progress?(total, total)
         return .logits(languageOutput)
     }
 
@@ -1859,7 +1861,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     /// The vision tower and image→token merge run once over the remainder, whose M-RoPE positions
     /// are computed once from the position anchor (cache offset plus the rope delta in `state`),
     /// so a new image's t/h/w indices start there rather than at zero. The language model is then
-    /// driven in `windowSize` chunks, bounding the attention scratch to `[heads, chunk, L]`. The
+    /// driven in `prefill`-sized chunks, bounding the attention scratch to `[heads, chunk, L]`. The
     /// visual mask and per-layer deepstack tensors slice in lockstep, deepstack rows by
     /// visual-token count rather than by token index.
     ///
@@ -1870,7 +1872,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         cache: [any KVCache],
         state: LMOutput.State?,
         cacheOffset: Int,
-        windowSize: Int
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
@@ -1898,26 +1900,27 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
 
         let visualIndices = vision.visualIndices ?? []
         let typedCache = castCache(cache)
-        let step = max(1, windowSize)
-        var lastLogits = MLXArray(0)
-        var start = 0
         var visualStart = 0
-        repeat {
-            let end = min(start + step, remainderLength)
 
-            let chunkPositions = positionIds[0..., 0..., start ..< end]
-            let chunkEmbeds = vision.inputEmbeddings?[0..., start ..< end, 0...]
-            let chunkIds = chunkEmbeds == nil ? inputIds[0..., start ..< end] : nil
+        /// One forward over `range`, slicing positions, embeddings, and the per-layer deepstack
+        /// features in lockstep. Deepstack rows are indexed by visual-token count rather than by
+        /// token index, so `visualStart` advances with the ranges — which arrive in order, first
+        /// from `forEachChunk` and then the reserved tail.
+        func forward(_ range: Range<Int>) -> LMOutput {
+            let chunkEmbeds = vision.inputEmbeddings?[0..., range, 0...]
+            let chunkIds = chunkEmbeds == nil ? inputIds[0..., range] : nil
 
             var visualEnd = visualStart
-            while visualEnd < visualIndices.count, visualIndices[visualEnd] < end {
+            while visualEnd < visualIndices.count, visualIndices[visualEnd] < range.upperBound {
                 visualEnd += 1
             }
 
             let chunkVisualIndices: [Int]?
             let chunkDeepstack: [MLXArray]?
             if visualEnd > visualStart {
-                chunkVisualIndices = visualIndices[visualStart ..< visualEnd].map { $0 - start }
+                chunkVisualIndices = visualIndices[visualStart ..< visualEnd].map {
+                    $0 - range.lowerBound
+                }
                 chunkDeepstack = vision.deepstackEmbeds?.map {
                     $0[visualStart ..< visualEnd, 0...]
                 }
@@ -1925,14 +1928,15 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
                 chunkVisualIndices = nil
                 chunkDeepstack = nil
             }
+            visualStart = visualEnd
 
-            let output = languageModel(
+            return languageModel(
                 chunkIds,
                 cache: typedCache,
                 state: nil,
                 inputEmbeddings: chunkEmbeds,
                 mask: nil,
-                positionIds: chunkPositions,
+                positionIds: positionIds[0..., 0..., range],
                 visualIndices: chunkVisualIndices,
                 deepstackEmbeds: chunkDeepstack,
                 // Never the pixels: a non-nil value here clears the carried
@@ -1940,17 +1944,20 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
                 pixelValues: nil,
                 imageGridTHW: nil,
                 videoGridTHW: nil)
+        }
 
-            lastLogits = output.logits
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = forward(range)
             if let typedCache {
                 asyncEval(typedCache)
             }
-            visualStart = visualEnd
-            start = end
-        } while start < remainderLength
-        if let typedCache {
+        }
+        if processed > 0, let typedCache {
             eval(typedCache)
         }
+
+        let lastLogits = forward(processed ..< remainderLength).logits
+        prefill.progress?(remainderLength, remainderLength)
 
         var resumeState = LMOutput.State()
         resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))

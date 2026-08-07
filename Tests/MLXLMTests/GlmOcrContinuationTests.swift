@@ -109,15 +109,15 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1))),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -138,16 +138,16 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -170,19 +170,19 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (logitsF, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2, t3], axis: 1)), image: image),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
 
         let cacheW = model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t1)), cache: cacheW, state: nil, prefill: .init()))
         let (_, s2) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2), image: image), cache: cacheW, state: s1,
-                windowSize: nil))
+                prefill: .init()))
         let (logitsW, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t3)), cache: cacheW, state: s2, windowSize: nil))
+                LMInput(text: .init(tokens: t3)), cache: cacheW, state: s2, prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsW, logitsF), 1e-3,
@@ -199,12 +199,13 @@ final class GlmOcrContinuationTests: XCTestCase {
         let cacheS = model.newCache(parameters: nil)
         let (logitsS, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: prompt)), cache: cacheS, state: nil, prefill: .init()))
 
         let cacheC = model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil, windowSize: 8))
+                LMInput(text: .init(tokens: prompt)), cache: cacheC, state: nil,
+                prefill: .init(stepSize: 8)))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsC, logitsS), 1e-3,
@@ -227,13 +228,13 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (logitsS, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheS, state: nil,
-                windowSize: nil))
+                prefill: .init()))
 
         let cacheC = model.newCache(parameters: nil)
         let (logitsC, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: prompt), image: image), cache: cacheC, state: nil,
-                windowSize: 8))
+                prefill: .init(stepSize: 8)))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(logitsC, logitsS), 1e-3,
@@ -256,7 +257,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (_, warmState) = try lastLogits(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(6))), cache: cache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         XCTAssertNotNil(warmState?[LMOutput.Key<MLXArray>("glmocr.ropeDeltas")])
 
         let batched = concatenated(
@@ -266,7 +267,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         XCTAssertThrowsError(
             try model.prepare(
                 LMInput(text: .init(tokens: batched)), cache: cache, state: warmState,
-                windowSize: nil)
+                prefill: .init())
         ) { error in
             guard
                 case ContinuationStateError.unsupportedBatchContinuation(let name)? =
@@ -287,13 +288,13 @@ final class GlmOcrContinuationTests: XCTestCase {
         XCTAssertNoThrow(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
-                windowSize: 8),
+                prefill: .init(stepSize: 8)),
             "a long cold prefill carries no anchor and must not throw")
 
         XCTAssertThrowsError(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(6, seed: 2))), cache: cache, state: nil,
-                windowSize: nil)
+                prefill: .init())
         ) { error in
             guard
                 case ContinuationStateError.missingState(_, let key)? =
@@ -315,7 +316,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
 
         guard let anchor = state?[ropeDeltasKey] else {
             return XCTFail("cold text-only prefill returned no rope delta")
@@ -340,7 +341,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (_, stateF) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: cacheF, state: nil, windowSize: nil))
+                cache: cacheF, state: nil, prefill: .init()))
         let decodeF = model(LMInput.Text(tokens: next), cache: cacheF, state: stateF)
 
         // Warm: prefill t1, continue with t2, then decode the same token.
@@ -348,10 +349,10 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         let (_, s2) = try lastLogits(
             model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
         XCTAssertNotNil(s2?[ropeDeltasKey], "continuation must hand back an anchor")
         let decodeW = model(LMInput.Text(tokens: next), cache: cacheW, state: s2)
 
@@ -374,7 +375,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (_, savedState) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
-                windowSize: nil))
+                prefill: .init()))
         XCTAssertNotNil(savedState)
 
         let url = FileManager.default.temporaryDirectory
@@ -387,11 +388,11 @@ final class GlmOcrContinuationTests: XCTestCase {
         let (warmLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2)), cache: warmCache, state: savedState,
-                windowSize: nil))
+                prefill: .init()))
         let (restoredLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t2)), cache: snapshot.cache, state: snapshot.state,
-                windowSize: nil))
+                prefill: .init()))
 
         XCTAssertLessThanOrEqual(
             maxAbsDiff(restoredLogits, warmLogits), 1e-6,
@@ -400,6 +401,6 @@ final class GlmOcrContinuationTests: XCTestCase {
         let keptCache = try loadPromptCacheSnapshot(url: url).cache
         XCTAssertThrowsError(
             try model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil, windowSize: nil))
+                LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil, prefill: .init()))
     }
 }

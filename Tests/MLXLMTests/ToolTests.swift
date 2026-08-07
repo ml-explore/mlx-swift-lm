@@ -1074,11 +1074,25 @@ struct ToolTests {
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
+        #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
             #expect(ToolCallFormat(rawValue: format.rawValue) == format)
         }
+    }
+
+    @Test("gptOSS createParser is a non-fatal compatibility fallback")
+    func testGPTOSSCreateParserCompatibilityFallback() throws {
+        // Alternate callers (e.g. MLXFoundationModels ToolCallProcessor paths)
+        // must be able to construct a parser without trapping, even though
+        // Harmony tool calling is not text-parser based.
+        let parser = ToolCallFormat.gptOSS.createParser()
+        #expect(parser.startTag == "<tool_call>")
+        #expect(parser.endTag == "</tool_call>")
+        // Processor construction must likewise be non-fatal.
+        let processor = ToolCallProcessor(format: .gptOSS)
+        #expect(processor.toolCalls.isEmpty)
     }
 
     // MARK: - Mistral Format Tests

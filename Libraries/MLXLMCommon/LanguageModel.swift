@@ -252,7 +252,7 @@ public struct LMOutput {
     }
 }
 
-/// The result of the call to ``LanguageModel/prepare(_:cache:state:windowSize:)``
+/// The result of the call to ``LanguageModel/prepare(_:cache:state:prefill:)``
 public enum PrepareResult {
     /// tokens to process by the ``TokenIterator``
     case tokens(LMInput.Text)
@@ -266,7 +266,7 @@ public enum PrepareResult {
 /// The language model is typically called by the ``TokenIterator`` and it:
 ///
 /// - consumes the ``LMInput``
-/// - calls ``prepare(_:cache:state:windowSize:)`` to initialize the KVCache and consume the prompt
+/// - calls ``prepare(_:cache:state:prefill:)`` to initialize the KVCache and consume the prompt
 /// - calls ``callAsFunction(_:cache:state:)-9kuvf`` for each token, producing an ``LMOutput``
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
@@ -284,7 +284,17 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// This can return:
     /// - ``PrepareResult/tokens(_:)`` if the caller should evaluate the (remaining) tokens normally
     /// - ``PrepareResult/logits(_:)`` to produce the next token from the prompt
-    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?)
+    ///
+    /// Implementations that chunk the prompt should drive the loop with
+    /// ``PrefillParameters/forEachChunk(total:reserving:defaultStepSize:maximumStepSize:_:)``,
+    /// which owns cancellation, pooling, and per-chunk progress. An
+    /// implementation returning `.logits` owns its whole
+    /// ``PrefillParameters/progress`` sequence, including the terminal
+    /// `(total, total)`; one returning `.tokens` reports only its own chunks —
+    /// the iterator that evaluates the remainder completes the sequence.
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    )
         throws -> PrepareResult
 
     /// Primary entry point to produce a step (single token) from the model
@@ -300,6 +310,17 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 }
 
 extension LanguageModel {
+    @available(
+        *, deprecated, renamed: "prepare(_:cache:state:prefill:)",
+        message:
+            "prefill now defaults to balanced chunking; use prefill.chunking = .remainder for the legacy chunk boundaries"
+    )
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+    ) throws -> PrepareResult {
+        try prepare(input, cache: cache, state: state, prefill: .init(stepSize: windowSize))
+    }
+
     public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
     {

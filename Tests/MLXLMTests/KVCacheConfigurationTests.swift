@@ -458,10 +458,8 @@ struct KVCacheConfigurationTests {
 
     private final class HybridProgressModel: Module, LanguageModel {
         func prepare(
-            _ input: LMInput,
-            cache: [KVCache],
-            state: LMOutput.State?,
-            windowSize: Int?
+            _ input: MLXLMCommon.LMInput, cache: [any MLXLMCommon.KVCache],
+            state: MLXLMCommon.LMOutput.State?, prefill: MLXLMCommon.PrefillParameters
         ) throws -> PrepareResult {
             .tokens(input.text)
         }

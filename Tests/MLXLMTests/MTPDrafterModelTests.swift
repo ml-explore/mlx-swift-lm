@@ -83,7 +83,9 @@ func testMTPDrafterContainerPerform() async {
 private final class DummyLanguageModel: Module, LanguageModel, KVCacheDimensionProvider {
     var kvHeads: [Int] { [] }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    )
         throws -> PrepareResult
     {
         .tokens(input.text)

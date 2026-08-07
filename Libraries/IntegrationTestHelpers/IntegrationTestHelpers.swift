@@ -31,6 +31,80 @@ private func check(_ condition: Bool, _ message: String) throws {
     guard condition else { throw IntegrationTestFailure(message) }
 }
 
+// MARK: - Harmony tokenizer contract
+
+public enum HarmonyProtocolTests {
+    /// Exercises the production tokenizer adapter and GPT-OSS chat template
+    /// without downloading model weights.
+    public static func realTokenizerContract(tokenizer: any Tokenizer) throws {
+        let expectedControlTokenIDs = [
+            "<|return|>": 200_002,
+            "<|constrain|>": 200_003,
+            "<|channel|>": 200_005,
+            "<|start|>": 200_006,
+            "<|end|>": 200_007,
+            "<|message|>": 200_008,
+            "<|call|>": 200_012,
+        ]
+
+        for (token, expectedID) in expectedControlTokenIDs {
+            try check(
+                tokenizer.convertTokenToId(token) == expectedID,
+                "GPT-OSS tokenizer resolved \(token) to "
+                    + "\(String(describing: tokenizer.convertTokenToId(token))); expected \(expectedID)"
+            )
+            try check(
+                tokenizer.encode(text: token, addSpecialTokens: false) == [expectedID],
+                "GPT-OSS tokenizer did not encode \(token) atomically")
+        }
+
+        try check(
+            HarmonyFrameParser(tokenizer: tokenizer) != nil,
+            "HarmonyFrameParser rejected the production GPT-OSS tokenizer")
+        try check(
+            HarmonyFrameParser.stopTokenIDs(tokenizer: tokenizer) == [200_002, 200_012],
+            "Harmony stop-token resolution did not match <|return|>/<|call|>")
+
+        let call = ToolCall(
+            function: .init(name: "get_weather", arguments: ["city": "Paris"]),
+            id: "call_fixture")
+        let generator: any MessageGenerator = GPTOSSMessageGenerator()
+        let messages = generator.generate(messages: [
+            .user("Weather in Paris?"),
+            .assistant("", toolCalls: [call]),
+            .tool(#"{"forecast":"sunny"}"#, id: "call_fixture"),
+        ])
+        let tools: [[String: any Sendable]] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "city": ["type": "string"] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                        "required": ["city"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ]
+        ]
+
+        let rendered = try tokenizer.applyChatTemplate(
+            messages: messages, tools: tools, additionalContext: nil)
+        try check(rendered.contains(200_012), "Real GPT-OSS template omitted the tool-call token")
+        let promptStart = rendered.lastIndex(of: 200_006)
+        let promptSuffix = promptStart.map {
+            tokenizer.decode(
+                tokenIds: Array(rendered[$0...]), skipSpecialTokens: false)
+        }
+        try check(
+            promptSuffix == "<|start|>assistant",
+            "Real GPT-OSS template omitted the assistant generation prompt")
+    }
+}
+
 // MARK: - Network Retry
 
 /// Transient network failures worth retrying on a flaky CI network — chiefly

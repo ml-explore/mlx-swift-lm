@@ -147,13 +147,13 @@ public class ChatSessionTests: XCTestCase {
         }
 
         func prepare(
-            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
         ) throws -> PrepareResult {
             try base.prepare(
                 LMInput(tokens: input.text.tokens),
                 cache: cache,
                 state: state,
-                windowSize: windowSize)
+                prefill: prefill)
         }
 
         func callAsFunction(
@@ -250,13 +250,15 @@ public class ChatSessionTests: XCTestCase {
         }
 
         func prepare(
-            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
         ) throws -> PrepareResult {
             let logits = inner(batched(input.text.tokens), cache: cache.isEmpty ? nil : cache)
             // Carry a seeded anchor forward, or start one at zero — the shape
             // of every wired model's cold prefill.
             var produced = LMOutput.State()
             produced[Self.anchorKey] = state?[Self.anchorKey] ?? MLXArray([Int32(0)])
+            let total = input.text.tokens.dim(-1)
+            prefill.progress?(total, total)
             return .logits(LMOutput(logits: logits, state: produced))
         }
 

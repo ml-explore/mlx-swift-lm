@@ -102,6 +102,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
 
+    /// GPT-OSS full Harmony response protocol.
+    ///
+    /// Not a tool-call JSON dialect: selects the Harmony frame parser + router
+    /// (channels, recipients, terminators). Tool calls appear only as
+    /// `commentary to=functions.<name>` frames within that protocol.
+    /// Example: `<|channel|>commentary to=functions.get_weather<|message|>{"location": "Tokyo"}<|call|>`
+    case gptOSS = "gpt_oss"
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -132,6 +140,57 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .gptOSS:
+            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        }
+    }
+
+    /// Builds the response-protocol decoder used by streaming text generation.
+    ///
+    /// Ordinary formats share the detokenized tool-call decoder. Protocols
+    /// with token-level framing provide their own implementation here, keeping
+    /// concrete model behavior out of the generic evaluation loop.
+    func makeTokenStreamDecoder(
+        tokenizer: any Tokenizer,
+        tools: [[String: any Sendable]]?,
+        stopStrings: Set<String>
+    ) -> any TokenStreamDecoder {
+        switch self {
+        case .gptOSS:
+            if let decoder = HarmonyStreamAdapter(
+                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+            {
+                return decoder
+            }
+            // Preserve the pre-Harmony compatibility path when a tokenizer
+            // lacks the protocol's complete control-token vocabulary.
+            return StandardTokenStreamDecoder(
+                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+            .mistral, .llama3:
+            return StandardTokenStreamDecoder(
+                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+        }
+    }
+
+    /// Cache-reuse rules required by this protocol's on-device token stream.
+    ///
+    /// Most formats are plain text dialects: what the model generates is what a
+    /// chat-template re-render produces, so the standard prefix rules suffice
+    /// and this returns no extra rules. A protocol that keeps state in the KV
+    /// cache which the template cannot reproduce contributes a rule here.
+    ///
+    /// - Parameter tokenizer: used to resolve protocol control tokens; a
+    ///   tokenizer lacking them yields no rules, leaving the model on the
+    ///   standard path.
+    func promptCacheReuseRules(tokenizer: any Tokenizer) -> [any PromptCacheReuseRule] {
+        switch self {
+        case .gptOSS:
+            return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2, .mistral,
+            .llama3:
+            return []
         }
     }
 

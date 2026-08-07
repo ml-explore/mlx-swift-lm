@@ -1042,7 +1042,8 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
+        prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -1065,11 +1066,11 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
                 model: "GlmOcr", key: ropeDeltasKey.id)
         }
 
-        let window = windowSize ?? 512
+        let window = prefill.resolvedStepSize()
         let tokenCount = inputIds.dim(-1)
         if inputIds.ndim <= 2, tokenCount > 0, cacheOffset > 0 || tokenCount > window {
             return try prepareContinuation(
-                input, cache: cache, state: state, cacheOffset: cacheOffset, windowSize: window)
+                input, cache: cache, state: state, cacheOffset: cacheOffset, prefill: prefill)
         }
 
         let vision = visionInputs(input)
@@ -1084,6 +1085,8 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         let result = languageModel(
             nil, cache: cache, state: state, inputEmbedding: inputEmbeddings)
 
+        let total = inputEmbeddings.dim(1)
+        prefill.progress?(total, total)
         return .logits(result)
     }
 
@@ -1092,7 +1095,7 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     /// The vision tower and image→token merge run once over the remainder, whose M-RoPE positions
     /// are computed once from the position anchor (cache offset plus the rope delta in `state`),
     /// so a new image's t/h/w indices start there rather than at zero. The language model is then
-    /// driven in `windowSize` chunks, bounding the attention scratch to `[heads, chunk, L]`.
+    /// driven in `prefill`-sized chunks, bounding the attention scratch to `[heads, chunk, L]`.
     ///
     /// The returned state carries `getRopeIndex` delta − cache offset.
     private func prepareContinuation(
@@ -1100,7 +1103,7 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         cache: [any KVCache],
         state: LMOutput.State?,
         cacheOffset: Int,
-        windowSize: Int
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let rawInputIds = input.text.tokens
         // getRopeIndex and the image merge both index a [batch, seq] layout.
@@ -1130,22 +1133,28 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         let (positionIds, ropeDeltas) = getRopeIndex(
             inputIds: inputIds, imageGridThw: vision?.frames, positionOffset: positionOffset)
 
-        let step = max(1, windowSize)
-        var lastLogits = MLXArray(0)
-        var start = 0
-        repeat {
-            let end = min(start + step, remainderLength)
-            let output = languageModel(
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = languageModel(
                 nil,
                 cache: cache,
                 state: nil,
-                inputEmbedding: embeds[0..., start ..< end, 0...],
-                positionIds: positionIds[0..., 0..., start ..< end])
-            lastLogits = output.logits
+                inputEmbedding: embeds[0..., range, 0...],
+                positionIds: positionIds[0..., 0..., range])
             asyncEval(cache)
-            start = end
-        } while start < remainderLength
-        eval(cache)
+        }
+        if processed > 0 {
+            eval(cache)
+        }
+
+        let tailRange = processed ..< remainderLength
+        let lastLogits = languageModel(
+            nil,
+            cache: cache,
+            state: nil,
+            inputEmbedding: embeds[0..., tailRange, 0...],
+            positionIds: positionIds[0..., 0..., tailRange]
+        ).logits
+        prefill.progress?(remainderLength, remainderLength)
 
         var resumeState = LMOutput.State()
         resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))

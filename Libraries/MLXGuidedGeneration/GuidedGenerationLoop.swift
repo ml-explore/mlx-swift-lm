@@ -75,6 +75,9 @@ public enum GuidedGenerationLoop {
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
+    ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
+    ///     progress callback). Defaults to a 512-token step with balanced
+    ///     chunking.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -98,6 +101,7 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -123,7 +127,7 @@ public enum GuidedGenerationLoop {
         var logits: MLXArray
         let inputLength = input.text.cacheSequenceLength
         switch try model.prepare(
-            input, cache: cacheStorage.cache, state: nil, windowSize: 512)
+            input, cache: cacheStorage.cache, state: nil, prefill: prefill)
         {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength
