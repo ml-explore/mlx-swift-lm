@@ -39,7 +39,7 @@ public func scatterUnsort(x: MLXArray, invOrder: MLXArray, shape: [Int]? = nil) 
 
 // MARK: - SwitchGLU
 
-public class SwitchGLU: Module {
+open class SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
@@ -95,7 +95,7 @@ public class SwitchGLU: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+    open func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
         let doSort = indices.size >= 64
@@ -219,7 +219,7 @@ public class FusedGateUpSwitchGLU: Module {
 
 // MARK: - SwitchLinear
 
-public class SwitchLinear: Module, Quantizable {
+open class SwitchLinear: Module, Quantizable {
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "bias") var bias: MLXArray?
 
@@ -262,7 +262,7 @@ public class SwitchLinear: Module, Quantizable {
         self._bias.wrappedValue = bias
     }
 
-    public func callAsFunction(
+    open func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
         let weightT = self.weight.swappedAxes(-1, -2)
