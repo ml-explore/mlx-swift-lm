@@ -22,6 +22,13 @@ final class RotatingStagedKVCache: KVCache {
     /// Positions staged but not yet committed.
     var stagedCount: Int { stagedKeys?.dim(2) ?? 0 }
 
+    /// The staged rows, for a caller that needs to replay them after a restore. Valid until
+    /// ``commit(retaining:)`` clears them.
+    var stagedArrays: (MLXArray, MLXArray)? {
+        guard let stagedKeys, let stagedValues else { return nil }
+        return (stagedKeys, stagedValues)
+    }
+
     /// The live ring's position plus whatever is staged.
     ///
     /// Masks are built before the layer writes, so at mask time this reads as the live offset --

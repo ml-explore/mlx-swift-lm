@@ -654,3 +654,97 @@ private func expectRoundMatchesAcceptedOnlyReplay(
     #expect(live.processedTokenCount == 7)
     #expect(live.nativeAttentionOffsetsAreAligned)
 }
+
+// MARK: - Taking back committed-but-unemitted positions
+//
+// A round commits its accepted prefix before the consumer has drained it, so a stop token partway
+// through leaves positions in the cache that were never emitted. Past a wrapped ring a plain trim
+// cannot take them back — the append already evicted what the rewind would restore — so the
+// commit keeps a restore point. Same oracle as above: the answer has to equal a cache that only
+// ever saw the positions that were actually emitted.
+
+private func expectRewindMatchesEmittedOnlyReplay(
+    window: Int, keep: Int = 0, prefill: Int, written: Int, retaining: Int, rewinding: Int,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let live = makeGemmaShapedStorage(window: window, keep: keep)
+    if prefill > 0 {
+        let (k, v) = positionedKV(0 ..< prefill)
+        for leaf in live.cache { _ = leaf.update(keys: k, values: v) }
+        live.commitProcessedTokens(prefill)
+    }
+
+    let oracle = live.copy()
+
+    let staged = try #require(
+        StagedRound(live, width: written), sourceLocation: sourceLocation)
+    stageRound(staged, prefill ..< (prefill + written))
+    staged.commit(accepted: retaining)
+
+    let rewound = live.rewindLastRound(rewinding)
+    #expect(
+        rewound == Swift.min(rewinding, retaining),
+        "rewind took back \(rewound), expected \(Swift.min(rewinding, retaining))",
+        sourceLocation: sourceLocation)
+
+    // The oracle only ever sees the positions that survived both steps.
+    let emitted = retaining - rewound
+    if emitted > 0 {
+        let (k, v) = positionedKV(prefill ..< (prefill + emitted))
+        for leaf in oracle.cache { _ = leaf.update(keys: k, values: v) }
+        oracle.commitProcessedTokens(emitted)
+    }
+
+    expectStoragesEquivalent(
+        live, oracle, "rewind \(rewinding) of \(retaining)", sourceLocation: sourceLocation)
+}
+
+@Test(arguments: [1, 2, 3, 4])
+func testRewindPastTheWrapMatchesEmittedOnlyReplay(rewinding: Int) throws {
+    // Prefill alone clears the window, so every ring here has already wrapped and a plain trim
+    // would silently no-op.
+    try expectRewindMatchesEmittedOnlyReplay(
+        window: 8, prefill: 20, written: 4, retaining: 4, rewinding: rewinding)
+}
+
+@Test(arguments: [1, 2, 3])
+func testRewindBelowTheWrapMatchesEmittedOnlyReplay(rewinding: Int) throws {
+    // Below the window the commit needs no restore point; the exact trim path handles it.
+    try expectRewindMatchesEmittedOnlyReplay(
+        window: 32, prefill: 4, written: 4, retaining: 4, rewinding: rewinding)
+}
+
+@Test func testRewindPastTheWrapWithAPinnedPrefix() throws {
+    try expectRewindMatchesEmittedOnlyReplay(
+        window: 8, keep: 2, prefill: 20, written: 4, retaining: 3, rewinding: 2)
+}
+
+@Test func testRewindingEverythingTheRoundCommittedPastTheWrap() throws {
+    try expectRewindMatchesEmittedOnlyReplay(
+        window: 8, prefill: 20, written: 4, retaining: 3, rewinding: 3)
+}
+
+/// The record is only good for the most recent commit: anything written after it invalidates the
+/// pre-commit contents the restore point refers to.
+@Test func testRewindIsRefusedAfterAnotherWrite() throws {
+    let live = makeGemmaShapedStorage(window: 8, keep: 0)
+    let (k, v) = positionedKV(0 ..< 20)
+    for leaf in live.cache { _ = leaf.update(keys: k, values: v) }
+    live.commitProcessedTokens(20)
+
+    let staged = try #require(StagedRound(live, width: 4))
+    stageRound(staged, 20 ..< 24)
+    staged.commit(accepted: 4)
+    #expect(live.processedTokenCount == 24)
+
+    // A single-token write outside a round: exactly what passthrough decoding does.
+    let (k2, v2) = positionedKV(24 ..< 25)
+    for leaf in live.cache { _ = leaf.update(keys: k2, values: v2) }
+    live.commitProcessedTokens(1)
+
+    // The rotating ring has wrapped, so the fallback trim reports that it took nothing back
+    // rather than corrupting the ring.
+    #expect(live.rewindLastRound(2) == 0)
+    #expect(live.processedTokenCount == 25)
+    #expect(live.nativeAttentionOffsetsAreAligned)
+}

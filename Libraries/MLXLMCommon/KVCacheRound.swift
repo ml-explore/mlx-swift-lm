@@ -29,6 +29,29 @@ package protocol KVCacheRoundStrategy: AnyObject {
 
     /// Keep the first `retaining` written positions and drop the rest. Called at most once.
     func commit(retaining: Int)
+
+    /// Enough to put this leaf back should the committed positions turn out not to have been
+    /// emitted after all, or `nil` when a later `trim(_:)` would undo them exactly.
+    ///
+    /// Called immediately before ``commit(retaining:)``, because that is the last moment the
+    /// pre-commit contents still exist.
+    func makeRestorePoint(retaining: Int) -> (any KVCacheLeafRestorePoint)?
+}
+
+extension KVCacheRoundStrategy {
+    /// Most leaves need nothing: their `trim(_:)` is bookkeeping and undoes an append exactly.
+    func makeRestorePoint(retaining: Int) -> (any KVCacheLeafRestorePoint)? { nil }
+}
+
+/// Enough to put one leaf back the way it was before a commit, and replay part of it.
+///
+/// A generation can stop with positions committed but never emitted -- a stop token partway
+/// through a round's accepted prefix, a consumer that walked away. Those have to come back out of
+/// the cache, and for a wrapped ring `trim(_:)` cannot do it: the append already evicted the
+/// entries the rewind would need to restore.
+package protocol KVCacheLeafRestorePoint {
+    /// Restore the pre-commit contents, then re-apply the first `retaining` committed positions.
+    func restore(retaining: Int)
 }
 
 extension KVCacheRoundStrategy {
@@ -84,6 +107,46 @@ final class RotatingRoundStrategy: KVCacheRoundStrategy {
 
     func commit(retaining: Int) {
         staged.commit(retaining: retaining)
+    }
+
+    func makeRestorePoint(retaining: Int) -> (any KVCacheLeafRestorePoint)? {
+        // Below the window a trim is exact bookkeeping, so a snapshot would be dead weight on
+        // every round of every short generation. Ask about the post-commit position, since that
+        // is the state a later rewind would be undoing.
+        guard !live.isTrimmable(after: retaining) else { return nil }
+        let snapshot = live.state
+        guard snapshot.count == 2 else { return nil }
+        return RotatingRestorePoint(
+            live: live,
+            // Detached the same way `RotatingKVCache.copy()` detaches: a full-range slice shares
+            // the node but is a new object, and an in-place write rebinds the *receiver*. Holding
+            // `live.state` directly would hold the very objects the commit is about to rebind.
+            state: snapshot.map { $0[.ellipsis] },
+            metaState: live.metaState,
+            replay: staged.stagedArrays)
+    }
+}
+
+/// Restores a rotating leaf by putting its ring back and replaying the accepted rows.
+///
+/// Capture is cheap -- a full-range slice reuses the underlying node -- so the price is deferred:
+/// while the snapshot is alive the next ring write cannot donate its buffer. It is dropped as
+/// soon as another round opens.
+struct RotatingRestorePoint: KVCacheLeafRestorePoint {
+    let live: RotatingKVCache
+    let state: [MLXArray]
+    let metaState: [String]
+    let replay: (MLXArray, MLXArray)?
+
+    func restore(retaining: Int) {
+        // Order matters and mirrors `copy()`: the state setter deliberately leaves `offset`
+        // alone, because `idx` and `offset` both arrive with the metadata.
+        live.state = state
+        live.metaState = metaState
+        guard retaining > 0, let replay else { return }
+        _ = live.update(
+            keys: replay.0[.ellipsis, ..<retaining, 0...],
+            values: replay.1[.ellipsis, ..<retaining, 0...])
     }
 }
 

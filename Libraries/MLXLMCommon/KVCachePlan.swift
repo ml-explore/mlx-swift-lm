@@ -118,6 +118,14 @@ package final class KVCacheStorage {
 
     private var openRound: KVCacheRound?
 
+    /// What it would take to undo the most recent commit, kept only until the next write.
+    private struct CompletedRound {
+        let committedPositions: Int
+        let restorePoints: [any KVCacheLeafRestorePoint]
+        let trimmableLeaves: [KVCache]
+    }
+    private var lastRound: CompletedRound?
+
     /// Whether a staged round is presently writing provisionally against these entries.
     ///
     /// A round hands the model substitute caches and defers part of its writes, so the entries
@@ -154,6 +162,7 @@ package final class KVCacheStorage {
         let (updated, overflow) = processedTokenCount.addingReportingOverflow(count)
         precondition(!overflow, "Processed token count overflow")
         processedTokenCount = updated
+        lastRound = nil
     }
 
     /// Trim cache state and the shared logical timeline atomically.
@@ -166,6 +175,7 @@ package final class KVCacheStorage {
             trimmed <= processedTokenCount,
             "Cache trimmed beyond its processed-token timeline")
         processedTokenCount -= trimmed
+        lastRound = nil
         return trimmed
     }
 
@@ -196,6 +206,7 @@ package final class KVCacheStorage {
             strategies.append(strategy)
         }
 
+        lastRound = nil
         let round = KVCacheRound(strategies: strategies, maximumPositions: maximumPositions)
         openRound = round
         return round
@@ -215,11 +226,27 @@ package final class KVCacheStorage {
             retaining >= 0 && retaining <= written,
             "cannot retain \(retaining) of \(written) written positions")
 
+        // Built before the commit, because that is the last moment the pre-commit contents of a
+        // wrapped ring still exist.
+        var restorePoints = [any KVCacheLeafRestorePoint]()
+        var trimmableLeaves = [KVCache]()
         for strategy in round.strategies {
+            if let point = strategy.makeRestorePoint(retaining: retaining) {
+                restorePoints.append(point)
+            } else {
+                trimmableLeaves.append(strategy.presented)
+            }
             strategy.commit(retaining: retaining)
         }
         processedTokenCount += retaining
         openRound = nil
+        lastRound =
+            restorePoints.isEmpty
+            ? nil
+            : CompletedRound(
+                committedPositions: retaining,
+                restorePoints: restorePoints,
+                trimmableLeaves: trimmableLeaves)
 
         assert(
             nativeAttentionOffsetsAreAligned,
@@ -235,6 +262,40 @@ package final class KVCacheStorage {
     @discardableResult
     package func rollback(_ round: KVCacheRound) -> KVCacheRoundCommit {
         commit(round, retaining: 0)
+    }
+
+    /// Take back `count` positions the last commit kept.
+    ///
+    /// A generation can stop with positions committed but never emitted, and those have to leave
+    /// the cache before anything reconciles a token ledger against it. `trim(_:)` handles that
+    /// whenever every leaf can undo an append by bookkeeping; past a sliding window one cannot,
+    /// so the commit left behind what it takes to put that leaf back and replay the part that was
+    /// emitted. Either way this is exact, and it is the only rewind left on the staged path.
+    ///
+    /// Only the most recent commit can be taken back: any write after it invalidates the record.
+    @discardableResult
+    package func rewindLastRound(_ count: Int) -> Int {
+        precondition(count >= 0, "Rewind count cannot be negative")
+        precondition(!roundIsOpen, "cannot rewind while a staged round is open")
+        guard count > 0 else { return 0 }
+
+        guard let last = lastRound else { return trim(count) }
+        let rewound = Swift.min(count, last.committedPositions)
+        guard rewound > 0 else { return 0 }
+
+        for point in last.restorePoints {
+            point.restore(retaining: last.committedPositions - rewound)
+        }
+        for leaf in last.trimmableLeaves {
+            leaf.trim(rewound)
+        }
+        processedTokenCount -= rewound
+        lastRound = nil
+
+        assert(
+            nativeAttentionOffsetsAreAligned,
+            "rewinding a committed round left the leaves and the timeline out of step")
+        return rewound
     }
 
     /// How much of the emitted sequence the given leaf can still describe, outside a round.
