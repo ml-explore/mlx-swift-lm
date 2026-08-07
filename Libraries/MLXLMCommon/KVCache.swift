@@ -616,18 +616,27 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     /// the buffer, which is where every multi-token write leaves it) both steps degrade to
     /// slices and nothing is copied.
     ///
-    /// - Parameter tail: Maximum number of entries to return. Clamped to what the cache holds;
-    ///   a negative value returns an empty view.
-    /// - Returns: `(keys, values)` shaped `[B, kvHeads, min(tail, count), headDim]`, or `nil`
-    ///   before the first write.
-    public func logicalView(tail: Int) -> (MLXArray, MLXArray)? {
+    /// The pinned `keep` prefix is a floor, not just a splice point: a `tail` below it still
+    /// comes back, because those entries are not evictable and a view that dropped them would be
+    /// a context this ring can never present. With `keep == 0` -- every sliding-window model --
+    /// the floor is zero and the length is exactly `min(tail, count)`.
+    ///
+    /// - Parameter tail: Requested number of trailing entries. Clamped to what the cache holds;
+    ///   a negative value is read as zero.
+    /// - Returns: `(keys, values)` shaped `[B, kvHeads, n, headDim]` where
+    ///   `n == max(min(tail, count), min(keep, count))`, or `nil` before the first write.
+    package func logicalView(tail: Int) -> (MLXArray, MLXArray)? {
         guard let keys = self.keys, let values = self.values else { return nil }
 
         let orderedKeys = temporalOrder(keys)
         let orderedValues = temporalOrder(values)
 
         let available = orderedKeys.dim(2)
-        let bound = Swift.min(Swift.max(tail, 0), available)
+        // Raising the bound to the pinned prefix is what keeps the front-trim's second slice in
+        // range; stated here rather than left to slice clamping, since the length it produces is
+        // the documented contract.
+        let requested = Swift.min(Swift.max(tail, 0), available)
+        let bound = Swift.max(requested, Swift.min(keep, available))
         let trimSize = available - bound
         guard trimSize > 0 else { return (orderedKeys, orderedValues) }
 

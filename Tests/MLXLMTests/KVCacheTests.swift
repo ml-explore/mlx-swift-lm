@@ -1116,6 +1116,36 @@ private func fillOneAtATime(_ cache: RotatingKVCache, positions: Range<Int>) {
     #expect(positions.suffix(3).sorted() == Array(positions.suffix(3)), "tail out of order")
 }
 
+@Test func testRotatingLogicalViewFloorsAtThePinnedPrefix() throws {
+    // A pinned entry is never evictable, so `keep` is a floor on the view and not just a
+    // splice point: a `tail` below it still returns the prefix. The alternative -- honouring
+    // `tail` exactly -- would hand back a context the ring itself can never present.
+    let cache = RotatingKVCache(maxSize: 8, keep: 2)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    for tail in 0 ... 2 {
+        let view = try #require(cache.logicalView(tail: tail))
+        #expect(
+            encodedPositions(view.0) == [0, 1],
+            "tail \(tail) below `keep` dropped the pinned prefix")
+        #expect(encodedPositions(view.1).map { -$0 } == [0, 1], "values diverged from keys")
+    }
+
+    // One past the floor is the first tail that actually selects anything.
+    let positions = encodedPositions(try #require(cache.logicalView(tail: 3)).0)
+    #expect(positions.count == 3)
+    #expect(Array(positions.prefix(2)) == [0, 1], "the prefix moved once the tail cleared it")
+}
+
+@Test func testRotatingLogicalViewFloorIsBoundedByWhatTheCacheHolds() throws {
+    // Fewer entries written than `keep` pins: the floor is what exists, not what is reserved.
+    let cache = RotatingKVCache(maxSize: 8, keep: 4)
+    fillOneAtATime(cache, positions: 0 ..< 2)
+
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 0)).0) == [0, 1])
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 9)).0) == [0, 1])
+}
+
 /// The property the speculative overlay rests on: for a multi-token write, the presentation the
 /// cache *would* return equals `logicalView(tail: maxSize - 1)` followed by the new rows. An
 /// adapter can therefore stage beside the ring and hand the model an identical view.
