@@ -244,6 +244,41 @@ final class GlmOcrContinuationTests: XCTestCase {
 
     /// A warm cache continued without its anchor must throw; a cold cache
     /// through the same windowed path must not.
+    /// A warm batched continuation carries one scalar anchor that cannot describe rows resuming
+    /// at different positions. It must be refused rather than sharing the anchor across rows
+    /// (silently wrong positions) or reaching getRopeIndex's batchSize precondition (a trap).
+    /// This is independent of the missing-state guard: here the anchor is present and valid.
+    func testWarmBatchedContinuationThrows() throws {
+        MLXRandom.seed(23)
+        let model = try makeTinyModel()
+
+        let cache = model.newCache(parameters: nil)
+        let (_, warmState) = try lastLogits(
+            try model.prepare(
+                LMInput(text: .init(tokens: textTokens(6))), cache: cache, state: nil,
+                windowSize: nil))
+        XCTAssertNotNil(warmState?[LMOutput.Key<MLXArray>("glmocr.ropeDeltas")])
+
+        let batched = concatenated(
+            [textTokens(4, seed: 1), textTokens(4, seed: 2)], axis: 0)
+        XCTAssertEqual(batched.dim(0), 2)
+
+        XCTAssertThrowsError(
+            try model.prepare(
+                LMInput(text: .init(tokens: batched)), cache: cache, state: warmState,
+                windowSize: nil)
+        ) { error in
+            guard
+                case ContinuationStateError.unsupportedBatchContinuation(let name)? =
+                    error as? ContinuationStateError
+            else {
+                return XCTFail(
+                    "expected ContinuationStateError.unsupportedBatchContinuation, got \(error)")
+            }
+            XCTAssertEqual(name, "GlmOcr")
+        }
+    }
+
     func testWarmContinuationWithoutStateThrows() throws {
         MLXRandom.seed(19)
         let model = try makeTinyModel()

@@ -614,6 +614,7 @@ public final class ChatSession {
         promptCache: consuming PromptCacheSnapshot,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -626,6 +627,7 @@ public final class ChatSession {
             state: promptCache.state,
             speculativeDecoding: speculativeDecoding,
             generateParameters: generateParameters,
+            components: components,
             processing: processing,
             additionalContext: additionalContext,
             tools: tools,
@@ -654,6 +656,7 @@ public final class ChatSession {
         promptCache: consuming PromptCacheSnapshot,
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
+        components: GenerationComponents = .init(),
         processing: UserInput.Processing = .init(resize: CGSize(width: 512, height: 512)),
         additionalContext: [String: any Sendable]? = nil,
         tools: [ToolSpec]? = nil,
@@ -665,6 +668,7 @@ public final class ChatSession {
             promptCache: promptCache,
             speculativeDecoding: speculativeDecoding,
             generateParameters: generateParameters,
+            components: components,
             processing: processing,
             additionalContext: additionalContext,
             tools: tools,
@@ -1116,7 +1120,13 @@ public final class ChatSession {
                             preparedInput.image == nil,
                             preparedInput.video == nil,
                             preparedInput.audio == nil,
+                            // A warm main cache with no draft cache is admitted only when
+                            // `reusedMainCacheWithoutDraft` says the transcript can rebuild both
+                            // from the full input below. Without that ledger — a session restored
+                            // from a snapshot — there is nothing to re-prefill the draft from, and
+                            // handing mismatched caches to the iterator would throw, not fall back.
                             draftKVCache != nil || kvCache.processedTokenCount == 0
+                                || reusedMainCacheWithoutDraft
                         {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {

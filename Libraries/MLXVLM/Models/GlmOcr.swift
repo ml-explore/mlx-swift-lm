@@ -1047,7 +1047,18 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let inputIds = input.text.tokens
+        // Both the image merge and getRopeIndex index a [batch, seq] layout,
+        // and a warm text turn arrives already batched — normalize once here
+        // rather than inflating the rank on the text-only path.
+        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
         let cacheOffset = cache.first?.offset ?? 0
+
+        // The carried anchor is a single scalar, so it cannot describe several rows resuming at
+        // different positions. Independent of the missing-state guard below: that one covers an
+        // absent anchor, this one covers an anchor that cannot span the batch.
+        guard cacheOffset == 0 || inputIds2D.dim(0) == 1 else {
+            throw ContinuationStateError.unsupportedBatchContinuation(model: "GlmOcr")
+        }
 
         guard cacheOffset == 0 || state?[ropeDeltasKey] != nil else {
             throw ContinuationStateError.missingState(
@@ -1062,11 +1073,6 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         let vision = visionInputs(input)
-
-        // Both the image merge and getRopeIndex index a [batch, seq] layout,
-        // and a warm text turn arrives already batched — normalize once here
-        // rather than inflating the rank on the text-only path.
-        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
 
         let (inputEmbeddings, positionIds, ropeDeltas) = self.inputEmbeddings(
             inputIds: inputIds2D, pixelValues: vision?.pixels, frames: vision?.frames)

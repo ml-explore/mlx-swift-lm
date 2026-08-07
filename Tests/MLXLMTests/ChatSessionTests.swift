@@ -201,6 +201,35 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    /// Attaches media to the first prepared turn only. That turn refuses speculation and drops
+    /// the draft cache; later text-only turns are what should be able to pick it back up.
+    ///
+    /// `@unchecked Sendable` because the counter is serialised by the lock.
+    private final class FirstTurnImageInputProcessor: UserInputProcessor, @unchecked Sendable {
+        private let base: TestInputProcessor
+        private let lock = NSLock()
+        private var prepared = 0
+
+        init(base: TestInputProcessor) {
+            self.base = base
+        }
+
+        private func consumeFirst() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            prepared += 1
+            return prepared == 1
+        }
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            let text = try await base.prepare(input: input).text
+            guard consumeFirst() else { return LMInput(text: text) }
+            return LMInput(
+                text: text,
+                image: .init(pixels: MLXArray.zeros([1, 1, 1, 1])))
+        }
+    }
+
     /// A model that hands back model state on every prefill, the way the Qwen
     /// vision families and GLM-OCR hand back an M-RoPE anchor. The state is
     /// what a session has to carry across turns and persist with its cache;
@@ -1221,6 +1250,58 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNotNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    /// Speculation refused on one turn must not disable it for the rest of the session.
+    /// The media turn drops the draft cache; the next text turn extends the cached prefix, which
+    /// sets `reusedMainCacheWithoutDraft` so both caches are rebuilt from the full input and
+    /// speculation resumes. Without that, the gate stays false forever once the main cache is
+    /// warm and the draft cache is nil.
+    func testSpeculativeDecodingResumesAfterAMediaTurn() async throws {
+        // The prefix-preserving tokenizer makes turn 2 render as an exact extension of turn 1, so
+        // the session takes the suffix-reuse path and keeps a warm main cache with a valid ledger.
+        // That is what sets `reusedMainCacheWithoutDraft`; with an ordinary tokenizer turn 2
+        // rebuilds from cold instead and never exercises this path.
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var context = model()
+        context.processor = FirstTurnImageInputProcessor(
+            base: TestInputProcessor(
+                tokenizer: PrefixPreservingTokenizer(renderedLengthContinuation: continuation),
+                configuration: ModelConfiguration(id: "test"),
+                messageGenerator: DefaultMessageGenerator()))
+        _ = renderedLengths
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2
+            ),
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        func telemetryForTurn(_ prompt: String) async throws -> SpeculativeDecodingTelemetry? {
+            var info: GenerateCompletionInfo?
+            for try await generation in session.streamDetails(
+                to: prompt,
+                role: .user,
+                images: [] as [UserInput.Image],
+                videos: [] as [UserInput.Video]
+            ) {
+                if let generationInfo = generation.info {
+                    info = generationInfo
+                }
+            }
+            return try XCTUnwrap(info).speculativeDecodingTelemetry
+        }
+
+        let mediaTurn = try await telemetryForTurn("describe this")
+        XCTAssertNil(
+            mediaTurn, "a media turn cannot speculate — the draft would have to prefill it")
+
+        let textTurn = try await telemetryForTurn("and now in one word")
+        XCTAssertNotNil(
+            textTurn,
+            "speculation must resume once a text turn can rebuild both caches from the transcript")
     }
 
     func testSpeculativeDecodingFallsBackForPrebuiltCacheWithoutDraftCache() async throws {
