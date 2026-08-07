@@ -28,8 +28,8 @@ Tokenizers are loaded automatically by model factories:
 
 ```swift
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config
 )
 let tokenizer = await container.tokenizer
@@ -37,12 +37,12 @@ let tokenizer = await container.tokenizer
 
 ### Manual Loading
 
-Tokenizer loading is handled by the `TokenizerLoader` protocol. Each integration
-package provides a concrete loader:
+Tokenizer loading is handled by the `TokenizerLoader` protocol. The `MLXHuggingFace`
+`#huggingFaceTokenizerLoader()` macro provides a concrete loader backed by Swift
+Tokenizers' `AutoTokenizer`:
 
 ```swift
-// Using TokenizersLoader from MLXLMTokenizers (swift-tokenizers-mlx)
-let loader = TokenizersLoader()
+let loader = #huggingFaceTokenizerLoader()
 let tokenizer = try await loader.load(from: modelDirectory)
 ```
 
@@ -55,7 +55,7 @@ let tokenizer = try await loader.load(from: modelDirectory)
 let tokens: [Int] = tokenizer.encode(text: "Hello, world!")
 
 // Decode tokens to text
-let text: String = tokenizer.decode(tokens: tokens)
+let text: String = tokenizer.decode(tokenIds: tokens)
 ```
 
 ### Chat Template
@@ -276,19 +276,21 @@ if let chunk = detokenizer.next() {
 // nil means waiting for more tokens
 ```
 
-## Tokenizer Replacement Registry
+## Registering a Tokenizer Class
 
-Override tokenizer classes for compatibility:
+Some models ship a tokenizer class name that Swift Tokenizers does not recognize.
+Register a concrete implementation for that class using `AutoTokenizer.register(_:for:)`
+from Swift Tokenizers (this replaces the removed `replacementTokenizers` /
+`TokenizerReplacementRegistry`):
 
 ```swift
-// Built-in replacements
-// "Qwen2Tokenizer" -> "PreTrainedTokenizer"
-// "InternLM2Tokenizer" -> "PreTrainedTokenizer"
-// etc.
+import Tokenizers
 
-// Add custom replacement
-replacementTokenizers["CustomTokenizer"] = "PreTrainedTokenizer"
+// Map an unrecognized tokenizer class to a concrete implementation
+AutoTokenizer.register(PreTrainedTokenizer.self, for: "CustomTokenizer")
 ```
+
+Register before loading the model so the loader can resolve the class.
 
 ## Deprecated Patterns
 

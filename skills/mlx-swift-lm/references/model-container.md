@@ -25,23 +25,23 @@
 ```swift
 // Via factory (recommended)
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
-// With custom hub (from MLXLMHuggingFace)
-let hub = HubClient(token: "hf_...")
+// With a custom hub client (auth token, custom cache, etc.).
+// HubClient comes from the HuggingFace module; wrap it with #hubDownloader(_:).
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: hub,
-    using: TokenizersLoader(),
+    from: #hubDownloader(HubClient()),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "private/model")
 )
 
 // With progress tracking
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config,
     progressHandler: { progress in
         print("Downloaded: \(progress.fractionCompleted)")
@@ -92,7 +92,7 @@ let streamWithTicket = try await container.generate(
 
 // Encode/decode
 let tokens = await container.encode("Hello world")
-let text = await container.decode(tokens: [1, 2, 3])
+let text = await container.decode(tokenIds: [1, 2, 3])
 
 // Apply chat template
 let tokens = try await container.applyChatTemplate(messages: [
@@ -160,10 +160,9 @@ let config = ModelConfiguration(
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `id` | `Identifier` | `.id(String)` or `.directory(URL)` |
+| `id` | `Identifier` | `.id(String, revision:)` or `.directory(URL)` |
 | `name` | `String` | Human-readable name |
-| `tokenizerId` | `String?` | Pull tokenizer from different repo |
-| `overrideTokenizer` | `String?` | Force tokenizer class |
+| `tokenizerSource` | `TokenizerSource?` | Load tokenizer from a different source: `.id(String, revision:)` (remote) or `.directory(URL)` (local); `nil` = same as model |
 | `defaultPrompt` | `String` | Default prompt for testing |
 | `extraEOSTokens` | `Set<String>` | Additional stop tokens (as strings) |
 | `eosTokenIds` | `Set<Int>` | EOS token IDs (loaded from config) |
@@ -179,8 +178,8 @@ let factory = LLMModelFactory.shared
 
 // Load container
 let container = try await factory.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: LLMRegistry.llama3_2_3B_4bit
 )
 
@@ -197,8 +196,8 @@ let customFactory = LLMModelFactory(
 let factory = VLMModelFactory.shared
 
 let container = try await factory.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: VLMRegistry.qwen2VL2BInstruct4Bit
 )
 ```
@@ -249,7 +248,7 @@ Map `model_type` from config.json to model initializers:
 // Download location
 let resolved = try await resolve(
     configuration: configuration,
-    from: HubClient.default,
+    from: #hubDownloader(),
     progressHandler: { _ in }
 )
 let modelDir = resolved.modelDirectory

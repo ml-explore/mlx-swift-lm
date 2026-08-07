@@ -6,12 +6,14 @@ This directory contains ports of popular Encoders / Embedding Models.
 
 ```swift
 import MLXEmbedders
-import MLXEmbeddersHuggingFace
-import MLXLMTokenizers
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
-let modelContainer = try await loadModelContainer(
-    using: TokenizersLoader(),
-    configuration: .nomic_text_v1_5
+let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: EmbedderRegistry.nomic_text_v1_5
 )
 let searchInputs = [
     "search_query: Animals in Tropical Climates.",
@@ -21,10 +23,9 @@ let searchInputs = [
 ]
 
 // Generate embeddings
-let resultEmbeddings = await modelContainer.perform {
-    (model: EmbeddingModel, tokenizer: Tokenizer, pooling: Pooling) -> [[Float]] in
+let resultEmbeddings = await modelContainer.perform { context -> [[Float]] in
     let inputs = searchInputs.map {
-        tokenizer.encode(text: $0, addSpecialTokens: true)
+        context.tokenizer.encode(text: $0, addSpecialTokens: true)
     }
     // Pad to longest
     let maxLength = inputs.reduce(into: 16) { acc, elem in
@@ -36,16 +37,17 @@ let resultEmbeddings = await modelContainer.perform {
             MLXArray(
                 elem
                     + Array(
-                        repeating: tokenizer.eosTokenId ?? 0,
+                        repeating: context.tokenizer.eosTokenId ?? 0,
                         count: maxLength - elem.count))
         })
-    let mask = (padded .!= tokenizer.eosTokenId ?? 0)
+    let mask = (padded .!= context.tokenizer.eosTokenId ?? 0)
     let tokenTypes = MLXArray.zeros(like: padded)
-    let result = pooling(
-        model(padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask),
+    let result = context.pooling(
+        context.model(padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask),
         normalize: true, applyLayerNorm: true
     )
     result.eval()
+    // MLXArray is not Sendable; convert before returning from perform
     return result.map { $0.asArray(Float.self) }
 }
 ```
@@ -54,12 +56,13 @@ Load from a local directory:
 
 ```swift
 import MLXEmbedders
-import MLXLMTokenizers
+import MLXHuggingFace
+import Tokenizers
 
 let modelDirectory = URL(filePath: "/path/to/embedder")
-let modelContainer = try await loadModelContainer(
+let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
     from: modelDirectory,
-    using: TokenizersLoader()
+    using: #huggingFaceTokenizerLoader()
 )
 ```
 
@@ -67,14 +70,15 @@ Use a custom Hugging Face client:
 
 ```swift
 import MLXEmbedders
-import MLXEmbeddersHuggingFace
-import MLXLMTokenizers
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
-let hub = HubClient(token: "hf_...")
-let modelContainer = try await loadModelContainer(
-    from: hub,
-    using: TokenizersLoader(),
-    configuration: .nomic_text_v1_5
+// HubClient comes from the HuggingFace module; wrap it with #hubDownloader(_:).
+let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(HubClient()),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: EmbedderRegistry.nomic_text_v1_5
 )
 ```
 
@@ -83,7 +87,8 @@ Use a custom downloader:
 ```swift
 import MLXEmbedders
 import MLXLMCommon
-import MLXLMTokenizers
+import MLXHuggingFace
+import Tokenizers
 
 struct S3Downloader: Downloader {
     func download(
@@ -98,9 +103,9 @@ struct S3Downloader: Downloader {
     }
 }
 
-let modelContainer = try await loadModelContainer(
+let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
     from: S3Downloader(),
-    using: TokenizersLoader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "my-bucket/my-embedder")
 )
 ```
