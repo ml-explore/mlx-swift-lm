@@ -29,6 +29,26 @@ final class LoadWeightsTests: XCTestCase {
         XCTAssertEqual(names, ["model.safetensors"])
     }
 
+    func testLoadWeightsFallsBackWhenIndexedShardIsMissing() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeEmptyFile("model.safetensors", in: directory)
+        try """
+        {
+          "metadata": { "total_size": 1 },
+          "weight_map": {
+            "model.norm.weight": "model-00001-of-000001.safetensors"
+          }
+        }
+        """.data(using: .utf8)!.write(
+            to: directory.appendingPathComponent("model.safetensors.index.json"))
+
+        let names = try safetensorWeightURLs(in: directory).map(\.lastPathComponent)
+
+        XCTAssertEqual(names, ["model.safetensors"])
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("LoadWeightsTests-\(UUID().uuidString)", isDirectory: true)

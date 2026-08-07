@@ -78,6 +78,76 @@ Currently supported model types are:
 - idefics3
 - gemma3
 - smolvlm
+- deepseekocr
+- unlimited-ocr / unlimited_ocr
+
+Tried DeepSeek-OCR Hub packs:
+
+- `mlx-community/DeepSeek-OCR-5bit` (`VLMRegistry.deepseekOCR5bit`)
+
+```swift
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+let text = try await ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam)
+).respond(to: "Free OCR.", image: .url(pageURL))
+```
+
+Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
+(`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1` or cached DeepSeek-OCR-5bit).
+
+Tried Unlimited-OCR Hub packs:
+
+- `majentik/Unlimited-OCR-MLX-6bit` (`VLMRegistry.unlimitedOCR6bit`)
+
+Unlimited-OCR (`model_type`: `unlimited-ocr` / `unlimited_ocr`) reuses the whole
+DeepSeek-OCR stack and swaps the decode cache for `RingSlidingKVCache` (R-SWA), so
+the KV cache stays constant-size no matter how long the output runs. Load it the
+same way, with `VLMRegistry.unlimitedOCR6bit` and its default prompt
+`"document parsing. "`.
+
+> Note: these packs ship `model_type: deepseekocr` with
+> `_orig_model_type: unlimited-ocr` as a back-compat shim for loaders predating the
+> Unlimited registration. `VLMModelFactory` honors the original type by default, so
+> such a pack loads as `UnlimitedOCR`. Pass `honorOrigModelType: false` to one of the
+> `load` / `loadContainer` overloads to force the plain DeepSeek-OCR path instead.
+
+### DeepSeek-OCR processor modes
+
+`DeepseekOCRProcessor.Mode`:
+
+- **`gundam`** (default) — 1024 global + optional 640 local tiles (`max_num` 9, or 32 via `unlimitedContext`)
+- **`base`** — single 640 view; pass `DeepseekOCRProcessor.modeContext(.base)` into `ChatSession`
+- **Multipage fused** — multiple `UserInput.Image`s + `.base` + prompt `Multi page parsing.` (Python Unlimited `multi_image_single_token`)
+
+See the top-level README section “DeepSeek-OCR / Unlimited-OCR crop modes”.
+
+### DeepSeek-OCR grounding tokens
+
+`DeepseekOCRSpecialTokens` exposes `<|grounding|>`, `<|ref|>`/`<|/ref|>`,
+`<|det|>`/`<|/det|>` with tokenizer ID resolution and prompt helpers. Decode with
+`skipSpecialTokens: false`. Full structured layout-tree parsing is deferred;
+`parseDetections(from:)` covers bbox extraction. See the top-level README.
+
+### Optional sliding-window no-repeat n-gram
+
+`SlidingWindowNoRepeatNGramProcessor` ports the DeepSeek / Unlimited-OCR
+repetition guard. It is **opt-in** (mlx-vlm / Unlimited defaults leave it off):
+
+```swift
+let parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
+let components = GenerationComponents(
+    logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage() }
+)
+// Multi-page/PDF examples often use .unlimitedOCRMultiPage() (window 1024).
+```
+
+See `UnlimitedOCR` model docs and `GenerationComponents.logitProcessorFactory`.
 
 See [llm-tool](../../Tools/llm-tool)
 

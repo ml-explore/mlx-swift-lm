@@ -104,4 +104,53 @@ public class BaseConfigurationTests: XCTestCase {
         XCTAssertEqual(config.effectiveEOSTokenIds, [248046])
     }
 
+    func testOrigModelTypeResolvesUnlimitedOCRShim() throws {
+        let json =
+            """
+            {
+                "model_type": "deepseekocr",
+                "_orig_model_type": "unlimited-ocr"
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(config.modelType, "deepseekocr")
+        XCTAssertEqual(config.origModelType, "unlimited-ocr")
+        XCTAssertEqual(config.resolvedModelType(), "unlimited-ocr")
+        XCTAssertEqual(
+            config.resolvedModelType(honorOrigModelType: false), "deepseekocr")
+    }
+
+    func testOrigModelTypeUnderscoreAliasNormalizesToHyphen() throws {
+        let json =
+            """
+            {
+                "model_type": "deepseekocr",
+                "_orig_model_type": "unlimited_ocr"
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(config.resolvedModelType(), "unlimited-ocr")
+    }
+
+    func testMissingOrigModelTypeKeepsHubModelType() throws {
+        let json =
+            """
+            {
+                "model_type": "deepseekocr"
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertNil(config.origModelType)
+        XCTAssertEqual(config.resolvedModelType(), "deepseekocr")
+    }
+
 }

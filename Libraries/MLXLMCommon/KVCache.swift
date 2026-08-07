@@ -844,6 +844,174 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
+/// Unlimited-OCR Reference Sliding Window Attention (R-SWA) cache.
+///
+/// Keeps the full prompt/prefill KV, then appends decode tokens until a ring of
+/// ``windowSize`` is full. Afterwards new decode keys/values overwrite that ring
+/// while `offset` (and therefore RoPE absolute positions) keeps increasing.
+///
+/// Do **not** substitute ``RotatingKVCache`` — that cache keeps leading tokens and
+/// rotates from the start, which is a different sliding-window semantics.
+///
+/// Port of Python `mlx_vlm.models.unlimited_ocr.language.RingSlidingKVCache`.
+public class RingSlidingKVCache: KVCacheSimple {
+    public private(set) var windowSize: Int
+    public private(set) var prefillLength: Int?
+    private var ringPos: Int = 0
+
+    /// Logical retained length once the decode ring is active: `prefill + window`.
+    public override var maxSize: Int? {
+        guard let prefillLength else { return nil }
+        return prefillLength + windowSize
+    }
+
+    public init(windowSize: Int) {
+        precondition(windowSize > 0, "RingSlidingKVCache windowSize must be > 0")
+        self.windowSize = windowSize
+        super.init()
+    }
+
+    public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let seqLen = keys.dim(2)
+
+        if prefillLength == nil {
+            // Multi-token prefill: grow like a standard cache; defer marking
+            // prefill length until the first single-token decode step.
+            if seqLen > 1 {
+                return super.update(keys: keys, values: values)
+            }
+            prefillLength = offset
+        }
+
+        let prefill = prefillLength!
+        if self.keys == nil || offset < prefill + windowSize {
+            let result = super.update(keys: keys, values: values)
+            if offset >= prefill + windowSize {
+                ringPos = 0
+            }
+            return result
+        }
+
+        // Steady-state decode: overwrite the ring in place.
+        for idx in 0 ..< seqLen {
+            let slot = prefill + ringPos
+            self.keys![.ellipsis, slot ..< (slot + 1), 0...] =
+                keys[
+                    .ellipsis, idx ..< (idx + 1), 0...]
+            self.values![.ellipsis, slot ..< (slot + 1), 0...] =
+                values[
+                    .ellipsis, idx ..< (idx + 1), 0...]
+            ringPos = (ringPos + 1) % windowSize
+        }
+
+        offset += seqLen
+        let end = prefill + windowSize
+        return (
+            self.keys![.ellipsis, ..<end, 0...],
+            self.values![.ellipsis, ..<end, 0...]
+        )
+    }
+
+    public override func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        // Prefill / warmup: standard causal. Steady-state decode (q_len=1)
+        // attends over retained prompt + ring slots with no extra window mask.
+        if let prefillLength,
+            offset >= prefillLength + self.windowSize,
+            n == 1, !returnArray
+        {
+            return .none
+        }
+        return super.makeMask(n: n, windowSize: nil, returnArray: returnArray)
+    }
+
+    public override var state: [MLXArray] {
+        get {
+            guard let keys = self.keys, let values = self.values else { return [] }
+            let end: Int
+            if let prefillLength {
+                end = min(offset, prefillLength + windowSize)
+            } else {
+                end = offset
+            }
+            return [
+                keys[.ellipsis, ..<end, 0...],
+                values[.ellipsis, ..<end, 0...],
+            ]
+        }
+        set {
+            guard newValue.count == 2 else {
+                fatalError("RingSlidingKVCache state must have exactly 2 arrays")
+            }
+            self.keys = newValue[0]
+            self.values = newValue[1]
+            self.offset = self.keys?.dim(2) ?? 0
+            self.prefillLength = nil
+            self.ringPos = 0
+        }
+    }
+
+    public override var metaState: [String] {
+        get {
+            [
+                String(windowSize),
+                String(prefillLength ?? -1),
+                String(offset),
+                String(ringPos),
+            ]
+        }
+        set {
+            guard newValue.count == 4 else {
+                fatalError("RingSlidingKVCache metaState must have exactly 4 values")
+            }
+            guard let window = Int(newValue[0]),
+                let prefill = Int(newValue[1]),
+                let offsetVal = Int(newValue[2]),
+                let ring = Int(newValue[3])
+            else {
+                fatalError("Failed to convert RingSlidingKVCache metaState to integers")
+            }
+            self.windowSize = window
+            self.prefillLength = prefill < 0 ? nil : prefill
+            self.offset = offsetVal
+            self.ringPos = ring
+        }
+    }
+
+    public override var isTrimmable: Bool {
+        // Once the ring is active, trimming would desync ring slots.
+        prefillLength == nil || offset < (prefillLength! + windowSize)
+    }
+
+    public override func copy() -> any KVCache {
+        let new = RingSlidingKVCache(windowSize: windowSize)
+        new.step = self.step
+        let s = self.state
+        if !s.isEmpty {
+            // Assigning state resets ring metadata; restore meta afterward.
+            new.state = s.map { $0[.ellipsis] }
+        }
+        new.metaState = self.metaState
+        return new
+    }
+
+    public override var debugDescription: String {
+        "RingSlidingKVCache offset: \(offset), window: \(windowSize), prefill: \(prefillLength.map(String.init) ?? "nil"), ringPos: \(ringPos)"
+    }
+}
+
+/// Build per-layer caches matching Python Unlimited-OCR `LanguageModel.make_cache`.
+///
+/// When `slidingWindowSize` is set, each layer gets a ``RingSlidingKVCache``;
+/// otherwise a standard ``KVCacheSimple``.
+public func makeCaches(numLayers: Int, slidingWindowSize: Int?) -> [KVCache] {
+    if let slidingWindowSize {
+        return (0 ..< numLayers).map { _ in RingSlidingKVCache(windowSize: slidingWindowSize) }
+    }
+    return (0 ..< numLayers).map { _ in KVCacheSimple() }
+}
+
 func resolvedKVQuantizationGroupSize(
     requested: Int,
     keyHeadDim: Int,
@@ -1644,6 +1812,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
+    case is RingSlidingKVCache: return "RingSlidingKVCache"
     case is RotatingKVCache: return "RotatingKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is TurboQuantKVCache: return "TurboQuantKVCache"
@@ -1787,6 +1956,16 @@ private func restoreCacheFromMetaState(
         if !state.isEmpty {
             cache.state = state
         }
+        cache.metaState = metaState
+        return cache
+
+    case "RingSlidingKVCache":
+        guard metaState.count >= 4, let windowSize = Int(metaState[0]) else {
+            throw KVCacheError(
+                message: "Invalid RingSlidingKVCache metaState - expected 4 values")
+        }
+        let cache = RingSlidingKVCache(windowSize: max(windowSize, 1))
+        cache.state = state
         cache.metaState = metaState
         return cache
 
