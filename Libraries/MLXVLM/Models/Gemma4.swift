@@ -58,7 +58,7 @@ private func gemma4DefaultVisionRopeParameters() -> [String: StringOrNumber] {
     ]
 }
 
-private func gemma4MaskedScatter(
+func gemma4MaskedScatter(
     inputTensor: MLXArray, mask: MLXArray, source: MLXArray
 ) -> MLXArray {
     let flattenedInput = inputTensor.flattened()
@@ -1805,20 +1805,24 @@ private final class Gemma4VisionPooler: Module {
         _ hiddenStates: MLXArray,
         patchPositions: MLXArray,
         patchesW: Int,
-        outputLength: Int
+        outputLength: Int,
+        validCount: Int? = nil
     ) -> MLXArray {
         let scale = MLXArray(rootHiddenSize, dtype: hiddenStates.dtype)
         let numPatches = hiddenStates.dim(1)
+        // The dense path pools the whole grid; the fixed-length path passes
+        // `validCount` so trailing sentinel-padded rows never reach the pool.
+        let count = validCount ?? numPatches
         let length = max(outputLength, 1)
         if numPatches <= length {
-            return hiddenStates * scale
+            return hiddenStates[0..., ..<count, 0...] * scale
         }
 
         // All batch rows share one position grid, so a single [l, L] weight
         // matrix pools every row. The processor's resize keeps both sides
         // divisible by kernel * patchSize, so the pooled grid covers the
         // image exactly.
-        let positions = patchPositions[0]
+        let positions = patchPositions[0, ..<count]
         let kernel = max(Int(sqrt(Double(numPatches / length))), 1)
         let divisor = kernel * kernel
 
@@ -1829,7 +1833,7 @@ private final class Gemma4VisionPooler: Module {
         let weights =
             gemma4OneHot(flatKernel, numClasses: length).asType(.float32)
             / Float(divisor)
-        let output = einsum("lL,bld->bLd", weights, hiddenStates)
+        let output = einsum("lL,bld->bLd", weights, hiddenStates[0..., ..<count, 0...])
             .asType(hiddenStates.dtype)
         return output * scale
     }
@@ -1855,14 +1859,14 @@ private final class Gemma4VisionTransformerModel: Module {
     }
 }
 
-private final class Gemma4VisionModel: Module {
+final class Gemma4VisionModel: Module {
     let config: Gemma4VisionConfiguration
     let patchSize: Int
     let poolingKernelSize: Int
 
-    @ModuleInfo(key: "patch_embedder") var patchEmbedder: Gemma4VisionPatchEmbedder
-    @ModuleInfo(key: "encoder") var encoder: Gemma4VisionTransformerModel
-    @ModuleInfo(key: "pooler") var pooler: Gemma4VisionPooler
+    @ModuleInfo(key: "patch_embedder") private var patchEmbedder: Gemma4VisionPatchEmbedder
+    @ModuleInfo(key: "encoder") private var encoder: Gemma4VisionTransformerModel
+    @ModuleInfo(key: "pooler") private var pooler: Gemma4VisionPooler
     @ModuleInfo(key: "std_bias") var standardizationBias: MLXArray?
     @ModuleInfo(key: "std_scale") var standardizationScale: MLXArray?
 
@@ -1894,6 +1898,22 @@ private final class Gemma4VisionModel: Module {
             : broadcast(positions, to: [batch, patchesH * patchesW, 2])
     }
 
+    /// Pads the position grid up to `outputLength` pooled slots with `(-1,
+    /// -1)` sentinels so callers that need exactly that many pooled tokens per
+    /// image get them regardless of the image's own patch count.
+    private func paddedPatchPositions(
+        batch: Int, patchesH: Int, patchesW: Int, outputLength: Int
+    ) -> MLXArray {
+        let positions = patchPositions(batch: batch, patchesH: patchesH, patchesW: patchesW)
+        let paddedCount = Swift.max(
+            outputLength * poolingKernelSize * poolingKernelSize - patchesH * patchesW, 0)
+        guard paddedCount > 0 else { return positions }
+
+        let padding = MLXArray.full(
+            [batch, paddedCount, 2], values: MLXArray(Int32(-1)), type: Int32.self)
+        return concatenated([positions, padding], axis: 1)
+    }
+
     /// Encodes a batch of same-sized images. Every patch is real (callers
     /// slice padded canvases down to each image's true size first), so
     /// attention is dense and the pooled output length falls out of the
@@ -1923,11 +1943,61 @@ private final class Gemma4VisionModel: Module {
         }
         return hiddenStates
     }
+
+    /// Encodes a batch of same-sized images, padding each patch grid up to
+    /// `outputLength * poolingKernelSize²` slots so every image produces
+    /// exactly `outputLength` pooled tokens. Sentinel positions mask the
+    /// padding out of attention and pooling. Used by models whose prompts
+    /// reserve a fixed number of soft tokens per image, e.g. DiffusionGemma.
+    func callAsFunction(_ pixelValues: MLXArray, outputLength: Int) -> MLXArray {
+        let pixels =
+            if pixelValues.ndim == 3 {
+                expandedDimensions(pixelValues, axis: 0)
+            } else {
+                pixelValues
+            }
+        let batch = pixels.dim(0)
+        let patchesH = pixels.dim(2) / patchSize
+        let patchesW = pixels.dim(3) / patchSize
+        let realCount = patchesH * patchesW
+
+        let patchPositions = paddedPatchPositions(
+            batch: batch, patchesH: patchesH, patchesW: patchesW, outputLength: outputLength)
+        let realPositions = patchPositions[0..., ..<realCount, 0...]
+        var hiddenStates = patchEmbedder(pixels, patchPositions: realPositions)
+
+        let paddingCount = patchPositions.dim(1) - realCount
+        if paddingCount > 0 {
+            let pad = MLXArray.zeros(
+                [batch, paddingCount, hiddenStates.dim(2)], dtype: hiddenStates.dtype)
+            hiddenStates = concatenated([hiddenStates, pad], axis: 1)
+        }
+
+        let validMask = patchPositions[0..., 0..., 0] .>= 0
+        var attentionMask =
+            expandedDimensions(validMask, axis: 1) * expandedDimensions(validMask, axis: 2)
+        attentionMask = MLX.where(
+            attentionMask,
+            MLXArray(0.0, dtype: hiddenStates.dtype),
+            MLXArray(-Float.infinity, dtype: hiddenStates.dtype)
+        )
+        attentionMask = expandedDimensions(attentionMask, axis: 1)
+
+        hiddenStates = encoder(hiddenStates, positions: patchPositions, mask: attentionMask)
+        hiddenStates = pooler(
+            hiddenStates, patchPositions: patchPositions, patchesW: patchesW,
+            outputLength: outputLength, validCount: realCount)
+
+        if let standardizationBias, let standardizationScale {
+            hiddenStates = (hiddenStates - standardizationBias) * standardizationScale
+        }
+        return hiddenStates
+    }
 }
 
-private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
-    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
-    @ModuleInfo(key: "embedding_pre_projection_norm") var embeddingPreProjectionNorm:
+final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
+    @ModuleInfo(key: "embedding_projection") private var embeddingProjection: Linear
+    @ModuleInfo(key: "embedding_pre_projection_norm") private var embeddingPreProjectionNorm:
         Gemma4RMSNormNoScale
 
     init(embeddingDim: Int, textHiddenSize: Int, eps: Float) {
