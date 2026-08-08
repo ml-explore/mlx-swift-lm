@@ -1066,12 +1066,14 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try model.layers.map { layer in
             if layer.isLinear {
                 return MambaCache()
             }
-            return KVCacheSimple()
+            // Full-attention layers honor maxKVSize; GDN / linear layers keep
+            // a fixed recurrent state that cannot be token-windowed.
+            return try makeAttentionKVCache(parameters: parameters)
         }
     }
 
@@ -1139,8 +1141,8 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         languageModel(inputs, cache: cache)
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

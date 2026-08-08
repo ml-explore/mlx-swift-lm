@@ -136,7 +136,7 @@ struct PrefillParametersTests {
             log.events.append([processed, total])
         }
         let prompt = MLXArray((0 ..< promptTokens).map { Int32($0 % 100) })
-        let cache = model.newCache(parameters: parameters)
+        let cache = try model.newCache(parameters: parameters)
         _ = try TokenIterator(
             input: LMInput(tokens: prompt), model: model, cache: cache, parameters: parameters)
         return (log.events, cache.map { $0.offset })

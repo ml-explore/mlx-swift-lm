@@ -67,8 +67,19 @@ public struct GenerateParameters: Sendable {
     /// Maximum tokens to generate
     public var maxTokens: Int?
 
-    /// Maximum size of the key-value cache. Old entries (except the first 4 tokens) will be overwritten.
-    /// When set, uses ``RotatingKVCache`` instead of ``KVCacheSimple``
+    /// Maximum size of the key-value cache. Old entries are overwritten while retaining
+    /// up to the first 4 tokens when the requested size permits.
+    /// The value must be greater than zero; generation and cache construction throw
+    /// ``KVCacheConfigurationError/invalidCapacity(_:)`` for an invalid value.
+    ///
+    /// When set, full-attention layers that would otherwise use ``KVCacheSimple`` use
+    /// ``RotatingKVCache`` instead. Architecture sliding-window layers use the smaller
+    /// of their model-defined window and this limit. State-space / Mamba / GDN layers
+    /// are not token-windowed and therefore do not consume this budget.
+    ///
+    /// Inspect the effective policy with ``LanguageModel/cacheStatus(parameters:)``
+    /// (also on ``ModelContainer`` / ``ChatSession``). This is a cache policy, not a
+    /// generation stop reason — output token limits still surface as ``GenerateStopReason/length``.
     public var maxKVSize: Int?
 
     /// Typed key-value cache configuration.
@@ -701,7 +712,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         try self.init(
             input: .init(text: .init(tokens: prompt)), model: model,
             cacheStorage: KVCacheStorage(
-                cache ?? model.newCache(parameters: parameters), plan: plan),
+                cache ?? (try model.newCache(parameters: parameters)), plan: plan),
             parameters: parameters, components: components)
     }
 
@@ -729,7 +740,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         try self.init(
             input: input, model: model,
             cacheStorage: KVCacheStorage(
-                cache ?? model.newCache(parameters: parameters), plan: plan),
+                cache ?? (try model.newCache(parameters: parameters)), plan: plan),
             state: state, parameters: parameters, components: components)
     }
 
@@ -780,7 +791,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.state = state
         self.y = input.text
         self.cacheStorage = KVCacheStorage(
-            cache ?? model.newCache(parameters: nil), plan: .disabled)
+            try cache ?? model.newCache(parameters: nil), plan: .disabled)
 
         self.processor = processor
         self.sampler = sampler
@@ -1007,9 +1018,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         try self.init(
             input: input, mainModel: mainModel, draftModel: draftModel,
             mainCacheStorage: KVCacheStorage(
-                mainCache ?? mainModel.newCache(parameters: parameters), plan: plan),
+                mainCache ?? (try mainModel.newCache(parameters: parameters)), plan: plan),
             draftCacheStorage: KVCacheStorage(
-                draftCache ?? draftModel.newCache(parameters: parameters), plan: plan),
+                draftCache ?? (try draftModel.newCache(parameters: parameters)), plan: plan),
             parameters: parameters, numDraftTokens: numDraftTokens,
             components: components)
     }

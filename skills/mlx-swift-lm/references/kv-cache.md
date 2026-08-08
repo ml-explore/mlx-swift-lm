@@ -115,7 +115,39 @@ let simpleAgain = quantizedCache.toUnquantized()
 ```swift
 // Models create appropriate cache for their architecture
 let cache = model.newCache(parameters: generateParameters)
+
+// Inspect planned topology, capacity, and strategy state
+let status = try model.cacheStatus(parameters: generateParameters)
+// Or via ModelContainer / ChatSession:
+// let status = try await container.cacheStatus(parameters: params)
+// let status = try await session.cacheStatus()
+
+switch status.capacityDisposition {
+case .notRequested: break
+case .fullyApplied: break          // every attention layer is at or below the request
+case .partiallyApplied: break      // only some attention layers satisfy the request
+case .unsupported: break           // pure SSM — no attention KV to limit
+case .ignored: break               // attention exists but stayed unbounded
+}
+
+for layer in status.layers {
+    print(layer.path, layer.kind, layer.capacitySource as Any,
+          layer.state, layer.resolvedStrategy as Any)
+}
 ```
+
+Hybrid attention / state-space models (Qwen3.5, Jamba, LFM2, Falcon-H1, …)
+apply `maxKVSize` only to attention layers. Architecture sliding-window layers
+use `min(slidingWindow, maxKVSize)`. State-space caches are never token-windowed.
+
+Typed `KVCacheConfiguration.Capacity` follows its separate contract: it bounds
+caller-configurable full-attention caches while leaving model-native sliding
+windows unchanged. `KVCacheStatus` normalizes both entry points into one
+requested configuration while preserving `.legacy` / `.typed` request source,
+per-layer capacity provenance, and planned / realized phase.
+
+Prefer `makeAttentionKVCache(parameters:)` / `makeHybridAttentionKVCache(...)`
+inside model `newCache` overrides so the limit cannot be silently dropped.
 
 ### Via Utility Functions
 

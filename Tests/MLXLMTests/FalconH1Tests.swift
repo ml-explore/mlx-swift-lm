@@ -109,7 +109,7 @@ final class FalconH1Tests: XCTestCase {
         let model = FalconH1Model(config)
         let params = GenerateParameters(maxKVSize: 8)
 
-        let cache = model.newCache(parameters: params)
+        let cache = try model.newCache(parameters: params)
         XCTAssertEqual(cache.count, 2)
 
         for entry in cache {
@@ -124,7 +124,7 @@ final class FalconH1Tests: XCTestCase {
         let model = FalconH1Model(config)
         let params = GenerateParameters(kvBits: 4, kvGroupSize: 32, quantizedKVStart: 0)
 
-        let cache = model.newCache(parameters: params)
+        let cache = try model.newCache(parameters: params)
         XCTAssertEqual(cache.count, 2)
 
         for entry in cache {

@@ -406,28 +406,25 @@ public class Gemma3TextModel: Module, LLMModel {
         return processedWeights
     }
 
-    public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
-        var caches = [KVCache]()
+    public func newCache(parameters: GenerateParameters? = nil) throws -> [KVCache] {
         let slidingWindow = config.slidingWindow
         let slidingWindowPattern = config.slidingWindowPattern
 
-        for i in 0 ..< config.hiddenLayers {
+        return try (0 ..< config.hiddenLayers).map { i in
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
-
             if isGlobalLayer {
-                // For global layers, use standard cache but with reasonable step size for long sequences
-                let cache = StandardKVCache()
-                cache.step = 1024  // Larger step size for efficiency with long sequences
-                caches.append(cache)
+                // Global (full-attention) layers honor maxKVSize. When unbounded,
+                // use a larger allocation step for long-context efficiency.
+                let cache = try makeAttentionKVCache(parameters: parameters)
+                if let simple = cache as? StandardKVCache {
+                    simple.step = 1024
+                }
+                return cache
             } else {
-                // For sliding window layers, use rotating cache
-                caches.append(
-                    RotatingKVCache(maxSize: slidingWindow, keep: 0)
-                )
+                return try makeSlidingWindowKVCache(
+                    parameters: parameters, window: slidingWindow)
             }
         }
-
-        return caches
     }
 
     /// Handles prompt processing for sequences

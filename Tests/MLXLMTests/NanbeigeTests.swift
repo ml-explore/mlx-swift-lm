@@ -7,10 +7,10 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import XCTest
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 final class NanbeigeTests: XCTestCase {
 
@@ -101,7 +101,37 @@ final class NanbeigeTests: XCTestCase {
 
     func testNewCacheAllocatesOneCachePerLoopLayerPair() throws {
         let model = NanbeigeModel(try makeConfig())
-        XCTAssertEqual(model.newCache(parameters: nil).count, 6)
+        XCTAssertEqual(try model.newCache(parameters: nil).count, 6)
+    }
+
+    func testNewCacheHonorsTypedCapacity() throws {
+        let model = NanbeigeModel(try makeConfig())
+        let capacity = try KVCacheConfiguration.Capacity(
+            maxTokens: 32, preservedPrefixTokens: 3)
+        let parameters = GenerateParameters(
+            kvCache: KVCacheConfiguration(capacity: capacity))
+
+        let caches = try model.newCache(parameters: parameters)
+        XCTAssertEqual(caches.count, 6)
+        for cache in caches {
+            let rotating = try XCTUnwrap(cache as? RotatingKVCache)
+            XCTAssertEqual(rotating.maxSize, 32)
+            XCTAssertEqual(rotating.keepCount, 3)
+            XCTAssertEqual(rotating.capacityOrigin, .requested)
+        }
+    }
+
+    func testNewCacheClampsTinyLegacyLimit() throws {
+        let model = NanbeigeModel(try makeConfig())
+        let caches = try model.newCache(parameters: GenerateParameters(maxKVSize: 1))
+
+        XCTAssertEqual(caches.count, 6)
+        for cache in caches {
+            let rotating = try XCTUnwrap(cache as? RotatingKVCache)
+            XCTAssertEqual(rotating.maxSize, 1)
+            XCTAssertEqual(rotating.keepCount, 0)
+            XCTAssertEqual(rotating.capacityOrigin, .requested)
+        }
     }
 
     /// The released Nanbeige4.2-3B shape: 22 hidden layers, 2 loops → 44
@@ -124,7 +154,7 @@ final class NanbeigeTests: XCTestCase {
             }
             """
         let config = try JSONDecoder().decode(NanbeigeConfiguration.self, from: Data(json.utf8))
-        XCTAssertEqual(NanbeigeModel(config).newCache(parameters: nil).count, 44)
+        XCTAssertEqual(try NanbeigeModel(config).newCache(parameters: nil).count, 44)
     }
 
     // MARK: - Sanitize
@@ -171,10 +201,10 @@ final class NanbeigeTests: XCTestCase {
         let t2 = textTokens(8, seed: 3)
         let full = concatenated([t1, t2], axis: 0)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let logitsF = try prefillLogits(model, full, cache: cacheF)
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         _ = try prefillLogits(model, t1, cache: cacheW)
         let logitsW = try prefillLogits(model, t2, cache: cacheW)
 

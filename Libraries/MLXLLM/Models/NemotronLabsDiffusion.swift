@@ -435,6 +435,9 @@ public struct NemotronLabsDiffusionConfiguration: Codable, Sendable {
 // MARK: - Generation Helpers
 
 extension NemotronLabsDiffusionModel {
+    private func makeUnboundedCache() -> [KVCache] {
+        kvHeads.map { _ in KVCacheSimple() }
+    }
 
     /// Number of tokens to commit per denoising step within a single block,
     /// distributed evenly with leftovers spread to the first few steps. Mirrors
@@ -502,7 +505,7 @@ extension NemotronLabsDiffusionModel {
         maxNewTokens: Int = 128,
         eosTokenId: Int? = nil
     ) -> (tokens: [Int], nfe: Int) {
-        let cache = newCache(parameters: nil)
+        let cache = makeUnboundedCache()
 
         let prompt = MLXArray(promptIds.map { Int32($0) })[.newAxis, 0...]
         var logits = self(prompt, cache: cache)
@@ -586,7 +589,7 @@ extension NemotronLabsDiffusionModel {
         var nfe = 0
 
         // Causal prefill of the prompt once. After this, cache.offset == promptIds.count.
-        let cache = newCache(parameters: nil)
+        let cache = makeUnboundedCache()
         let promptArr = MLXArray(promptIds.map { Int32($0) })[.newAxis, 0...]
         _ = self(promptArr, cache: cache)
         eval(cache)
@@ -734,7 +737,7 @@ extension NemotronLabsDiffusionModel {
     ) -> (tokens: [Int], nfe: Int) {
         let maskId = Int32(args.maskTokenId)
 
-        let cache = newCache(parameters: nil)
+        let cache = makeUnboundedCache()
 
         // Causal prefill: LoRA off so the cached prefix matches AR mode.
         setLoRAEnabledFast(false)

@@ -34,11 +34,11 @@ func testGemma4TextEmitFalseReturnsNoStateBySynthetic() {
 }
 
 @Test
-func testGemma4TextEmitTrueWithBothLayerTypesPopulatesStateBySynthetic() {
+func testGemma4TextEmitTrueWithBothLayerTypesPopulatesStateBySynthetic() throws {
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])
-    let cache = model.newCache(parameters: nil)
+    let cache = try model.newCache(parameters: nil)
     let inputs = MLXArray((0 ..< 8).map { Int32($0) }).reshaped([1, 8])
 
     let out = model(inputs, cache: cache, emitDrafterState: true)
@@ -64,9 +64,9 @@ func testGemma4TextEmitTrueWithBothLayerTypesPopulatesStateBySynthetic() {
 }
 
 @Test
-func testGemma4TextEmitTrueWithMissingLayerTypeReturnsNilSharedKV() {
+func testGemma4TextEmitTrueWithMissingLayerTypeReturnsNilSharedKV() throws {
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: ["full_attention"])
-    let cache = model.newCache(parameters: nil)
+    let cache = try model.newCache(parameters: nil)
     let inputs = MLXArray((0 ..< 4).map { Int32($0) }).reshaped([1, 4])
 
     let out = model(inputs, cache: cache, emitDrafterState: true)

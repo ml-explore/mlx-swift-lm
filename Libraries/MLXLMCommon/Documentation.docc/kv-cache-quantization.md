@@ -61,15 +61,21 @@ Applications that need a hard total-context cap and compression should omit
 cache capacity, use `.requireAtLeastOneLayer`, and enforce the total token budget
 before inference. A bounded compressed ring cache is not currently implemented.
 
-``ChatSession/kvCacheRuntimeReport()`` reports the requested configuration and
-each realized layer's state, resolved strategy, and skip reason. Its aggregate
-counts let an application display compressed, pending, and skipped layer counts
-without assuming that a request took effect. Session reports also include the
-container-owned `processedTokenCount`; reports built directly from a raw cache
-array leave it `nil` because the array does not own the model-wide timeline.
+``ChatSession/cacheStatus()`` is the unified diagnostic surface for legacy and
+typed configuration. It reports the normalized request, request source,
+planned or realized phase, flattened cache topology, per-layer capacity source,
+strategy state, skip reason, and the container-owned `processedTokenCount`.
+Aggregate compressed, pending, skipped, and capacity-application counts are
+available on the same value.
+``LanguageModel/cacheStatus(parameters:)`` and
+``ModelContainer/cacheStatus(parameters:)`` provide the same shape for planned
+caches. The lower-level ``kvCacheRuntimeReport(cache:configuration:)`` remains
+available when directly applying a typed configuration to a raw cache array.
 
-A realized `ChatSession` cache is bound to its configuration. Call
-``ChatSession/clear()`` before changing its capacity or strategy.
+A realized `ChatSession` cache is bound to its configuration. When parameters
+change, a session with a structured transcript rebuilds automatically on the
+next response. A restored raw cache has no transcript to replay and rejects an
+incompatible request; clear it or create a new session.
 
 ## Cache ownership and progress
 

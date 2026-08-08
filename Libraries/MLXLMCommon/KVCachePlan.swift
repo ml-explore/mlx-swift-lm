@@ -8,9 +8,14 @@ package struct KVCachePlan: Sendable, Equatable {
     package static let disabled = KVCachePlan(configuration: nil)
 
     package let configuration: KVCacheConfiguration?
+    package let requestSource: KVCacheStatus.RequestSource?
 
-    package init(configuration: KVCacheConfiguration?) {
+    package init(
+        configuration: KVCacheConfiguration?,
+        requestSource: KVCacheStatus.RequestSource? = nil
+    ) {
         self.configuration = configuration
+        self.requestSource = configuration == nil ? nil : requestSource ?? .typed
     }
 
     package func validated(_ cache: [KVCache]) throws -> [KVCache] {
@@ -201,18 +206,28 @@ extension KVCacheConfiguration.Capacity {
 }
 
 extension GenerateParameters {
-    package var effectiveKVCacheCapacity: KVCacheConfiguration.Capacity? {
-        if let capacity = kvCache?.capacity {
-            return capacity
-        }
-        guard let maxKVSize else { return nil }
-        return .init(
-            uncheckedMaxTokens: maxKVSize,
-            preservedPrefixTokens: min(4, max(0, maxKVSize - 1)))
+    /// Resolve and validate the complete request before exposing its capacity.
+    ///
+    /// Cache factories use this instead of constructing an unchecked legacy
+    /// capacity so direct `newCache(parameters:)` calls fail with the same typed
+    /// errors as generation entry points.
+    package func effectiveKVCacheCapacity() throws -> KVCacheConfiguration.Capacity? {
+        try resolvedKVCacheConfiguration()?.capacity
     }
 
     package func kvCachePlan() throws -> KVCachePlan {
-        KVCachePlan(configuration: try resolvedKVCacheConfiguration())
+        let configuration = try resolvedKVCacheConfiguration()
+        let requestSource: KVCacheStatus.RequestSource? =
+            if configuration == nil {
+                nil
+            } else if kvCache == nil {
+                .legacy
+            } else {
+                .typed
+            }
+        return KVCachePlan(
+            configuration: configuration,
+            requestSource: requestSource)
     }
 
     package func resolvedKVCacheConfiguration() throws -> KVCacheConfiguration? {

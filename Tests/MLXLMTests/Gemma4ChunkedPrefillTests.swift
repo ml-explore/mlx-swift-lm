@@ -72,7 +72,7 @@ struct Gemma4ChunkedPrefillTests {
     private static func prefillLogits(
         model: Gemma4, tokens: [Int], windowSize: Int
     ) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
         let result = try model.prepare(
             input, cache: cache, state: nil, prefill: .init(stepSize: windowSize))
@@ -139,7 +139,7 @@ struct Gemma4ChunkedPrefillTests {
 
         let input = LMInput(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
         _ = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil, prefill: prefill)
+            input, cache: try model.newCache(parameters: nil), state: nil, prefill: prefill)
 
         #expect(log.events.last == [tokens.count, tokens.count])
         #expect(log.events.map { $0[0] } == log.events.map { $0[0] }.sorted())
@@ -151,7 +151,7 @@ struct Gemma4ChunkedPrefillTests {
         let model = try Self.makeTinyModel()
         let tokens = Self.makePrompt(count: 21)
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens))  // 1-D, no batch axis
         let result = try model.prepare(input, cache: cache, state: nil, prefill: .init(stepSize: 6))
         guard case .logits(let output) = result else {

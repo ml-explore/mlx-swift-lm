@@ -348,15 +348,14 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
 
     /// Create appropriate caches for each layer type.
     ///
-    /// Sliding window attention layers use RotatingKVCache,
-    /// full attention layers use standard KVCacheSimple.
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
-            if layer.useSliding, let slidingWindow = args.slidingWindow {
-                return RotatingKVCache(maxSize: slidingWindow)
-            } else {
-                return KVCacheSimple()
-            }
+    /// Sliding-window layers use the smaller of the architecture window and
+    /// `GenerateParameters.maxKVSize`; full-attention layers use the requested limit.
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try model.layers.map { layer in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: args.slidingWindow,
+                usesSlidingWindow: layer.useSliding)
         }
     }
 }

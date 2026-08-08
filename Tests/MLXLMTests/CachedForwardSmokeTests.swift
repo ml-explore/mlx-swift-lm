@@ -22,8 +22,8 @@ final class CachedForwardSmokeTests: XCTestCase {
         expectedLayers: Int,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
-        let cache = model.newCache(parameters: nil)
+    ) throws {
+        let cache = try model.newCache(parameters: nil)
         XCTAssertEqual(
             cache.count, expectedLayers,
             "newCache must return one cache per layer", file: file, line: line)
@@ -85,7 +85,7 @@ final class CachedForwardSmokeTests: XCTestCase {
     func testOlmo3SlidingLayersGetRotatingCache() throws {
         let config = try olmo3Config()
         let model: any LanguageModel = Olmo3Model(config)
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
 
         for (i, layerType) in config.layerTypes.enumerated() {
             if layerType == "full_attention" {
