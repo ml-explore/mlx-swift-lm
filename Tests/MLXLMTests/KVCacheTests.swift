@@ -217,6 +217,263 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     }
 }
 
+@Test func testPromptCacheStateRoundTrip() throws {
+    let cache = KVCacheSimple()
+    let keys = MLXArray.ones([1, 2, 4, 8], dtype: .bfloat16)
+    let values = MLXArray.zeros([1, 2, 4, 8], dtype: .bfloat16)
+    _ = cache.update(keys: keys, values: values)
+
+    let ropeDeltasKey = LMOutput.Key<MLXArray>("test.ropeDeltas")
+    let positionsKey = LMOutput.Key<MLXArray>("test.positionIds")
+    let ropeDeltas = MLXArray([Int32(3), 5, 7]).reshaped([1, 3])
+    let positions = MLXArray([Int32(11), 13, 17, 19]).reshaped([2, 2])
+    var state = LMOutput.State()
+    state[ropeDeltasKey] = ropeDeltas
+    state[positionsKey] = positions
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try savePromptCache(
+        url: url, cache: [cache], metadata: ["source": "test"], state: state)
+
+    let snapshot = try loadPromptCacheSnapshot(url: url)
+    let restoredRopeDeltas = try #require(snapshot.state?[ropeDeltasKey])
+    let restoredPositions = try #require(snapshot.state?[positionsKey])
+
+    #expect(snapshot.metadata == ["source": "test"])
+    #expect(restoredRopeDeltas.dtype == ropeDeltas.dtype)
+    #expect(restoredRopeDeltas.shape == ropeDeltas.shape)
+    #expect(allClose(restoredRopeDeltas, ropeDeltas, rtol: 0, atol: 0).item(Bool.self))
+    #expect(restoredPositions.dtype == positions.dtype)
+    #expect(restoredPositions.shape == positions.shape)
+    #expect(allClose(restoredPositions, positions, rtol: 0, atol: 0).item(Bool.self))
+
+    let (storedArrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    #expect(storedArrays["__mlx_lm_state_tensor_0"] != nil)
+    #expect(storedArrays["__mlx_lm_state_tensor_1"] != nil)
+    #expect(
+        storedArrays.keys.allSatisfy {
+            Int($0.split(separator: ".")[0]) != nil
+                || $0.hasPrefix("__mlx_lm_state_tensor_")
+        })
+    #expect(storedMetadata["1.__mlx_lm_state_0_key"] == "test.positionIds")
+    #expect(storedMetadata["1.__mlx_lm_state_1_key"] == "test.ropeDeltas")
+    #expect(storedMetadata["2.0"] == "__mlx_lm_state_v1__:KVCache")
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCache(url: url)
+    }
+}
+
+@Test func testLegacyPromptCacheLoadsWithNilState() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache])
+    let snapshot = try loadPromptCacheSnapshot(url: url)
+    let (legacyCache, legacyMetadata) = try loadPromptCache(url: url)
+    let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+
+    #expect(snapshot.cache.count == 1)
+    #expect(snapshot.state == nil)
+    #expect(legacyCache.count == 1)
+    #expect(legacyMetadata.isEmpty)
+    #expect(arrays.keys.allSatisfy { Int($0.split(separator: ".")[0]) != nil })
+    #expect(!metadata.keys.contains { $0.contains("__mlx_lm_state_") })
+    #expect(metadata["2.0"] == "KVCache")
+}
+
+@Test func testEmptyPromptCacheStateUsesTheLegacyFormat() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let legacyURL = tempURL()
+    let emptyStateURL = tempURL()
+    defer {
+        try? FileManager.default.removeItem(at: legacyURL)
+        try? FileManager.default.removeItem(at: emptyStateURL)
+    }
+
+    try savePromptCache(url: legacyURL, cache: [cache])
+    try savePromptCache(url: emptyStateURL, cache: [cache], state: LMOutput.State())
+    let snapshot = try loadPromptCacheSnapshot(url: emptyStateURL)
+    let (legacyCache, _) = try loadPromptCache(url: emptyStateURL)
+    let (legacyArrays, legacyMetadata) = try loadArraysAndMetadata(url: legacyURL)
+    let (emptyStateArrays, emptyStateMetadata) = try loadArraysAndMetadata(url: emptyStateURL)
+
+    #expect(snapshot.state == nil)
+    #expect(legacyCache.count == 1)
+    #expect(Set(emptyStateArrays.keys) == Set(legacyArrays.keys))
+    #expect(emptyStateMetadata == legacyMetadata)
+}
+
+@Test func testPromptCacheStateRejectsReservedUserMetadata() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    #expect(throws: KVCacheError.self) {
+        try savePromptCache(
+            url: url, cache: [cache],
+            metadata: ["__mlx_lm_state_version": "caller-owned"])
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnsupportedValues() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let unsupportedKey = LMOutput.Key<Bool>("test.unsupported")
+    var state = LMOutput.State()
+    state[unsupportedKey] = true
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    #expect(throws: LMOutput.State.SerializationError.self) {
+        try savePromptCache(url: url, cache: [cache], state: state)
+    }
+    #expect(!FileManager.default.fileExists(atPath: url.path))
+}
+
+@Test func testPromptCacheStateRejectsMalformedEntries() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_count"] = "2"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnknownVersions() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_version"] = "999"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsDuplicateKeys() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let firstKey = LMOutput.Key<MLXArray>("test.first")
+    let secondKey = LMOutput.Key<MLXArray>("test.second")
+    var state = LMOutput.State()
+    state[firstKey] = MLXArray([Int32(1)])
+    state[secondKey] = MLXArray([Int32(2)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_1_key"] = "test.first"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnexpectedTensors() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (storedArrays, metadata) = try loadArraysAndMetadata(url: url)
+    var malformedArrays = storedArrays
+    malformedArrays["__mlx_lm_state_tensor_99"] = MLXArray([Int32(99)])
+    try save(arrays: malformedArrays, metadata: metadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRequiresCompatibilityMarker() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = storedMetadata
+    malformedMetadata["2.0"] = "KVCache"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheCompatibilityMarkerRequiresState() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache])
+    let (arrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = storedMetadata
+    malformedMetadata["2.0"] = "__mlx_lm_state_v1__:KVCache"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
 @Test func testQuantizedKVCacheRestoresNonDefaultQuantizationMetadata() throws {
     let cache = QuantizedKVCache(groupSize: 64, bits: 4)
     let keys = MLXArray.ones([1, 1, 4, 32], dtype: .bfloat16)
