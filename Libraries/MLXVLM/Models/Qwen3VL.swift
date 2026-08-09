@@ -1743,7 +1743,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize _: Int?
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
 
@@ -1820,6 +1820,8 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             imageGridTHW: imageFrames,
             videoGridTHW: videoFrames)
 
+        let total = inputIds.dim(-1)
+        prefill.progress?(total, total)
         return .logits(languageOutput)
     }
 

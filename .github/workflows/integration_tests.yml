@@ -3,10 +3,28 @@ name: Integration Tests
 # Heavy integration tests (Hugging Face model downloads, Metal GPU, long-running).
 # Kept out of the PR path so they never block merges
 on:
+  # Nightly at 09:17 UTC (02:17 PDT), so a regression is found by morning
+  # instead of whenever someone remembers to dispatch. Deliberately off the
+  # hour: GitHub queues :00 schedules behind everyone else's and delays them.
+  # Scheduled runs always use the default branch's copy of this file.
+  schedule:
+    - cron: '17 9 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# One integration run at a time, repo-wide. There is a single self-hosted mac
+# with one on-disk Hugging Face cache, and the tests are already forced to a
+# single xctest worker for that reason (see below); two runs would race the
+# same cache. Deliberately ref-independent: a manual dispatch on a branch
+# contends for the same runner and cache as the nightly on main, so keeping
+# github.ref out of the group is what makes them serialize. cancel-in-progress
+# is false because a nightly that is 100 minutes into downloading models
+# should not be thrown away by a dispatch.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   integration_tests:
@@ -69,3 +87,117 @@ jobs:
             IntegrationTesting.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
+
+  # A red nightly has to land somewhere maintainers will see it. GitHub emails
+  # scheduled-workflow failures to exactly one account (whoever last edited the
+  # cron above), so instead we keep one tracking issue and comment on it.
+  notify:
+    needs: integration_tests
+    # No implicit success() here: any explicit job-level `if` replaces it, so
+    # this runs only when the guard below says so. failure() is true when a
+    # needed job failed, which includes blowing the 120-minute cap. Scheduled
+    # runs only: whoever pressed "Run workflow" is already watching that run,
+    # and a dispatch can target any branch, so a red WIP branch must not get
+    # filed as a nightly regression.
+    if: >-
+      failure()
+      && github.event_name == 'schedule'
+      && github.repository == 'ml-explore/mlx-swift-lm'
+    # Not the self-hosted mac: this is two REST calls, and it must not occupy
+    # the one machine that runs the tests.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    # Job-level permissions replace the workflow-level block outright rather
+    # than merging with it, so this job gets issues:write and nothing else.
+    # It never checks out the repo, so it needs no contents access.
+    permissions:
+      issues: write
+    steps:
+      - name: File or update the nightly failure issue
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const label = 'ci-failure';
+            const title = 'Nightly integration tests are failing';
+            const { owner, repo } = context.repo;
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+            // schedule events carry no head_commit payload; context.sha is the
+            // default branch head the run actually tested.
+            const sha = context.sha;
+            const shortSha = sha.slice(0, 7);
+            const commitUrl = `${context.serverUrl}/${owner}/${repo}/commit/${sha}`;
+            const today = new Date().toISOString().slice(0, 10);
+
+            // Create the label up front. It does not exist in this repo yet, and
+            // it is not documented whether issues.create auto-creates labels
+            // passed in `labels`, so do not rely on that: the dedupe lookup
+            // below filters on the label and has to work on the very first run.
+            // Label writes are covered by the issues scope.
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name: label,
+                color: 'd73a4a',
+                description: 'Automated CI failure report (nightly integration tests)',
+              });
+            }
+
+            // listForRepo, not the Search API: search is a separate eventually
+            // consistent index with its own rate limit, so a freshly filed
+            // issue can be invisible to it and two nightlies in a row would
+            // each open their own. listForRepo also returns pull requests, so
+            // drop anything with a pull_request key.
+            const open = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              labels: label,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = open.data.find(
+              (issue) => !issue.pull_request && issue.title === title);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: `Still failing ${today}: [run #${context.runNumber}]`
+                  + `(${runUrl}) (attempt ${attempt}) at \`${shortSha}\`.`,
+              });
+              core.notice(`Commented on existing #${existing.number}`);
+              return;
+            }
+
+            const body = [
+              'The nightly `Integration Tests` run failed.',
+              '',
+              `- Run: ${runUrl} (attempt ${attempt})`,
+              `- Commit: [\`${shortSha}\`](${commitUrl}) on \`${context.ref}\``,
+              `- First seen: ${today}`,
+              '',
+              'The failing run uploads an `integration-test-results` artifact:',
+              'the `IntegrationTesting.xcresult` bundle plus anything in',
+              '`~/Library/Logs/DiagnosticReports` (crash logs). Artifacts are',
+              'kept for 7 days, so download it from the run page before it',
+              'expires, then open the `.xcresult` in Xcode.',
+              '',
+              'Consecutive failures comment on this issue instead of opening a',
+              'new one. Close it once the nightly is green again; the next',
+              'failure after that opens a fresh issue.',
+            ].join('\n');
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+              labels: [label],
+            });
+            core.notice(`Opened #${created.data.number}`);

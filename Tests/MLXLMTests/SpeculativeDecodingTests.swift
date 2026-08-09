@@ -3,9 +3,10 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
 import MLXNN
 import Testing
+
+@testable import MLXLMCommon
 
 @Suite(.serialized)
 struct SpeculativeDecodingTests {
@@ -214,6 +215,89 @@ struct SpeculativeDecodingTests {
         #expect(tokenCount == 3)
         #expect(telemetry.emittedTokenCount == tokenCount)
     }
+
+    @Test(arguments: [1, 2, 4])
+    func `finalizeGeneration trims unreturned speculative lookahead`(consumedTokens: Int) throws {
+        // Contract: after `finalizeGeneration()` the shared caches must represent
+        // exactly the tokens returned to the generation loop — no verified
+        // but unreturned lookahead. ChatSession relies on this to reconcile
+        // its token ledger against the model-wide processed-token timeline,
+        // so the timeline must rewind together with the cache entries.
+        let vocabularySize = 100
+        let mainCache = [KVCacheSimple()]
+        let draftCache = [KVCacheSimple()]
+        var iterator = try SpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([7])),
+            mainModel: CacheTrackingTransitionModel(vocabularySize: vocabularySize),
+            draftModel: CacheTrackingTransitionModel(vocabularySize: vocabularySize),
+            mainCache: mainCache,
+            draftCache: draftCache,
+            parameters: GenerateParameters(maxTokens: 16, temperature: 0.0),
+            numDraftTokens: 3
+        )
+
+        // The first `next()` runs the opening round: the verifier sees the
+        // prompt plus 3 drafts and the deterministic draft matches everywhere,
+        // so 4 tokens pend and 3 are already committed to the main cache.
+        var consumed = 0
+        while consumed < consumedTokens {
+            #expect(iterator.next() != nil)
+            consumed += 1
+        }
+        #expect(mainCache.first?.offset == 4)  // prompt + 3 committed drafts
+        #expect(draftCache.first?.offset == 3)  // prompt + 2 fed drafts (trails by one)
+
+        iterator.finalizeGeneration()
+
+        let expectedMain = 1 + Swift.min(consumed, 3)
+        let expectedDraft = 1 + Swift.min(consumed, 2)
+        #expect(mainCache.first?.offset == expectedMain)
+        #expect(draftCache.first?.offset == expectedDraft)
+        // The authoritative timeline rewound with the entries, not behind them.
+        #expect(iterator.mainCacheStorage.processedTokenCount == expectedMain)
+        #expect(iterator.draftCacheStorage.processedTokenCount == expectedDraft)
+        #expect(iterator.mainCacheStorage.nativeAttentionOffsetsAreAligned)
+        #expect(iterator.draftCacheStorage.nativeAttentionOffsetsAreAligned)
+    }
+}
+
+/// ``StableTransitionLanguageModel`` variant that maintains a real KV cache,
+/// so tests can assert cache-offset accounting (e.g. ``finalizeGeneration()``
+/// trimming verified-but-unreturned lookahead).
+private final class CacheTrackingTransitionModel: Module, LanguageModel,
+    KVCacheDimensionProvider
+{
+    let vocabularySize: Int
+    var kvHeads: [Int] { [1] }
+
+    init(vocabularySize: Int) {
+        self.vocabularySize = vocabularySize
+        super.init()
+    }
+
+    func prepare(
+        _ input: MLXLMCommon.LMInput, cache: [any MLXLMCommon.KVCache],
+        state: MLXLMCommon.LMOutput.State?, prefill: MLXLMCommon.PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let tokenIds = inputs.asArray(Int.self)
+        if let cache, let first = cache.first {
+            let entry = MLXArray.zeros([1, 1, tokenIds.count, 1])
+            _ = first.update(keys: entry, values: entry)
+        }
+
+        var logits = Array(
+            repeating: Float(-100),
+            count: tokenIds.count * vocabularySize
+        )
+        for (position, token) in tokenIds.enumerated() {
+            logits[position * vocabularySize + (token * 31 + 7) % vocabularySize] = 100
+        }
+        return MLXArray(logits, [1, tokenIds.count, vocabularySize])
+    }
 }
 
 /// Deterministic causal model for speculative decoding contract tests.
@@ -231,7 +315,9 @@ private final class StableTransitionLanguageModel: Module, LanguageModel, KVCach
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    )
         throws -> PrepareResult
     {
         .tokens(input.text)

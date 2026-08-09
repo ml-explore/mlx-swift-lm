@@ -38,8 +38,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     let drafter: any MTPDrafterModel
 
     var mainState: LMOutput.State?
-    var mainCache: [KVCache]
-    let quantizeKVCache: (inout [KVCache]) -> Void
+    let mainCacheStorage: KVCacheStorage
+    var mainCache: [KVCache] {
+        get { mainCacheStorage.cache }
+        set { mainCacheStorage.replace(with: newValue) }
+    }
+    var kvCachePlan: KVCachePlan { mainCacheStorage.plan }
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
@@ -53,6 +57,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
+    /// Number of pending tokens already represented by `mainCache`. The last
+    /// verifier sample is not committed until a later forward pass.
+    private var committedPendingTokenCount = 0
 
     /// Set to `true` when the iterator detects that the target can no
     /// longer emit drafter state (typically due to KV cache quantization
@@ -108,15 +115,19 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             blockSize >= 2,
             "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)")
 
+        let kvCachePlan = try parameters.kvCachePlan()
+        let mainCache = try kvCachePlan.validated(
+            mainCache ?? mainModel.newCache(parameters: parameters))
+        guard canTrimPromptCache(mainCache) else {
+            throw KVCacheError(
+                message: "MTP speculative decoding requires a trimmable main KV cache.")
+        }
+
         self.y = input.text
         self.mainModel = mainModel
         self.drafter = drafter
 
-        self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
-        guard canTrimPromptCache(self.mainCache) else {
-            throw KVCacheError(
-                message: "MTP speculative decoding requires a trimmable main KV cache.")
-        }
+        self.mainCacheStorage = KVCacheStorage(mainCache, plan: kvCachePlan)
 
         self.sampler = parameters.sampler()
         self.processor = components.logitProcessor(parameters: parameters)
@@ -124,24 +135,27 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.maxTokens = parameters.maxTokens
         self.blockSize = blockSize
 
-        self.quantizeKVCache = { cache in
-            maybeQuantizeKVCache(
-                cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart
-            )
-        }
-
         let prefillStart = Date.timeIntervalSinceReferenceDate
-        try prepare(input: input, windowSize: parameters.prefillStepSize)
+        try prepare(input: input, prefill: parameters.prefill)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+
+        // The guard above ran against a fresh, zero-offset cache, where a
+        // rotating cache is trimmable vacuously. Re-check now that the prompt
+        // is in: one whose length leaves no room for a speculative round can
+        // never be rewound, so speculation is unavailable for this stream.
+        // `blockSize` bounds the first round's width.
+        standDownIfNoTrimHeadroom(
+            positions: blockSize,
+            reason:
+                "prompt fills the sliding window — MTP rewind unavailable; generating without speculation"
+        )
     }
 
     /// Prefill the main model with the prompt. The drafter has no cache to
     /// prime; its first-round inputs come from the prefill's `LMOutput.state`.
-    mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
+    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
+        let inputLength = input.text.cacheSequenceLength
 
         var prefillState = LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
@@ -150,13 +164,19 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // passing `prefillState` into `prepare` — the emit flag is meant for
         // exactly one position, not the whole prompt.
 
-        switch try mainModel.prepare(input, cache: mainCache, state: nil, windowSize: windowSize)
+        switch try mainModel.prepare(input, cache: mainCache, state: nil, prefill: prefill)
         {
         case .tokens(let tokens):
+            let remainingLength = tokens.cacheSequenceLength
+            precondition(
+                remainingLength <= inputLength,
+                "Main model prepare returned more tokens than it received")
+            mainCacheStorage.commitProcessedTokens(inputLength - remainingLength)
             y = tokens
             // Final prompt position not yet evaluated -- run one forward to
             // produce the bonus token AND prime drafter state.
             let result = mainModel(y[text: .newAxis], cache: mainCache, state: prefillState)
+            mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
             var logits = result.logits[0..., -1, 0...]
             logits = processor?.process(logits: logits) ?? logits
             let token = sampler.sample(logits: logits)
@@ -168,7 +188,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // equivalent autoregressive run, violating speculative
             // decoding's bit-exact-equivalence-to-greedy guarantee.
             pendingTokens.append(token.item(Int.self))
+
+            // the model reported per-chunk progress; the bonus forward above
+            // consumed the remainder of the prompt
+            let total = input.text.tokens.size
+            prefill.progress?(total, total)
         case .logits(let prefillResult):
+            mainCacheStorage.commitProcessedTokens(inputLength)
             // Some `prepare` implementations evaluate the final position
             // themselves and return logits directly; their `state` here may
             // or may not carry drafter state depending on whether the model
@@ -187,6 +213,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 || mainState?[mtpSharedKVStatesKey] == nil
             {
                 let primed = mainModel(y[text: .newAxis], cache: mainCache, state: prefillState)
+                mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
                 mainState = primed.state
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
@@ -203,12 +230,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 // to the first speculateRound.
                 pendingTokens.append(token.item(Int.self))
                 pendingTokens.append(newToken.item(Int.self))
+                committedPendingTokenCount = 1
             } else {
                 // Prefill state already carried drafter keys; the single
                 // bonus is the input to the first speculateRound.
                 pendingTokens.append(token.item(Int.self))
             }
         }
+
+        try kvCachePlan.applyAndValidate(to: mainCacheStorage)
     }
 
     /// Single round: draft `blockSize - 1` tokens, verify with main, accept
@@ -245,6 +275,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
+        // This round's verify pass commits `numDraft + 1` positions. If that
+        // would carry the sliding cache past its window, the rewind below
+        // would no-op and strand this round's rejected drafts in the cache —
+        // stand down now, while the cache is still rewindable.
+        if standDownIfNoTrimHeadroom(
+            positions: numDraft + 1,
+            reason:
+                "sliding cache wrapped mid-stream — MTP rewind unavailable; continuing without speculation"
+        ) {
+            return
+        }
+
         // Slice the hidden at the slot that produced the newly-accepted
         // bonus's prediction. Round 1: last (and only) position. Round 2+:
         // index `lastRoundAccepted`, matching mlx-lm's
@@ -256,7 +298,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             bonusSlotHidden = lastHidden[0..., (-1)..., 0...]
         }
 
-        let cacheOffset = mainCache.first?.offset ?? 0
+        let cacheOffset = mainCacheStorage.processedTokenCount
 
         // Invariant: the span the drafter attends over describes exactly the
         // true sequence — the rewind site trims the emitted snapshot in
@@ -292,6 +334,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: mainCache, state: verifyState)
+        mainCacheStorage.commitProcessedTokens(verifyInput.cacheSequenceLength)
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
@@ -338,6 +381,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let finalToken = mainTokens[accepted ... accepted]
         processor?.didSample(token: finalToken)
         pendingTokens.append(mainTokensList[accepted])
+        committedPendingTokenCount = accepted
 
         proposedCount += numDraft
         acceptedCount += accepted
@@ -358,13 +402,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // untrimmable (post-wrap sliding window), where trimPromptCache
         // no-ops and returns 0.
         let rejected = numDraft - accepted
-        let trimmed = trimPromptCache(mainCache, numTokens: rejected)
+        let trimmed = mainCacheStorage.trim(rejected)
         trimSharedKVState(&mainState, numTokens: trimmed)
 
         // Dynamic cache quantization may convert `.regular` K/V to `.quantized`,
         // at which point the target's emit-hook returns sharedKV: nil and the
         // next round transitions to passthrough.
-        quantizeKVCache(&mainCache)
+        kvCachePlan.apply(to: mainCacheStorage)
 
         y = .init(tokens: finalToken)
     }
@@ -383,12 +427,43 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         passthrough = true
     }
 
+    /// Stand down to passthrough if the main cache cannot absorb `positions`
+    /// more tokens and still be rewound.
+    ///
+    /// MTP's accept/reject step depends on `trimPromptCache`, so each cache
+    /// predicts whether it will remain trimmable after the verify positions
+    /// are appended. The append happens *inside* the verify pass, so a check
+    /// that merely asks "is it trimmable now?" fires a round too late: that
+    /// round's rewind silently returns 0 (the guard in `trimPromptCache` is
+    /// all-or-nothing over the array, so even the trimmable full-attention
+    /// entries are skipped) and its rejected drafts stay welded into every
+    /// layer's cache. Standing down while headroom remains keeps every rewind
+    /// valid, so a passthrough-crossing stream stays bit-exact to a plain
+    /// autoregressive run.
+    @discardableResult
+    private mutating func standDownIfNoTrimHeadroom(
+        positions: Int, reason: String
+    ) -> Bool {
+        guard !passthrough else { return false }
+        let hasHeadroom = mainCache.allSatisfy {
+            $0.isTrimmable(after: positions)
+        }
+        guard !hasHeadroom else { return false }
+        switchToPassthrough(reason: reason)
+        // Release the emitted snapshot: passthrough passes `state: nil` and
+        // never reads it again, and its sliding entries can span up to
+        // `maxCacheSize + S - 1` per layer.
+        mainState = nil
+        return true
+    }
+
     /// One single-token forward step against the main model, used in
     /// passthrough mode. The drafter is not invoked.
     private mutating func passthroughStep() -> Int? {
         if let maxTokens, tokenCount >= maxTokens { return nil }
 
         let result = mainModel(y[text: .newAxis], cache: mainCache, state: nil)
+        mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
         var logits = result.logits[0..., -1, 0...]
         logits = processor?.process(logits: logits) ?? logits
         let token = sampler.sample(logits: logits)
@@ -396,13 +471,27 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         eval(token)
         let tokenInt = token.item(Int.self)
         y = .init(tokens: token)
-        quantizeKVCache(&mainCache)
+        kvCachePlan.apply(to: mainCacheStorage)
         return tokenInt
     }
 
     public mutating func next() -> Int? {
         if let maxTokens, tokenCount >= maxTokens {
             return nil
+        }
+
+        // Drain the pending buffer first — before the passthrough branch. A
+        // stand-down at the end of `init` leaves the prepare-time bonus
+        // sitting here, already committed to the cache (`y` is the token
+        // after it). Short-circuiting to `passthroughStep()` would drop it and
+        // start the stream one position ahead of an equivalent autoregressive
+        // run. Rounds that flip passthrough mid-stream always clear the buffer
+        // first, so this reordering is a no-op for them.
+        if pendingIndex < pendingTokens.count {
+            let token = pendingTokens[pendingIndex]
+            pendingIndex += 1
+            telemetry.recordGeneratedToken()
+            return token
         }
 
         if passthrough {
@@ -413,17 +502,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return nil
         }
 
-        // Drain the pending buffer first.
-        if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
-        }
-
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
+        committedPendingTokenCount = 0
         autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
@@ -441,6 +523,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         pendingIndex += 1
         telemetry.recordGeneratedToken()
         return token
+    }
+
+}
+
+extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
+    mutating func finalizeGeneration() {
+        let consumed = Swift.min(pendingIndex, committedPendingTokenCount)
+        let lookahead = committedPendingTokenCount - consumed
+        guard lookahead > 0 else { return }
+
+        // Trim through the storage so the model-wide processed-token timeline
+        // rewinds with the cache; `ChatSession` reconciles its ledger against
+        // that timeline, not against per-entry offsets.
+        let trimmed = mainCacheStorage.trim(lookahead)
+        trimSharedKVState(&mainState, numTokens: trimmed)
     }
 }
 

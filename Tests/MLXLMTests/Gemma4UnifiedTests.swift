@@ -113,7 +113,7 @@ struct Gemma4UnifiedTests {
         let input = LMInput(tokens: MLXArray([0, 2, 3, 4, 5, 1]).expandedDimensions(axis: 0))
 
         let result = try model.prepare(
-            input, cache: cache, state: nil, windowSize: 2)
+            input, cache: cache, state: nil, prefill: .init(stepSize: 2))
 
         guard case .logits(let output) = result else {
             Issue.record("Expected text-only Gemma4Unified.prepare to return logits")
@@ -138,7 +138,8 @@ struct Gemma4UnifiedTests {
 
         func prefill(windowSize: Int) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
             let cache = model.newCache(parameters: nil)
-            let result = try model.prepare(input, cache: cache, state: nil, windowSize: windowSize)
+            let result = try model.prepare(
+                input, cache: cache, state: nil, prefill: .init(stepSize: windowSize))
             guard case .logits(let output) = result else {
                 Issue.record("Expected text-only Gemma4Unified.prepare to return logits")
                 return (MLXArray.zeros([1, 32]), [])
@@ -291,7 +292,7 @@ struct Gemma4UnifiedTests {
         )
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil, windowSize: nil)
+            input, cache: model.newCache(parameters: nil), state: nil, prefill: .init())
 
         guard case .logits(let output) = result else {
             Issue.record("Expected Gemma4Unified.prepare to return logits")

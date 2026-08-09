@@ -17,46 +17,48 @@ extension LLMModel {
 
     /// Default prepare step for ``LLMModel``.
     ///
-    /// This will evaluate the prompt in chunks until there is a small number of
-    /// tokens left to feed into the `TokenIterator`.
+    /// Evaluates the prompt into the cache in chunks of at most
+    /// `PrefillParameters.stepSize` (default 512), leaving one token for the
+    /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
+    /// (the default) the chunks are equal-sized, so no forward is a small
+    /// remainder paying full attention cost against the whole prompt.
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
-        let prefillStepSize = windowSize ?? 512
-        var y = input.text
+        let stepSize = prefill.resolvedStepSize()
+        let y = input.text
+        let total = y.tokens.size
 
+        // A prompt that fits in one chunk is handed to the iterator whole,
+        // keeping short prompts bitwise-identical to the pre-chunking path.
+        // `.unchunked` (forEachChunk processes nothing) takes the same route
+        // at any prompt length.
+        guard total > stepSize else { return .tokens(y) }
+
+        var processed = 0
         try withPreparedCache(cache, lengths: y.sequenceLengths) {
-            // Prepare the prompt in chunks if larger than the prefill size.
             // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
-            // chunk N.
+            // chunk N. Under .remainder the reserved tail is the legacy leftover
+            // (up to a full step) rather than a single token.
             var state: LMOutput.State? = state
-            while y.tokens.size > prefillStepSize {
-                // Cooperative cancellation between prefill windows. On iOS, GPU work
-                // submitted after the app moves to the background is rejected by the
-                // system ("Insufficient Permission"), and the resulting command-buffer
-                // error is thrown from a Metal completion handler where it cannot be
-                // caught, aborting the process. Without this check a long prompt's
-                // prefill cannot be interrupted, so apps cannot stop GPU submissions
-                // in time when entering the background. See ml-explore/mlx-swift-examples#230.
-                try Task.checkCancellation()
-                // Pool per chunk: long prompts run hundreds of chunk forwards
-                // before returning to any autorelease boundary.
-                autoreleasepool {
-                    let input = y[.newAxis, ..<prefillStepSize]
-                    let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                    state = output.state
-                    asyncEval(cache)
-                    y = y[prefillStepSize...]
-                }
+            processed = try prefill.forEachChunk(
+                total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
+            ) { range in
+                let input = y[.newAxis, range]
+                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
+                state = output.state
+                asyncEval(cache)
             }
 
             // Single sync after the loop to flush any remaining async work.
-            eval(cache)
+            if processed > 0 {
+                eval(cache)
+            }
         }
 
-        return .tokens(y)
+        return .tokens(y[processed...])
     }
 
     public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {

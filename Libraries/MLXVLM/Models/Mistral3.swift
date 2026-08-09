@@ -579,8 +579,8 @@ private enum Language {
             return layerTypes.map { layerType in
                 if layerType == "sliding_attention", let slidingWindow = config.slidingWindow {
                     return RotatingKVCache(maxSize: slidingWindow)
-                } else if let maxKVSize = parameters?.maxKVSize {
-                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                } else if let capacity = parameters?.effectiveKVCacheCapacity {
+                    return capacity.makeRotatingCache()
                 } else {
                     return KVCacheSimple()
                 }
@@ -722,7 +722,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -747,22 +747,18 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
 
         var tokens = inputIds
         if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
-        let prefillStepSize = windowSize ?? 512
         let totalPositions = embeddings.dim(1)
-        var processed = 0
-        while totalPositions - processed > 1 {
-            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-            let range = processed ..< (processed + chunkLength)
+        let processed = try prefill.forEachChunk(total: totalPositions) { range in
             _ = languageModel(
                 tokens[0..., range], cache: cache,
                 inputsEmbeds: embeddings[0..., range, 0...])
             asyncEval(cache)
-            processed += chunkLength
         }
-        eval(cache)
+        if processed > 0 { eval(cache) }
         let logits = languageModel(
             tokens[0..., processed...], cache: cache,
             inputsEmbeds: embeddings[0..., processed..., 0...])
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(.init(logits: logits))
     }
 

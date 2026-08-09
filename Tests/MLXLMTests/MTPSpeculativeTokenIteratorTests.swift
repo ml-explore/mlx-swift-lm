@@ -69,7 +69,9 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    )
         throws -> PrepareResult
     {
         // Return `.tokens(...)`; the iterator's `prepare` will follow up with
@@ -147,9 +149,18 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
 /// Minimal `KVCache` that satisfies the protocol's trimmable interface; the
 /// mock model adjusts `offset` directly. Inherits the default
 /// `ropeOffset = .scalar(offset)` from the `KVCache` protocol extension.
+///
+/// `wrapAt` is opt-in and defaults to nil (unbounded, always trimmable), which
+/// is the behavior every pre-existing test relies on. Setting it mirrors
+/// `RotatingKVCache` through the predictive trimmability query, so a mock stream
+/// can cross the window the same way a real sliding-window cache does.
 private final class CountingKVCache: KVCache {
     var offset: Int = 0
-    var maxSize: Int? { nil }
+    let wrapAt: Int?
+    init(wrapAt: Int? = nil) {
+        self.wrapAt = wrapAt
+    }
+    var maxSize: Int? { wrapAt }
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         (keys, values)
     }
@@ -161,9 +172,16 @@ private final class CountingKVCache: KVCache {
         get { [] }
         set {}
     }
-    var isTrimmable: Bool { true }
+    var isTrimmable: Bool {
+        isTrimmable(after: 0)
+    }
+    func isTrimmable(after positions: Int) -> Bool {
+        guard let wrapAt else { return true }
+        return offset + positions < wrapAt
+    }
     @discardableResult
     func trim(_ n: Int) -> Int {
+        guard isTrimmable else { return 0 }
         let removed = Swift.min(n, offset)
         offset -= removed
         return removed
@@ -174,7 +192,7 @@ private final class CountingKVCache: KVCache {
         .none
     }
     func copy() -> any KVCache {
-        let c = CountingKVCache()
+        let c = CountingKVCache(wrapAt: wrapAt)
         c.offset = offset
         return c
     }
@@ -182,6 +200,28 @@ private final class CountingKVCache: KVCache {
 }
 
 // MARK: - Smallest-unit-of-work smoke test
+
+@Suite("MTP KV-cache configuration")
+struct MTPKVCacheConfigurationTests {
+    @Test func legacyTurboSchemeUsesTypedDispatcher() throws {
+        let main = MockMainModel(nextLogitTokens: [0, 0, 7])
+        let drafter = MockDrafter(draftedTokenValue: 7)
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+        let iterator = try MTPSpeculativeTokenIterator(
+            input: input,
+            mainModel: main,
+            drafter: drafter,
+            parameters: GenerateParameters(kvScheme: "turbo0v4"),
+            blockSize: 2)
+        let simple = KVCacheSimple()
+        simple.offset = 1
+        var cache: [KVCache] = [simple]
+
+        iterator.kvCachePlan.apply(to: &cache)
+
+        #expect(cache[0] is TurboQuantKVCache)
+    }
+}
 
 @Test
 func testMTPSpeculateRoundSmokeWithSynthetics() throws {
@@ -596,4 +636,163 @@ func testTrimSharedKVStateNoOpOnNilStateAndAbsentKey() {
     trimSharedKVState(&keylessState, numTokens: 3)
     #expect(keylessState?[mtpSharedKVStatesKey] == nil)
     #expect(keylessState?[mtpEmitFlagKey] == true)
+}
+
+// MARK: - Stand-down when the sliding cache runs out of trim headroom
+//
+// MTP's accept/reject step rewinds the main cache with `trimPromptCache`, and
+// `RotatingKVCache.isTrimmable(after:)` owns the strict sliding-window boundary.
+// Before the stand-down existed the iterator only checked trimmability at init,
+// against a fresh zero-offset cache where the check is vacuously true, so any
+// stream whose total context crossed the window kept drafting: the verify pass's
+// sliding K/V grew to `maxCacheSize + S - 1`, flowed into `sharedKV`, and the next
+// `draftBlock` tripped `precondition(slidingKvLen <= textCfg.slidingWindow)`.
+//
+// `CountingKVCache(wrapAt:)` mirrors that regime; the checks below pin both
+// entry points and the equivalence-to-greedy guarantee across the transition.
+
+/// A prompt that leaves no room for a speculative round stands down during
+/// `init` — the drafter is never called, and the stream still completes.
+///
+/// The first-token assertion is the load-bearing one: `prepare` has already
+/// queued the prefill bonus in `pendingTokens` by the time the stand-down
+/// fires, and that token is already committed to the cache (`y` is the token
+/// after it). If `next()` short-circuits into `passthroughStep()` without
+/// draining the buffer, the bonus vanishes and the whole stream shifts a
+/// position relative to an equivalent autoregressive run.
+@Test
+func testMTPIteratorStandsDownWhenPromptFillsSlidingWindow() throws {
+    // Prompt of 8 against a window of 6: the cache is already past the window
+    // when prefill returns, so no rewind is possible for the rest of the run.
+    let mainLogitTokens: [Int32] = [
+        // Prefill follow-up call (length 8): only the final position is
+        // sampled; the rest are inert placeholders (< vocab=20).
+        0, 0, 0, 0, 0, 0, 0, 5,
+        // Passthrough single-token steps.
+        11, 12, 13,
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3, 4, 5, 6, 7, 8]))
+    let cache = CountingKVCache(wrapAt: 6)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 4, temperature: 0), blockSize: 4
+    )
+
+    let tokens = [iter.next(), iter.next(), iter.next(), iter.next(), iter.next()]
+
+    // The prefill bonus must be yielded first, then passthrough tokens.
+    #expect(tokens[0] == 5, "prefill bonus was dropped by the init-time stand-down")
+    #expect(tokens[1] == 11)
+    #expect(tokens[2] == 12)
+    #expect(tokens[3] == 13)
+    #expect(tokens[4] == nil)
+    #expect(iter.tokenCount == 4)
+
+    #expect(
+        iter.passthroughReason
+            == "prompt fills the sliding window — MTP rewind unavailable; generating without speculation"
+    )
+    // Never speculated: no draft was ever requested.
+    #expect(drafter.draftBlockCallCount == 0)
+    #expect(iter.proposedCount == 0)
+    #expect(iter.acceptedCount == 0)
+}
+
+/// A stream that speculates successfully and only later runs out of headroom
+/// stands down mid-stream, after real speculation has happened.
+@Test
+func testMTPIteratorStandsDownWhenSlidingCacheWrapsMidStream() throws {
+    // window=8, prompt=3, blockSize=4. Prefill leaves offset=3, so round 1 has
+    // headroom (3 + 4 < 8) and runs; its verify pass carries offset to 7, so
+    // round 2 (3 more positions) does not, and the iterator stands down before
+    // drafting rather than after the cache has already wrapped.
+    let mainLogitTokens: [Int32] = [
+        // Prefill follow-up (length 3): bonus 7.
+        0, 0, 7,
+        // Verify pass (length 4): all three drafts match, then correction 9.
+        7, 7, 7, 9,
+        // Passthrough single-token steps.
+        11, 12, 13,
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 7)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+    let cache = CountingKVCache(wrapAt: 8)
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: [cache],
+        parameters: GenerateParameters(maxTokens: 8, temperature: 0), blockSize: 4
+    )
+
+    var tokens: [Int] = []
+    while let token = iter.next() { tokens.append(token) }
+
+    #expect(tokens == [7, 7, 7, 7, 9, 11, 12, 13])
+
+    // It really speculated before standing down.
+    #expect(drafter.draftBlockCallCount == 1)
+    #expect(iter.proposedCount == 3)
+    #expect(iter.acceptedCount == 3)
+
+    #expect(
+        iter.passthroughReason
+            == "sliding cache wrapped mid-stream — MTP rewind unavailable; continuing without speculation"
+    )
+}
+
+/// Bit-exact equivalence to greedy survives the stand-down: a stream that
+/// speculates, crosses the window, and finishes in passthrough emits exactly
+/// the tokens a plain `TokenIterator` emits from the same model.
+///
+/// Note on the harness: `MockMainModel` addresses its script by a running
+/// per-forward-call index, not by absolute sequence position, and a rejected
+/// draft rewinds the cache without rewinding that index. The two arms
+/// therefore only stay in step while every draft is accepted — which is the
+/// regime scripted here (`MockDrafter` emits one constant value, and the
+/// verify positions hold that same value). A rejection would desynchronize the
+/// script rather than reveal a real divergence.
+@Test
+func testMTPIteratorMatchesGreedyAcrossMidStreamStandDown() throws {
+    let mainLogitTokens: [Int32] = [
+        0, 0, 7,
+        7, 7, 7, 9,
+        11, 12, 13,
+        // Greedy consumes one script entry per emitted token, so it reads one
+        // position further than the speculative arm on the final step.
+        0,
+    ]
+    let promptTokens = MLXArray([Int32(1), 2, 3])
+    let parameters = GenerateParameters(maxTokens: 8, temperature: 0)
+
+    var mtpTokens: [Int] = []
+    do {
+        let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+        var iter = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: promptTokens), mainModel: main,
+            drafter: MockDrafter(draftedTokenValue: 7),
+            mainCache: [CountingKVCache(wrapAt: 8)],
+            parameters: parameters, blockSize: 4
+        )
+        while let token = iter.next() { mtpTokens.append(token) }
+        #expect(iter.passthroughReason != nil, "the run must actually cross the window")
+        #expect(iter.acceptedCount > 0, "the run must actually speculate first")
+    }
+
+    var greedyTokens: [Int] = []
+    do {
+        let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+        var iter = try TokenIterator(
+            input: LMInput(tokens: promptTokens), model: main,
+            cache: [CountingKVCache(wrapAt: 8)],
+            parameters: parameters
+        )
+        while let token = iter.next() { greedyTokens.append(token) }
+    }
+
+    #expect(
+        mtpTokens == greedyTokens,
+        "MTP diverged from greedy across the stand-down: \(mtpTokens) vs \(greedyTokens)")
 }

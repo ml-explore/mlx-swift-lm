@@ -980,7 +980,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func prepare(
-        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
@@ -1036,22 +1036,18 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             pixelAttentionMask: pixelAttentionMask
         )
 
-        let result = withPreparedCache(cache, lengths: input.text.sequenceLengths) {
-            let prefillStepSize = windowSize ?? 512
+        let result = try withPreparedCache(cache, lengths: input.text.sequenceLengths) {
             let totalPositions = inputEmbeddings.dim(1)
-            var processed = 0
-            while totalPositions - processed > 1 {
-                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
-                let range = processed ..< (processed + chunkLength)
+            let processed = try prefill.forEachChunk(total: totalPositions) { range in
                 _ = languageModel(
                     nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., range, 0...])
                 asyncEval(cache)
-                processed += chunkLength
             }
-            eval(cache)
+            if processed > 0 { eval(cache) }
 
             let result = languageModel(
                 nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., processed..., 0...])
+            prefill.progress?(totalPositions, totalPositions)
             return result
         }
 

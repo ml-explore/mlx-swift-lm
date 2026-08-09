@@ -156,6 +156,36 @@ final class StopStringTests: XCTestCase {
         XCTAssertFalse(result.stopped)
     }
 
+    func testStandardDecoderAppliesStopStringsBeforeToolCallParsing() {
+        let tokenizer = DeterministicStopStringTokenizer(decoding: [
+            1: #"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#
+        ])
+        var decoder = StandardTokenStreamDecoder(
+            tokenizer: tokenizer,
+            format: .json,
+            tools: nil,
+            stopStrings: ["arguments"])
+        var stopped = false
+        var toolCalls: [ToolCall] = []
+
+        let continued = decoder.push(1) { event in
+            switch event {
+            case .response:
+                return true
+            case .toolCall(let toolCall):
+                toolCalls.append(toolCall)
+                return true
+            case .stop:
+                stopped = true
+                return false
+            }
+        }
+
+        XCTAssertFalse(continued)
+        XCTAssertTrue(stopped)
+        XCTAssertTrue(toolCalls.isEmpty)
+    }
+
     func testKnownRegistryEntriesExposeFamilyStopDefaults() {
         assertStops(LLMRegistry.gemma3_1B_qat_4bit, "<end_of_turn>")
         assertStops(LLMRegistry.gemma3n_E4B_it_lm_4bit, "<end_of_turn>")

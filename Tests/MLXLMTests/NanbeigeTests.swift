@@ -56,7 +56,8 @@ final class NanbeigeTests: XCTestCase {
         _ model: NanbeigeModel, _ tokens: MLXArray, cache: [KVCache]
     ) throws -> MLXArray {
         let result = try model.prepare(
-            LMInput(text: .init(tokens: tokens)), cache: cache, state: nil, windowSize: 16)
+            LMInput(text: .init(tokens: tokens)), cache: cache, state: nil,
+            prefill: .init(stepSize: 16))
         switch result {
         case .tokens(let remainder):
             let out = model(remainder.tokens[.newAxis], cache: cache)

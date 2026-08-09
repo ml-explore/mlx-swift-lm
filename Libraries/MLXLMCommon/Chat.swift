@@ -41,6 +41,11 @@ public enum Chat {
             public static func result(id: String) -> Self {
                 Self(storage: .result(id: id))
             }
+
+            package var calls: [ToolCall]? {
+                guard case .calls(let calls) = storage else { return nil }
+                return calls
+            }
         }
 
         public init(

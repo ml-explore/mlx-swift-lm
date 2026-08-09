@@ -7,10 +7,10 @@ import Testing
 
 @testable import MLXVLM
 
-/// Unit tests for `Gemma4.prepare(_:cache:state:windowSize:)` chunked prefill.
+/// Unit tests for `Gemma4.prepare(_:cache:state:prefill:)` chunked prefill.
 ///
 /// The core property under test is **chunk-size invariance**: prefilling the
-/// same prompt with a small `windowSize` (many chunks) and a `windowSize`
+/// same prompt with a small step size (many chunks) and a step size
 /// larger than the prompt (single pass) must agree on the final logits and
 /// leave the KV caches at the same offsets. The synthetic config deliberately
 /// covers Gemma 4's tricky structures: sliding-window layers whose rotating
@@ -74,7 +74,8 @@ struct Gemma4ChunkedPrefillTests {
     ) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
         let cache = model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
-        let result = try model.prepare(input, cache: cache, state: nil, windowSize: windowSize)
+        let result = try model.prepare(
+            input, cache: cache, state: nil, prefill: .init(stepSize: windowSize))
         guard case .logits(let output) = result else {
             Issue.record("Expected .logits from Gemma4.prepare, got .tokens")
             return (MLXArray(0), [])
@@ -126,6 +127,25 @@ struct Gemma4ChunkedPrefillTests {
         #expect(result.logits.shape == [1, 200])
     }
 
+    @Test("A .logits model reports monotone progress ending at (total, total)")
+    func logitsModelProgressContract() throws {
+        let model = try Self.makeTinyModel()
+        let tokens = Self.makePrompt(count: 37)
+
+        final class Log: @unchecked Sendable { var events: [[Int]] = [] }
+        let log = Log()
+        var prefill = PrefillParameters(stepSize: 8)
+        prefill.progress = { log.events.append([$0, $1]) }
+
+        let input = LMInput(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
+        _ = try model.prepare(
+            input, cache: model.newCache(parameters: nil), state: nil, prefill: prefill)
+
+        #expect(log.events.last == [tokens.count, tokens.count])
+        #expect(log.events.map { $0[0] } == log.events.map { $0[0] }.sorted())
+        #expect(log.events.allSatisfy { $0[1] == tokens.count })
+    }
+
     @Test("Unbatched (1-D) token input is accepted on the text path")
     func unbatchedTokensAccepted() throws {
         let model = try Self.makeTinyModel()
@@ -133,7 +153,7 @@ struct Gemma4ChunkedPrefillTests {
 
         let cache = model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray(tokens))  // 1-D, no batch axis
-        let result = try model.prepare(input, cache: cache, state: nil, windowSize: 6)
+        let result = try model.prepare(input, cache: cache, state: nil, prefill: .init(stepSize: 6))
         guard case .logits(let output) = result else {
             Issue.record("Expected .logits from Gemma4.prepare")
             return
