@@ -807,13 +807,25 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 /// ``windowSize`` is full. Afterwards new decode keys/values overwrite that ring
 /// while `offset` (and therefore RoPE absolute positions) keeps increasing.
 ///
+/// Extends ``BaseKVCache`` directly (like ``RotatingKVCache``) rather than
+/// ``KVCacheSimple`` so KV quantization never treats it as a plain growable
+/// cache — quantizing would freeze the ring slots and break in-place overwrite.
+///
+/// Multi-token steps before the first single-token step are treated as
+/// (possibly chunked) prefill and extend the retained reference prefix; the
+/// prefix boundary is marked by the first single-token decode step.
+///
 /// Do **not** substitute ``RotatingKVCache`` — that cache keeps leading tokens and
 /// rotates from the start, which is a different sliding-window semantics.
 ///
 /// Port of Python `mlx_vlm.models.unlimited_ocr.language.RingSlidingKVCache`.
-public class RingSlidingKVCache: KVCacheSimple {
+public class RingSlidingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public private(set) var windowSize: Int
     public private(set) var prefillLength: Int?
+    public var step = 256
+
+    private var keys: MLXArray?
+    private var values: MLXArray?
     private var ringPos: Int = 0
 
     /// Logical retained length once the decode ring is active: `prefill + window`.
@@ -828,6 +840,57 @@ public class RingSlidingKVCache: KVCacheSimple {
         super.init()
     }
 
+    public override func innerState() -> [MLXArray] {
+        [self.keys, self.values].compactMap { $0 }
+    }
+
+    /// Append to the growing (pre-ring) region with ``KVCacheSimple``-style
+    /// step-quantized allocation.
+    private func appendGrowing(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let previous = self.offset
+
+        let reset =
+            if let currentKeys = self.keys, (previous + keys.dim(2)) > currentKeys.dim(2) {
+                true
+            } else {
+                self.keys == nil
+            }
+        if reset {
+            let B = keys.dim(0)
+            let kvHeads = keys.dim(1)
+            let kHeadDim = keys.dim(3)
+            let vHeadDim = values.dim(3)
+
+            let nSteps = (step + keys.dim(2) - 1) / step
+            let kShape = [B, kvHeads, nSteps * step, kHeadDim]
+            let vShape = [B, kvHeads, nSteps * step, vHeadDim]
+            let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
+            let newV = MLXArray.zeros(vShape, dtype: values.dtype)
+
+            if var currentKeys = self.keys, var currentValues = self.values {
+                if previous % step != 0 {
+                    currentKeys = currentKeys[.ellipsis, ..<previous, 0...]
+                    currentValues = currentValues[.ellipsis, ..<previous, 0...]
+                }
+                self.keys = concatenated([currentKeys, newK], axis: 2)
+                self.values = concatenated([currentValues, newV], axis: 2)
+            } else {
+                self.keys = newK
+                self.values = newV
+            }
+        }
+
+        self.offset += keys.dim(2)
+
+        self.keys?[.ellipsis, previous ..< self.offset, 0...] = keys
+        self.values?[.ellipsis, previous ..< self.offset, 0...] = values
+
+        return (
+            self.keys![.ellipsis, ..<self.offset, 0...],
+            self.values![.ellipsis, ..<self.offset, 0...]
+        )
+    }
+
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let seqLen = keys.dim(2)
 
@@ -835,52 +898,140 @@ public class RingSlidingKVCache: KVCacheSimple {
             // Multi-token prefill: grow like a standard cache; defer marking
             // prefill length until the first single-token decode step.
             if seqLen > 1 {
-                return super.update(keys: keys, values: values)
+                return appendGrowing(keys: keys, values: values)
             }
             prefillLength = offset
         }
 
         let prefill = prefillLength!
-        if self.keys == nil || offset < prefill + windowSize {
-            let result = super.update(keys: keys, values: values)
-            if offset >= prefill + windowSize {
+        let capacity = prefill + windowSize
+
+        // Still filling the window and this step fits: plain growth.
+        if offset + seqLen <= capacity {
+            let result = appendGrowing(keys: keys, values: values)
+            if offset == capacity {
                 ringPos = 0
             }
             return result
         }
 
-        // Steady-state decode: overwrite the ring in place.
-        for idx in 0 ..< seqLen {
+        // Steady-state single-token decode: overwrite the ring in place.
+        if seqLen == 1 {
             let slot = prefill + ringPos
-            self.keys![.ellipsis, slot ..< (slot + 1), 0...] =
-                keys[
-                    .ellipsis, idx ..< (idx + 1), 0...]
-            self.values![.ellipsis, slot ..< (slot + 1), 0...] =
-                values[
-                    .ellipsis, idx ..< (idx + 1), 0...]
+            self.keys![.ellipsis, slot ..< (slot + 1), 0...] = keys
+            self.values![.ellipsis, slot ..< (slot + 1), 0...] = values
             ringPos = (ringPos + 1) % windowSize
+            offset += 1
+            return (
+                self.keys![.ellipsis, ..<capacity, 0...],
+                self.values![.ellipsis, ..<capacity, 0...]
+            )
         }
 
+        // Multi-token step overlapping the ring: like ``RotatingKVCache``'s
+        // concat path, temporarily exceed the bound so every new token sees its
+        // full window. Returns [prefix | last (windowSize - 1) decode tokens |
+        // new tokens] in temporal order, then retains only the last
+        // `windowSize` decode tokens for subsequent steps.
+        return updateConcatRing(keys: keys, values: values, prefill: prefill, capacity: capacity)
+    }
+
+    private func updateConcatRing(
+        keys: MLXArray, values: MLXArray, prefill: Int, capacity: Int
+    ) -> (MLXArray, MLXArray) {
+        let seqLen = keys.dim(2)
+        let decodeLen = min(offset - prefill, windowSize)
+        let keep = min(decodeLen, windowSize - 1)
+
+        // Retained decode region in temporal order, trimmed to the last `keep`.
+        func orderedDecode(_ buffer: MLXArray) -> MLXArray? {
+            guard keep > 0 else { return nil }
+            let ordered: MLXArray
+            if offset >= capacity, ringPos > 0 {
+                ordered = concatenated(
+                    [
+                        buffer[.ellipsis, (prefill + ringPos) ..< capacity, 0...],
+                        buffer[.ellipsis, prefill ..< (prefill + ringPos), 0...],
+                    ], axis: 2)
+            } else {
+                ordered = buffer[.ellipsis, prefill ..< (prefill + decodeLen), 0...]
+            }
+            return ordered[.ellipsis, (decodeLen - keep)..., 0...]
+        }
+
+        var kParts: [MLXArray] = []
+        var vParts: [MLXArray] = []
+        if prefill > 0 {
+            kParts.append(self.keys![.ellipsis, ..<prefill, 0...])
+            vParts.append(self.values![.ellipsis, ..<prefill, 0...])
+        }
+        if let orderedKeys = orderedDecode(self.keys!),
+            let orderedValues = orderedDecode(self.values!)
+        {
+            kParts.append(orderedKeys)
+            vParts.append(orderedValues)
+        }
+        kParts.append(keys)
+        vParts.append(values)
+        let wideKeys = concatenated(kParts, axis: 2)
+        let wideValues = concatenated(vParts, axis: 2)
+
+        // Retain [prefix | last windowSize decode tokens] in temporal order;
+        // `keep + seqLen >= windowSize` whenever this path is reached, so the
+        // tail never reaches back into the prefix.
+        let wideLength = wideKeys.dim(2)
+        let tailKeys = wideKeys[.ellipsis, (wideLength - windowSize)..., 0...]
+        let tailValues = wideValues[.ellipsis, (wideLength - windowSize)..., 0...]
+        if prefill > 0 {
+            self.keys = concatenated(
+                [wideKeys[.ellipsis, ..<prefill, 0...], tailKeys], axis: 2)
+            self.values = concatenated(
+                [wideValues[.ellipsis, ..<prefill, 0...], tailValues], axis: 2)
+        } else {
+            self.keys = tailKeys
+            self.values = tailValues
+        }
+        ringPos = 0
         offset += seqLen
-        let end = prefill + windowSize
-        return (
-            self.keys![.ellipsis, ..<end, 0...],
-            self.values![.ellipsis, ..<end, 0...]
-        )
+        return (wideKeys, wideValues)
     }
 
     public override func makeMask(
-        n: Int, windowSize: Int?, returnArray: Bool
+        n: Int, windowSize maskWindowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        // Prefill / warmup: standard causal. Steady-state decode (q_len=1)
-        // attends over retained prompt + ring slots with no extra window mask.
-        if let prefillLength,
-            offset >= prefillLength + self.windowSize,
-            n == 1, !returnArray
-        {
+        // Prefill / warmup (cache purely growing): standard causal.
+        guard let prefill = prefillLength, offset + n > prefill + self.windowSize else {
+            return super.makeMask(n: n, windowSize: nil, returnArray: returnArray)
+        }
+
+        // Steady-state decode (q_len=1) attends over retained prompt + every
+        // ring slot with no extra window mask.
+        if n == 1 {
             return .none
         }
-        return super.makeMask(n: n, windowSize: nil, returnArray: returnArray)
+
+        // Multi-token step overlapping the ring: `update` returns
+        // [prefix | last keep decode tokens | n new tokens] in temporal order.
+        // Each query attends the full prefix plus decode positions within its
+        // trailing window of `windowSize` (its own position included).
+        let window = self.windowSize
+        let keep = min(min(offset - prefill, window), window - 1)
+
+        var columnPositions = [Int32]()
+        columnPositions.reserveCapacity(prefill + keep + n)
+        for position in 0 ..< prefill {
+            columnPositions.append(Int32(position))
+        }
+        for position in (offset - keep) ..< (offset + n) {
+            columnPositions.append(Int32(position))
+        }
+
+        let rows = MLXArray(Int32(offset) ..< Int32(offset + n))[0..., .newAxis]
+        let cols = MLXArray(columnPositions)[.newAxis]
+        let causal = rows .>= cols
+        let inWindow = cols .>= (rows - Int32(window - 1))
+        let isPrefix = cols .< Int32(prefill)
+        return .array(causal & (inWindow | isPrefix))
     }
 
     public override var state: [MLXArray] {
@@ -929,7 +1080,7 @@ public class RingSlidingKVCache: KVCacheSimple {
             else {
                 fatalError("Failed to convert RingSlidingKVCache metaState to integers")
             }
-            self.windowSize = window
+            self.windowSize = max(window, 1)
             self.prefillLength = prefill < 0 ? nil : prefill
             self.offset = offsetVal
             self.ringPos = ring
@@ -939,6 +1090,21 @@ public class RingSlidingKVCache: KVCacheSimple {
     public override var isTrimmable: Bool {
         // Once the ring is active, trimming would desync ring slots.
         prefillLength == nil || offset < (prefillLength! + windowSize)
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard isTrimmable else { return 0 }
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        if let prefill = prefillLength, offset <= prefill {
+            // Trimmed to (or below) the marked reference prefix: unmark it so
+            // the cache grows as prefill again and the boundary is re-marked
+            // by the next single-token step.
+            prefillLength = nil
+            ringPos = 0
+        }
+        return trimmed
     }
 
     public override func copy() -> any KVCache {
@@ -953,7 +1119,7 @@ public class RingSlidingKVCache: KVCacheSimple {
         return new
     }
 
-    public override var debugDescription: String {
+    public var debugDescription: String {
         "RingSlidingKVCache offset: \(offset), window: \(windowSize), prefill: \(prefillLength.map(String.init) ?? "nil"), ringPos: \(ringPos)"
     }
 }
