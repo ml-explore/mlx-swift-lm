@@ -1010,7 +1010,7 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize _: Int?
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let pixels = input.image?.pixels.asType(samModel.patchEmbed.proj.weight.dtype)
         let embeddings: MLXArray
@@ -1031,6 +1031,7 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             embeddings = languageModel.embedTokens(input.text.tokens)
         }
         let logits = computeLogits(languageModel.forward(embeddings, cache: cache))
+        prefill.progress?(embeddings.dim(1), embeddings.dim(1))
         return .logits(LMOutput(logits: logits, state: state ?? .init()))
     }
 
