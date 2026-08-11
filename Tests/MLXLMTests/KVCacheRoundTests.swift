@@ -452,6 +452,22 @@ private final class ProbeCache: KVCache {
 
 // MARK: - Adapter surface
 
+@Test func testFirstStagedPresentationPreservesInputDTypeAndShape() throws {
+    let live = RotatingKVCache(maxSize: 8, keep: 0)
+    let overlay = try #require(StagedRound([live]))
+    let adapter = try #require(overlay.caches.first as? RotatingStagedKVCache)
+    let keys = MLXArray.ones([1, 2, 3, 4], dtype: .bfloat16)
+    let values = MLXArray.zeros([1, 2, 3, 4], dtype: .bfloat16)
+
+    let presented = adapter.update(keys: keys, values: values)
+
+    #expect(presented.0.dtype == .bfloat16)
+    #expect(presented.1.dtype == .bfloat16)
+    #expect(presented.0.shape == keys.shape)
+    #expect(presented.1.shape == values.shape)
+    #expect(live.offset == 0, "staging the first rows must not initialize the live ring")
+}
+
 @Test func testOverlayAdapterReportsStagedPositionsInItsOffset() throws {
     let live = RotatingKVCache(maxSize: 8, keep: 0)
     let (k, v) = positionedKV(0 ..< 5)

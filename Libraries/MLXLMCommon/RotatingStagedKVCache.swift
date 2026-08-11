@@ -38,9 +38,11 @@ final class RotatingStagedKVCache: KVCache {
     var maxSize: Int? { live.maxSize }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        stagedKeys = stagedKeys.map { concatenated([$0, keys], axis: 2) } ?? keys
-        stagedValues = stagedValues.map { concatenated([$0, values], axis: 2) } ?? values
-        return presentation()
+        let stagedKeys = stagedKeys.map { concatenated([$0, keys], axis: 2) } ?? keys
+        let stagedValues = stagedValues.map { concatenated([$0, values], axis: 2) } ?? values
+        self.stagedKeys = stagedKeys
+        self.stagedValues = stagedValues
+        return presentation(stagedKeys: stagedKeys, stagedValues: stagedValues)
     }
 
     /// The live cache's own mask.
@@ -70,10 +72,9 @@ final class RotatingStagedKVCache: KVCache {
             values: stagedValues[.ellipsis, ..<keep, 0...])
     }
 
-    private func presentation() -> (MLXArray, MLXArray) {
-        guard let stagedKeys, let stagedValues else {
-            return live.logicalView(tail: live.offset) ?? emptyPresentation()
-        }
+    private func presentation(
+        stagedKeys: MLXArray, stagedValues: MLXArray
+    ) -> (MLXArray, MLXArray) {
         // `maxSize - 1` is the same bound the multi-token write path front-trims to, so the first
         // staged query still reaches back a full window.
         let bound = Swift.min(live.offset, (live.maxSize ?? Int.max) - 1)
@@ -84,11 +85,6 @@ final class RotatingStagedKVCache: KVCache {
             concatenated([view.0, stagedKeys], axis: 2),
             concatenated([view.1, stagedValues], axis: 2)
         )
-    }
-
-    private func emptyPresentation() -> (MLXArray, MLXArray) {
-        let empty = MLXArray.zeros([1, 1, 0, 1])
-        return (empty, empty)
     }
 
     func innerState() -> [MLXArray] {
