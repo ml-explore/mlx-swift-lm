@@ -239,13 +239,18 @@ public func resolve(
     let modelDirectory: URL
     switch configuration.id {
     case .id(let id, let revision):
-        modelDirectory = try await downloader.download(
+        let subdirectory = try configuration.normalizedModelSubdirectory
+        let patterns = modelDownloadPatterns.map { pattern in
+            subdirectory.map { "\($0)/\(pattern)" } ?? pattern
+        }
+        let repositoryDirectory = try await downloader.download(
             id: id, revision: revision,
-            matching: modelDownloadPatterns,
+            matching: patterns,
             useLatest: useLatest,
             progressHandler: progressHandler)
+        modelDirectory = try configuration.appendingModelSubdirectory(to: repositoryDirectory)
     case .directory(let directory):
-        modelDirectory = directory
+        modelDirectory = try configuration.appendingModelSubdirectory(to: directory)
     }
 
     let tokenizerDirectory: URL
