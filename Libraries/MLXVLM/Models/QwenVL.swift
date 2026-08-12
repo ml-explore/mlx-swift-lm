@@ -13,6 +13,45 @@ private func debug(_ message: @autoclosure () -> String) {
 }
 
 public struct QwenVL {
+    /// The position new tokens are placed from when resuming on a warm cache: the cache offset
+    /// plus the rope delta the cached images accumulated, carried in `state` under `key`.
+    ///
+    /// A cold cache (offset zero) needs no anchor and returns zero, so long cold prefills share
+    /// the continuation path. A warm one fails closed: anchoring at zero instead would place the
+    /// continuation as if the cached prefix held no images, silently changing the output.
+    ///
+    /// Pair with ``continuationResumeState(ropeDeltas:cacheOffset:key:)`` — one adds the offset
+    /// on the way in, the other subtracts it on the way out.
+    static func continuationAnchor(
+        model: String, key: LMOutput.Key<MLXArray>, cacheOffset: Int, batchSize: Int,
+        state: LMOutput.State?
+    ) throws -> Int {
+        guard cacheOffset > 0 else { return 0 }
+        // The anchor is one scalar, so it cannot describe several rows resuming at different
+        // positions. Checked before the anchor itself: this covers an anchor that cannot span
+        // the batch, the guard below an absent one.
+        guard batchSize == 1 else {
+            throw ContinuationStateError.unsupportedBatchContinuation(model: model)
+        }
+        guard let anchor = state?[key] else {
+            throw ContinuationStateError.missingState(model: model, key: key.id)
+        }
+        return cacheOffset + anchor.asType(.int32).item(Int.self)
+    }
+
+    /// The state a continuation hands back so the next turn re-anchors correctly.
+    ///
+    /// `getRopeIndex` returns a delta in the offset frame; the next turn adds its own cache
+    /// offset back, which by then includes this remainder. Storing `ropeDeltas - cacheOffset`
+    /// keeps the value offset-relative, so it survives extending or trimming the cache.
+    static func continuationResumeState(
+        ropeDeltas: MLXArray, cacheOffset: Int, key: LMOutput.Key<MLXArray>
+    ) -> LMOutput.State {
+        var resumeState = LMOutput.State()
+        resumeState[key] = ropeDeltas - MLXArray(Int32(cacheOffset))
+        return resumeState
+    }
+
     /// Rotates half the hidden dims of the input
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let index = x.dim(-1) / 2

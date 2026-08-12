@@ -602,6 +602,58 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
+    /// The trailing `tail` cache entries in chronological order, without mutating the cache.
+    ///
+    /// `update(keys:values:)` is the only other way to read a rotating cache's contents, and it
+    /// necessarily writes. This is the read-only counterpart: `keys`, `values`, `idx` and
+    /// `offset` are all left exactly as they were, so a caller can present the ring's history
+    /// alongside K/V it has not committed yet.
+    ///
+    /// The result is built by the same two steps the multi-token write path uses --
+    /// ``temporalOrder(_:)`` to linearize, then the front-trim that preserves the pinned `keep`
+    /// prefix -- so a view of length `n` holds exactly the entries a write that front-trimmed to
+    /// `n` rows would have presented. When the ring is already chronological (`idx` at the end of
+    /// the buffer, which is where every multi-token write leaves it) both steps degrade to
+    /// slices and nothing is copied.
+    ///
+    /// The pinned `keep` prefix is a floor, not just a splice point: a `tail` below it still
+    /// comes back, because those entries are not evictable and a view that dropped them would be
+    /// a context this ring can never present. With `keep == 0` -- every sliding-window model --
+    /// the floor is zero and the length is exactly `min(tail, count)`.
+    ///
+    /// - Parameter tail: Requested number of trailing entries. Clamped to what the cache holds;
+    ///   a negative value is read as zero.
+    /// - Returns: `(keys, values)` shaped `[B, kvHeads, n, headDim]` where
+    ///   `n == max(min(tail, count), min(keep, count))`, or `nil` before the first write.
+    package func logicalView(tail: Int) -> (MLXArray, MLXArray)? {
+        guard let keys = self.keys, let values = self.values else { return nil }
+
+        let orderedKeys = temporalOrder(keys)
+        let orderedValues = temporalOrder(values)
+
+        let available = orderedKeys.dim(2)
+        // Raising the bound to the pinned prefix is what keeps the front-trim's second slice in
+        // range; stated here rather than left to slice clamping, since the length it produces is
+        // the documented contract.
+        let requested = Swift.min(Swift.max(tail, 0), available)
+        let bound = Swift.max(requested, Swift.min(keep, available))
+        let trimSize = available - bound
+        guard trimSize > 0 else { return (orderedKeys, orderedValues) }
+
+        // `keep == 0` is the sliding-window case (Gemma 3/3n/4, GPT-OSS, Exaone4): no pinned
+        // prefix to splice around, so the trailing window is one slice per array.
+        if keep == 0 {
+            return (
+                orderedKeys[.ellipsis, trimSize..., 0...],
+                orderedValues[.ellipsis, trimSize..., 0...]
+            )
+        }
+        return (
+            trim(trimSize: trimSize, orderedKeys),
+            trim(trimSize: trimSize, orderedValues)
+        )
+    }
+
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         if self.keys == nil {
             self.keys = keys
@@ -1988,20 +2040,66 @@ private func cacheClassName(_ cache: KVCache) -> String {
     }
 }
 
+/// A prompt cache and the model state that belongs with it.
+///
+/// Keeping the two together is the point: a KV cache restored without its model state positions
+/// later tokens as if the cached prefix contained no images, which changes the output silently.
+/// Pass a snapshot to a `ChatSession` initializer that accepts a `promptCache` rather than
+/// unpacking it into the `cache:` initializer.
+///
+/// A snapshot does not carry the chat transcript. A `ChatSession` restored from one appends each
+/// new message rather than re-rendering the conversation, so a later image-bearing turn builds a
+/// different prompt than it would in a session that still holds its history. Positions stay
+/// correct either way. On vision encoders that attend across image boundaries (Qwen2-VL today)
+/// the new image's features differ too, since it is encoded alone rather than beside the cached
+/// one; Qwen2.5-VL, Qwen3-VL, and GLM-OCR isolate each image and are unaffected.
+///
+/// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
+/// caches before constructing multiple sessions from it.
+public struct PromptCacheSnapshot {
+    public let cache: [KVCache]
+    public let metadata: [String: String]
+    public let state: LMOutput.State?
+
+    /// Pair a cache with the model state that belongs with it.
+    ///
+    /// Use this when the cache was built in process — ``loadPromptCacheSnapshot(url:)`` returns a
+    /// snapshot for caches read from disk.
+    ///
+    /// - Parameters:
+    ///   - cache: the KV cache
+    ///   - metadata: optional caller metadata to carry alongside it
+    ///   - state: the model state captured with the cache, if the model produced any
+    public init(cache: [KVCache], metadata: [String: String] = [:], state: LMOutput.State? = nil) {
+        self.cache = cache
+        self.metadata = metadata
+        self.state = state
+    }
+}
+
 /// Save a pre-computed prompt cache to a file.
 ///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 ///   - cache: The model cache state
 ///   - metadata: Optional metadata to save along with cache state
+///   - state: Optional model state associated with the cache
 public func savePromptCache(
     url: URL,
     cache: [KVCache],
-    metadata: [String: String] = [:]
+    metadata: [String: String] = [:],
+    state: LMOutput.State? = nil
 ) throws {
+    let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
+    guard stateArrays.isEmpty || !cache.isEmpty else {
+        throw KVCacheError(message: "Model state requires at least one prompt cache")
+    }
+
     let cacheData = cache.map { $0.state }
     let cacheInfo = cache.map { $0.metaState }
-    let cacheClasses = cache.map { cacheClassName($0) }
+    let cacheClasses = cache.map {
+        promptCacheClassName(cacheClassName($0), hasState: !stateArrays.isEmpty)
+    }
 
     // Flatten cache data using tree_flatten compatible structure: "i.j" format
     var flattenedData: [String: MLXArray] = [:]
@@ -2031,18 +2129,39 @@ public func savePromptCache(
         flattenedMetadata["2.\(i)"] = className
     }
 
+    addPromptCacheState(
+        stateArrays, flattenedData: &flattenedData, flattenedMetadata: &flattenedMetadata)
+
     try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
 }
 
-/// Load a prompt cache from a file.
+/// Load a prompt cache from a file, without model state.
+///
+/// Prefer ``loadPromptCacheSnapshot(url:)``, which also restores the model state a cache needs to
+/// be continued correctly. This tuple form has no slot for that state, so it rejects files that
+/// carry any rather than dropping it. Models that position from a carried anchor refuse a warm
+/// cache that arrives without one, so a cache saved through this API cannot warm them.
 ///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 /// - Returns: The prompt cache and the metadata
+/// - Throws: If the file contains model state that this tuple return value cannot represent
 public func loadPromptCache(
     url: URL
 ) throws -> ([KVCache], [String: String]) {
-    let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+    let promptCache = try loadPromptCacheSnapshot(url: url)
+    guard promptCache.state == nil else {
+        throw KVCacheError(
+            message:
+                "Prompt cache contains model state; use loadPromptCacheSnapshot(url:) to restore it"
+        )
+    }
+    return (promptCache.cache, promptCache.metadata)
+}
+
+/// Load a prompt cache and its associated model state from a file.
+public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
+    var (arrays, metadata) = try loadArraysAndMetadata(url: url)
 
     // Unflatten metadata using tree_unflatten compatible logic
     let unflattenedMetadata = unflattenMetadata(metadata)
@@ -2054,14 +2173,18 @@ public func loadPromptCache(
     }
 
     let cacheInfo = unflattenedMetadata[0] as? [[String]] ?? []
-    let userMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
-    let cacheClasses = unflattenedMetadata[2] as? [String] ?? []
+    let storedUserMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
+    let (state, userMetadata) = try loadPromptCacheState(
+        arrays: &arrays, metadata: storedUserMetadata)
+    let storedCacheClasses = unflattenedMetadata[2] as? [String] ?? []
+    let cacheClasses = try loadPromptCacheClasses(storedCacheClasses, hasState: state != nil)
 
     guard cacheInfo.count == cacheClasses.count else {
         throw KVCacheError(message: "Mismatch in cache counts")
     }
 
     // Metadata carries the cache count even when one or more valid caches have no arrays.
+    // State tensors were removed from `arrays` above, so only cache arrays remain here.
     let cacheData = try unflattenArrays(arrays, cacheCount: cacheClasses.count)
 
     // Reconstruct cache instances
@@ -2075,8 +2198,121 @@ public func loadPromptCache(
         caches.append(cache)
     }
 
-    return (caches, userMetadata)
+    return PromptCacheSnapshot(cache: caches, metadata: userMetadata, state: state)
 }
+
+private func promptCacheStateArrays(
+    _ state: LMOutput.State?, userMetadata: [String: String]
+) throws -> [(key: String, value: MLXArray)] {
+    guard !userMetadata.keys.contains(where: { $0.hasPrefix(promptCacheStateMetadataPrefix) })
+    else {
+        throw KVCacheError(message: "User metadata uses the reserved prompt cache state namespace")
+    }
+    guard let state else { return [] }
+    return try state.serializedArrays().sorted { $0.key < $1.key }
+}
+
+private func addPromptCacheState(
+    _ stateArrays: [(key: String, value: MLXArray)],
+    flattenedData: inout [String: MLXArray], flattenedMetadata: inout [String: String]
+) {
+    guard !stateArrays.isEmpty else { return }
+
+    flattenedMetadata["1.\(promptCacheStateVersionKey)"] = promptCacheStateFormatVersion
+    flattenedMetadata["1.\(promptCacheStateCountKey)"] = String(stateArrays.count)
+    for (index, entry) in stateArrays.enumerated() {
+        flattenedData[promptCacheStateTensorKey(index)] = entry.value
+        flattenedMetadata["1.\(promptCacheStateEntryKey(index))"] = entry.key
+    }
+}
+
+private func loadPromptCacheState(
+    arrays: inout [String: MLXArray], metadata: [String: String]
+) throws -> (LMOutput.State?, [String: String]) {
+    let stateMetadata = metadata.filter { $0.key.hasPrefix(promptCacheStateMetadataPrefix) }
+    let stateTensorKeys = arrays.keys.filter { $0.hasPrefix(promptCacheStateTensorPrefix) }
+    guard !stateMetadata.isEmpty || !stateTensorKeys.isEmpty else { return (nil, metadata) }
+
+    guard metadata[promptCacheStateVersionKey] == promptCacheStateFormatVersion else {
+        throw KVCacheError(message: "Unsupported prompt cache state format")
+    }
+    guard let countValue = metadata[promptCacheStateCountKey],
+        let count = Int(countValue), count > 0
+    else {
+        throw KVCacheError(message: "Invalid prompt cache state count")
+    }
+
+    var serializedArrays: [String: MLXArray] = [:]
+    for index in 0 ..< count {
+        let tensorKey = promptCacheStateTensorKey(index)
+        guard let key = metadata[promptCacheStateEntryKey(index)],
+            let array = arrays.removeValue(forKey: tensorKey)
+        else {
+            throw KVCacheError(message: "Invalid prompt cache state entry at index \(index)")
+        }
+        guard serializedArrays.updateValue(array, forKey: key) == nil else {
+            throw KVCacheError(message: "Duplicate prompt cache state key: \(key)")
+        }
+    }
+
+    // The loop proved every expected entry is present; counting rejects the leftovers — a
+    // reserved-namespace key this reader does not know about means the file was written by
+    // something else, so refuse it rather than silently dropping part of the state.
+    guard stateMetadata.count == count + 2 else {
+        throw KVCacheError(message: "Unexpected prompt cache state metadata")
+    }
+    guard stateTensorKeys.count == count else {
+        throw KVCacheError(message: "Unexpected prompt cache state tensors")
+    }
+
+    let userMetadata = metadata.filter { !$0.key.hasPrefix(promptCacheStateMetadataPrefix) }
+    return (LMOutput.State(serializedArrays: serializedArrays), userMetadata)
+}
+
+/// Prefixes the stored cache class name when the file carries model state.
+///
+/// The marker is redundant for this reader — the state metadata already says whether state is
+/// present — and exists for older ones. A reader predating model state would ignore the
+/// `__mlx_lm_state_` metadata entirely and restore the cache without its continuation anchor,
+/// which positions new tokens as if the cached prefix held no images. Poisoning the class name
+/// makes that reader fail with "Unknown cache class" instead of continuing at the wrong offsets.
+private func promptCacheClassName(_ className: String, hasState: Bool) -> String {
+    hasState ? "\(promptCacheStateClassPrefix)\(className)" : className
+}
+
+private func loadPromptCacheClasses(_ classNames: [String], hasState: Bool) throws -> [String] {
+    if hasState {
+        guard !classNames.isEmpty,
+            classNames.allSatisfy({ $0.hasPrefix(promptCacheStateClassPrefix) })
+        else {
+            throw KVCacheError(
+                message: "Prompt cache model state is missing its compatibility marker")
+        }
+        return classNames.map { String($0.dropFirst(promptCacheStateClassPrefix.count)) }
+    }
+
+    guard !classNames.contains(where: { $0.hasPrefix(promptCacheStateClassPrefix) }) else {
+        throw KVCacheError(message: "Prompt cache compatibility marker has no model state")
+    }
+    return classNames
+}
+
+private func promptCacheStateEntryKey(_ index: Int) -> String {
+    "\(promptCacheStateMetadataPrefix)\(index)_key"
+}
+
+private func promptCacheStateTensorKey(_ index: Int) -> String {
+    "\(promptCacheStateTensorPrefix)\(index)"
+}
+
+private let promptCacheStateFormatVersion = "1"
+private let promptCacheStateMetadataPrefix = "__mlx_lm_state_"
+private let promptCacheStateVersionKey = "__mlx_lm_state_version"
+private let promptCacheStateCountKey = "__mlx_lm_state_count"
+private let promptCacheStateTensorPrefix = "__mlx_lm_state_tensor_"
+// Derived so the format version lives in exactly one place.
+private let promptCacheStateClassPrefix =
+    "__mlx_lm_state_v\(promptCacheStateFormatVersion)__:"
 
 /// Reconstruct a single cache from its class name, state arrays, and metaState.
 ///

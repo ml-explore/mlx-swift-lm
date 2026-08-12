@@ -190,6 +190,101 @@ public class ChatSessionTests: XCTestCase {
 
     private struct UnexpectedDraftModelLoadError: Error {}
 
+    private struct PreparedImageInputProcessor: UserInputProcessor {
+        private let base = TestInputProcessor()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let text = try base.prepare(input: input).text
+            return LMInput(
+                text: text,
+                image: .init(pixels: MLXArray.zeros([1, 1, 1, 1])))
+        }
+    }
+
+    /// Attaches media to the first prepared turn only. That turn refuses speculation and drops
+    /// the draft cache; later text-only turns are what should be able to pick it back up.
+    ///
+    /// `@unchecked Sendable` because the counter is serialised by the lock.
+    private final class FirstTurnImageInputProcessor: UserInputProcessor, @unchecked Sendable {
+        private let base: TestInputProcessor
+        private let lock = NSLock()
+        private var prepared = 0
+
+        init(base: TestInputProcessor) {
+            self.base = base
+        }
+
+        private func consumeFirst() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            prepared += 1
+            return prepared == 1
+        }
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            let text = try await base.prepare(input: input).text
+            guard consumeFirst() else { return LMInput(text: text) }
+            return LMInput(
+                text: text,
+                image: .init(pixels: MLXArray.zeros([1, 1, 1, 1])))
+        }
+    }
+
+    /// A model that hands back model state on every prefill, the way the Qwen
+    /// vision families and GLM-OCR hand back an M-RoPE anchor. The state is
+    /// what a session has to carry across turns and persist with its cache;
+    /// this stands in for a VLM without needing image inputs.
+    private final class StateProducingModel: Module, LanguageModel, KVCacheDimensionProvider {
+        static let anchorKey = LMOutput.Key<MLXArray>("test.ropeDeltas")
+
+        @ModuleInfo var inner: Gemma3TextModel
+
+        var kvHeads: [Int] { (inner as? KVCacheDimensionProvider)?.kvHeads ?? [] }
+
+        init(_ inner: Gemma3TextModel) {
+            self.inner = inner
+        }
+
+        private func batched(_ tokens: MLXArray) -> MLXArray {
+            tokens.ndim == 1 ? tokens[.newAxis, 0...] : tokens
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            let logits = inner(batched(input.text.tokens), cache: cache.isEmpty ? nil : cache)
+            // Carry a seeded anchor forward, or start one at zero — the shape
+            // of every wired model's cold prefill.
+            var produced = LMOutput.State()
+            produced[Self.anchorKey] = state?[Self.anchorKey] ?? MLXArray([Int32(0)])
+            let total = input.text.tokens.dim(-1)
+            prefill.progress?(total, total)
+            return .logits(LMOutput(logits: logits, state: produced))
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            LMOutput(logits: inner(batched(input.tokens), cache: cache), state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            inner.newCache(parameters: parameters)
+        }
+    }
+
+    private static func makeStateProducingModel() -> ModelContext {
+        let base = makeModel()
+        guard let inner = base.model as? Gemma3TextModel else {
+            fatalError("expected the test model to be a Gemma3TextModel")
+        }
+        return .init(
+            configuration: base.configuration,
+            model: StateProducingModel(inner),
+            processor: base.processor,
+            tokenizer: base.tokenizer)
+    }
+
     private actor DraftModelLoadCounter {
         private var count = 0
 
@@ -1092,6 +1187,166 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
     }
 
+    func testSpeculativeDecodingFallsBackForPreparedMedia() async throws {
+        var context = model()
+        context.processor = PreparedImageInputProcessor()
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    /// Carried model state does not disqualify a turn from speculation. The
+    /// anchors these models carry position from the cache offset, and a
+    /// rejected proposal rewinds that offset along with the KV rows.
+    func testSpeculativeDecodingRunsWithCarriedModelState() async throws {
+        let context = model()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let cache = context.model.newCache(parameters: parameters)
+        let stateKey = LMOutput.Key<MLXArray>("test.carriedState")
+        var state = LMOutput.State()
+        state[stateKey] = MLXArray([Int32(1)])
+        let session = ChatSession(
+            context,
+            cache: cache,
+            state: state,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2
+            ),
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNotNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
+    /// Speculation refused on one turn must not disable it for the rest of the session.
+    /// The media turn drops the draft cache; the next text turn extends the cached prefix, which
+    /// sets `reusedMainCacheWithoutDraft` so both caches are rebuilt from the full input and
+    /// speculation resumes. Without that, the gate stays false forever once the main cache is
+    /// warm and the draft cache is nil.
+    func testSpeculativeDecodingResumesAfterAMediaTurn() async throws {
+        // The prefix-preserving tokenizer makes turn 2 render as an exact extension of turn 1, so
+        // the session takes the suffix-reuse path and keeps a warm main cache with a valid ledger.
+        // That is what sets `reusedMainCacheWithoutDraft`; with an ordinary tokenizer turn 2
+        // rebuilds from cold instead and never exercises this path.
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var context = model()
+        context.processor = FirstTurnImageInputProcessor(
+            base: TestInputProcessor(
+                tokenizer: PrefixPreservingTokenizer(renderedLengthContinuation: continuation),
+                configuration: ModelConfiguration(id: "test"),
+                messageGenerator: DefaultMessageGenerator()))
+        _ = renderedLengths
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2
+            ),
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
+        )
+
+        func telemetryForTurn(_ prompt: String) async throws -> SpeculativeDecodingTelemetry? {
+            var info: GenerateCompletionInfo?
+            for try await generation in session.streamDetails(
+                to: prompt,
+                role: .user,
+                images: [] as [UserInput.Image],
+                videos: [] as [UserInput.Video]
+            ) {
+                if let generationInfo = generation.info {
+                    info = generationInfo
+                }
+            }
+            return try XCTUnwrap(info).speculativeDecodingTelemetry
+        }
+
+        let mediaTurn = try await telemetryForTurn("describe this")
+        XCTAssertNil(
+            mediaTurn, "a media turn cannot speculate — the draft would have to prefill it")
+
+        let textTurn = try await telemetryForTurn("and now in one word")
+        XCTAssertNotNil(
+            textTurn,
+            "speculation must resume once a text turn can rebuild both caches from the transcript")
+    }
+
+    func testSpeculativeDecodingFallsBackForPrebuiltCacheWithoutDraftCache() async throws {
+        let context = model()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let cache = context.model.newCache(parameters: parameters)
+        let input = try await context.processor.prepare(
+            input: UserInput(chat: [.user("cached prefix")]))
+        _ = try TokenIterator(
+            input: input,
+            model: context.model,
+            cache: cache,
+            parameters: parameters)
+        XCTAssertTrue(cache.contains { $0.offset > 0 })
+
+        let session = ChatSession(
+            context,
+            cache: cache,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModelBytes: 0,
+                numDraftTokens: 2
+            ) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "hello",
+            role: .user,
+            images: [] as [UserInput.Image],
+            videos: [] as [UserInput.Video]
+        ) {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+
+        let completionInfo = try XCTUnwrap(info)
+        XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+    }
+
     func testDeferredSpeculativeDecodingMemoryPolicyFailDoesNotLoadDraftModel() async throws {
         let session = ChatSession(
             model(),
@@ -1208,9 +1463,126 @@ public class ChatSessionTests: XCTestCase {
             .appendingPathExtension("safetensors")
         try await initial.saveCache(to: url)
 
-        let (loadedCache, _) = try loadPromptCache(url: url)
+        let promptCache = try loadPromptCacheSnapshot(url: url)
         let restored = ChatSession(
-            ctx, cache: loadedCache, generateParameters: generationParameters)
+            ctx, promptCache: promptCache, generateParameters: generationParameters)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testSaveCachePreservesRestoredState() async throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let stateKey = LMOutput.Key<MLXArray>("test.chatSessionState")
+        let stateValue = MLXArray([Int32(2), 4, 6])
+        var state = LMOutput.State()
+        state[stateKey] = stateValue
+        let promptCache = PromptCacheSnapshot(cache: [cache], metadata: [:], state: state)
+        let session = ChatSession(
+            model(), promptCache: promptCache, generateParameters: generationParameters)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try await session.saveCache(to: url)
+        let restored = try loadPromptCacheSnapshot(url: url)
+        let restoredState = try XCTUnwrap(restored.state?[stateKey])
+
+        XCTAssertTrue(allClose(restoredState, stateValue, rtol: 0, atol: 0).item(Bool.self))
+    }
+
+    // MARK: - Carrying model state
+
+    /// Stateful continuation models cannot safely rewind arbitrary model state
+    /// when speculative proposals are rejected, so the session must use normal
+    /// generation without loading a draft model.
+    /// A model that hands back an anchor on every prefill still speculates, and
+    /// the anchor survives the speculative turn: the iterator seeds it, threads
+    /// it through verification, and hands it back for the next turn to persist.
+    func testSpeculativeDecodingCarriesModelStateProducedByItsTurns() async throws {
+        let context = Self.makeStateProducingModel()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: ModelContainer(context: model()),
+                numDraftTokens: 2
+            ),
+            generateParameters: parameters
+        )
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(to: "hello") {
+            if let generationInfo = generation.info {
+                info = generationInfo
+            }
+        }
+        XCTAssertNotNil(try XCTUnwrap(info).speculativeDecodingTelemetry)
+
+        // A second turn must succeed with the anchor the speculative turn carried.
+        _ = try await session.respond(to: "hello again")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await session.saveCache(to: url)
+
+        let restored = try loadPromptCacheSnapshot(url: url)
+        XCTAssertNotNil(
+            restored.state?[StateProducingModel.anchorKey],
+            "the session dropped the model state produced by its turns")
+    }
+
+    /// The end-to-end path the snapshot API exists for: a session that carries
+    /// model state saves it with its cache, and a new session restored from
+    /// that snapshot keeps generating.
+    func testStateProducingSessionSurvivesSaveAndRestore() async throws {
+        let context = Self.makeStateProducingModel()
+        let session = ChatSession(context, generateParameters: generationParameters)
+        _ = try await session.respond(to: "hello")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await session.saveCache(to: url)
+
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        XCTAssertNotNil(
+            snapshot.state?[StateProducingModel.anchorKey],
+            "saveCache dropped the model state")
+
+        let restored = ChatSession(
+            Self.makeStateProducingModel(), promptCache: snapshot,
+            generateParameters: generationParameters)
+        let result = try await restored.respond(to: "hello again")
+        XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    /// A snapshot can be built in process, not only read from disk, so a caller
+    /// holding a cache and its state has a way to keep the two together.
+    func testSessionAcceptsInProcessPromptCacheSnapshot() async throws {
+        let context = Self.makeStateProducingModel()
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0.0)
+
+        // Warm a cache directly, the way a caller building a prefix cache in
+        // process would, and pair it with its state without going through disk.
+        let cache = context.model.newCache(parameters: parameters)
+        let input = try await context.processor.prepare(
+            input: UserInput(chat: [.user("cached prefix")]))
+        let iterator = try TokenIterator(
+            input: input, model: context.model, cache: cache, parameters: parameters)
+        XCTAssertTrue(cache.contains { $0.offset > 0 })
+
+        let snapshot = PromptCacheSnapshot(cache: cache, state: iterator.state)
+        XCTAssertNotNil(snapshot.state?[StateProducingModel.anchorKey])
+
+        let restored = ChatSession(
+            context, promptCache: snapshot, generateParameters: generationParameters)
         let result = try await restored.respond(to: "hello again")
         XCTAssertGreaterThan(result.count, targetLength, result)
     }

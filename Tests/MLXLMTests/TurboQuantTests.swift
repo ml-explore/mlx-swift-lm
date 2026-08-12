@@ -620,6 +620,127 @@ struct TurboFlashAttentionTests {
         #expect(maxDiff < 1e-3, "Max diff \(maxDiff) exceeds tolerance for asymmetric bits")
     }
 
+    /// The bounded path intentionally changes only scheduling: it must agree
+    /// with the established block-parallel implementation, including when the
+    /// inverse value rotation is fused into the same dispatch.
+    @Test func singleDispatchMatchesTwoPass() {
+        let dim = 128
+        let keyBits = 4
+        let valueBits = 2
+        let nQHeads = 8
+        let nKVHeads = 2
+        let tokenCount = 193  // spans multiple 64-token blocks in the reference path
+        let repeatCount = nQHeads / nKVHeads
+        let keyCodec = MSECodec(dim: dim, bits: keyBits, seed: 91)
+        let valCodec = MSECodec(dim: dim, bits: valueBits, seed: 92)
+
+        let rawKeys = MLXRandom.normal([nKVHeads * tokenCount, dim])
+        let rawValues = MLXRandom.normal([nKVHeads * tokenCount, dim])
+        let (keyPacked, keyNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+            input: rawKeys, whtSigns: keyCodec.whtSigns!,
+            boundaries: keyCodec.boundaries, codebook: keyCodec.codebook,
+            bits: keyBits, dim: dim)
+        let (valPacked, valNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+            input: rawValues, whtSigns: valCodec.whtSigns!,
+            boundaries: valCodec.boundaries, codebook: valCodec.codebook,
+            bits: valueBits, dim: dim)
+        let kpw = TurboQuantPacking.packedWidth(count: dim, bits: keyBits)
+        let vpw = TurboQuantPacking.packedWidth(count: dim, bits: valueBits)
+        let keys = keyPacked.reshaped(nKVHeads, tokenCount, kpw)
+        let keyNormsByHead = keyNorms.reshaped(nKVHeads, tokenCount)
+        let values = valPacked.reshaped(nKVHeads, tokenCount, vpw)
+        let valNormsByHead = valNorms.reshaped(nKVHeads, tokenCount)
+        let queries = MLXRandom.normal([nQHeads, dim]) / sqrt(Float(dim))
+
+        func attention(singleDispatch: Bool, rotation: MLXArray? = nil) -> MLXArray {
+            TurboQuantKernelOps.turboFlashAttention(
+                rotatedQueries: queries,
+                keyPacked: keys, keyNorms: keyNormsByHead,
+                keyCodebook: keyCodec.codebook,
+                valPacked: values, valNorms: valNormsByHead,
+                valCodebook: valCodec.codebook,
+                tokenCount: tokenCount, repeatCount: repeatCount,
+                keyBits: keyBits, valueBits: valueBits, dim: dim,
+                valRotation: rotation, singleDispatch: singleDispatch)
+        }
+
+        let single = attention(singleDispatch: true)
+        let twoPass = attention(singleDispatch: false)
+        let identity = MLXArray.eye(dim)
+        let singleRotated = attention(singleDispatch: true, rotation: identity)
+        let twoPassRotated = attention(singleDispatch: false, rotation: identity)
+        eval(single, twoPass, singleRotated, twoPassRotated)
+
+        let maxDiff = abs(single - twoPass).max().item(Float.self)
+        let rotatedMaxDiff = abs(singleRotated - twoPassRotated).max().item(Float.self)
+        #expect(maxDiff < 1e-4, "single/two-pass max diff \(maxDiff) exceeds 1e-4")
+        #expect(
+            rotatedMaxDiff < 1e-4,
+            "single/two-pass rotated max diff \(rotatedMaxDiff) exceeds 1e-4")
+    }
+
+    @Test func microbenchSingleDispatchVsTwoPass() {
+        let dim = 128
+        let keyBits = 4
+        let valueBits = 2
+        let nQHeads = 24
+        let nKVHeads = 4
+        let repeatCount = nQHeads / nKVHeads
+        let iterations = 300
+        let keyCodec = MSECodec(dim: dim, bits: keyBits, seed: 93)
+        let valCodec = MSECodec(dim: dim, bits: valueBits, seed: 94)
+
+        for tokenCount in [1, 8, 16, 32, 64, 128, 256] {
+            let rawKeys = MLXRandom.normal([nKVHeads * tokenCount, dim])
+            let rawValues = MLXRandom.normal([nKVHeads * tokenCount, dim])
+            let (keyPacked, keyNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+                input: rawKeys, whtSigns: keyCodec.whtSigns!,
+                boundaries: keyCodec.boundaries, codebook: keyCodec.codebook,
+                bits: keyBits, dim: dim)
+            let (valPacked, valNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+                input: rawValues, whtSigns: valCodec.whtSigns!,
+                boundaries: valCodec.boundaries, codebook: valCodec.codebook,
+                bits: valueBits, dim: dim)
+            let kpw = TurboQuantPacking.packedWidth(count: dim, bits: keyBits)
+            let vpw = TurboQuantPacking.packedWidth(count: dim, bits: valueBits)
+            let keys = keyPacked.reshaped(nKVHeads, tokenCount, kpw)
+            let values = valPacked.reshaped(nKVHeads, tokenCount, vpw)
+            let keyNormsByHead = keyNorms.reshaped(nKVHeads, tokenCount)
+            let valNormsByHead = valNorms.reshaped(nKVHeads, tokenCount)
+            let queries = MLXRandom.normal([nQHeads, dim]) / sqrt(Float(dim))
+
+            func run(singleDispatch: Bool) -> MLXArray {
+                TurboQuantKernelOps.turboFlashAttention(
+                    rotatedQueries: queries,
+                    keyPacked: keys,
+                    keyNorms: keyNormsByHead,
+                    keyCodebook: keyCodec.codebook,
+                    valPacked: values,
+                    valNorms: valNormsByHead,
+                    valCodebook: valCodec.codebook,
+                    tokenCount: tokenCount, repeatCount: repeatCount,
+                    keyBits: keyBits, valueBits: valueBits, dim: dim,
+                    singleDispatch: singleDispatch)
+            }
+
+            for _ in 0 ..< 20 {
+                eval(run(singleDispatch: true), run(singleDispatch: false))
+            }
+            let singleStart = Date()
+            for _ in 0 ..< iterations { eval(run(singleDispatch: true)) }
+            let singleMs = Date().timeIntervalSince(singleStart) * 1000 / Double(iterations)
+            let twoPassStart = Date()
+            for _ in 0 ..< iterations { eval(run(singleDispatch: false)) }
+            let twoPassMs = Date().timeIntervalSince(twoPassStart) * 1000 / Double(iterations)
+            let singleText = String(format: "%.3f", singleMs)
+            let twoPassText = String(format: "%.3f", twoPassMs)
+            let speedupText = String(format: "%.2f", twoPassMs / singleMs)
+            print(
+                "[MICROBENCH single] T=\(tokenCount): single=\(singleText)ms, "
+                    + "two-pass=\(twoPassText)ms, speedup=\(speedupText)x")
+        }
+    }
+
     /// Microbenchmark: fused vs separated at various token counts
     @Test func microbenchFlashVsSeparated() {
         let dim = 128
