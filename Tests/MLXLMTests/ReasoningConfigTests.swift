@@ -8,60 +8,6 @@ import Testing
 @Suite
 struct ReasoningConfigTests {
 
-    // MARK: - infer
-
-    @Test func inferQwen3() {
-        let config = ReasoningConfig.infer(from: "qwen3", modelId: "mlx-community/Qwen3-4B-4bit")
-        #expect(config?.startDelimiter == "<think>")
-        #expect(config?.endDelimiter == "</think>")
-        #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
-    }
-
-    @Test func inferDeepSeekV3IsAlwaysOn() {
-        let config = ReasoningConfig.infer(
-            from: "deepseek_v3", modelId: "mlx-community/DeepSeek-R1-4bit")
-        #expect(config?.promptStrategy == .alwaysOn)
-        #expect(config?.startDelimiter == "<think>")
-        #expect(config?.endDelimiter == "</think>")
-    }
-
-    /// R1-Distill reports `model_type == "qwen2"` — indistinguishable from plain
-    /// Qwen2.5 by type alone. It must be recognized by repo id (the load-bearing
-    /// `modelId` parameter).
-    @Test func inferR1DistillByIdNotType() {
-        let config = ReasoningConfig.infer(
-            from: "qwen2", modelId: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit")
-        #expect(config?.promptStrategy == .alwaysOn)
-        #expect(config?.startDelimiter == "<think>")
-    }
-
-    @Test func inferPlainQwen2IsNil() {
-        #expect(
-            ReasoningConfig.infer(
-                from: "qwen2", modelId: "mlx-community/Qwen2.5-3B-Instruct-4bit") == nil)
-    }
-
-    @Test func inferGemmaIsNil() {
-        #expect(
-            ReasoningConfig.infer(from: "gemma3", modelId: "mlx-community/gemma-3-270m-it-4bit")
-                == nil)
-    }
-
-    @Test func inferLlamaIsNil() {
-        #expect(
-            ReasoningConfig.infer(
-                from: "llama", modelId: "mlx-community/Llama-3.2-3B-Instruct-4bit") == nil)
-    }
-
-    /// `modelId` defaults to nil; type-only inference must still work for the
-    /// VLM-style bare call site.
-    @Test func inferWithoutModelId() {
-        #expect(
-            ReasoningConfig.infer(from: "qwen3")?.promptStrategy
-                == .templateFlag(key: "enable_thinking", defaultOn: true))
-        #expect(ReasoningConfig.infer(from: "gemma3") == nil)
-    }
-
     // MARK: - ReasoningPromptStrategy.additionalContext
 
     @Test func templateFlagThinkingOn() throws {
@@ -119,8 +65,8 @@ struct ReasoningConfigTests {
     /// thinking on a `.none` strategy must throw `cannotDisableReasoning`
     /// rather than silently returning nil. The capability gate in the FM
     /// adapter relies on this throw to surface `unsupportedCapability` for
-    /// any future configuration that resolves `.none` (today nothing in
-    /// `ReasoningConfig.infer` does, but a custom resolver could).
+    /// any future configuration that resolves `.none` (nothing declares it
+    /// today, but a model or a registered resolver could).
     @Test func noneStrategyThrowsWhenDisabled() {
         #expect(throws: ReasoningError.cannotDisableReasoning) {
             try ReasoningPromptStrategy.none.additionalContext(forThinkingEnabled: false)

@@ -66,7 +66,7 @@ public protocol ModelConfigurationValidating {
 /// This contains the following:
 ///
 /// - ``ModelConfiguration``: identifier for the model
-/// - ``LanguageModel``: the model itself, see ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``
+/// - ``LanguageModel``: the model itself, see ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)``
 /// - ``UserInputProcessor``: can convert ``UserInput`` into ``LMInput``
 /// - `Tokenizer` -- the tokenizer used by ``UserInputProcessor``
 ///

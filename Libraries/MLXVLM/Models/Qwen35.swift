@@ -872,13 +872,13 @@ enum Qwen35Language {
             return LMOutput(logits: out, state: state)
         }
 
-        func makeCache(maxKVSize: Int?) -> [KVCache] {
+        func makeCache(capacity: KVCacheConfiguration.Capacity?) -> [KVCache] {
             model.layers.map { layer in
                 if layer.isLinear {
                     return MambaCache()
                 }
-                if let maxKVSize {
-                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+                if let capacity {
+                    return capacity.makeRotatingCache()
                 }
                 return KVCacheSimple()
             }
@@ -908,7 +908,7 @@ public class Qwen35: Module, VLMModel {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.makeCache(maxKVSize: parameters?.maxKVSize)
+        languageModel.makeCache(capacity: parameters?.effectiveKVCacheCapacity)
     }
 
     private func mergeInputIdsWithImageFeatures(
@@ -1025,25 +1025,32 @@ public class Qwen35: Module, VLMModel {
         _ input: LMInput,
         cache: [any KVCache],
         state: LMOutput.State?,
-        windowSize: Int?
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
+        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
+        let cacheOffset = faCacheOffset(cache)
+        // Resolved before the routing decision so a warm cache fails closed on either path.
+        let positionOffset = try QwenVL.continuationAnchor(
+            model: "Qwen35", key: ropeDeltasKey, cacheOffset: cacheOffset,
+            batchSize: inputIds2D.dim(0), state: state)
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
-        // (Gemma3/LLMModel: `windowSize ?? 512`). The windowed forward also
+        // (Gemma3/LLMModel: `prefill.resolvedStepSize()`). The windowed forward also
         // owns every warm continuation (multi-turn chat, tool restart,
         // restored prompt cache): a cold cache is just a continuation
         // anchored at offset 0, and a warm one anchors M-RoPE positions at
         // the cache offset plus the rope delta carried in `state` — never
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
-        let window = windowSize ?? 512
-        if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
-            faCacheOffset(cache) > 0 || inputIds.dim(-1) > window
+        let window = prefill.resolvedStepSize()
+        if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
+            cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
             return try prepareContinuation(
-                input, cache: cache, state: state, windowSize: window)
+                input, inputIds: inputIds2D, cache: cache, cacheOffset: cacheOffset,
+                positionOffset: positionOffset, prefill: prefill)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1064,6 +1071,8 @@ public class Qwen35: Module, VLMModel {
             )
         }
 
+        let total = inputIds.dim(-1)
+        prefill.progress?(total, total)
         return .logits(output)
     }
 
@@ -1081,7 +1090,7 @@ public class Qwen35: Module, VLMModel {
     /// remainder, computes the new image's M-RoPE positions **once** from the
     /// seeded **Position Anchor** (so the image's diverging t/h/w indices
     /// start at the anchor, not zero), then drives the language-model forward
-    /// in chunks of `windowSize`. The full-attention scratch is bounded to
+    /// in chunks from the prefill parameters. The full-attention scratch is bounded to
     /// `[heads, chunk, L]` instead of `[heads, L, L]`, so it cannot crash on
     /// a long prefix or a large image.
     ///
@@ -1094,22 +1103,14 @@ public class Qwen35: Module, VLMModel {
     /// flat-continuation branch. Decode stays caller-owned.
     private func prepareContinuation(
         _ input: LMInput,
+        inputIds: MLXArray,
         cache: [any KVCache],
-        state: LMOutput.State?,
-        windowSize: Int
+        cacheOffset: Int,
+        positionOffset: Int,
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
-        let inputIds = input.text.tokens
         let remainderLength = inputIds.dim(-1)
         precondition(remainderLength > 0, "prepareContinuation needs a non-empty remainder")
-
-        // The Position Anchor: token offset already in the cache (P) plus the
-        // rope delta the cached images accumulated, carried in `state`.
-        let cacheOffset = faCacheOffset(cache)
-        var anchorRopeDelta = 0
-        if let seeded = state?[ropeDeltasKey] {
-            anchorRopeDelta = seeded.asType(.int32).item(Int.self)
-        }
-        let positionOffset = cacheOffset + anchorRopeDelta
 
         // Vision tower + image→token merge — once, over the whole remainder;
         // chunks slice the merged embeddings below.
@@ -1133,56 +1134,62 @@ public class Qwen35: Module, VLMModel {
 
         // Chunk the forward. Each window forwards `chunk` query tokens against
         // the growing cache, so the full-attention scratch stays `[heads,
-        // chunk, L]`. Intermediate logits are dropped un-evaluated (only the
-        // cache is realized between windows), so `lm_head` never materializes a
-        // `[1, L, vocab]` tensor. `asyncEval` bounds the un-evaluated graph
-        // while letting the GPU run window i as the CPU builds window i+1
-        // (same shape as the sibling chunked prefills, e.g. Gemma3).
+        // chunk, L]`. Chunk logits are dropped un-evaluated (only the cache is
+        // realized between windows) and the logits the iterator samples come
+        // from the reserved final position, so `lm_head` materializes
+        // `[1, 1, vocab]`, never `[1, L, vocab]`. `asyncEval` bounds the
+        // un-evaluated graph while letting the GPU run window i as the CPU
+        // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
-        let step = max(1, windowSize)
-        var lastLogits: MLXArray
-        var start = 0
-        repeat {
-            try Task.checkCancellation()
-            let end = min(start + step, remainderLength)
-            let chunkInputs = inputIds[0..., start ..< end]
-            let chunkEmbeds = inputEmbeddings.map { $0[0..., start ..< end, 0...] }
-            let chunkPositions = positionIds[0..., 0..., start ..< end]
-            let output = languageModel(
-                chunkInputs,
-                inputsEmbeds: chunkEmbeds,
+
+        /// One forward over `range`, slicing positions and embeddings in lockstep.
+        func forward(_ range: Range<Int>) -> LMOutput {
+            languageModel(
+                inputIds[0..., range],
+                inputsEmbeds: inputEmbeddings.map { $0[0..., range, 0...] },
                 cache: typedCache,
                 state: nil,
                 mask: nil,
-                positionIds: chunkPositions,
+                positionIds: positionIds[0..., 0..., range],
+                // Never the pixels: a non-nil value here clears the carried
+                // anchor and restarts positions at zero.
                 pixelValues: nil,
                 imageGridTHW: nil,
                 videoGridTHW: nil
             )
-            lastLogits = output.logits
+        }
+
+        let processed = try prefill.forEachChunk(total: remainderLength) { range in
+            _ = forward(range)
             if let typedCache {
                 asyncEval(typedCache)
             }
-            start = end
-        } while start < remainderLength
-        if let typedCache {
+        }
+        if processed > 0, let typedCache {
             eval(typedCache)
         }
+
+        let lastLogits = forward(processed ..< remainderLength).logits
+        prefill.progress?(remainderLength, remainderLength)
 
         // Seed the post-image text tail's anchor. The vendor's flat-continuation
         // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
         // after this remainder `tailCacheOffset = P + remainderLength`, so the
         // delta the tail needs is the offset-frame `getRopeIndex` delta minus
         // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
-        var resumeState = LMOutput.State()
-        resumeState[ropeDeltasKey] = ropeDeltas - MLXArray(Int32(cacheOffset))
-
-        return .logits(LMOutput(logits: lastLogits, state: resumeState))
+        return .logits(
+            LMOutput(
+                logits: lastLogits,
+                state: QwenVL.continuationResumeState(
+                    ropeDeltas: ropeDeltas, cacheOffset: cacheOffset, key: ropeDeltasKey)))
     }
 
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        precondition(
+            faCacheOffset(cache ?? []) == 0 || state?[ropeDeltasKey] != nil,
+            "Qwen35 cannot continue a warm prompt cache without \(ropeDeltasKey.id)")
         let typedCache = castCacheOptional(cache)
         let result = languageModel(
             input.tokens,
@@ -1288,4 +1295,12 @@ extension Qwen35 {
         guard let cache else { return nil }
         return castCache(cache)
     }
+}
+
+// MARK: - Chat conventions
+
+// `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
+extension Qwen35 {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
 }

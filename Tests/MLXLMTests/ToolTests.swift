@@ -3,6 +3,13 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    @Test("ChatConventionsProviding defaults to nil for both properties")
+    func chatConventionsOptInDefaults() {
+        struct Bare: ChatConventionsProviding {}
+        #expect(Bare().toolCallFormat == nil)
+        #expect(Bare().reasoningConfig == nil)
+    }
+
     @Test("ToolCallProcessor drains calls once in parse order")
     func toolCallProcessorPublicDrain() {
         let processor = ToolCallProcessor(format: .json)
@@ -514,6 +521,52 @@ struct ToolTests {
         #expect(toolCall.function.arguments["unit"] == .string("celsius"))
     }
 
+    @Test("Test Pythonic Tool Call Parser - Object Wrapper Argument (LFM2)")
+    func testPythonicParserObjectWrapperArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // LFM2 emits the full parameter object under a `properties` wrapper key.
+        // The object also contains a comma the old `[^,\)]+` value regex truncated on.
+        let content =
+            "<|tool_call_start|>[get_weather(properties={\"location\": \"Tokyo\", \"unit\": \"celsius\"})]<|tool_call_end|>"
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "get_weather",
+                    "parameters": [
+                        "properties": [
+                            "location": ["type": "string"],
+                            "unit": ["type": "string"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Object-Valued Argument Preserved")
+    func testPythonicParserObjectValuedArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // A non-wrapper key is not unwrapped; the object value (with its inner
+        // comma) is parsed intact rather than truncated.
+        let content =
+            "<|tool_call_start|>[configure(settings={\"width\": 10, \"height\": 20})]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "configure")
+        #expect(
+            toolCall.function.arguments["settings"]
+                == .object(["width": .int(10), "height": .int(20)]))
+    }
+
     @Test("Test Pythonic Tool Call Parser - Double Quotes")
     func testPythonicParserDoubleQuotes() throws {
         let parser = PythonicToolCallParser(
@@ -1021,6 +1074,7 @@ struct ToolTests {
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
+        #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -1028,80 +1082,17 @@ struct ToolTests {
         }
     }
 
-    // MARK: - Format Inference Tests
-
-    @Test("Test ToolCallFormat Inference from Model Type")
-    func testToolCallFormatInference() throws {
-        // LFM2 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "lfm2") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "LFM2") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm2_moe") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm2_5") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "LFM2_5") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm25") == .lfm2)
-
-        // GLM4 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "glm4") == .glm4)
-        #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4)
-        #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4)
-        #expect(ToolCallFormat.infer(from: "glm4_5") == .glm4)
-        #expect(ToolCallFormat.infer(from: "GLM4_5") == .glm4)
-
-        // Gemma models
-        #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
-        #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
-
-        // Nemotron models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "NEMOTRON_H") == .xmlFunction)
-
-        // Qwen3.5 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_5") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .xmlFunction)
-
-        // Qwen3-Next models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
-
-        // Mistral3 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
-        #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
-        #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
-
-        // Llama models - require secondary signals from configData
-        #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
-
-        let llama3RopeConfig = """
-            {
-                "model_type": "llama",
-                "rope_scaling": {
-                    "rope_type": "llama3"
-                }
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "llama", configData: llama3RopeConfig) == .llama3)
-
-        let llama3VocabConfig = """
-            {
-                "model_type": "llama",
-                "vocab_size": 128256
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "LLAMA", configData: llama3VocabConfig) == .llama3)
-
-        let llama2Config = """
-            {
-                "model_type": "llama",
-                "vocab_size": 32000
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "llama", configData: llama2Config) == nil)
-
-        // Unknown models should return nil (use default JSON format)
-        #expect(ToolCallFormat.infer(from: "qwen2") == nil)
-        #expect(ToolCallFormat.infer(from: "mistral") == nil)
+    @Test("gptOSS createParser is a non-fatal compatibility fallback")
+    func testGPTOSSCreateParserCompatibilityFallback() throws {
+        // Alternate callers (e.g. MLXFoundationModels ToolCallProcessor paths)
+        // must be able to construct a parser without trapping, even though
+        // Harmony tool calling is not text-parser based.
+        let parser = ToolCallFormat.gptOSS.createParser()
+        #expect(parser.startTag == "<tool_call>")
+        #expect(parser.endTag == "</tool_call>")
+        // Processor construction must likewise be non-fatal.
+        let processor = ToolCallProcessor(format: .gptOSS)
+        #expect(processor.toolCalls.isEmpty)
     }
 
     // MARK: - Mistral Format Tests

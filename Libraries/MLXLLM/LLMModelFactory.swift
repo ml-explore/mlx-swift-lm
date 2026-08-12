@@ -45,6 +45,7 @@ public enum LLMTypeRegistry {
         "qwen3_5": create(Qwen35Configuration.self, Qwen35Model.init),
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoEModel.init),
         "qwen3_5_text": create(Qwen35TextConfiguration.self, Qwen35TextModel.init),
+        "nanbeige": create(NanbeigeConfiguration.self, NanbeigeModel.init),
         "minicpm": create(MiniCPMConfiguration.self, MiniCPMModel.init),
         "starcoder2": create(Starcoder2Configuration.self, Starcoder2Model.init),
         "cohere": create(CohereConfiguration.self, CohereModel.init),
@@ -592,10 +593,12 @@ public final class LLMModelFactory: GenericModelFactory {
     public typealias ContainerType = ModelContainer
 
     public init(
-        typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry
+        typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry,
+        conventionsRegistry: ChatConventionsRegistry = .shared
     ) {
         self.typeRegistry = typeRegistry
         self.modelRegistry = modelRegistry
+        self.conventionsRegistry = conventionsRegistry
     }
 
     /// Shared instance with default behavior.
@@ -607,6 +610,10 @@ public final class LLMModelFactory: GenericModelFactory {
 
     /// registry of model id to configuration, e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`
     public let modelRegistry: AbstractModelRegistry
+
+    /// resolvers for chat conventions that are keyed on model id rather than declared
+    /// by the model itself, e.g. DeepSeek-R1
+    public let conventionsRegistry: ChatConventionsRegistry
 
     public func _load(
         configuration: ResolvedModelConfiguration,
@@ -657,16 +664,21 @@ public final class LLMModelFactory: GenericModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
+        // Chat conventions. Precedence: an explicit value on the configuration
+        // (registry entry or caller) wins; then a registered resolver, which sees
+        // the repo id the model cannot; then the model's own declaration.
+        let modelId = configuration.name
         if mutableConfiguration.toolCallFormat == nil {
-            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
-                from: baseConfig.modelType, configData: configData)
+            mutableConfiguration.toolCallFormat =
+                conventionsRegistry.toolCallFormat(
+                    modelId: modelId, modelType: baseConfig.modelType)
+                ?? model.toolCallFormat
         }
-        // Reasoning protocol: registry override wins; otherwise infer from
-        // model_type + repo id. `modelId` is load-bearing — R1-Distill reports a
-        // base model_type (qwen2/llama) and is only recognizable by id.
         if mutableConfiguration.reasoningConfig == nil {
-            mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
-                from: baseConfig.modelType, modelId: configuration.name, configData: configData)
+            mutableConfiguration.reasoningConfig =
+                conventionsRegistry.reasoningConfig(
+                    modelId: modelId, modelType: baseConfig.modelType)
+                ?? model.reasoningConfig
         }
 
         // Load tokenizer and weights in parallel

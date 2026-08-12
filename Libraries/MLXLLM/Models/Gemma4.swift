@@ -108,3 +108,9 @@ extension Gemma4Model: LoRAModel {
         languageModel.loraLayers
     }
 }
+
+// MARK: - Chat conventions
+
+extension Gemma4Model {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
+}

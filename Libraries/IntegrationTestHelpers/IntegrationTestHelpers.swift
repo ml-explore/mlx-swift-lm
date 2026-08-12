@@ -31,6 +31,117 @@ private func check(_ condition: Bool, _ message: String) throws {
     guard condition else { throw IntegrationTestFailure(message) }
 }
 
+// MARK: - Harmony tokenizer contract
+
+public enum HarmonyProtocolTests {
+    /// Exercises the production tokenizer adapter and GPT-OSS chat template
+    /// without downloading model weights.
+    public static func realTokenizerContract(tokenizer: any Tokenizer) throws {
+        let expectedControlTokenIDs = [
+            "<|return|>": 200_002,
+            "<|constrain|>": 200_003,
+            "<|channel|>": 200_005,
+            "<|start|>": 200_006,
+            "<|end|>": 200_007,
+            "<|message|>": 200_008,
+            "<|call|>": 200_012,
+        ]
+
+        for (token, expectedID) in expectedControlTokenIDs {
+            try check(
+                tokenizer.convertTokenToId(token) == expectedID,
+                "GPT-OSS tokenizer resolved \(token) to "
+                    + "\(String(describing: tokenizer.convertTokenToId(token))); expected \(expectedID)"
+            )
+            try check(
+                tokenizer.encode(text: token, addSpecialTokens: false) == [expectedID],
+                "GPT-OSS tokenizer did not encode \(token) atomically")
+        }
+
+        try check(
+            HarmonyFrameParser(tokenizer: tokenizer) != nil,
+            "HarmonyFrameParser rejected the production GPT-OSS tokenizer")
+        try check(
+            HarmonyFrameParser.stopTokenIDs(tokenizer: tokenizer) == [200_002, 200_012],
+            "Harmony stop-token resolution did not match <|return|>/<|call|>")
+
+        let call = ToolCall(
+            function: .init(name: "get_weather", arguments: ["city": "Paris"]),
+            id: "call_fixture")
+        let generator: any MessageGenerator = GPTOSSMessageGenerator()
+        let messages = generator.generate(messages: [
+            .user("Weather in Paris?"),
+            .assistant("", toolCalls: [call]),
+            .tool(#"{"forecast":"sunny"}"#, id: "call_fixture"),
+        ])
+        let tools: [[String: any Sendable]] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "city": ["type": "string"] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                        "required": ["city"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ]
+        ]
+
+        let rendered = try tokenizer.applyChatTemplate(
+            messages: messages, tools: tools, additionalContext: nil)
+        try check(rendered.contains(200_012), "Real GPT-OSS template omitted the tool-call token")
+        let promptStart = rendered.lastIndex(of: 200_006)
+        let promptSuffix = promptStart.map {
+            tokenizer.decode(
+                tokenIds: Array(rendered[$0...]), skipSpecialTokens: false)
+        }
+        try check(
+            promptSuffix == "<|start|>assistant",
+            "Real GPT-OSS template omitted the assistant generation prompt")
+    }
+}
+
+// MARK: - Network Retry
+
+/// Transient network failures worth retrying on a flaky CI network — chiefly
+/// `-1005 networkConnectionLost`, which surfaced mid-download in CI.
+private func isTransientNetworkError(_ error: Error) -> Bool {
+    guard let urlError = error as? URLError else { return false }
+    switch urlError.code {
+    case .networkConnectionLost, .timedOut, .cannotConnectToHost,
+        .notConnectedToInternet, .dnsLookupFailed, .cannotFindHost,
+        .resourceUnavailable, .badServerResponse:
+        return true
+    default:
+        return false
+    }
+}
+
+/// Run `operation`, retrying a few times with linear backoff on transient
+/// network errors. Non-network errors (and the final attempt) rethrow.
+private func withNetworkRetry<T>(
+    _ label: String, attempts: Int = 3, _ operation: () async throws -> T
+) async throws -> T {
+    var lastError: Error?
+    for attempt in 1 ... attempts {
+        do {
+            return try await operation()
+        } catch {
+            lastError = error
+            guard isTransientNetworkError(error), attempt < attempts else { throw error }
+            print(
+                "Transient network error loading \(label) "
+                    + "(attempt \(attempt)/\(attempts)): \(error). Retrying…")
+            try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+        }
+    }
+    throw lastError ?? IntegrationTestFailure("\(label): retry loop exited unexpectedly")
+}
+
 // MARK: - Model IDs
 
 public enum IntegrationTestModelIDs {
@@ -72,16 +183,27 @@ public actor IntegrationTestModels {
         let tokenizerLoader = self.tokenizerLoader
         let task = Task {
             print("Loading LLM: \(key)")
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: downloader, using: tokenizerLoader,
-                configuration: configuration,
-                progressHandler: logProgress(key)
-            )
+            let container = try await withNetworkRetry(key) {
+                try await LLMModelFactory.shared.loadContainer(
+                    from: downloader, using: tokenizerLoader,
+                    configuration: configuration,
+                    progressHandler: logProgress(key)
+                )
+            }
             print("Loaded LLM: \(key)")
             return container
         }
         llmTasksByName[key] = task
         return try await task.value
+    }
+
+    /// Drop the cached container for `configuration` so ARC can free its
+    /// GPU-resident weights between tests. Pair with `GPU.clearCache()` at the
+    /// call site to release the freed buffers back to the system — without this,
+    /// loading many large models in one serialized run accumulates weights until
+    /// the process is jetsammed (Metal compiler XPC failures / crashes).
+    public func evictLLM(_ configuration: ModelConfiguration) {
+        llmTasksByName[configuration.name] = nil
     }
 
     /// Load an arbitrary VLM container, cached by `configuration.name` so the same
@@ -255,6 +377,69 @@ public enum ChatSessionTests {
                 "Expected a response after providing tool result, got empty string"
             )
         }
+    }
+
+    /// Exercises the structured continuation path used by clients that execute
+    /// tool calls outside `ChatSession` and feed the results back afterward.
+    ///
+    /// Conversation-aware templates must receive the original user query and
+    /// assistant tool call again on the result turn. Rendering only the new
+    /// `.tool` message reproduces the Qwen Jinja "No user query found" failure.
+    public static func structuredToolContinuation(container: LLModelContainer) async throws {
+        let session = ChatSession(
+            container,
+            instructions:
+                "Use the weather tool whenever weather is requested. After receiving its result, answer the user briefly.",
+            generateParameters: GenerateParameters(maxTokens: 150, temperature: 0),
+            additionalContext: ["enable_thinking": false],
+            tools: [weatherToolSchema]
+        )
+
+        var firstPassCalls: [ToolCall] = []
+        for try await generation in session.streamDetails(
+            to: "What's the weather in Tokyo? Use the weather tool.",
+            images: [],
+            videos: [])
+        {
+            if case .toolCall(let call) = generation {
+                firstPassCalls.append(call)
+            }
+        }
+
+        guard let call = firstPassCalls.first else {
+            throw IntegrationTestFailure("Expected the first pass to call get_weather")
+        }
+        try check(
+            call.function.name == "get_weather",
+            "Expected get_weather, got \(call.function.name)")
+
+        var followUpText = ""
+        var followUpCalls: [ToolCall] = []
+        var completion: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(to: [
+            .tool(
+                #"{"location":"Tokyo","temperature_celsius":24,"conditions":"clear"}"#,
+                id: call.id)
+        ]) {
+            switch generation {
+            case .chunk(let text):
+                followUpText += text
+            case .toolCall(let call):
+                followUpCalls.append(call)
+            case .info(let info):
+                completion = info
+            }
+        }
+
+        try check(
+            completion != nil,
+            "Expected structured tool continuation to complete generation")
+        try check(
+            !followUpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "Expected a final text response after the tool result")
+        try check(
+            followUpCalls.isEmpty,
+            "Expected the tool result to resolve the request, got another tool call")
     }
 
     public static func toolInvocation(container: LLModelContainer) async throws {
@@ -780,7 +965,11 @@ public enum ToolCallTests {
             let lmInput = try await context.processor.prepare(input: input)
             let stream = try generate(
                 input: lmInput,
-                parameters: GenerateParameters(maxTokens: maxTokens),
+                // temperature: 0 (greedy) so tool-call generation is deterministic.
+                // The default sampling temperature makes these end-to-end checks
+                // flaky — the model may emit no tool call or malformed arguments on
+                // some runs (matches the temperature: 0 used by the coherence/MTP tests).
+                parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
                 context: context
             )
             var text = ""

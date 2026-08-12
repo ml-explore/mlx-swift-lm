@@ -477,3 +477,11 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         model.layers
     }
 }
+
+// MARK: - Chat conventions
+//
+// Deliberately none. `deepseek_v3` is an architecture shared by DeepSeek-V3 and
+// DeepSeek-R1, while always-on reasoning is a property of the R1 checkpoints and
+// their chat template, not of the architecture. Declaring it here would advertise
+// reasoning for plain V3 too, so R1 is recognized by repo id in
+// `DeepSeekR1ConventionsResolver` instead.

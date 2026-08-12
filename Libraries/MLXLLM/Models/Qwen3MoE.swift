@@ -255,7 +255,9 @@ public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
         var sanitizedWeights = weights
 
         if configuration.tieWordEmbeddings {
-            sanitizedWeights["lm_head.weight"] = nil
+            sanitizedWeights = sanitizedWeights.filter { key, _ in
+                !key.hasPrefix("lm_head.")
+            }
         }
 
         if sanitizedWeights["model.layers.0.mlp.experts.0.up_proj.weight"] == nil {
@@ -363,4 +365,10 @@ extension Qwen3MoEModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
     }
+}
+
+// MARK: - Chat conventions
+
+extension Qwen3MoEModel {
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
 }

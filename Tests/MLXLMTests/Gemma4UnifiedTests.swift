@@ -113,7 +113,7 @@ struct Gemma4UnifiedTests {
         let input = LMInput(tokens: MLXArray([0, 2, 3, 4, 5, 1]).expandedDimensions(axis: 0))
 
         let result = try model.prepare(
-            input, cache: cache, state: nil, windowSize: 2)
+            input, cache: cache, state: nil, prefill: .init(stepSize: 2))
 
         guard case .logits(let output) = result else {
             Issue.record("Expected text-only Gemma4Unified.prepare to return logits")
@@ -126,12 +126,20 @@ struct Gemma4UnifiedTests {
 
     @Test("Gemma4 Unified text-only prefill is chunk-size invariant")
     func textOnlyPrefillChunkSizeInvariant() throws {
-        let model = Gemma4Unified(try tinyTextConfig())
+        // Pin the initializer weights. Task-local rather than MLXRandom.seed:
+        // tests in this suite run concurrently and share the global RNG.
+        let config = try tinyTextConfig()
+        let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+            Gemma4Unified(config)
+        }
+        // Run in f16, as real models do.
+        model.apply { $0.dtype.isFloatingPoint ? $0.asType(.float16) : $0 }
         let input = LMInput(tokens: MLXArray([0, 2, 3, 4, 5, 1]).expandedDimensions(axis: 0))
 
         func prefill(windowSize: Int) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
             let cache = model.newCache(parameters: nil)
-            let result = try model.prepare(input, cache: cache, state: nil, windowSize: windowSize)
+            let result = try model.prepare(
+                input, cache: cache, state: nil, prefill: .init(stepSize: windowSize))
             guard case .logits(let output) = result else {
                 Issue.record("Expected text-only Gemma4Unified.prepare to return logits")
                 return (MLXArray.zeros([1, 32]), [])
@@ -147,7 +155,9 @@ struct Gemma4UnifiedTests {
         let diff = abs(full.logits.asType(.float32) - chunked.logits.asType(.float32)).max()
         eval(diff)
 
-        #expect(diff.item(Float.self) < 1e-4)
+        #expect(
+            diff.item(Float.self) < 1e-4,
+            "Chunked and single-pass prefill logits differ by \(diff.item(Float.self)).")
     }
 
     @Test("Gemma4 Unified processor emits model patches and position ids")
@@ -282,7 +292,7 @@ struct Gemma4UnifiedTests {
         )
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil, windowSize: nil)
+            input, cache: model.newCache(parameters: nil), state: nil, prefill: .init())
 
         guard case .logits(let output) = result else {
             Issue.record("Expected Gemma4Unified.prepare to return logits")

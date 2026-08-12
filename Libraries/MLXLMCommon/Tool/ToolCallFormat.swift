@@ -102,6 +102,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
 
+    /// GPT-OSS full Harmony response protocol.
+    ///
+    /// Not a tool-call JSON dialect: selects the Harmony frame parser + router
+    /// (channels, recipients, terminators). Tool calls appear only as
+    /// `commentary to=functions.<name>` frames within that protocol.
+    /// Example: `<|channel|>commentary to=functions.get_weather<|message|>{"location": "Tokyo"}<|call|>`
+    case gptOSS = "gpt_oss"
+
     // MARK: - Factory Methods
 
     /// Create the appropriate parser for this format.
@@ -132,6 +140,57 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .gptOSS:
+            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        }
+    }
+
+    /// Builds the response-protocol decoder used by streaming text generation.
+    ///
+    /// Ordinary formats share the detokenized tool-call decoder. Protocols
+    /// with token-level framing provide their own implementation here, keeping
+    /// concrete model behavior out of the generic evaluation loop.
+    func makeTokenStreamDecoder(
+        tokenizer: any Tokenizer,
+        tools: [[String: any Sendable]]?,
+        stopStrings: Set<String>
+    ) -> any TokenStreamDecoder {
+        switch self {
+        case .gptOSS:
+            if let decoder = HarmonyStreamAdapter(
+                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+            {
+                return decoder
+            }
+            // Preserve the pre-Harmony compatibility path when a tokenizer
+            // lacks the protocol's complete control-token vocabulary.
+            return StandardTokenStreamDecoder(
+                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+            .mistral, .llama3:
+            return StandardTokenStreamDecoder(
+                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+        }
+    }
+
+    /// Cache-reuse rules required by this protocol's on-device token stream.
+    ///
+    /// Most formats are plain text dialects: what the model generates is what a
+    /// chat-template re-render produces, so the standard prefix rules suffice
+    /// and this returns no extra rules. A protocol that keeps state in the KV
+    /// cache which the template cannot reproduce contributes a rule here.
+    ///
+    /// - Parameter tokenizer: used to resolve protocol control tokens; a
+    ///   tokenizer lacking them yields no rules, leaving the model on the
+    ///   standard path.
+    func promptCacheReuseRules(tokenizer: any Tokenizer) -> [any PromptCacheReuseRule] {
+        switch self {
+        case .gptOSS:
+            return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2, .mistral,
+            .llama3:
+            return []
         }
     }
 
@@ -145,82 +204,5 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         default:
             return "call_" + uuid.lowercased()
         }
-    }
-
-    /// Infer the tool call format based on model type from config.json.
-    ///
-    /// This method maps known model types to their corresponding tool call formats,
-    /// enabling automatic format detection when loading models.
-    ///
-    /// - Parameters:
-    ///   - modelType: The `model_type` value from config.json
-    ///   - configData: The raw config.json data for inspecting secondary signals (e.g. `rope_scaling` for Llama 3)
-    /// - Returns: The appropriate `ToolCallFormat`, or `nil` to use the default format
-    public static func infer(from modelType: String, configData: Data? = nil) -> ToolCallFormat? {
-        let type = modelType.lowercased()
-
-        // Llama family (need secondary signal for Llama 3 vs 1/2)
-        if type == "llama" {
-            guard let data = configData,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
-
-            // Secondary signal 1: vocab_size >= 128000 (Llama 3 uses 128256, Llama 2 uses 32000)
-            if let vocabSize = json["vocab_size"] as? Int, vocabSize >= 128000 {
-                return .llama3
-            }
-
-            // Secondary signal 2: rope_scaling with rope_type == "llama3"
-            if let ropeScaling = json["rope_scaling"] as? [String: Any],
-                let ropeType = ropeScaling["rope_type"] as? String,
-                ropeType == "llama3"
-            {
-                return .llama3
-            }
-
-            return nil
-        }
-
-        // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
-        if type.hasPrefix("lfm2") {
-            return .lfm2
-        }
-
-        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
-        if type.hasPrefix("glm4") {
-            return .glm4
-        }
-
-        // Gemma4
-        if type.hasPrefix("gemma4") {
-            return .gemma4
-        }
-
-        // Gemma
-        if type == "gemma" {
-            return .gemma
-        }
-
-        // Nemotron family (nemotron_h, etc.)
-        if type.hasPrefix("nemotron") {
-            return .xmlFunction
-        }
-
-        // Qwen3.5 family (qwen3_5, qwen3_5_moe, etc.)
-        if type.hasPrefix("qwen3_5") {
-            return .xmlFunction
-        }
-
-        // Qwen3-Next family (qwen3_next, etc.)
-        if type.hasPrefix("qwen3_next") {
-            return .xmlFunction
-        }
-
-        // Mistral3 family (mistral3, mistral3_text, etc.)
-        if type.hasPrefix("mistral3") {
-            return .mistral
-        }
-
-        return nil
     }
 }
