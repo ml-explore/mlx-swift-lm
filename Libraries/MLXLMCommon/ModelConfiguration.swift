@@ -18,6 +18,7 @@ public struct ModelConfiguration: Sendable {
     public enum DirectoryError: LocalizedError, Equatable {
         case unresolvedModelDirectory(String)
         case unresolvedTokenizerDirectory(String)
+        case invalidModelSubdirectory(String)
 
         public var errorDescription: String? {
             switch self {
@@ -25,6 +26,9 @@ public struct ModelConfiguration: Sendable {
                 return "Model configuration '\(id)' has not been resolved to a local directory."
             case .unresolvedTokenizerDirectory(let id):
                 return "Tokenizer source '\(id)' has not been resolved to a local directory."
+            case .invalidModelSubdirectory(let path):
+                return
+                    "Model subdirectory '\(path)' must be a canonical repository-relative path without traversal, control, or glob characters."
             }
         }
     }
@@ -39,6 +43,12 @@ public struct ModelConfiguration: Sendable {
 
     /// The model's identifier (ID or Directory).
     public var id: Identifier
+
+    /// Optional repository-relative directory containing this model variant.
+    ///
+    /// This supports repositories that publish several MLX variants together,
+    /// such as `4bit/`, `8bit/`, and `bf16/`, without downloading every variant.
+    public let modelSubdirectory: String?
 
     /// A display-friendly name for the model.
     ///
@@ -61,7 +71,7 @@ public struct ModelConfiguration: Sendable {
         get throws {
             switch id {
             case .directory(let directory):
-                return directory
+                return try appendingModelSubdirectory(to: directory)
             case .id(let id, _):
                 throw DirectoryError.unresolvedModelDirectory(id)
             }
@@ -130,8 +140,11 @@ public struct ModelConfiguration: Sendable {
     /// `nil` keeps the model's own default.
     public var messageGenerator: (any MessageGenerator)? = nil
 
+    /// Sampling defaults supplied by the checkpoint's `generation_config.json`.
+    public var generationConfig: GenerationConfigFile? = nil
+
     public init(
-        id: String, revision: String = "main",
+        id: String, revision: String = "main", modelSubdirectory: String? = nil,
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
@@ -139,9 +152,11 @@ public struct ModelConfiguration: Sendable {
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
-        messageGenerator: (any MessageGenerator)? = nil
+        messageGenerator: (any MessageGenerator)? = nil,
+        generationConfig: GenerationConfigFile? = nil
     ) {
         self.id = .id(id, revision: revision)
+        self.modelSubdirectory = modelSubdirectory
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
@@ -150,10 +165,11 @@ public struct ModelConfiguration: Sendable {
         self.toolCallFormat = toolCallFormat
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
+        self.generationConfig = generationConfig
     }
 
     public init(
-        directory: URL,
+        directory: URL, modelSubdirectory: String? = nil,
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
@@ -161,9 +177,11 @@ public struct ModelConfiguration: Sendable {
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
-        messageGenerator: (any MessageGenerator)? = nil
+        messageGenerator: (any MessageGenerator)? = nil,
+        generationConfig: GenerationConfigFile? = nil
     ) {
         self.id = .directory(directory)
+        self.modelSubdirectory = modelSubdirectory
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
@@ -172,6 +190,7 @@ public struct ModelConfiguration: Sendable {
         self.toolCallFormat = toolCallFormat
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
+        self.generationConfig = generationConfig
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -192,7 +211,42 @@ public struct ModelConfiguration: Sendable {
             eosTokenIds: eosTokenIds,
             toolCallFormat: toolCallFormat,
             reasoningConfig: reasoningConfig,
-            messageGenerator: messageGenerator)
+            messageGenerator: messageGenerator,
+            generationConfig: generationConfig)
+    }
+
+    /// Validated, canonical repository-relative model directory.
+    ///
+    /// The value is used both as a local URL path and as the literal prefix of
+    /// downloader glob patterns. Validation therefore rejects path traversal,
+    /// non-canonical separators, control characters, and glob metacharacters.
+    /// This is lexical validation; filesystem symlinks remain the responsibility
+    /// of the directory provider.
+    package var normalizedModelSubdirectory: String? {
+        get throws {
+            guard let modelSubdirectory else { return nil }
+            guard !modelSubdirectory.isEmpty,
+                !modelSubdirectory.hasPrefix("/")
+            else {
+                throw DirectoryError.invalidModelSubdirectory(modelSubdirectory)
+            }
+
+            let components = modelSubdirectory.split(
+                separator: "/", omittingEmptySubsequences: false)
+            let unsafeCharacters = CharacterSet.controlCharacters.union(
+                CharacterSet(charactersIn: "\\*?[]{}"))
+            guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+                modelSubdirectory.rangeOfCharacter(from: unsafeCharacters) == nil
+            else {
+                throw DirectoryError.invalidModelSubdirectory(modelSubdirectory)
+            }
+            return components.joined(separator: "/")
+        }
+    }
+
+    package func appendingModelSubdirectory(to root: URL) throws -> URL {
+        guard let subdirectory = try normalizedModelSubdirectory else { return root }
+        return root.appending(path: subdirectory, directoryHint: .isDirectory)
     }
 
 }
@@ -203,6 +257,7 @@ extension ModelConfiguration: Equatable {
     // `messageGenerator` is not `Equatable`, so a new property will not appear here on its own.
     public static func == (lhs: ModelConfiguration, rhs: ModelConfiguration) -> Bool {
         lhs.id == rhs.id
+            && lhs.modelSubdirectory == rhs.modelSubdirectory
             && lhs.tokenizerSource == rhs.tokenizerSource
             && lhs.defaultPrompt == rhs.defaultPrompt
             && lhs.extraEOSTokens == rhs.extraEOSTokens
@@ -210,6 +265,7 @@ extension ModelConfiguration: Equatable {
             && lhs.eosTokenIds == rhs.eosTokenIds
             && lhs.toolCallFormat == rhs.toolCallFormat
             && lhs.reasoningConfig == rhs.reasoningConfig
+            && lhs.generationConfig == rhs.generationConfig
             && sameMessageGenerator(lhs.messageGenerator, rhs.messageGenerator)
     }
 

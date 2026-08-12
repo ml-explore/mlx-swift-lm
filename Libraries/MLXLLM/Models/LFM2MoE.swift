@@ -106,6 +106,71 @@ public struct LFM2MoEConfiguration: Codable, Sendable {
     }
 }
 
+extension LFM2MoEConfiguration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        guard modelType == "lfm2_moe" else {
+            throw ModelFactoryError.invalidConfiguration(
+                "LFM2MoEConfiguration requires model_type 'lfm2_moe', received '\(modelType)'.")
+        }
+        guard vocabularySize > 0, hiddenSize > 0, hiddenLayers > 0,
+            intermediateSize > 0, moeIntermediateSize > 0,
+            maxPositionEmbeddings > 0
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "LFM2 MoE dimensions, layer count, context length, and vocabulary size must be positive."
+            )
+        }
+        guard attentionHeads > 0, kvHeads > 0,
+            hiddenSize.isMultiple(of: attentionHeads),
+            attentionHeads.isMultiple(of: kvHeads)
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "hidden_size must be divisible by num_attention_heads, which must be divisible by num_key_value_heads."
+            )
+        }
+        guard numExperts > 0, (1 ... numExperts).contains(numExpertsPerToken) else {
+            throw ModelFactoryError.invalidConfiguration(
+                "num_experts must be positive and num_experts_per_tok must be between 1 and num_experts."
+            )
+        }
+        guard (0 ... hiddenLayers).contains(numDenseLayers), convLCache > 1 else {
+            throw ModelFactoryError.invalidConfiguration(
+                "num_dense_layers must be within the model and conv_L_cache must be at least 2.")
+        }
+        guard normEps > 0, ropeTheta > 0, routedScalingFactor > 0 else {
+            throw ModelFactoryError.invalidConfiguration(
+                "norm_eps, rope_theta, and routed_scaling_factor must be positive.")
+        }
+        if let layerTypes {
+            guard layerTypes.count == hiddenLayers else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "layer_types contains \(layerTypes.count) entries for \(hiddenLayers) layers.")
+            }
+            let supportedTypes = Set(["conv", "full_attention"])
+            guard layerTypes.allSatisfy(supportedTypes.contains) else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "layer_types may contain only 'conv' and 'full_attention'.")
+            }
+            if let explicit = _fullAttnIdxs {
+                let derived = layerTypes.enumerated().compactMap { index, layerType in
+                    layerType == "full_attention" ? index : nil
+                }
+                guard explicit == derived else {
+                    throw ModelFactoryError.invalidConfiguration(
+                        "full_attn_idxs and layer_types describe different layer layouts.")
+                }
+            }
+        }
+        let attentionLayers = fullAttnIdxs
+        guard Set(attentionLayers).count == attentionLayers.count,
+            attentionLayers.allSatisfy({ (0 ..< hiddenLayers).contains($0) })
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "full_attn_idxs must contain unique layer indices in range.")
+        }
+    }
+}
+
 class LFM2MoEAttention: Module {
     let args: LFM2MoEConfiguration
     let scale: Float
@@ -218,22 +283,15 @@ class LFM2MoEShortConv: Module {
         var Bx = B * xComp
 
         if let mask {
-            let expandedMask = mask[.ellipsis, .newAxis]
-            let zeros = MLXArray.zeros(Bx.shape, dtype: Bx.dtype)
-            Bx = MLX.where(expandedMask, Bx, zeros)
+            Bx = MLX.where(
+                mask.asType(.bool)[.ellipsis, .newAxis], Bx, MLXArray.zeros(like: Bx))
         }
 
-        var state = cache?[0]
-        if state == nil {
-            state = MLXArray.zeros([Bx.dim(0), lCache - 1, args.hiddenSize], dtype: Bx.dtype)
-        }
-
-        Bx = concatenated([state!, Bx], axis: -2)
-        if let cache {
-            let start = Bx.dim(1) - (lCache - 1)
-            cache[0] = contiguous(Bx[0..., start..., 0...])
-            cache.advance(x.dim(1))
-        }
+        Bx = LFM2RuntimeSupport.convolutionTimeline(
+            input: Bx,
+            stateLength: lCache - 1,
+            hiddenSize: args.hiddenSize,
+            cache: cache)
 
         let convOut = conv(Bx)
         let y = C * convOut
@@ -397,26 +455,30 @@ public class LFM2MoEModelInner: Module {
 
     func callAsFunction(
         _ inputs: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        ssmMask: MLXArray? = nil,
         cache: [KVCache]? = nil,
         inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
         var hidden = inputEmbeddings ?? embedTokens(inputs)
 
-        let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let index = firstAttentionIndex,
-                let cache,
-                index < cache.count
-            else { return .none }
-            return createAttentionMask(h: hidden, cache: cache[index])
-        }()
+        let attentionMask =
+            attentionMask
+            ?? {
+                guard let firstAttentionIndex, let cache, firstAttentionIndex < cache.count else {
+                    return createAttentionMask(h: hidden, cache: nil, windowSize: nil)
+                }
+                return createAttentionMask(h: hidden, cache: cache[firstAttentionIndex])
+            }()
 
-        let ssmMask: MLXArray? = {
-            guard let index = firstConvIndex,
-                let cache,
-                index < cache.count
-            else { return nil }
-            return createSSMMask(h: hidden, cache: cache[index] as? MambaCache)
-        }()
+        let ssmMask =
+            ssmMask
+            ?? {
+                guard let firstConvIndex, let cache, firstConvIndex < cache.count else {
+                    return nil
+                }
+                return createSSMMask(h: hidden, cache: cache[firstConvIndex] as? MambaCache)
+            }()
 
         for (i, layer) in layers.enumerated() {
             hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
@@ -429,7 +491,7 @@ public class LFM2MoEModelInner: Module {
 public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
-    let configuration: LFM2MoEConfiguration
+    public let configuration: LFM2MoEConfiguration
 
     public let model: LFM2MoEModelInner
 
@@ -447,10 +509,24 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
         return model.embedTokens.asLinear(out)
     }
 
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let out = model(input.tokens, ssmMask: input.mask, cache: cache)
+        return LMOutput(logits: model.embedTokens.asLinear(out))
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized: [String: MLXArray] = [:]
+        let shouldStripLanguageModelPrefix =
+            weights.keys.contains(where: { $0.hasPrefix("language_model.model.") })
+            && !weights.keys.contains(where: { $0.hasPrefix("model.") })
 
         for (name, param) in weights {
+            let name =
+                shouldStripLanguageModelPrefix && name.hasPrefix("language_model.")
+                ? String(name.dropFirst("language_model.".count))
+                : name
             var tensor = param
             if name.contains("conv.weight") {
                 if tensor.dim(-1) > tensor.dim(1) {
@@ -480,11 +556,11 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
             }
 
             for name in ["gate_proj", "down_proj", "up_proj"] {
-                let key = "\(expertPrefix).0.\(name).weight"
-                guard sanitized[key] != nil else { continue }
-                let stacked = (0 ..< configuration.numExperts).map { expert -> MLXArray in
-                    sanitized.removeValue(forKey: "\(expertPrefix).\(expert).\(name).weight")!
+                let keys = (0 ..< configuration.numExperts).map {
+                    "\(expertPrefix).\($0).\(name).weight"
                 }
+                guard keys.allSatisfy({ sanitized[$0] != nil }) else { continue }
+                let stacked = keys.compactMap { sanitized.removeValue(forKey: $0) }
                 sanitized["\(prefix).feed_forward.switch_mlp.\(name).weight"] = MLX.stacked(stacked)
             }
         }
@@ -493,13 +569,11 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        try (0 ..< configuration.hiddenLayers).map { layerIdx in
-            if configuration.fullAttnIdxs.contains(layerIdx) {
-                try makeAttentionKVCache(parameters: parameters)
-            } else {
-                MambaCache()
-            }
-        }
+        try LFM2RuntimeSupport.makeHybridCache(
+            hiddenLayers: configuration.hiddenLayers,
+            fullAttentionIndices: Set(configuration.fullAttnIdxs),
+            convolutionStateLength: configuration.convLCache - 1,
+            parameters: parameters)
     }
 }
 
