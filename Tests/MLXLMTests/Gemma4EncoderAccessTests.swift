@@ -46,7 +46,8 @@ struct Gemma4EncoderAccessTests {
     private static func makeModel() throws -> Gemma4TextModel {
         // Wrap the text config the way a real gemma4_unified config.json does, so the
         // decode path and the resulting type match what the factory produces.
-        let wrapped = #"{"model_type": "gemma4_unified", "vocab_size": 128, "text_config": "#
+        let wrapped =
+            #"{"model_type": "gemma4_unified", "vocab_size": 128, "text_config": "#
             + configJSON + "}"
         let config = try JSONDecoder().decode(
             Gemma4Configuration.self, from: Data(wrapped.utf8))
@@ -66,8 +67,9 @@ struct Gemma4EncoderAccessTests {
         for layer in inner.layers {
             // Not using per-layer inputs, KV sharing, or a position offset: pass nil and
             // ignore the corresponding returned values.
-            let (out, _, _) = layer(h, mask: nil, cache: nil,
-                                    perLayerInput: nil, sharedKV: nil, positionOffset: nil)
+            let (out, _, _) = layer(
+                h, mask: nil, cache: nil,
+                perLayerInput: nil, sharedKV: nil, positionOffset: nil)
             h = out
             states.append(h)
         }
