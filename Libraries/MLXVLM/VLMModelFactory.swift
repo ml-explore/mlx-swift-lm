@@ -106,6 +106,7 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
     ])
 }
 
@@ -141,6 +142,8 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "MuseGlimmerProcessor": create(
+            MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
     ])
 }
 
@@ -269,6 +272,18 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let museGlimmer30B4bit = ModelConfiguration(
+        id: "mlx-community/Muse-Glimmer-30B-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<|eot|>", "<|end_of_text|>"],
+        toolCallFormat: .atem,
+        reasoningConfig: ReasoningConfig(
+            startDelimiter: "to=self<|message|>",
+            endDelimiter: "<|eom|>",
+            promptStrategy: .none,
+            isSpecialToken: true)
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
             paligemma3bMix448_8bit,
@@ -288,6 +303,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             fastvlm,
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
+            museGlimmer30B4bit,
         ]
     }
 

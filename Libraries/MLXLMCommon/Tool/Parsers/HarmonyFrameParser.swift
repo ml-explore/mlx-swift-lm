@@ -83,6 +83,11 @@ package struct HarmonyFrameParser: Sendable {
         [controls.call, controls.return]
     }
 
+    package var isInsideReasoning: Bool {
+        guard case .body(let header, _) = state else { return false }
+        return header.channel == .analysis
+    }
+
     /// The commit token that separates an assistant function call from its
     /// tool result in a rendered Harmony conversation.
     package static func callTokenID(tokenizer: any Tokenizer) -> Int? {

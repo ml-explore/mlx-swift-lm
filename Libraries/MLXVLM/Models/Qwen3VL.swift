@@ -2037,5 +2037,7 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
 // MARK: - Chat conventions
 
 extension Qwen3VL {
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+    // Qwen3-VL shares Qwen's tags and tool-call boundary, but does not declare
+    // the original Qwen3 family's model-specific hard-budget transition.
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

@@ -128,6 +128,18 @@ public final class ModelContainer: Sendable {
 
     // MARK: - Thread-safe convenience methods
 
+    /// Authoritative planned cache status for the given generation parameters.
+    ///
+    /// Reports topology, capacity provenance, and strategy compatibility without
+    /// requiring application code to allocate or cast concrete ``KVCache`` types.
+    public func cacheStatus(parameters: GenerateParameters? = nil) async throws
+        -> KVCacheStatus
+    {
+        try await perform { context in
+            try context.model.cacheStatus(parameters: parameters)
+        }
+    }
+
     /// The resolved local model directory for the loaded container.
     public var modelDirectory: URL {
         get async throws {

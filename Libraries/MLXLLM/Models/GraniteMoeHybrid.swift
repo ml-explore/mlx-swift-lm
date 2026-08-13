@@ -517,12 +517,12 @@ public class GraniteMoeHybridModel: Module, LLMModel, KVCacheDimensionProvider {
         return out / logitsScaling
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        configuration.layerTypes.map { layerType in
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try configuration.layerTypes.map { layerType in
             if layerType == "mamba" {
                 return MambaCache()
             } else {
-                return KVCacheSimple()
+                return try makeAttentionKVCache(parameters: parameters)
             }
         }
     }

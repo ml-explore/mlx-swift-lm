@@ -55,7 +55,7 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
         file: StaticString = #filePath, line: UInt = #line
     ) throws {
         var model: Qwen35TextModel? = Qwen35TextModel(try tinyMoEConfiguration(headDim: headDim))
-        var cache: [KVCache]? = mapCache(model!.newCache(parameters: nil))
+        var cache: [KVCache]? = mapCache(try model!.newCache(parameters: nil))
 
         for token in [Int32(1), Int32(2)] {
             let logits = model!(MLXArray([token]).reshaped(1, 1), cache: cache)

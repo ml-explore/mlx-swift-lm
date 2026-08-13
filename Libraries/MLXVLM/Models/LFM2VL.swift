@@ -1102,11 +1102,11 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         return sanitizedWeights
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         let textConfig = config.textConfiguration
-        return (0 ..< textConfig.hiddenLayers).map { layerIdx in
+        return try (0 ..< textConfig.hiddenLayers).map { layerIdx in
             if textConfig.fullAttnIdxs.contains(layerIdx) {
-                KVCacheSimple()
+                try makeAttentionKVCache(parameters: parameters)
             } else {
                 MambaCache()
             }

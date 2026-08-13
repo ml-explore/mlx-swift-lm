@@ -656,24 +656,24 @@ public class Gemma3nLanguageModel: Module {
 
     @ModuleInfo var norm: RMSNorm
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        var caches: [any KVCache] = []
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
         let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
         let layerTypes =
             config.layerTypes ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
 
-        for i in 0 ..< firstKvSharedLayerIdx {
+        return try (0 ..< firstKvSharedLayerIdx).map { i in
             let layerType = layerTypes[i]
-            if layerType == "full_attention" {
-                caches.append(StandardKVCache())
-            } else if layerType == "sliding_attention" {
-                caches.append(RotatingKVCache(maxSize: slidingWindow, keep: 0))
-            } else {
+            switch layerType {
+            case "full_attention", "global_attention":
+                return try makeAttentionKVCache(parameters: parameters)
+            case "sliding_attention":
+                return try makeSlidingWindowKVCache(
+                    parameters: parameters, window: slidingWindow)
+            default:
                 fatalError("Unknown layer type: \(layerType) for layer \(i)")
             }
         }
-        return caches
     }
 
     init(_ config: Gemma3nTextConfiguration) {
@@ -942,8 +942,8 @@ public class Gemma3nTextModel: Module, LLMModel {
         super.init()
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        return languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        return try languageModel.newCache(parameters: parameters)
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {

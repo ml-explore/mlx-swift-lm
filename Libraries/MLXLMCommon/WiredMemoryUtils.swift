@@ -94,7 +94,7 @@ public enum WiredMemoryUtils {
         parameters: GenerateParameters
     ) throws -> [KVCache] {
         let kvCachePlan = try parameters.kvCachePlan()
-        var cache = try kvCachePlan.validated(model.newCache(parameters: parameters))
+        var cache = try kvCachePlan.validated(try model.newCache(parameters: parameters))
 
         switch try model.prepare(
             input, cache: cache, state: nil, prefill: parameters.prefill)

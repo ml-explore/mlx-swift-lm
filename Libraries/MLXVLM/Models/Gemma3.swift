@@ -372,20 +372,22 @@ private class LanguageModel: Module, KVCacheDimensionProvider {
         self.kvHeads = Array(repeating: config.kvHeads, count: config.hiddenLayers)
     }
 
-    /// Creates appropriate cache types for each layer
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        var caches: [any KVCache] = []
+    /// Creates appropriate cache types for each layer.
+    /// Global layers honor caller-requested capacity. Local layers retain the
+    /// architecture sliding window for typed requests and are capped by legacy
+    /// ``GenerateParameters/maxKVSize``.
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
         let slidingWindowPattern = config.slidingWindowPattern
-        for i in 0 ..< config.hiddenLayers {
+        return try (0 ..< config.hiddenLayers).map { i in
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
             if isGlobalLayer {
-                caches.append(StandardKVCache())
+                return try makeAttentionKVCache(parameters: parameters)
             } else {
-                caches.append(RotatingKVCache(maxSize: slidingWindow, keep: 0))
+                return try makeSlidingWindowKVCache(
+                    parameters: parameters, window: slidingWindow)
             }
         }
-        return caches
     }
 
     func callAsFunction(
@@ -890,8 +892,8 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
     public var kvHeads: [Int] { languageModel.kvHeads }
 
     /// Create cache with proper types for each layer
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        return languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        return try languageModel.newCache(parameters: parameters)
     }
 
     public init(_ config: Gemma3Configuration) {

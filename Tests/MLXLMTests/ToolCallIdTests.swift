@@ -25,8 +25,8 @@ struct ToolCallIdTests {
 
         let messages: [Chat.Message] = [
             .assistant("", toolCalls: [weatherCall, timeCall]),
-            .tool(#"{"temperature":18}"#, id: "call_123"),
-            .tool(#"{"time":"12:00"}"#, id: "call_456"),
+            .tool(#"{"temperature":18}"#, id: "call_123", name: "get_weather"),
+            .tool(#"{"time":"12:00"}"#, id: "call_456", name: "get_time"),
         ]
 
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)
@@ -59,11 +59,13 @@ struct ToolCallIdTests {
         #expect(weatherResult["role"] as? String == "tool")
         #expect(weatherResult["content"] as? String == #"{"temperature":18}"#)
         #expect(weatherResult["tool_call_id"] as? String == "call_123")
+        #expect(weatherResult["name"] as? String == "get_weather")
 
         let timeResult = rawMessages[2]
         #expect(timeResult["role"] as? String == "tool")
         #expect(timeResult["content"] as? String == #"{"time":"12:00"}"#)
         #expect(timeResult["tool_call_id"] as? String == "call_456")
+        #expect(timeResult["name"] as? String == "get_time")
     }
 
     @Test("Plain messages do not emit tool metadata")

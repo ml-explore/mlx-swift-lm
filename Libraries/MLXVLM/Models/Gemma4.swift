@@ -1391,15 +1391,14 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         super.init()
     }
 
-    func newCache(parameters: GenerateParameters?) -> [any KVCache] {
+    func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
-        return config.layerTypes.prefix(config.hiddenLayers - config.numKVSharedLayers).map {
+        return try config.layerTypes.prefix(config.hiddenLayers - config.numKVSharedLayers).map {
             layerType in
-            if layerType == "full_attention" {
-                StandardKVCache()
-            } else {
-                RotatingKVCache(maxSize: slidingWindow, keep: 0)
-            }
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: slidingWindow,
+                usesSlidingWindow: layerType != "full_attention")
         }
     }
 
@@ -1983,8 +1982,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         super.init()
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 
     private func getInputEmbeddings(
@@ -2434,8 +2433,8 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
         super.init()
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 
     private func getImageFeatures(

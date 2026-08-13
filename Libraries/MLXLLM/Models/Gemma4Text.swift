@@ -923,18 +923,15 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
         return Int(digits)
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
 
-        var caches = [any KVCache]()
-        for i in 0 ..< firstKvShared {
-            if config.layerTypes[i] == "full_attention" {
-                caches.append(StandardKVCache())
-            } else {
-                caches.append(RotatingKVCache(maxSize: config.slidingWindow, keep: 0))
-            }
+        return try (0 ..< firstKvShared).map { i in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: config.slidingWindow,
+                usesSlidingWindow: config.layerTypes[i] != "full_attention")
         }
-        return caches
     }
 }
 

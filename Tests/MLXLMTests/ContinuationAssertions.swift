@@ -92,10 +92,10 @@ struct ContinuationAssertions {
         let t1 = textTokens(40)
         let t2 = textTokens(8, seed: 3)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try prefill(model, concatenated([t1, t2], axis: 1), cache: cacheF)
 
-        let cacheD = model.newCache(parameters: nil)
+        let cacheD = try model.newCache(parameters: nil)
         let (_, s0) = try prefill(model, t1, cache: cacheD)
         var state = s0
         var logitsD = MLXArray(0)
@@ -107,7 +107,7 @@ struct ContinuationAssertions {
         }
         let noiseFloor = maxAbsDiff(logitsD, logitsF)
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try prefill(model, t1, cache: cacheW)
         let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
 
@@ -127,11 +127,11 @@ struct ContinuationAssertions {
         let t1 = concatenated([textTokens(10), imageRun(), textTokens(8, seed: 5)], axis: 1)
         let t2 = textTokens(8, seed: 9)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try prefill(
             model, concatenated([t1, t2], axis: 1), image: image, cache: cacheF)
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try prefill(model, t1, image: image, cache: cacheW)
         let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
 
@@ -154,11 +154,11 @@ struct ContinuationAssertions {
             [textTokens(4, seed: 2), imageRun(), textTokens(6, seed: 4)], axis: 1)
         let t3 = textTokens(8, seed: 6)
 
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (logitsF, _) = try prefill(
             model, concatenated([t1, t2, t3], axis: 1), image: image, cache: cacheF)
 
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try prefill(model, t1, cache: cacheW)
         let (_, s2) = try prefill(model, t2, image: image, cache: cacheW, state: s1)
         let (logitsW, _) = try prefill(model, t3, cache: cacheW, state: s2)
@@ -176,10 +176,10 @@ struct ContinuationAssertions {
         MLXRandom.seed(11)
         let prompt = textTokens(40)
 
-        let cacheS = model.newCache(parameters: nil)
+        let cacheS = try model.newCache(parameters: nil)
         let (logitsS, _) = try prefill(model, prompt, cache: cacheS)
 
-        let cacheC = model.newCache(parameters: nil)
+        let cacheC = try model.newCache(parameters: nil)
         let (logitsC, _) = try prefill(model, prompt, cache: cacheC, stepSize: 8)
 
         XCTAssertLessThanOrEqual(
@@ -202,11 +202,11 @@ struct ContinuationAssertions {
         let image = image()
         let prompt = concatenated([textTokens(10), imageRun(), textTokens(12, seed: 7)], axis: 1)
 
-        let cacheS = model.newCache(parameters: nil)
+        let cacheS = try model.newCache(parameters: nil)
         let (logitsS, _) = try prefill(model, prompt, image: image, cache: cacheS)
 
         for stepSize in [3, 5, 8] {
-            let cacheC = model.newCache(parameters: nil)
+            let cacheC = try model.newCache(parameters: nil)
             let (logitsC, _) = try prefill(
                 model, prompt, image: image, cache: cacheC, stepSize: stepSize)
 

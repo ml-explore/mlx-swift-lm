@@ -559,6 +559,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override var maxSize: Int? { maxCacheSize }
 
+    /// Number of leading tokens that are never rotated out of the window.
+    var keepCount: Int { keep }
+
     public init(maxSize: Int, keep: Int = 0, step: Int = 256) {
         self.maxCacheSize = maxSize
         self.keep = keep
@@ -1496,8 +1499,50 @@ public class ArraysCache: BaseKVCache {
 
 /// Simple cache for Mamba-style state space models
 public class MambaCache: ArraysCache {
+    private struct SpeculativeCheckpoint {
+        var state: [MLXArray?]
+        var offset: Int
+        var leftPadding: MLXArray?
+        var lengths: MLXArray?
+    }
+
+    private var speculativeCheckpoint: SpeculativeCheckpoint?
+
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
+    }
+
+    /// Save the recurrent state at the last unconditionally committed token
+    /// inside a speculative verification pass.
+    package func saveSpeculativeCheckpoint(
+        convState: MLXArray,
+        recurrentState: MLXArray,
+        advancedBy tokenCount: Int
+    ) {
+        speculativeCheckpoint = SpeculativeCheckpoint(
+            state: [convState, recurrentState],
+            offset: offset,
+            leftPadding: leftPadding.map { $0 - tokenCount },
+            lengths: lengths.map { $0 - tokenCount })
+    }
+
+    package var hasSpeculativeCheckpoint: Bool {
+        speculativeCheckpoint != nil
+    }
+
+    @discardableResult
+    package func restoreSpeculativeCheckpoint() -> Bool {
+        guard let checkpoint = speculativeCheckpoint else { return false }
+        cache = checkpoint.state
+        offset = checkpoint.offset
+        leftPadding = checkpoint.leftPadding
+        lengths = checkpoint.lengths
+        speculativeCheckpoint = nil
+        return true
+    }
+
+    package func discardSpeculativeCheckpoint() {
+        speculativeCheckpoint = nil
     }
 
     public override func copy() -> any KVCache {
@@ -1516,7 +1561,7 @@ public class CacheList: BaseKVCache {
         super.init()
     }
 
-    /// Internal initializer for reconstruction from deserialized children
+    /// Internal initializer for reconstruction from deserialized children.
     internal init(caches: [KVCache]) {
         self.caches = caches
         super.init()
@@ -1614,7 +1659,7 @@ public class CacheList: BaseKVCache {
         return result
     }
 
-    /// Internal accessor for child caches (used by serialization)
+    /// Internal accessor for child caches (used by serialization and policy reporting).
     internal var children: [KVCache] { caches }
 
     // MARK: - Serialization
@@ -2207,38 +2252,40 @@ private func unflattenMetadata(_ flatMetadata: [String: String]) -> [Any] {
 ///
 /// This function will defer the cache construction to the model if it has a
 /// `newCache` method, otherwise it will make a default KV cache.
+///
+/// - Throws: ``KVCacheConfigurationError`` when the request or a model-defined
+///   cache size is invalid.
 public func makePromptCache(
     model: any LanguageModel,
     parameters: GenerateParameters? = nil
-) -> [KVCache] {
+) throws -> [KVCache] {
     // The model already conforms to LanguageModel which has newCache
     // If it also conforms to KVCacheDimensionProvider, the extension will provide the implementation
-    return model.newCache(parameters: parameters)
+    return try model.newCache(parameters: parameters)
 }
 
 /// Legacy function for backwards compatibility
 public func makePromptCache(
     model: any LanguageModel,
     maxKVSize: Int? = nil
-) -> [KVCache] {
+) throws -> [KVCache] {
     let parameters = maxKVSize.map { GenerateParameters(maxKVSize: $0) }
-    return makePromptCache(model: model, parameters: parameters)
+    return try makePromptCache(model: model, parameters: parameters)
 }
 
 /// Fallback function to create cache when layer count is known
 ///
 /// This function creates a default cache structure when the number of layers is known.
 /// Use this when `makePromptCache` cannot determine the layer count automatically.
+///
+/// - Throws: ``KVCacheConfigurationError`` when `maxKVSize` is invalid.
 public func makePromptCacheWithLayerCount(
     numLayers: Int,
     maxKVSize: Int? = nil
-) -> [KVCache] {
-    if let maxKVSize = maxKVSize {
-        return (0 ..< numLayers).map { _ in
-            RotatingKVCache(maxSize: maxKVSize, keep: 4)
-        }
-    } else {
-        return (0 ..< numLayers).map { _ in KVCacheSimple() }
+) throws -> [KVCache] {
+    let parameters = maxKVSize.map { GenerateParameters(maxKVSize: $0) }
+    return try (0 ..< numLayers).map { _ in
+        try makeAttentionKVCache(parameters: parameters)
     }
 }
 
@@ -2256,6 +2303,42 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     guard canTrimPromptCache(cache), !cache.isEmpty else { return 0 }
     cache.dropFirst().forEach { $0.trim(numTokens) }
     return cache.first?.trim(numTokens) ?? 0
+}
+
+/// Rewind a one-token speculative tail in a hybrid attention/recurrent cache.
+/// Attention entries trim normally; Mamba entries restore the checkpoint the
+/// model captured after the round's committed bonus token.
+@discardableResult
+package func rewindSpeculativePromptCache(
+    _ cache: [KVCache], numTokens: Int
+) -> Int {
+    guard numTokens == 1,
+        cache.allSatisfy({ entry in
+            if entry.isTrimmable {
+                return entry.offset >= numTokens
+            }
+            return (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
+        })
+    else { return 0 }
+
+    for entry in cache {
+        if entry.isTrimmable {
+            guard entry.trim(numTokens) == numTokens else {
+                preconditionFailure("Speculative cache validation and rewind diverged")
+            }
+        } else {
+            guard (entry as? MambaCache)?.restoreSpeculativeCheckpoint() == true else {
+                preconditionFailure("Missing recurrent speculative checkpoint")
+            }
+        }
+    }
+    return numTokens
+}
+
+package func discardSpeculativePromptCacheCheckpoints(_ cache: [KVCache]) {
+    for case let entry as MambaCache in cache {
+        entry.discardSpeculativeCheckpoint()
+    }
 }
 
 // MARK: - Type Aliases

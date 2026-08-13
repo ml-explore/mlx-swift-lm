@@ -1,9 +1,13 @@
 // Copyright © 2026 Apple Inc.
 
-/// A semantic event decoded from a model's generated token stream.
-enum TokenStreamEvent: Sendable {
+/// A protocol-neutral semantic event decoded from a model's generated token stream.
+package enum TokenStreamEvent: Sendable, Equatable {
+    case reasoning(String)
     case response(String)
     case toolCall(ToolCall)
+    /// A framed protocol rejected malformed output. Public generation logs it;
+    /// package-level consumers can observe it and decide whether to retry.
+    case protocolError(String)
     case stop
 }
 
@@ -12,13 +16,17 @@ enum TokenStreamEvent: Sendable {
 /// The generation loop owns iteration and cancellation. A decoder owns the
 /// response protocol: token framing, semantic stop tokens, and event routing.
 /// This keeps model-specific protocols out of the generic evaluation loop.
-protocol TokenStreamDecoder {
+package protocol TokenStreamDecoder {
     /// Semantic boundaries in addition to the model's ordinary EOS tokens.
     var additionalStopTokenIDs: Set<Int> { get }
 
     /// Whether semantic stop tokens must be passed through `push` before the
     /// generation loop terminates.
     var receivesStopTokens: Bool { get }
+
+    /// Whether the decoder is currently consuming private reasoning payload.
+    /// Sample this before feeding a token to attribute usage accurately.
+    var isInsideReasoning: Bool { get }
 
     /// Consumes one generated token. Returns `false` when decoding should stop
     /// because of either a semantic boundary or consumer termination.
@@ -30,8 +38,9 @@ protocol TokenStreamDecoder {
 }
 
 extension TokenStreamDecoder {
-    var additionalStopTokenIDs: Set<Int> { [] }
-    var receivesStopTokens: Bool { false }
+    package var additionalStopTokenIDs: Set<Int> { [] }
+    package var receivesStopTokens: Bool { false }
+    package var isInsideReasoning: Bool { false }
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.

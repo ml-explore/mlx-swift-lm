@@ -1,7 +1,8 @@
 // Copyright © 2025 Apple Inc.
 
 /// Routes a model's decoded generation stream into reasoning (chain-of-thought)
-/// vs response segments by scanning for the model's reasoning delimiters.
+/// vs response segments by scanning for the model's reasoning delimiters and
+/// any protocol-declared implicit exits.
 ///
 /// A value-type streaming scanner: feed it
 /// each decoded chunk via ``process(_:)`` and it returns the routed segments,
@@ -34,6 +35,7 @@ public struct ReasoningEventEmitter: Sendable {
 
     private let startDelimiter: String
     private let endDelimiter: String
+    private let endDelimiters: [String]
 
     /// Whether the scanner is currently inside a reasoning span.
     private var inside: Bool
@@ -47,9 +49,9 @@ public struct ReasoningEventEmitter: Sendable {
     /// following `<think>`/`</think>` are dropped (mirrors `unwrapToolCallMarkers`).
     private var pendingLeadingTrim: Bool = false
 
-    /// True once an end delimiter has been consumed, i.e. a reasoning span has
-    /// closed at least once. Unlike ``isInsideReasoning``, this latches — so a
-    /// caller (e.g. a think-then-call token collector) can detect a close even
+    /// True once a canonical or implicit end boundary has been observed, i.e. a
+    /// reasoning span has closed at least once. Unlike ``isInsideReasoning``,
+    /// this latches — so a caller (e.g. a think-then-call token collector) can detect a close even
     /// when an empty `<think></think>` resolves within a single ``process(_:)``
     /// call, where sampling ``isInsideReasoning`` afterward reads `false` both
     /// before and after and the transient open is invisible.
@@ -58,6 +60,11 @@ public struct ReasoningEventEmitter: Sendable {
     public init(config: ReasoningConfig, primedInside: Bool) {
         self.startDelimiter = config.startDelimiter
         self.endDelimiter = config.endDelimiter
+        self.endDelimiters =
+            [config.endDelimiter]
+            + config.implicitEndDelimiters.filter {
+                $0 != config.endDelimiter
+            }
         self.inside = primedInside
     }
 
@@ -79,12 +86,18 @@ public struct ReasoningEventEmitter: Sendable {
     public static func promptEndsInsideReasoning(
         renderedPromptTail tail: String, config: ReasoningConfig
     ) -> Bool {
+        guard !config.startDelimiter.isEmpty else { return false }
         var trimmed = Substring(tail)
         while let last = trimmed.last, last.isWhitespace { trimmed = trimmed.dropLast() }
         guard let lastStart = trimmed.range(of: config.startDelimiter, options: .backwards) else {
             return false
         }
-        return trimmed[lastStart.upperBound...].range(of: config.endDelimiter) == nil
+        let afterStart = trimmed[lastStart.upperBound...]
+        return ([config.endDelimiter] + config.implicitEndDelimiters)
+            .filter { !$0.isEmpty }
+            .allSatisfy {
+                afterStart.range(of: $0) == nil
+            }
     }
 
     /// Whether the scanner is currently inside a reasoning span.
@@ -104,25 +117,39 @@ public struct ReasoningEventEmitter: Sendable {
         pendingPrefix = ""
 
         while true {
-            let delimiter = inside ? endDelimiter : startDelimiter
-            if let range = working.range(of: delimiter) {
+            let delimiters = inside ? endDelimiters : [startDelimiter]
+            if let match = firstMatch(in: working, delimiters: delimiters) {
                 // Text before the marker belongs to the current mode; trim the
                 // whitespace immediately preceding the marker.
                 appendSegment(
-                    String(working[working.startIndex ..< range.lowerBound]),
+                    String(working[working.startIndex ..< match.range.lowerBound]),
                     trimmingTrailing: true, into: &output)
-                // Consume the marker and trim whitespace immediately after it.
-                working = working[range.upperBound...]
-                pendingLeadingTrim = true
-                // Matching while `inside` means we just consumed an *end*
-                // delimiter (`delimiter == endDelimiter`) — a close.
-                if inside { hasClosedReasoning = true }
-                inside.toggle()
+
+                if inside {
+                    hasClosedReasoning = true
+                    inside = false
+                    if match.delimiter == endDelimiter {
+                        // Canonical delimiters are framing and do not belong to
+                        // either routed segment.
+                        working = working[match.range.upperBound...]
+                        pendingLeadingTrim = true
+                    } else {
+                        // An implicit delimiter is answer/tool content. Keep it
+                        // in the stream and reprocess it while outside reasoning.
+                        working = working[match.range.lowerBound...]
+                    }
+                } else {
+                    // Opening delimiters are framing and do not belong to the
+                    // routed reasoning content.
+                    working = working[match.range.upperBound...]
+                    pendingLeadingTrim = true
+                    inside = true
+                }
                 // Re-scan the remainder in the new mode.
             } else {
                 // No full marker. Hold back any suffix that could begin one on
                 // the next chunk; emit the rest in the current mode.
-                let tail = heldBackTailLength(working, delimiter: delimiter)
+                let tail = heldBackTailLength(working, delimiters: delimiters)
                 let splitIndex = working.index(working.endIndex, offsetBy: -tail)
                 appendSegment(
                     String(working[working.startIndex ..< splitIndex]),
@@ -175,10 +202,28 @@ public struct ReasoningEventEmitter: Sendable {
         }
     }
 
-    /// The length of the longest suffix of `text` that is a *proper* prefix of
-    /// `delimiter` (and therefore might complete into the delimiter on the next
-    /// chunk). Returns 0 when no suffix could begin the delimiter.
+    private func firstMatch(
+        in text: Substring, delimiters: [String]
+    ) -> (delimiter: String, range: Range<String.Index>)? {
+        var first: (delimiter: String, range: Range<String.Index>)?
+        for delimiter in delimiters where !delimiter.isEmpty {
+            guard let range = text.range(of: delimiter) else { continue }
+            if let first, range.lowerBound >= first.range.lowerBound { continue }
+            first = (delimiter, range)
+        }
+        return first
+    }
+
+    /// The length of the longest suffix of `text` that is a proper prefix of any
+    /// watched delimiter and may complete in the next chunk.
+    private func heldBackTailLength(_ text: Substring, delimiters: [String]) -> Int {
+        delimiters.reduce(0) { longest, delimiter in
+            max(longest, heldBackTailLength(text, delimiter: delimiter))
+        }
+    }
+
     private func heldBackTailLength(_ text: Substring, delimiter: String) -> Int {
+        guard !delimiter.isEmpty else { return 0 }
         let textChars = Array(text)
         let delimiterChars = Array(delimiter)
         var k = min(textChars.count, delimiterChars.count - 1)

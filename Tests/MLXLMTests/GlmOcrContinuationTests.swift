@@ -116,7 +116,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         MLXRandom.seed(23)
         let model = try makeTinyModel()
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let (_, warmState) = try lastLogits(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(6))), cache: cache, state: nil,
@@ -147,7 +147,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         MLXRandom.seed(19)
         let model = try makeTinyModel()
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         XCTAssertNoThrow(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
@@ -175,7 +175,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         MLXRandom.seed(23)
         let model = try makeTinyModel()
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
@@ -200,7 +200,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let next = textTokens(1, seed: 8)
 
         // Reference: one cold prefill of everything, then one decode step.
-        let cacheF = model.newCache(parameters: nil)
+        let cacheF = try model.newCache(parameters: nil)
         let (_, stateF) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
@@ -208,7 +208,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let decodeF = model(LMInput.Text(tokens: next), cache: cacheF, state: stateF)
 
         // Warm: prefill t1, continue with t2, then decode the same token.
-        let cacheW = model.newCache(parameters: nil)
+        let cacheW = try model.newCache(parameters: nil)
         let (_, s1) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
@@ -234,7 +234,7 @@ final class GlmOcrContinuationTests: XCTestCase {
         let t1 = concatenated([textTokens(6), imageRun(), textTokens(6, seed: 2)], axis: 1)
         let t2 = textTokens(8, seed: 4)
 
-        let warmCache = model.newCache(parameters: nil)
+        let warmCache = try model.newCache(parameters: nil)
         let (_, savedState) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,

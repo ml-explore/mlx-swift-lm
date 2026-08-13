@@ -5,11 +5,11 @@ import Testing
 
 @testable import MLXLMCommon
 
-/// Router policy: final → response, analysis dropped, allowlisted commentary → tool call,
-/// one call per turn, strict JSON, no undeclared names.
+/// Router policy: analysis → private reasoning, final → response, allowlisted
+/// commentary → tool call, one call per turn, strict JSON, no undeclared names.
 struct HarmonyOutputRouterTests {
 
-    @Test("final payload streams as response; analysis is dropped")
+    @Test("final payload streams as response; analysis remains private reasoning")
     func finalVisibleAnalysisHidden() throws {
         let events = try route(
             [
@@ -19,6 +19,7 @@ struct HarmonyOutputRouterTests {
             allowed: ["search"])
 
         #expect(events.compactMap(\.response).joined() == "public")
+        #expect(events.compactMap(\.reasoning).joined() == "private")
         #expect(events.compactMap(\.toolCall).isEmpty)
         #expect(!events.compactMap(\.response).joined().contains("private"))
         #expect(!events.compactMap(\.response).joined().contains("<|"))
@@ -75,6 +76,7 @@ struct HarmonyOutputRouterTests {
 
         #expect(events.compactMap(\.toolCall).isEmpty)
         #expect(events.compactMap(\.response).joined().isEmpty)
+        #expect(events.compactMap(\.reasoning).joined() == #"{"city":"X"}"#)
     }
 
     @Test("second tool call in the same turn is ignored")
@@ -154,6 +156,10 @@ struct HarmonyOutputRouterTests {
 // MARK: - Helpers
 
 extension HarmonyOutputRouter.Event {
+    fileprivate var reasoning: String? {
+        if case .reasoning(let text) = self { return text }
+        return nil
+    }
     fileprivate var response: String? {
         if case .response(let text) = self { return text }
         return nil

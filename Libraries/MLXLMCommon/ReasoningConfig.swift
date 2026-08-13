@@ -91,39 +91,55 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// How a thinking on / off preference is expressed to the chat template.
     public var promptStrategy: ReasoningPromptStrategy
 
-    /// Diagnostic only: whether ``startDelimiter`` is a registered special token
-    /// for this model's tokenizer.
+    /// Markers that implicitly leave reasoning without emitting ``endDelimiter``.
     ///
-    /// Not load-bearing in v1 — detection is always string-scan based (the
-    /// decoded stream renders the delimiter as literal text whether or not it is
-    /// a special token, because `decode(tokenIds:)` defaults
-    /// `skipSpecialTokens: false`). Reserved for a future token-ID-stream
-    /// optimization.
+    /// These markers remain part of the generated stream. They are boundaries,
+    /// not replacements for the canonical closing delimiter. For example,
+    /// Qwen3.5 may begin `<tool_call>` directly from its thinking block.
+    public var implicitEndDelimiters: [String]
+
+    /// How this model safely transitions to its answer when a reasoning budget
+    /// is exhausted, or `nil` when hard budget enforcement is unsupported.
+    public var budgetTransition: ReasoningBudgetTransition?
+
+    /// Diagnostic only: whether ``startDelimiter`` is a registered special token
+    /// for this model's tokenizer. Budget enforcement compiles every boundary
+    /// with the active tokenizer and does not rely on this hint.
     public var isSpecialToken: Bool
 
     public init(
         startDelimiter: String,
         endDelimiter: String,
         promptStrategy: ReasoningPromptStrategy,
-        isSpecialToken: Bool = false
+        isSpecialToken: Bool = false,
+        implicitEndDelimiters: [String] = [],
+        budgetTransition: ReasoningBudgetTransition? = nil
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
         self.promptStrategy = promptStrategy
         self.isSpecialToken = isSpecialToken
+        self.implicitEndDelimiters = implicitEndDelimiters
+        self.budgetTransition = budgetTransition
     }
 
     // MARK: - Presets
 
-    /// `<think>`/`</think>`, toggled by the `enable_thinking` chat-template flag
-    /// (default on). The contract shared by the Qwen3 family and Nanbeige4.2+.
+    /// Generic `<think>`/`</think>` protocol toggled by the `enable_thinking`
+    /// chat-template flag (default on).
+    ///
+    /// This deliberately declares no budget transition. Sharing delimiters and
+    /// a template flag does not imply that two model families were trained to
+    /// respond to the same forced early-stop sequence.
     public static let thinkTagsWithEnableThinking = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
         isSpecialToken: true)
 
     /// Always-on `<think>`/`</think>` with no prompt-level off switch
-    /// (DeepSeek-R1 and its distills).
+    /// (DeepSeek-R1 and its distills). The protocol does not claim a known-safe
+    /// hard-budget transition; applications may opt into one explicitly after
+    /// validating it for their exact model and tokenizer.
     public static let alwaysOnThinking = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .alwaysOn)

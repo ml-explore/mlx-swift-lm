@@ -47,6 +47,8 @@ public struct Qwen35Configuration: Codable, Sendable {
         public var headDim: Int?
         public var ropeParameters: [String: StringOrNumber]?
         public var fullAttentionInterval: Int = 4
+        public var mtpNumHiddenLayers: Int = 0
+        public var mtpUseDedicatedEmbeddings: Bool = false
 
         // MoE fields
         public var numExperts: Int = 0
@@ -78,6 +80,8 @@ public struct Qwen35Configuration: Codable, Sendable {
             case headDim = "head_dim"
             case ropeParameters = "rope_parameters"
             case fullAttentionInterval = "full_attention_interval"
+            case mtpNumHiddenLayers = "mtp_num_hidden_layers"
+            case mtpUseDedicatedEmbeddings = "mtp_use_dedicated_embeddings"
             case numExperts = "num_experts"
             case numExpertsPerTok = "num_experts_per_tok"
             case decoderSparseStep = "decoder_sparse_step"
@@ -119,6 +123,11 @@ public struct Qwen35Configuration: Codable, Sendable {
             self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
             self.fullAttentionInterval =
                 try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+            self.mtpNumHiddenLayers =
+                try container.decodeIfPresent(Int.self, forKey: .mtpNumHiddenLayers) ?? 0
+            self.mtpUseDedicatedEmbeddings =
+                try container.decodeIfPresent(Bool.self, forKey: .mtpUseDedicatedEmbeddings)
+                ?? false
 
             self.numExperts = try container.decodeIfPresent(Int.self, forKey: .numExperts) ?? 0
             self.numExpertsPerTok =
@@ -505,7 +514,8 @@ enum Qwen35Language {
         func callAsFunction(
             _ inputs: MLXArray,
             mask: MLXArray? = nil,
-            cache: MambaCache? = nil
+            cache: MambaCache? = nil,
+            checkpointAfter: Int? = nil
         ) -> MLXArray {
             let B = inputs.dim(0)
             let S = inputs.dim(1)
@@ -548,26 +558,68 @@ enum Qwen35Language {
                 MLXArray(invScale).asType(dtype)
                 * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: 1e-6)
 
-            var out: MLXArray
-            (out, state) = gatedDeltaUpdate(
-                q: qNormed,
-                k: kNormed,
-                v: v,
-                a: a,
-                b: b,
-                aLog: aLog,
-                dtBias: dtBias,
-                state: state,
-                mask: mask
-            )
+            let out: MLXArray
+            if let split = checkpointAfter, split > 0, split < S {
+                let prefixMask = mask.map { $0[0..., ..<split] }
+                let suffixMask = mask.map { $0[0..., split...] }
+                let (prefixOut, prefixState) = gatedDeltaUpdate(
+                    q: qNormed[0..., ..<split, 0..., 0...],
+                    k: kNormed[0..., ..<split, 0..., 0...],
+                    v: v[0..., ..<split, 0..., 0...],
+                    a: a[0..., ..<split, 0...],
+                    b: b[0..., ..<split, 0...],
+                    aLog: aLog,
+                    dtBias: dtBias,
+                    state: state,
+                    mask: prefixMask)
+                let (suffixOut, suffixState) = gatedDeltaUpdate(
+                    q: qNormed[0..., split..., 0..., 0...],
+                    k: kNormed[0..., split..., 0..., 0...],
+                    v: v[0..., split..., 0..., 0...],
+                    a: a[0..., split..., 0...],
+                    b: b[0..., split..., 0...],
+                    aLog: aLog,
+                    dtBias: dtBias,
+                    state: prefixState,
+                    mask: suffixMask)
+                out = concatenated([prefixOut, suffixOut], axis: 1)
+                state = suffixState
+
+                if let cache {
+                    let checkpointConv: MLXArray
+                    if convKernelSize > 1 {
+                        checkpointConv = contiguous(
+                            convInput[
+                                0..., split ..< (split + convKernelSize - 1), 0...])
+                    } else {
+                        checkpointConv = MLXArray.zeros(
+                            [B, 0, convDim], dtype: mixedQKV.dtype)
+                    }
+                    cache.saveSpeculativeCheckpoint(
+                        convState: checkpointConv,
+                        recurrentState: prefixState,
+                        advancedBy: split)
+                }
+            } else {
+                (out, state) = gatedDeltaUpdate(
+                    q: qNormed,
+                    k: kNormed,
+                    v: v,
+                    a: a,
+                    b: b,
+                    aLog: aLog,
+                    dtBias: dtBias,
+                    state: state,
+                    mask: mask)
+            }
 
             if let cache {
                 cache[1] = state
                 cache.advance(S)
             }
 
-            out = norm(out, gate: z)
-            return outProj(out.reshaped(B, S, -1))
+            let gated = norm(out, gate: z)
+            return outProj(gated.reshaped(B, S, -1))
         }
     }
 
@@ -634,8 +686,13 @@ enum Qwen35Language {
 
         @ModuleInfo(key: "mlp") var mlp: Module
 
-        init(_ args: Qwen35Configuration.TextConfiguration, layerIdx: Int) {
-            self.isLinear = (layerIdx + 1) % args.fullAttentionInterval != 0
+        init(
+            _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
+            forceFullAttention: Bool = false
+        ) {
+            self.isLinear =
+                forceFullAttention
+                ? false : (layerIdx + 1) % args.fullAttentionInterval != 0
 
             if isLinear {
                 _linearAttn.wrappedValue = GatedDeltaNet(args)
@@ -663,11 +720,14 @@ enum Qwen35Language {
             attentionMask: MLXArray?,
             ssmMask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            checkpointAfter: Int? = nil
         ) -> MLXArray {
             let r: MLXArray
             if isLinear {
-                r = linearAttn!(inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache)
+                r = linearAttn!(
+                    inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache,
+                    checkpointAfter: checkpointAfter)
             } else {
                 r = selfAttn!(
                     inputLayerNorm(x), mask: attentionMask, cache: cache, positionIds: positionIds)
@@ -704,7 +764,9 @@ enum Qwen35Language {
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
             cache: [KVCache?]? = nil,
-            positionIds: MLXArray? = nil
+            positionIds: MLXArray? = nil,
+            applyFinalNorm: Bool = true,
+            checkpointAfter: Int? = nil
         ) -> MLXArray {
             var hiddenStates: MLXArray
             if let inputsEmbeds {
@@ -735,11 +797,12 @@ enum Qwen35Language {
                     attentionMask: faMask,
                     ssmMask: layerSSMMask,
                     cache: cacheArray?[index],
-                    positionIds: positionIds
+                    positionIds: positionIds,
+                    checkpointAfter: checkpointAfter
                 )
             }
 
-            return norm(hiddenStates)
+            return applyFinalNorm ? norm(hiddenStates) : hiddenStates
         }
     }
 
@@ -856,17 +919,32 @@ enum Qwen35Language {
                 }
             }
 
-            var out = model(
+            let emitDrafterState = state[mtpEmitFlagKey] ?? false
+            let preNormHidden = model(
                 inputs,
                 inputsEmbeds: inputsEmbeds,
                 cache: cache,
-                positionIds: positionIds
+                positionIds: positionIds,
+                applyFinalNorm: !emitDrafterState,
+                checkpointAfter: state[mtpCacheCheckpointIndexKey]
             )
+            let hiddenStates = emitDrafterState ? model.norm(preNormHidden) : preNormHidden
 
+            var out = hiddenStates
             if let lmHead {
                 out = lmHead(out)
             } else {
                 out = model.embedTokens.asLinear(out)
+            }
+
+            if emitDrafterState {
+                state[mtpLastHiddenStatesKey] = hiddenStates
+                state[mtpSharedKVStatesKey] = qwen35VLMSharedKVState(
+                    cache: cache, fullAttentionIndex: model.faIdx)
+                state[mtpSharedKVOffsetsKey] = qwen35VLMSharedKVOffsets(
+                    cache: cache, fullAttentionIndex: model.faIdx)
+                state[mtpSharedKVSourceIndicesKey] = ["full_attention": model.faIdx]
+                state[mtpPositionDeltasKey] = state[ropeDeltasKey]
             }
 
             return LMOutput(logits: out, state: state)
@@ -886,11 +964,41 @@ enum Qwen35Language {
     }
 }
 
+private func qwen35VLMSharedKVState(
+    cache: [KVCache?]?,
+    fullAttentionIndex: Int
+) -> [String: (MLXArray, MLXArray)] {
+    guard let cache,
+        fullAttentionIndex < cache.count,
+        let faCache = cache[fullAttentionIndex]
+    else {
+        return [:]
+    }
+    let state = faCache.state
+    guard state.count == 2 else {
+        return [:]
+    }
+    return ["full_attention": (state[0], state[1])]
+}
+
+private func qwen35VLMSharedKVOffsets(
+    cache: [KVCache?]?,
+    fullAttentionIndex: Int
+) -> [String: Int]? {
+    guard let cache,
+        fullAttentionIndex < cache.count,
+        let faCache = cache[fullAttentionIndex]
+    else {
+        return nil
+    }
+    return ["full_attention": faCache.offset]
+}
+
 // MARK: - Model
 
 public class Qwen35: Module, VLMModel {
     @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel
-    @ModuleInfo(key: "language_model") fileprivate var languageModel: Qwen35Language.LanguageModel
+    @ModuleInfo(key: "language_model") var languageModel: Qwen35Language.LanguageModel
 
     public let config: Qwen35Configuration
 
@@ -907,8 +1015,8 @@ public class Qwen35: Module, VLMModel {
         languageModel.model.layers
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.makeCache(capacity: parameters?.effectiveKVCacheCapacity)
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        languageModel.makeCache(capacity: try parameters?.effectiveKVCacheCapacity())
     }
 
     private func mergeInputIdsWithImageFeatures(
@@ -1281,6 +1389,10 @@ public class Qwen35: Module, VLMModel {
     }
 }
 
+extension Qwen35: SpeculativeCacheRewindModel {
+    public var maximumNativeTargetCacheRewind: Int { 1 }
+}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }
@@ -1302,5 +1414,5 @@ extension Qwen35 {
 // `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
 extension Qwen35 {
     public var toolCallFormat: ToolCallFormat? { .xmlFunction }
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

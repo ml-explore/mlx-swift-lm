@@ -116,13 +116,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
             [textTokens(10), visionStart(), imageRun(), textTokens(8, seed: 5)], axis: 1)
         let t2 = textTokens(8, seed: 9)
 
-        let fullCache = model.newCache(parameters: nil)
+        let fullCache = try model.newCache(parameters: nil)
         let (fullLogits, _) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
                 cache: fullCache, state: nil, prefill: .init()))
 
-        let warmCache = model.newCache(parameters: nil)
+        let warmCache = try model.newCache(parameters: nil)
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
@@ -169,7 +169,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
             prefill.progress = { log.events.append([$0, $1]) }
             _ = try model.prepare(
                 LMInput(text: .init(tokens: prompt)),
-                cache: model.newCache(parameters: nil), state: nil, prefill: prefill)
+                cache: try model.newCache(parameters: nil), state: nil, prefill: prefill)
             return log.events
         }
 
@@ -218,11 +218,11 @@ final class Qwen3VLContinuationTests: XCTestCase {
         ).expandedDimensions(axis: 0)
         let input = LMInput(text: .init(tokens: tokens, mask: mask), image: image)
 
-        let singleCache = model.newCache(parameters: nil)
+        let singleCache = try model.newCache(parameters: nil)
         let (singleLogits, _) = try lastLogits(
             model.prepare(input, cache: singleCache, state: nil, prefill: .init()))
 
-        let windowedCache = model.newCache(parameters: nil)
+        let windowedCache = try model.newCache(parameters: nil)
         let (windowedLogits, _) = try lastLogits(
             model.prepare(input, cache: windowedCache, state: nil, prefill: .init(stepSize: 8)))
 
@@ -240,7 +240,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
         MLXRandom.seed(19)
         let model = try makeTinyModel()
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         XCTAssertNoThrow(
             try model.prepare(
                 LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
@@ -268,7 +268,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
         MLXRandom.seed(23)
         let model = try makeTinyModel()
 
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let (_, state) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
@@ -293,7 +293,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
             [textTokens(6), visionStart(), imageRun(), textTokens(6, seed: 2)], axis: 1)
         let t2 = textTokens(8, seed: 4)
 
-        let warmCache = model.newCache(parameters: nil)
+        let warmCache = try model.newCache(parameters: nil)
         let (_, savedState) = try lastLogits(
             model.prepare(
                 LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,

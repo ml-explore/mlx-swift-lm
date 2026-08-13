@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 import MLXVLM
 import XCTest
 
@@ -78,5 +79,16 @@ final class Qwen3VLMoETests: XCTestCase {
         XCTAssertEqual(config.textConfiguration.moeIntermediateSize, 12)
         XCTAssertEqual(config.textConfiguration.numKeyValueHeads, 1)
         XCTAssertFalse(config.textConfiguration.tieWordEmbeddings)
+    }
+
+    func testDeclaresQwen3GenerationReasoningProtocol() throws {
+        let reasoning = try XCTUnwrap(Qwen3VLMoE(makeMinimalConfig()).reasoningConfig)
+
+        XCTAssertEqual(reasoning, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(reasoning.startDelimiter, "<think>")
+        XCTAssertEqual(reasoning.implicitEndDelimiters, ["<tool_call>"])
+        // Sharing Qwen's delimiters does not automatically opt a distinct
+        // post-training family into Qwen3's model-specific transition.
+        XCTAssertNil(reasoning.budgetTransition)
     }
 }

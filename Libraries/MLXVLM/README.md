@@ -68,6 +68,7 @@ The following models have been tried:
 - mlx-community/gemma-3-12b-it-qat-4bit
 - mlx-community/gemma-3-27b-it-qat-4bit
 - HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx
+- mlx-community/Muse-Glimmer-30B-4bit
 
 Currently supported model types are:
 
@@ -78,6 +79,7 @@ Currently supported model types are:
 - idefics3
 - gemma3
 - smolvlm
+- muse_glimmer
 
 See [llm-tool](../../Tools/llm-tool)
 
