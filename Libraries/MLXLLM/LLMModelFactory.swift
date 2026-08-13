@@ -216,37 +216,43 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let translategemma_4b_it_4bit = ModelConfiguration(
         id: "mlx-community/translategemma-4b-it-4bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let translategemma_4b_it_8bit = ModelConfiguration(
         id: "mlx-community/translategemma-4b-it-8bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let translategemma_12b_it_4bit = ModelConfiguration(
         id: "mlx-community/translategemma-12b-it-4bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let translategemma_12b_it_8bit = ModelConfiguration(
         id: "mlx-community/translategemma-12b-it-8bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let translategemma_27b_it_4bit = ModelConfiguration(
         id: "mlx-community/translategemma-27b-it-4bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let translategemma_27b_it_8bit = ModelConfiguration(
         id: "mlx-community/translategemma-27b-it-8bit",
         defaultPrompt: "Hello, how are you?",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<end_of_turn>"],
+        messageGenerator: TranslateGemma3MessageGenerator()
     )
 
     static public let hunyuan_mt_7b_4bit = ModelConfiguration(
@@ -691,13 +697,14 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let tokenizer = try await tokenizerTask
 
-        let messageGenerator =
-            if let model = model as? LLMModel {
-                model.messageGenerator(tokenizer: tokenizer)
-            } else {
-                DefaultMessageGenerator()
-            }
-
+        let messageGenerator: any MessageGenerator
+        if let configuredMessageGenerator = mutableConfiguration.messageGenerator {
+            messageGenerator = configuredMessageGenerator
+        } else if let model = model as? LLMModel {
+            messageGenerator = model.messageGenerator(tokenizer: tokenizer)
+        } else {
+            messageGenerator = DefaultMessageGenerator()
+        }
         // Build a ModelConfiguration for the ModelContext
         let tokenizerSource: TokenizerSource? =
             configuration.tokenizerDirectory == modelDirectory
@@ -711,7 +718,8 @@ public final class LLMModelFactory: GenericModelFactory {
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
             toolCallFormat: mutableConfiguration.toolCallFormat,
-            reasoningConfig: mutableConfiguration.reasoningConfig)
+            reasoningConfig: mutableConfiguration.reasoningConfig,
+            messageGenerator: mutableConfiguration.messageGenerator)
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,

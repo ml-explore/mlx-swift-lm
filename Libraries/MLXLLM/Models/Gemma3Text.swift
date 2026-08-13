@@ -456,20 +456,16 @@ public class Gemma3TextModel: Module, LLMModel {
         return .tokens(y[processed...])
     }
 
-    public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {
-        Gemma3MessageGenerator()
-    }
-
     /// Prefill chunk size when the caller sets none, tuned for this path on Apple Silicon.
     private static let defaultPrefillChunkSize = 128
 }
 
-/// Message generator for the Gemma 3 text path.
+/// Message generator for TranslateGemma, Google's translation fine-tunes of Gemma 3.
 ///
 /// TranslateGemma's chat template needs each user turn tagged with `source_lang_code` /
 /// `target_lang_code` (ISO 639-1); supply them via `UserInput.additionalContext`. Without
 /// those codes this behaves exactly like `DefaultMessageGenerator`.
-public struct Gemma3MessageGenerator: MessageGenerator {
+public struct TranslateGemma3MessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(from input: UserInput) -> [Message] {

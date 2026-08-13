@@ -114,12 +114,81 @@ public class TranslateGemmaTests: XCTestCase {
         }
     }
 
+    func testTranslateGemmaPresetsCarryMessageGenerator() {
+        let configurations = [
+            LLMRegistry.translategemma_4b_it_4bit,
+            LLMRegistry.translategemma_4b_it_8bit,
+            LLMRegistry.translategemma_12b_it_4bit,
+            LLMRegistry.translategemma_12b_it_8bit,
+            LLMRegistry.translategemma_27b_it_4bit,
+            LLMRegistry.translategemma_27b_it_8bit,
+        ]
+
+        for configuration in configurations {
+            XCTAssertTrue(
+                configuration.messageGenerator is TranslateGemma3MessageGenerator,
+                configuration.name)
+        }
+    }
+
+    func testPlainGemma3PresetDoesNotCarryTranslationGenerator() {
+        XCTAssertNil(LLMRegistry.gemma3_1B_qat_4bit.messageGenerator)
+    }
+
+    /// The review ask: the translation template must not ride on every `gemma3` text model.
+    /// The model type keeps the default generator; only the preset opts in.
+    func testGemma3TextModelKeepsDefaultMessageGenerator() {
+        let model = Gemma3TextModel(Self.tinyConfig())
+
+        let generator = model.messageGenerator(tokenizer: TestTokenizer())
+
+        XCTAssertFalse(generator is TranslateGemma3MessageGenerator)
+        XCTAssertTrue(generator is DefaultMessageGenerator)
+    }
+
+    /// The override has to survive resolution -- the factories read it from the resolved
+    /// configuration, not from the registry entry.
+    func testResolvedConfigurationCarriesMessageGenerator() {
+        let directory = URL(fileURLWithPath: "/tmp/translategemma-test")
+
+        let translate = LLMRegistry.translategemma_4b_it_4bit.resolved(
+            modelDirectory: directory, tokenizerDirectory: directory)
+        let plain = LLMRegistry.gemma3_1B_qat_4bit.resolved(
+            modelDirectory: directory, tokenizerDirectory: directory)
+
+        XCTAssertTrue(translate.messageGenerator is TranslateGemma3MessageGenerator)
+        XCTAssertNil(plain.messageGenerator)
+    }
+
+    /// ``VLMModelFactory`` applies a configured generator by wrapping the model's own
+    /// processor, so the wrapper must hand the delegate the already-generated messages.
+    func testMessageGeneratorUserInputProcessorAppliesConfiguredGenerator() async throws {
+        let delegate = CapturingUserInputProcessor()
+        let processor = MessageGeneratorUserInputProcessor(
+            processor: delegate, messageGenerator: TranslateGemma3MessageGenerator())
+
+        _ = try await processor.prepare(
+            input: UserInput(
+                chat: [.user("Hello, how are you?")],
+                additionalContext: ["source_lang_code": "en", "target_lang_code": "fr"]))
+
+        guard case .messages(let messages) = delegate.prompt else {
+            return XCTFail(
+                "Expected generated messages, got: \(String(describing: delegate.prompt))")
+        }
+        let content = messages.first?["content"] as? [[String: String]]
+        XCTAssertEqual(content?.count, 1)
+        XCTAssertEqual(content?.first?["source_lang_code"], "en")
+        XCTAssertEqual(content?.first?["target_lang_code"], "fr")
+        XCTAssertEqual(content?.first?["text"], "Hello, how are you?")
+    }
+
     // MARK: - Message generator
 
     /// With language codes in `additionalContext`, the generator must emit the structured
     /// single-mapping content the TranslateGemma chat template requires.
     func testMessageGeneratorBuildsStructuredTranslationContent() {
-        let generator = Gemma3MessageGenerator()
+        let generator = TranslateGemma3MessageGenerator()
         let input = UserInput(
             chat: [.user("Hello, how are you?")],
             additionalContext: ["source_lang_code": "en", "target_lang_code": "fr"]
@@ -146,7 +215,7 @@ public class TranslateGemmaTests: XCTestCase {
     /// Without language codes the generator is identical to the default (plain Gemma 3),
     /// so non-translation `gemma3` models are unaffected.
     func testMessageGeneratorFallsBackToPlainContentWithoutCodes() {
-        let generator = Gemma3MessageGenerator()
+        let generator = TranslateGemma3MessageGenerator()
         let input = UserInput(chat: [.user("Why is the sky blue?")])
 
         let messages = generator.generate(from: input)
@@ -177,5 +246,23 @@ public class TranslateGemmaTests: XCTestCase {
             slidingWindowPattern: 6,
             maxPositionEmbeddings: 64
         )
+    }
+
+    /// Records the prompt the wrapped processor is handed.
+    ///
+    /// `@unchecked Sendable` because the stored prompt is serialised by the lock.
+    private final class CapturingUserInputProcessor: UserInputProcessor, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedPrompt: UserInput.Prompt?
+
+        var prompt: UserInput.Prompt? {
+            lock.withLock { storedPrompt }
+        }
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            let prompt = input.prompt
+            lock.withLock { storedPrompt = prompt }
+            return LMInput(tokens: MLXArray([Int32(0)]))
+        }
     }
 }

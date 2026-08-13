@@ -76,6 +76,7 @@ public struct ResolvedModelConfiguration: Sendable {
     public var eosTokenIds: Set<Int>
     public var toolCallFormat: ToolCallFormat?
     public var reasoningConfig: ReasoningConfig?
+    public var messageGenerator: (any MessageGenerator)?
 
     public init(
         modelDirectory: URL,
@@ -86,7 +87,8 @@ public struct ResolvedModelConfiguration: Sendable {
         stopStrings: Set<String>? = nil,
         eosTokenIds: Set<Int>,
         toolCallFormat: ToolCallFormat?,
-        reasoningConfig: ReasoningConfig? = nil
+        reasoningConfig: ReasoningConfig? = nil,
+        messageGenerator: (any MessageGenerator)? = nil
     ) {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
@@ -97,6 +99,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
         self.reasoningConfig = reasoningConfig
+        self.messageGenerator = messageGenerator
     }
 }
 
@@ -113,6 +116,7 @@ extension ResolvedModelConfiguration {
             stopStrings: [],
             eosTokenIds: [],
             toolCallFormat: nil,
-            reasoningConfig: nil)
+            reasoningConfig: nil,
+            messageGenerator: nil)
     }
 }

@@ -451,6 +451,34 @@ public protocol UserInputProcessor: Sendable {
     func prepare(input: UserInput) async throws -> LMInput
 }
 
+/// Applies a configured message generator before delegating input processing.
+///
+/// This lets a model configuration override a VLM processor's built-in generator without
+/// changing the processor implementation.
+///
+/// - Important: the override fully replaces the model's own generator, including any
+///   image/video placeholder content that generator would emit. A text-only generator on a
+///   VLM configuration therefore loses media conditioning: Qwen-family processors throw on
+///   the placeholder-count mismatch, others silently ignore the attached media.
+public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
+    private let processor: any UserInputProcessor
+    private let messageGenerator: any MessageGenerator
+
+    public init(
+        processor: any UserInputProcessor,
+        messageGenerator: any MessageGenerator
+    ) {
+        self.processor = processor
+        self.messageGenerator = messageGenerator
+    }
+
+    public func prepare(input: UserInput) async throws -> LMInput {
+        var input = input
+        input.prompt = .messages(messageGenerator.generate(from: input))
+        return try await processor.prepare(input: input)
+    }
+}
+
 internal enum UserInputError: LocalizedError {
     case notImplemented
     case unableToLoad(URL)

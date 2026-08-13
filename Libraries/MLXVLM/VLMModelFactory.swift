@@ -458,9 +458,16 @@ public final class VLMModelFactory: GenericModelFactory {
         let processorType =
             processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
 
-        let processor = try await processorRegistry.createModel(
+        let baseProcessor = try await processorRegistry.createModel(
             configuration: processorConfigData,
             processorType: processorType, tokenizer: tokenizer)
+        let processor: any UserInputProcessor
+        if let messageGenerator = mutableConfiguration.messageGenerator {
+            processor = MessageGeneratorUserInputProcessor(
+                processor: baseProcessor, messageGenerator: messageGenerator)
+        } else {
+            processor = baseProcessor
+        }
 
         // Build a ModelConfiguration for the ModelContext
         let tokenizerSource: TokenizerSource? =
@@ -475,7 +482,8 @@ public final class VLMModelFactory: GenericModelFactory {
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
             toolCallFormat: mutableConfiguration.toolCallFormat,
-            reasoningConfig: mutableConfiguration.reasoningConfig)
+            reasoningConfig: mutableConfiguration.reasoningConfig,
+            messageGenerator: mutableConfiguration.messageGenerator)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,
