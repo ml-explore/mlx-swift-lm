@@ -45,8 +45,8 @@ private let _geluMul: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
 
 public struct Gemma4TextConfiguration: Codable, Sendable {
     var modelType: String = "gemma4_text"
-    var hiddenSize: Int = 1536
-    var numHiddenLayers: Int = 35
+    @_spi(GemmaEncoder) public var hiddenSize: Int = 1536
+    @_spi(GemmaEncoder) public var numHiddenLayers: Int = 35
     var intermediateSize: Int = 6144
     var numAttentionHeads: Int = 8
     var headDim: Int = 256
@@ -508,23 +508,28 @@ private class Gemma4TextExperts: Module {
 
 // MARK: - Decoder Layer
 
-private class Gemma4DecoderLayer: Module {
+/// One Gemma 4 decoder layer.
+///
+/// Exposed at `@_spi(GemmaEncoder)` scope so opted-in client code can drive the layer
+/// stack directly — e.g. an encoder-style tap that collects every hidden state rather
+/// than only the final one. Mirrors the Gemma 3 exposure added in #387.
+@_spi(GemmaEncoder) public class Gemma4DecoderLayer: Module {
     let config: Gemma4TextConfiguration
     let layerIdx: Int
     let layerType: String
     let hiddenSizePerLayerInput: Int
     let enableMoE: Bool
 
-    @ModuleInfo(key: "self_attn") var selfAttn: Gemma4Attention
-    @ModuleInfo var mlp: Gemma4MLP
+    @ModuleInfo(key: "self_attn") fileprivate var selfAttn: Gemma4Attention
+    @ModuleInfo fileprivate var mlp: Gemma4MLP
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayernorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayernorm: RMSNorm
 
     // MoE block (E-series): router, experts, and their extra norms
-    @ModuleInfo(key: "router") var router: Gemma4TextRouter?
-    @ModuleInfo(key: "experts") var experts: Gemma4TextExperts?
+    @ModuleInfo(key: "router") fileprivate var router: Gemma4TextRouter?
+    @ModuleInfo(key: "experts") fileprivate var experts: Gemma4TextExperts?
     @ModuleInfo(key: "post_feedforward_layernorm_1") var postFeedforwardLayernorm1: RMSNorm?
     @ModuleInfo(key: "post_feedforward_layernorm_2") var postFeedforwardLayernorm2: RMSNorm?
     @ModuleInfo(key: "pre_feedforward_layernorm_2") var preFeedforwardLayernorm2: RMSNorm?
@@ -589,7 +594,13 @@ private class Gemma4DecoderLayer: Module {
         super.init()
     }
 
-    func callAsFunction(
+    /// Run one decoder layer.
+    ///
+    /// Exposed at `@_spi(GemmaEncoder)` scope. Callers that do not use per-layer inputs,
+    /// KV sharing, or a position offset pass `nil` for those and ignore the corresponding
+    /// returned values; the sliding-vs-global attention split is resolved internally from
+    /// the layer index, so a client tap does not need to know about it.
+    @_spi(GemmaEncoder) public func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
@@ -657,15 +668,25 @@ private class Gemma4DecoderLayer: Module {
 
 // MARK: - Text Model
 
-private class Gemma4TextModelInner: Module {
-    let config: Gemma4TextConfiguration
-    let embedScale: Float
+/// The Gemma 4 text backbone: embeddings, the decoder stack, and the final norm.
+///
+/// Exposed at `@_spi(GemmaEncoder)` scope for encoder-style client taps.
+@_spi(GemmaEncoder) public class Gemma4TextModelInner: Module {
+    @_spi(GemmaEncoder) public let config: Gemma4TextConfiguration
+    /// Multiplier applied to the token embeddings.
+    ///
+    /// A plain `Float` — NOT pre-rounded to bfloat16 the way Gemma 3's scale is. Client
+    /// taps replicating the forward must apply it in this precision.
+    @_spi(GemmaEncoder) public let embedScale: Float
     let perLayerProjectionScale: Float
     let hiddenSizePerLayerInput: Int
 
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo(key: "layers") var layers: [Gemma4DecoderLayer]
-    @ModuleInfo var norm: RMSNorm
+    /// Token embedding table. Callers must scale its output by ``embedScale``.
+    @ModuleInfo(key: "embed_tokens") @_spi(GemmaEncoder) public var embedTokens: Embedding
+    /// The decoder stack, exposed for encoder-style client taps.
+    @ModuleInfo(key: "layers") @_spi(GemmaEncoder) public var layers: [Gemma4DecoderLayer]
+    /// Final norm. Plain `RMSNorm` — Gemma 4 has NO `1 + weight` shift, unlike Gemma 3.
+    @ModuleInfo @_spi(GemmaEncoder) public var norm: RMSNorm
 
     // Per-layer embeddings (PLE)
     @ModuleInfo(key: "embed_tokens_per_layer") var embedTokensPerLayer: Embedding?
@@ -824,7 +845,8 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
 
     fileprivate let config: Gemma4TextConfiguration
-    fileprivate let model: Gemma4TextModelInner
+    /// The text backbone, exposed at `@_spi(GemmaEncoder)` scope for client taps.
+    @_spi(GemmaEncoder) public let model: Gemma4TextModelInner
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
