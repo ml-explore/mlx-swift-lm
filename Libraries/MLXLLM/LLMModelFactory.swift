@@ -54,6 +54,7 @@ public enum LLMTypeRegistry {
         "deepseek_v2": create(DeepseekV2Configuration.self, DeepseekV2Model.init),
         "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
+        "helium": create(HeliumConfiguration.self, HeliumModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
         "mimo": create(MiMoConfiguration.self, MiMoModel.init),
@@ -365,6 +366,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|eot_id|>"]
     )
 
+    static public let helium_1_2b_4bit = ModelConfiguration(
+        id: "mlx-community/helium-1-preview-2b-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
     static public let deepseek_r1_4bit = ModelConfiguration(
         id: "mlx-community/DeepSeek-R1-4bit",
         defaultPrompt: "Tell me about the history of Spain."
@@ -500,6 +506,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             hy_mt2_7b_8bit,
             granite3_3_2b_4bit,
             granite_4_0_h_tiny_4bit_dwq,
+            helium_1_2b_4bit,
             llama3_1_8B_4bit,
             llama3_2_1B_4bit,
             llama3_2_3B_4bit,
