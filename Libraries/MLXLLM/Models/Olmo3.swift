@@ -223,16 +223,13 @@ public class Olmo3Model: Module, LLMModel, KVCacheDimensionProvider {
         weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        var caches: [KVCache] = []
-        for layerType in args.layerTypes {
-            if layerType == "full_attention" {
-                caches.append(KVCacheSimple())
-            } else {
-                caches.append(RotatingKVCache(maxSize: args.slidingWindow))
-            }
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try args.layerTypes.map { layerType in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: args.slidingWindow,
+                usesSlidingWindow: layerType != "full_attention")
         }
-        return caches
     }
 }
 

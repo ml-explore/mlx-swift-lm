@@ -831,3 +831,11 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
         return false
     }
 }
+
+// MARK: - Chat conventions
+
+extension Qwen3VLMoE {
+    // Qwen3-VL shares Qwen's tags and tool-call boundary, but does not declare
+    // the original Qwen3 family's model-specific hard-budget transition.
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
+}

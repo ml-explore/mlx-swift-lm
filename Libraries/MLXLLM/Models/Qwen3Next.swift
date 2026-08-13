@@ -498,17 +498,19 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try model.layers.map { layer in
             if layer.isLinear {
                 return MambaCache()
             }
-            return KVCacheSimple()
+            return try makeAttentionKVCache(parameters: parameters)
         }
     }
 
     public func makeCache() -> [KVCache] {
-        return newCache(parameters: nil)
+        model.layers.map { layer in
+            layer.isLinear ? MambaCache() : KVCacheSimple()
+        }
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -686,5 +688,5 @@ extension Qwen3NextModel: LoRAModel {
 
 extension Qwen3NextModel {
     public var toolCallFormat: ToolCallFormat? { .xmlFunction }
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

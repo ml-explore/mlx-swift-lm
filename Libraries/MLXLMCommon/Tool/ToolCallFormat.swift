@@ -94,6 +94,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// Muse Glimmer's Onyx ATEM invoke/parameter format.
+    /// Example: `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>`
+    case atem
+
     /// Mistral V11+ format with [TOOL_CALLS] and [ARGS] delimiters.
     /// Example: `[TOOL_CALLS]get_weather [ARGS]{"location": "Tokyo"}`
     case mistral
@@ -136,6 +140,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .atem:
+            return ATEMToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
@@ -150,27 +156,41 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Ordinary formats share the detokenized tool-call decoder. Protocols
     /// with token-level framing provide their own implementation here, keeping
     /// concrete model behavior out of the generic evaluation loop.
-    func makeTokenStreamDecoder(
+    package func makeTokenStreamDecoder(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,
         stopStrings: Set<String>
     ) -> any TokenStreamDecoder {
+        if let decoder = makeProtocolTokenStreamDecoder(
+            tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+        {
+            return decoder
+        }
+        return StandardTokenStreamDecoder(
+            tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+    }
+
+    /// Builds a decoder only for formats which own a framed token protocol.
+    /// Generic callers use this factory and never depend on an Onyx/Harmony
+    /// concrete type. Plain text tool syntaxes return `nil` and stay on their
+    /// standard detokenized routing path.
+    package func makeProtocolTokenStreamDecoder(
+        tokenizer: any Tokenizer,
+        tools: [[String: any Sendable]]?,
+        stopStrings: Set<String>
+    ) -> (any TokenStreamDecoder)? {
         switch self {
         case .gptOSS:
-            if let decoder = HarmonyStreamAdapter(
+            return HarmonyStreamAdapter(
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
-            {
-                return decoder
-            }
-            // Preserve the pre-Harmony compatibility path when a tokenizer
-            // lacks the protocol's complete control-token vocabulary.
-            return StandardTokenStreamDecoder(
-                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+
+        case .atem:
+            return OnyxStreamAdapter(
+                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
 
         case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
             .mistral, .llama3:
-            return StandardTokenStreamDecoder(
-                tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+            return nil
         }
     }
 
@@ -188,9 +208,33 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         switch self {
         case .gptOSS:
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2, .mistral,
+        case .atem:
+            return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+            .mistral,
             .llama3:
             return []
+        }
+    }
+
+    /// Number of structured call commits a protocol's chat-template render
+    /// contributes to the prompt. Harmony renders at most one call per
+    /// assistant message; Onyx renders every call as its own assistant frame.
+    func promptCacheStructuredToolCallCount(in messages: [Chat.Message]) -> Int {
+        switch self {
+        case .gptOSS:
+            messages.count {
+                $0.role == .assistant && $0.tool?.calls?.isEmpty == false
+            }
+        case .atem:
+            messages.reduce(into: 0) { count, message in
+                if message.role == .assistant {
+                    count += message.tool?.calls?.count ?? 0
+                }
+            }
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+            .mistral, .llama3:
+            0
         }
     }
 

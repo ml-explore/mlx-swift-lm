@@ -79,7 +79,7 @@ final class ChatConventionsModelTests: XCTestCase {
             """
         let model = try await LLMTypeRegistry.shared.createModel(
             configuration: Data(json.utf8), modelType: "qwen3")
-        XCTAssertEqual(model.reasoningConfig, .thinkTagsWithEnableThinking)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen3)
         // Qwen3 (unlike Qwen3.5) declares no tool-call format.
         XCTAssertNil(model.toolCallFormat)
     }
@@ -117,11 +117,27 @@ struct ChatConventionsTests {
         #expect(config.endDelimiter == "</think>")
         #expect(config.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
         #expect(config.isSpecialToken)
+        #expect(config.budgetTransition == nil)
+        #expect(config.implicitEndDelimiters.isEmpty)
+    }
+
+    @Test func qwenTaggedProtocol() {
+        let config = QwenReasoningProtocol.tagged
+        // Qwen surface syntax without the Qwen3 training recipe: no transition.
+        #expect(config.budgetTransition == nil)
+        #expect(config.implicitEndDelimiters == ["<tool_call>"])
+    }
+
+    @Test func qwen3BudgetProtocol() {
+        let config = QwenReasoningProtocol.qwen3
+        #expect(config.budgetTransition != nil)
+        #expect(config.implicitEndDelimiters == ["<tool_call>"])
     }
 
     @Test func alwaysOnPreset() {
         #expect(ReasoningConfig.alwaysOnThinking.promptStrategy == .alwaysOn)
         #expect(ReasoningConfig.alwaysOnThinking.startDelimiter == "<think>")
+        #expect(ReasoningConfig.alwaysOnThinking.budgetTransition == nil)
     }
 
     // MARK: - Declaration inheritance

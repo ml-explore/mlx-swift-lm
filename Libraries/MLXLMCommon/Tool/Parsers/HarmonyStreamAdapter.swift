@@ -11,6 +11,7 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
     private var stopStringFilter: StopStringFilter
     let additionalStopTokenIDs: Set<Int>
     let receivesStopTokens = true
+    var isInsideReasoning: Bool { parser.isInsideReasoning }
 
     init?(
         tokenizer: any Tokenizer,
@@ -60,6 +61,9 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
     ) -> Bool {
         for event in events {
             switch event {
+            case .reasoning(let text):
+                guard emit(.reasoning(text)) else { return false }
+
             case .response(let text):
                 let result = stopStringFilter.process(text)
                 if let response = result.text, !emit(.response(response)) {

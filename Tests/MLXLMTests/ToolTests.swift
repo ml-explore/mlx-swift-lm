@@ -1073,6 +1073,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.atem.rawValue == "atem")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
         #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
 

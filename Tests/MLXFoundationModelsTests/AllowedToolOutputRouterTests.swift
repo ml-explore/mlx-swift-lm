@@ -103,6 +103,24 @@ struct AllowedToolOutputRouterTests {
         #expect(!router.isInsideReasoning)
     }
 
+    @Test func implicitReasoningEndFlowsIntoToolParser() {
+        let config = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+            implicitEndDelimiters: ["<tool_call>"])
+        var router = AllowedToolOutputRouter(
+            format: .json, tools: tools,
+            reasoning: (config: config, primedInside: true))
+
+        let events = router.process(
+            #"check live data<tool_call>{"name":"get_weather","arguments":{"location":"Rome"}}</tool_call>"#
+        )
+
+        #expect(events.contains(.reasoning("check live data")))
+        #expect(events.contains { if case .toolCall = $0 { true } else { false } })
+        #expect(!router.isInsideReasoning)
+    }
+
     @Test func eosFlushesNonToolJSONAsResponse() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(router.process(#"{"answer":"hello"}"#) == [.response(#"{"answer":"hello"}"#)])

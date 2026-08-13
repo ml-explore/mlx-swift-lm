@@ -67,8 +67,19 @@ public struct GenerateParameters: Sendable {
     /// Maximum tokens to generate
     public var maxTokens: Int?
 
-    /// Maximum size of the key-value cache. Old entries (except the first 4 tokens) will be overwritten.
-    /// When set, uses ``RotatingKVCache`` instead of ``KVCacheSimple``
+    /// Maximum size of the key-value cache. Old entries are overwritten while retaining
+    /// up to the first 4 tokens when the requested size permits.
+    /// The value must be greater than zero; generation and cache construction throw
+    /// ``KVCacheConfigurationError/invalidCapacity(_:)`` for an invalid value.
+    ///
+    /// When set, full-attention layers that would otherwise use ``KVCacheSimple`` use
+    /// ``RotatingKVCache`` instead. Architecture sliding-window layers use the smaller
+    /// of their model-defined window and this limit. State-space / Mamba / GDN layers
+    /// are not token-windowed and therefore do not consume this budget.
+    ///
+    /// Inspect the effective policy with ``LanguageModel/cacheStatus(parameters:)``
+    /// (also on ``ModelContainer`` / ``ChatSession``). This is a cache policy, not a
+    /// generation stop reason — output token limits still surface as ``GenerateStopReason/length``.
     public var maxKVSize: Int?
 
     /// Typed key-value cache configuration.
@@ -703,7 +714,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         try self.init(
             input: .init(text: .init(tokens: prompt)), model: model,
             cacheStorage: KVCacheStorage(
-                cache ?? model.newCache(parameters: parameters), plan: plan),
+                cache ?? (try model.newCache(parameters: parameters)), plan: plan),
             parameters: parameters, components: components)
     }
 
@@ -731,7 +742,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         try self.init(
             input: input, model: model,
             cacheStorage: KVCacheStorage(
-                cache ?? model.newCache(parameters: parameters), plan: plan),
+                cache ?? (try model.newCache(parameters: parameters)), plan: plan),
             state: state, parameters: parameters, components: components)
     }
 
@@ -750,6 +761,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.y = input.text
         self.cacheStorage = cacheStorage
 
+        try components.validate(parameters: parameters)
         self.processor = components.logitProcessor(parameters: parameters)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
@@ -782,7 +794,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.state = state
         self.y = input.text
         self.cacheStorage = KVCacheStorage(
-            cache ?? model.newCache(parameters: nil), plan: .disabled)
+            try cache ?? model.newCache(parameters: nil), plan: .disabled)
 
         self.processor = processor
         self.sampler = sampler
@@ -1020,9 +1032,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         try self.init(
             input: input, mainModel: mainModel, draftModel: draftModel,
             mainCacheStorage: KVCacheStorage(
-                mainCache ?? mainModel.newCache(parameters: parameters), plan: plan),
+                mainCache ?? (try mainModel.newCache(parameters: parameters)), plan: plan),
             draftCacheStorage: KVCacheStorage(
-                draftCache ?? draftModel.newCache(parameters: parameters), plan: plan),
+                draftCache ?? (try draftModel.newCache(parameters: parameters)), plan: plan),
             mainState: mainState,
             parameters: parameters, numDraftTokens: numDraftTokens,
             components: components)
@@ -1066,6 +1078,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         self.state = mainState
 
         self.sampler = parameters.sampler()
+        try components.validate(parameters: parameters)
         self.processor = components.logitProcessor(parameters: parameters)
 
         self.maxTokens = parameters.maxTokens
@@ -2006,7 +2019,7 @@ public func generateTokens(
 ///     quantization, etc.).
 ///   - context: model context for the main (verifier) model.
 ///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
-///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)``
+///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``
 ///     per round; drafter instances hold no target-derived state and are safe
 ///     to share across iterators. Speculative rounds are staged and committed
 ///     rather than written and rewound, so a sliding-window model speculates
@@ -2141,6 +2154,35 @@ public func generateTokensTask(
         iterator: iterator,
         includeStopToken: includeStopToken,
         wiredMemoryTicket: wiredMemoryTicket
+    )
+}
+
+/// Package-only raw generation for framed response protocols.
+///
+/// The decoder remains owned by the caller; this function only applies its
+/// semantic stop-token policy to the generic generation loop.
+package func generateProtocolTokensTask(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    decoder: (any TokenStreamDecoder)?,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+    let iterator = try TokenIterator(
+        input: input, model: context.model, cache: cache, state: state,
+        parameters: parameters, components: components)
+    return generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: RawTokenLoopHandler(
+            additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
+            receivesStopTokens: decoder?.receivesStopTokens ?? false)
     )
 }
 
@@ -2624,6 +2666,8 @@ extension TokenLoopHandler {
 private struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
+    private static let logger = Logger(
+        subsystem: "mlx-swift-lm", category: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
 
     init(
@@ -2691,6 +2735,12 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) -> TokenLoopDisposition {
         switch event {
+        case .reasoning:
+            // The public Generation stream intentionally exposes only response
+            // text and tool calls. Protocol-aware clients consume reasoning via
+            // the package-level TokenStreamDecoder contract.
+            return .more
+
         case .response(let response):
             if case .terminated = emit(.chunk(response)) {
                 return .cancelled
@@ -2703,6 +2753,10 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             }
             return .more
 
+        case .protocolError(let message):
+            Self.logger.error("\(message)")
+            return .more
+
         case .stop:
             return .stop
         }
@@ -2711,6 +2765,14 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
 
 private struct RawTokenLoopHandler: TokenLoopHandler {
     typealias Output = TokenGeneration
+
+    let additionalStopTokenIDs: Set<Int>
+    let receivesStopTokens: Bool
+
+    init(additionalStopTokenIDs: Set<Int> = [], receivesStopTokens: Bool = false) {
+        self.additionalStopTokenIDs = additionalStopTokenIDs
+        self.receivesStopTokens = receivesStopTokens
+    }
 
     mutating func onToken(
         _ token: Int,

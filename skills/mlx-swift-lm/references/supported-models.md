@@ -166,6 +166,7 @@ for processor modes and grounding tokens.
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
 | `deepseekocr` | DeepSeek-OCR (see section above) |
 | `unlimited-ocr` / `unlimited_ocr` | Unlimited-OCR (R-SWA; stacks on DeepSeek) |
+| `muse_glimmer` | Meta Muse Glimmer (text, image, reasoning, and ATEM tool calls) |
 
 ## Loading Any Model
 

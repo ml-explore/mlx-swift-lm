@@ -109,7 +109,7 @@ struct Gemma4UnifiedTests {
     @Test("Gemma4 Unified text-only prepare chunks prefill")
     func textOnlyPrepareChunksPrefill() throws {
         let model = Gemma4Unified(try tinyTextConfig())
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
         let input = LMInput(tokens: MLXArray([0, 2, 3, 4, 5, 1]).expandedDimensions(axis: 0))
 
         let result = try model.prepare(
@@ -137,7 +137,7 @@ struct Gemma4UnifiedTests {
         let input = LMInput(tokens: MLXArray([0, 2, 3, 4, 5, 1]).expandedDimensions(axis: 0))
 
         func prefill(windowSize: Int) throws -> (logits: MLXArray, cacheOffsets: [Int]) {
-            let cache = model.newCache(parameters: nil)
+            let cache = try model.newCache(parameters: nil)
             let result = try model.prepare(
                 input, cache: cache, state: nil, prefill: .init(stepSize: windowSize))
             guard case .logits(let output) = result else {
@@ -292,7 +292,7 @@ struct Gemma4UnifiedTests {
         )
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil, prefill: .init())
+            input, cache: try model.newCache(parameters: nil), state: nil, prefill: .init())
 
         guard case .logits(let output) = result else {
             Issue.record("Expected Gemma4Unified.prepare to return logits")

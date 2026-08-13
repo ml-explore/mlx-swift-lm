@@ -213,14 +213,10 @@ public class NanbeigeModel: Module, LLMModel {
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         let count = model.cacheSlotCount
-        if let maxKVSize = parameters?.maxKVSize {
-            return (0 ..< count).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
-            }
-        } else {
-            return (0 ..< count).map { _ in KVCacheSimple() }
+        return try (0 ..< count).map { _ in
+            try makeAttentionKVCache(parameters: parameters)
         }
     }
 
@@ -358,7 +354,7 @@ extension NanbeigeModel {
     // the chat template also supports JSON.
     public var toolCallFormat: ToolCallFormat? { .xmlFunction }
 
-    // <think>/</think>, toggled via `enable_thinking` (template default true),
-    // same contract as the Qwen3 family.
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+    // Nanbeige shares Qwen's thinking tags and tool-call boundary, but not the
+    // original Qwen3 family's documented hard-budget transition.
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

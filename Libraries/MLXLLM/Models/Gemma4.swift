@@ -96,8 +96,8 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
         return languageModel.sanitize(weights: sanitized)
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 }
 

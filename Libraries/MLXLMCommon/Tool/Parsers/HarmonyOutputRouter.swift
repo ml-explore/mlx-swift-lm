@@ -19,6 +19,7 @@ package struct HarmonyOutputRouter {
 
     /// Events the generation adapter may emit on the public stream.
     package enum Event: Sendable, Equatable {
+        case reasoning(String)
         case response(String)
         case toolCall(ToolCall)
     }
@@ -27,12 +28,14 @@ package struct HarmonyOutputRouter {
     /// tools were offered for this generation, so no tool calls are accepted.
     private let allowedToolNames: Set<String>?
     private var hasEmittedToolCall = false
+    private var reasoningDetokenizer: NaiveStreamingDetokenizer
     private var responseDetokenizer: NaiveStreamingDetokenizer
     private let tokenizer: any Tokenizer
 
     package init(tokenizer: any Tokenizer, allowedToolNames: Set<String>?) {
         self.tokenizer = tokenizer
         self.allowedToolNames = allowedToolNames
+        self.reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         self.responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
     }
 
@@ -45,6 +48,13 @@ package struct HarmonyOutputRouter {
             return []
 
         case .payload(let header, let token):
+            if header.channel == .analysis {
+                reasoningDetokenizer.append(token: token)
+                if let text = reasoningDetokenizer.next(), !text.isEmpty {
+                    return [.reasoning(text)]
+                }
+                return []
+            }
             guard isPublicResponse(header) else { return [] }
             responseDetokenizer.append(token: token)
             if let text = responseDetokenizer.next(), !text.isEmpty {
@@ -53,6 +63,10 @@ package struct HarmonyOutputRouter {
             return []
 
         case .closed(let frame):
+            if frame.header.channel == .analysis {
+                reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                return []
+            }
             // Reset the response detokenizer between frames so a later final
             // frame starts clean after a tool turn.
             if isPublicResponse(frame.header) {

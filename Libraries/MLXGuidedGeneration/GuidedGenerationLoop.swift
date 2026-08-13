@@ -114,7 +114,7 @@ public enum GuidedGenerationLoop {
         let kvCachePlan = try generationParameters.kvCachePlan()
         let cacheStorage = try kvCachePlan.validated(
             KVCacheStorage(
-                model.newCache(parameters: generationParameters), plan: kvCachePlan))
+                try model.newCache(parameters: generationParameters), plan: kvCachePlan))
         var modelState: LMOutput.State?
 
         // Build EOS token set

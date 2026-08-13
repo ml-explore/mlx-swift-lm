@@ -370,5 +370,5 @@ extension Qwen3MoEModel: LoRAModel {
 // MARK: - Chat conventions
 
 extension Qwen3MoEModel {
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen3 }
 }

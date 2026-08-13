@@ -262,12 +262,14 @@ public class BaichuanM1Model: Module, LLMModel, KVCacheDimensionProvider {
         return outputs
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.enumerated().map { (i, _) in
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try model.layers.enumerated().map { (i, _) in
             let isSWA = configuration.slidingWindowLayers.contains(i)
             let convCache = MambaCache()
-            let kvCache: KVCache =
-                isSWA ? RotatingKVCache(maxSize: configuration.slidingWindow) : KVCacheSimple()
+            let kvCache = try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: configuration.slidingWindow,
+                usesSlidingWindow: isSWA)
             return CacheList(convCache, kvCache)
         }
     }

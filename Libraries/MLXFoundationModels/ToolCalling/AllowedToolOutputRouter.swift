@@ -5,6 +5,8 @@
 
 import MLXLMCommon
 
+/// Detokenized routing for ordinary, unframed tool-call formats.
+/// Framed protocols are selected by `ToolCallFormat` and bypass this router.
 struct AllowedToolOutputRouter {
     enum Event: Sendable, Equatable {
         case reasoning(String)

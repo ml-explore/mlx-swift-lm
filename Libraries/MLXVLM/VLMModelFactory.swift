@@ -109,6 +109,7 @@ public enum VLMTypeRegistry {
         "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
         "unlimited_ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
         "unlimited-ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
+        "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
     ])
 }
 
@@ -150,6 +151,8 @@ public enum VLMProcessorTypeRegistry {
             DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
         "UnlimitedOCRProcessor": create(
             UnlimitedOCRProcessorConfiguration.self, UnlimitedOCRProcessor.init),
+        "MuseGlimmerProcessor": create(
+            MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
     ])
 }
 
@@ -299,6 +302,18 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "document parsing. "
     )
 
+    static public let museGlimmer30B4bit = ModelConfiguration(
+        id: "mlx-community/Muse-Glimmer-30B-4bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<|eot|>", "<|end_of_text|>"],
+        toolCallFormat: .atem,
+        reasoningConfig: ReasoningConfig(
+            startDelimiter: "to=self<|message|>",
+            endDelimiter: "<|eom|>",
+            promptStrategy: .none,
+            isSpecialToken: true)
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
             paligemma3bMix448_8bit,
@@ -320,6 +335,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_5_35B_A3B_4bit,
             deepseekOCR5bit,
             unlimitedOCR6bit,
+            museGlimmer30B4bit,
         ]
     }
 

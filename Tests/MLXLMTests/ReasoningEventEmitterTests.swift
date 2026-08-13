@@ -12,6 +12,11 @@ struct ReasoningEventEmitterTests {
     private static let thinkConfig = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>", promptStrategy: .alwaysOn)
 
+    private static let thinkThenToolConfig = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .alwaysOn,
+        implicitEndDelimiters: ["<tool_call>"])
+
     private typealias Segment = ReasoningEventEmitter.Segment
 
     /// Feeds all chunks through the emitter and appends `finalize()`.
@@ -68,6 +73,24 @@ struct ReasoningEventEmitterTests {
             segments == [
                 .reasoning("a"), .response("mid"), .reasoning("b"), .response("end"),
             ])
+    }
+
+    @Test func implicitEndRemainsInResponseForToolParsing() {
+        let segments = run(
+            config: Self.thinkThenToolConfig,
+            [#"<think>check data<tool_call>{"name":"search"}</tool_call>"#])
+        #expect(reasoningText(segments) == "check data")
+        #expect(
+            responseText(segments)
+                == #"<tool_call>{"name":"search"}</tool_call>"#)
+    }
+
+    @Test func implicitEndCanSpanChunks() {
+        let segments = run(
+            config: Self.thinkThenToolConfig,
+            ["<think>check<tool_", "call>{}</tool_call>"])
+        #expect(reasoningText(segments) == "check")
+        #expect(responseText(segments) == "<tool_call>{}</tool_call>")
     }
 
     // MARK: - Primed state
@@ -201,10 +224,25 @@ struct ReasoningEventEmitterTests {
                 renderedPromptTail: "<|im_start|>assistant\n", config: Self.thinkConfig))
     }
 
+    @Test func emptyStartDelimiterDoesNotPrimeReasoning() {
+        let invalid = ReasoningConfig(
+            startDelimiter: "", endDelimiter: "</think>", promptStrategy: .alwaysOn)
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: "assistant", config: invalid))
+    }
+
     @Test func closedBlockInPromptIsNotInside() {
         #expect(
             !ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: "<think>cached</think>\nanswer", config: Self.thinkConfig))
+    }
+
+    @Test func implicitEndInPromptIsNotInside() {
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: "<think>cached<tool_call>{}",
+                config: Self.thinkThenToolConfig))
     }
 
     @Test func prefillWithMultipleTrailingNewlinesAndSpaces() {
@@ -249,5 +287,13 @@ struct ReasoningEventEmitterTests {
         #expect(!e.hasClosedReasoning)
         _ = e.process("thinking</think>answer")
         #expect(e.hasClosedReasoning)
+    }
+
+    @Test func hasClosedReasoningFiresForImplicitEnd() {
+        var e = ReasoningEventEmitter(config: Self.thinkThenToolConfig, primedInside: true)
+        let segments = e.process("thinking<tool_call>{}")
+        #expect(e.hasClosedReasoning)
+        #expect(!e.isInsideReasoning)
+        #expect(segments == [.reasoning("thinking"), .response("<tool_call>{}")])
     }
 }

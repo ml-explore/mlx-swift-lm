@@ -1584,8 +1584,8 @@ final class TurboQuantIntegrationTests: XCTestCase {
         quantize(model: model, groupSize: 64, bits: 4)
         eval(model)
 
-        func decode(scheme: String?) -> [Int] {
-            var cache = model.newCache(parameters: nil)
+        func decode(scheme: String?) throws -> [Int] {
+            var cache = try model.newCache(parameters: nil)
             let prompt = MLXArray([1, 7, 3, 12, 5, 9, 2, 8])[.newAxis, .ellipsis]
             var logits = model(prompt, cache: cache)
             var tokens: [Int] = []
@@ -1609,8 +1609,8 @@ final class TurboQuantIntegrationTests: XCTestCase {
             return tokens
         }
 
-        let turbo = decode(scheme: "turbo0v4")
-        let reference = decode(scheme: nil)
+        let turbo = try decode(scheme: "turbo0v4")
+        let reference = try decode(scheme: nil)
         XCTAssertEqual(turbo.count, 8)
         // The first decode token is computed from the still-raw cache, so it
         // must match the FP16 run exactly; later tokens may diverge within
@@ -1639,7 +1639,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         let model = Gemma3TextModel(config)
         eval(model)
 
-        var cache = model.newCache(parameters: nil)
+        var cache = try model.newCache(parameters: nil)
         // isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1),
         // so with pattern 2: layers 0, 2 are sliding-window; 1, 3 are global.
         XCTAssertTrue(cache[0] is RotatingKVCache, "layer 0 should be sliding-window")
