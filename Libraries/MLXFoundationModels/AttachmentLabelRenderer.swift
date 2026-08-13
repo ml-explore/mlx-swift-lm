@@ -21,6 +21,13 @@ import Foundation
 /// marker into their prose, so keeping the shape identical means an app can
 /// scrub leaked labels with the same pattern it would use against the on-device
 /// model.
+///
+/// Labels reach the tokenizer as ordinary prompt text, so one whose rendered
+/// form is a tokenizer special token would corrupt the prompt's image
+/// placeholders. ``AttachmentLabelValidator`` rejects those once the tokenizer is
+/// known, and it checks the bracketed form written below rather than the bare
+/// label, because the brackets are part of what gets tokenized: Mistral-family
+/// image tokens are bracketed, so a label of `IMG` renders as `[IMG]`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct AttachmentLabelRenderer {
 

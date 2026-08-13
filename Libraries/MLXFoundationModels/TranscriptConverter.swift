@@ -233,25 +233,47 @@ struct TranscriptConverter {
         }
     }
 
-    /// The distinct attachment labels present in `entries`, in first-seen order.
+    /// A distinct attachment label and the entry that carried it.
+    ///
+    /// The entry rides along so a label rejected by ``AttachmentLabelValidator``
+    /// can name the prompt it came from. `Transcript.Entry` is `Sendable`, so this
+    /// crosses the actor hop into `ModelContainer.perform` unboxed.
+    struct LabeledAttachment: Sendable {
+        let label: String
+        let entry: Transcript.Entry
+    }
+
+    /// The distinct attachment labels present in `entries`, in first-seen order,
+    /// each paired with the entry it was first seen in.
     ///
     /// Only prompt entries are considered: instructions attachments are dropped
     /// outright, matching FoundationModels, so a prompt is the only place an
-    /// image with a label reaches the model. Used to constrain a guided
-    /// `ImageReference` to a label that can actually resolve.
-    static func attachmentLabels(in entries: some Collection<Transcript.Entry>) -> [String] {
+    /// image with a label reaches the model.
+    static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
+        -> [LabeledAttachment]
+    {
         var seen = Set<String>()
-        var ordered: [String] = []
+        var ordered: [LabeledAttachment] = []
         for entry in entries {
             guard case .prompt(let prompt) = entry else { continue }
             for segment in prompt.segments {
                 guard case .attachment(let attachment) = segment,
                     let label = attachment.label
                 else { continue }
-                if seen.insert(label).inserted { ordered.append(label) }
+                if seen.insert(label).inserted {
+                    ordered.append(LabeledAttachment(label: label, entry: entry))
+                }
             }
         }
         return ordered
+    }
+
+    /// The distinct attachment labels present in `entries`, in first-seen order.
+    ///
+    /// Used to constrain a guided `ImageReference` to a label that can actually
+    /// resolve.
+    static func attachmentLabels(in entries: some Collection<Transcript.Entry>) -> [String] {
+        labeledAttachments(in: entries).map(\.label)
     }
 }
 
