@@ -49,7 +49,12 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
     public var vocabularySize: Int { languageModel.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
 
-    @ModuleInfo(key: "language_model") fileprivate var languageModel: Gemma4TextModel
+    /// The text model, exposed at `@_spi(GemmaEncoder)` scope.
+    ///
+    /// This is the type the model factory actually produces for `gemma4_unified`, so an
+    /// encoder-style client tap cannot reach `Gemma4TextModel` without it — exposing only
+    /// the inner types is not sufficient for a real load path.
+    @ModuleInfo(key: "language_model") @_spi(GemmaEncoder) public var languageModel: Gemma4TextModel
 
     public init(_ config: Gemma4Configuration) {
         self._languageModel.wrappedValue = Gemma4TextModel(config.textConfig)

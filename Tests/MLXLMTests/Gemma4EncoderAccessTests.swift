@@ -37,12 +37,22 @@ struct Gemma4EncoderAccessTests {
         }
         """
 
+    /// ⚠️ Builds the model through `Gemma4Model` — the type the factory produces for
+    /// `gemma4_unified` — and reaches the text model via `.languageModel`, rather than
+    /// constructing `Gemma4TextModel` directly. An earlier version of this test did the
+    /// latter and therefore proved the wrong thing: the inner types were reachable while
+    /// `Gemma4Model.languageModel` was still `fileprivate`, so no real load path could get
+    /// to them. A sufficiency test must walk the path production walks.
     private static func makeModel() throws -> Gemma4TextModel {
+        // Wrap the text config the way a real gemma4_unified config.json does, so the
+        // decode path and the resulting type match what the factory produces.
+        let wrapped = #"{"model_type": "gemma4_unified", "vocab_size": 128, "text_config": "#
+            + configJSON + "}"
         let config = try JSONDecoder().decode(
-            Gemma4TextConfiguration.self, from: Data(configJSON.utf8))
-        let model = Gemma4TextModel(config)
+            Gemma4Configuration.self, from: Data(wrapped.utf8))
+        let model = Gemma4Model(config)
         eval(model)
-        return model
+        return model.languageModel
     }
 
     /// The client-side tap this access surface exists for: embedding output plus one state
