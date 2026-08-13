@@ -5,8 +5,15 @@ The simplified LLM/VLM API allows you to load a model and evaluate prompts with 
 For example, this loads a model and asks a question and a follow-on question:
 
 ```swift
+import MLXLLM
+import MLXLMCommon
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
+
 let model = try await loadModel(
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     id: "mlx-community/Qwen3-4B-4bit"
 )
 let session = ChatSession(model)
@@ -30,7 +37,8 @@ a stream:
 
 ```swift
 let model = try await loadModel(
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     id: "mlx-community/Qwen3-4B-4bit"
 )
 let session = ChatSession(model)
@@ -95,7 +103,8 @@ to the `ChatSession`:
 
 ```swift
 let model = try await loadModel(
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
 )
 let session = ChatSession(model)

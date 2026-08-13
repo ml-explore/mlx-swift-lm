@@ -16,6 +16,13 @@ mlx-swift-lm uses Swift concurrency with specialized utilities to handle the uni
 | `ModelContainer` | Thread-safe model wrapper (uses SerialAccessContainer) |
 | `ChatSession` | NOT thread-safe (single task only) |
 
+> **Note:** `SerialAccessContainer`, `SendableBox`, and `AsyncMutex` are **internal**
+> (`package`/`private`) implementation details — they are not part of the public API and
+> cannot be referenced from a consuming module. `ModelContainer`/`EmbedderModelContainer`
+> already use them internally; for your own code, prefer those wrappers or reproduce the
+> pattern with your own type. The snippets below are illustrative of the pattern, not calls
+> you can make against the framework.
+
 ## SerialAccessContainer
 
 Provides exclusive access to state across `async` calls:
@@ -129,8 +136,8 @@ public final class ModelContainer: Sendable {
 ```swift
 // Multiple tasks can call perform() safely
 let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     id: "mlx-community/Qwen3-4B-4bit"
 )
 

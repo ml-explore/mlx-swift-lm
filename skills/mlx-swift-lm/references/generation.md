@@ -24,8 +24,13 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 ```swift
 import MLXLLM
 import MLXLMCommon
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
 
 let context = try await LLMModelFactory.shared.load(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 

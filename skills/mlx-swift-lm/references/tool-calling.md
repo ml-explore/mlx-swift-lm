@@ -29,12 +29,15 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | Format | Models | Example Output |
 |--------|--------|----------------|
 | `.json` | Llama, Qwen, most models | `<tool_call>{"name":"f","arguments":{...}}</tool_call>` |
-| `.lfm2` | LFM2 | `<\|tool_call_start\|>{"name":"f",...}<\|tool_call_end\|>` |
+| `.lfm2` | LFM2 | `<\|tool_call_start\|>[func(arg='value')]<\|tool_call_end\|>` |
 | `.xmlFunction` | Nemotron, Qwen3 Coder, Qwen3.5 | `<tool_call><function=name><parameter=k>v</parameter></function></tool_call>` |
 | `.glm4` | GLM4 | `func<arg_key>k</arg_key><arg_value>v</arg_value>` |
-| `.gemma` | Gemma | `call:name{key:value}` |
+| `.gemma` | Gemma | `<start_function_call>call:name{key:value}<end_function_call>` |
+| `.gemma4` | Gemma4 | `<\|tool_call>call:name{key:<\|"\|>value<\|"\|>}<tool_call\|>` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
+| `.mistral` | Mistral3 | `[TOOL_CALLS]get_weather [ARGS]{"location":"Tokyo"}` |
+| `.llama3` | Llama 3 | `<\|python_tag\|>{"name":"func","parameters":{...}}` |
 
 ## Defining Tools
 

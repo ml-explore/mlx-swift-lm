@@ -7,8 +7,8 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 **Files:**
 - `Libraries/MLXEmbedders/EmbeddingModel.swift`
 - `Libraries/MLXEmbedders/Pooling.swift`
-- `Libraries/MLXEmbedders/Models.swift`
-- `Libraries/MLXEmbedders/Load.swift`
+- `Libraries/MLXEmbedders/ModelFactory.swift`
+- `Libraries/MLXEmbedders/EmbedderModelContainer.swift`
 - `Libraries/MLXEmbedders/Models/Bert.swift`
 - `Libraries/MLXEmbedders/Models/NomicBert.swift`
 
@@ -17,8 +17,11 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 | Type | Purpose |
 |------|---------|
 | `EmbeddingModel` | Protocol for embedding models |
-| `ModelContainer` | Thread-safe embedding model wrapper |
-| `ModelConfiguration` | Model ID and settings |
+| `EmbedderModelFactory` | Loads embedder models/containers (use `.shared`) |
+| `EmbedderModelContainer` | Thread-safe embedder wrapper; `perform` hands you an `EmbedderModelContext` |
+| `EmbedderModelContext` | Holds `configuration`, `model`, `tokenizer`, `pooling` |
+| `EmbedderRegistry` | Registry of pre-registered embedder `ModelConfiguration`s |
+| `ModelConfiguration` | Model ID and settings (from `MLXLMCommon`) |
 | `Pooling` | Pooling strategies for embeddings |
 | `Pooling.Strategy` | mean, cls, first, last, max, none |
 | `EmbeddingModelOutput` | Hidden states and pooled output |
@@ -49,11 +52,15 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 
 ```swift
 import MLXEmbedders
+import MLXLMCommon
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
 
-let config = ModelConfiguration.bge_small
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+let config = EmbedderRegistry.bge_small
+let container = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config
 )
 ```
@@ -62,9 +69,9 @@ let container = try await loadModelContainer(
 
 ```swift
 let config = ModelConfiguration(id: "BAAI/bge-small-en-v1.5")
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+let container = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config
 )
 ```
@@ -72,18 +79,18 @@ let container = try await loadModelContainer(
 ### From Local Directory
 
 ```swift
-let container = try await loadModelContainer(
+let container = try await EmbedderModelFactory.shared.loadContainer(
     from: localModelURL,
-    using: TokenizersLoader()
+    using: #huggingFaceTokenizerLoader()
 )
 ```
 
 ### With Progress Tracking
 
 ```swift
-let container = try await loadModelContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),
+let container = try await EmbedderModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config
 ) { progress in
     print("Download progress: \(progress.fractionCompleted)")
@@ -95,21 +102,23 @@ let container = try await loadModelContainer(
 ### Basic Usage
 
 ```swift
-let container: ModelContainer = ...
+let container: EmbedderModelContainer = ...
 
-let embedding = await container.perform { model, tokenizer, pooler in
+let embedding = await container.perform { context in
     // Encode text
-    let tokens = tokenizer.encode(text: "Hello world")
+    let tokens = context.tokenizer.encode(text: "Hello world")
     let input = MLXArray(tokens).expandedDimensions(axis: 0)
 
     // Get model output
-    let output = model(input)
+    let output = context.model(
+        input, positionIds: nil, tokenTypeIds: nil, attentionMask: nil)
 
     // Pool to single vector
-    let pooled = pooler(output, normalize: true)
+    let pooled = context.pooling(output, normalize: true)
 
     eval(pooled)
-    return pooled
+    // MLXArray is not Sendable; convert before returning from perform
+    return pooled.asArray(Float.self)
 }
 ```
 
@@ -118,9 +127,9 @@ let embedding = await container.perform { model, tokenizer, pooler in
 ```swift
 let texts = ["First text", "Second text", "Third text"]
 
-let embeddings = await container.perform { model, tokenizer, pooler in
+let embeddings = await container.perform { context in
     // Encode all texts
-    let tokensList = texts.map { tokenizer.encode(text: $0) }
+    let tokensList = texts.map { context.tokenizer.encode(text: $0) }
     let maxLen = tokensList.map { $0.count }.max() ?? 0
 
     // Pad to same length
@@ -133,17 +142,19 @@ let embeddings = await container.perform { model, tokenizer, pooler in
                    Array(repeating: 0.0, count: padding.count))
     }
 
-    let input = MLXArray(padded)
-    let attentionMask = MLXArray(mask)
+    let input = MLXArray(padded.flatMap { $0 }, [padded.count, maxLen])
+    let attentionMask = MLXArray(mask.flatMap { $0 }, [mask.count, maxLen])
 
     // Forward pass
-    let output = model(input, attentionMask: attentionMask)
+    let output = context.model(
+        input, positionIds: nil, tokenTypeIds: nil, attentionMask: attentionMask)
 
     // Pool
-    let pooled = pooler(output, mask: attentionMask, normalize: true)
+    let pooled = context.pooling(output, mask: attentionMask, normalize: true)
 
     eval(pooled)
-    return pooled
+    // MLXArray is not Sendable; convert to a Sendable value before returning
+    return pooled.map { $0.asArray(Float.self) }
 }
 ```
 
@@ -165,13 +176,14 @@ public enum Strategy {
 ### Custom Pooling
 
 ```swift
-// Create custom pooler
+// Create a custom pooler
 let pooler = Pooling(strategy: .mean, dimension: 384)
-
-// Or from configuration file
-let pooler = loadPooling(modelDirectory: modelDir)
-// Reads from 1_Pooling/config.json
 ```
+
+The factory loads the model's own pooling automatically (from `1_Pooling/config.json`,
+falling back to the model's built-in strategy), exposed as `context.pooling`. The
+`loadPooling(modelDirectory:model:)` helper that does this is module-internal — use
+`context.pooling` rather than calling it directly.
 
 ### Pooling Options
 
@@ -187,8 +199,15 @@ let pooled = pooler(
 ## EmbeddingModel Protocol
 
 ```swift
-public protocol EmbeddingModel: Module {
+public protocol EmbeddingModel: BaseLanguageModel {
     var vocabularySize: Int { get }
+
+    /// Pooling strategy declared by the model (default: nil).
+    var poolingStrategy: Pooling.Strategy? { get }
+
+    /// Max position embeddings, or nil for length-agnostic encodings (e.g. RoPE).
+    /// Inputs longer than this are truncated internally with a warning.
+    var maxPositionEmbeddings: Int? { get }
 
     func callAsFunction(
         _ inputs: MLXArray,
@@ -196,13 +215,11 @@ public protocol EmbeddingModel: Module {
         tokenTypeIds: MLXArray?,
         attentionMask: MLXArray?
     ) -> EmbeddingModelOutput
-
-    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
 }
 
 public struct EmbeddingModelOutput {
-    let hiddenStates: MLXArray?  // [batch, seq_len, hidden]
-    let pooledOutput: MLXArray?  // [batch, hidden] (CLS pooling)
+    public let hiddenStates: MLXArray?  // [batch, seq_len, hidden]
+    public let pooledOutput: MLXArray?  // [batch, hidden] (CLS pooling)
 }
 ```
 
@@ -257,31 +274,40 @@ print("Similarity: \(similarity)")  // ~0.85
 
 ## Model Configuration
 
+Embedders reuse `MLXLMCommon.ModelConfiguration` (embedding-irrelevant properties such as
+`extraEOSTokens` are simply ignored):
+
 ```swift
 public struct ModelConfiguration: Sendable {
     public enum Identifier: Sendable {
-        case id(String)          // HuggingFace ID
-        case directory(URL)      // Local path
+        case id(String, revision: String = "main")  // HuggingFace ID
+        case directory(URL)                          // Local path
     }
 
     public var id: Identifier
-    public var name: String
-    public let tokenizerId: String?       // Alternate tokenizer
-    public let overrideTokenizer: String? // Override tokenizer class
+    public var name: String { get }              // repo id or path-based name
+    public let tokenizerSource: TokenizerSource? // load tokenizer from a different source
+    // ...LLM/VLM-specific fields (defaultPrompt, extraEOSTokens, ...) are ignored by embedders
 }
 ```
 
 ### Registry
 
+Pre-registered embedders live on `EmbedderRegistry`; lookups go through
+`EmbedderRegistry.shared`:
+
 ```swift
-// Get registered model
-let config = await ModelConfiguration.configuration(id: "bge-small")
+// Pre-registered configuration
+let config = EmbedderRegistry.bge_small
+
+// Get a registered model by id
+let config = EmbedderRegistry.shared.configuration(id: "BAAI/bge-small-en-v1.5")
 
 // List all models
-let models = await ModelConfiguration.models
+let models = EmbedderRegistry.shared.models
 
-// Register custom model
-await ModelConfiguration.register(configurations: [myConfig])
+// Register custom models
+EmbedderRegistry.shared.register(configurations: [myConfig])
 ```
 
 ## Supported Architectures

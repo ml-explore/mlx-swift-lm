@@ -95,12 +95,13 @@ becomes:
 ```swift
 import MLXLLM
 import MLXLMCommon
-
-import IntegrationPackage
+import MLXHuggingFace
+import HuggingFace
 
 let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
 let model = try await loadModelContainer(
-    from: HubClient(),
+    from: #hubDownloader(HubClient()),
+    using: #huggingFaceTokenizerLoader(),
     configuration: modelConfiguration
 )
 
@@ -209,7 +210,8 @@ Loading with a model factory:
 
 ```swift
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: modelConfiguration
 )
 ```
@@ -243,11 +245,11 @@ let text = tokenizer.decode(tokenIds: ids)
 
 ### Loading API
 
-The `hub` parameter (previously `HubApi`) has been replaced with `from` (any `Downloader` or `URL` for a local directory). Functions that previously defaulted to `defaultHubApi` no longer have a default – callers must either pass a `Downloader` explicitly or use the convenience methods in `MLXLMHuggingFace` / `MLXEmbeddersHuggingFace`, which default to `HubClient.default`.
+The `hub` parameter (previously `HubApi`) has been replaced with `from` (any `Downloader` or `URL` for a local directory). Functions that previously defaulted to `defaultHubApi` no longer have a default – callers must pass a `Downloader` explicitly (for example the `#hubDownloader()` macro from `MLXHuggingFace`) or use the `#huggingFaceLoadModelContainer` / `#huggingFaceLoadModel` convenience macros.
 
-For most users who were using the default Hub client, adding `import MLXLMHuggingFace` or `import MLXEmbeddersHuggingFace` and using the convenience overloads is sufficient.
+For most users who were using the default Hub client, adding `import MLXHuggingFace` (together with `import HuggingFace` and `import Tokenizers`) and using `#hubDownloader()` + `#huggingFaceTokenizerLoader()` — or the `#huggingFaceLoadModelContainer` macro — is sufficient.
 
-Users who were passing a custom `HubApi` instance should create a `HubClient` instead and pass it as the `from` parameter. `HubClient` conforms to `Downloader` via `MLXLMHuggingFace`.
+Users who were passing a custom `HubApi` instance should create a `HuggingFace.HubClient` instead and wrap it with `#hubDownloader(_:)` to pass as the `from` parameter.
 
 ### `ModelConfiguration`
 
@@ -263,7 +265,7 @@ Users who were passing a custom `HubApi` instance should create a `HubClient` in
 
 ### `defaultHubApi`
 
-The `defaultHubApi` global has been removed. Hugging Face Hub access is now provided by `HubClient.default` from the `HuggingFace` module.
+The `defaultHubApi` global has been removed. Hugging Face Hub access is now provided by the `#hubDownloader()` macro from `MLXHuggingFace`, which wraps a default `HuggingFace.HubClient`.
 
 ### Low-level APIs
 
