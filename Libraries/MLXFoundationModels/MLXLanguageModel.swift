@@ -963,13 +963,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             let messages = collected
 
-            // Vision capability gate (adapter-side). Labeled image
-            // attachments arrive as public `.attachment` segments that
-            // the SDK's own vision guard never inspects, so the adapter
-            // is the only place that can enforce `.vision` for this path.
-            // Throw the same typed error the SDK would, before loading
-            // any weights, so a model declared without `.vision` fails
-            // fast and identically across the tool / schema / plain paths.
+            // Vision capability gate (adapter-side). A labeled image arrives as
+            // a public `.attachment` segment that the SDK's own vision guard
+            // never inspects, so the adapter is the only place that can enforce
+            // `.vision` for this path. Throw the same typed error the SDK would,
+            // before loading any weights, so a model declared without `.vision`
+            // fails fast and identically across the tool / schema / plain paths.
+            //
+            // This sees prompt attachments only, because conversion above drops
+            // instructions and tool-output attachments before they become message
+            // images. So a request whose only image is in its instructions passes
+            // this gate even without `.vision` declared; the image was already
+            // discarded and never reaches the model. An app can observe that: the
+            // same request threw `unsupportedCapability(.vision)` when an
+            // instructions image was still carried into the system message and
+            // counted here.
             if !model.capabilities.contains(.vision),
                 messages.contains(where: { !$0.images.isEmpty })
             {
