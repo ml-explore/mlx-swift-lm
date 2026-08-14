@@ -27,21 +27,25 @@ struct TranscriptConverter {
         try entries.compactMap { entry -> Chat.Message? in
             switch entry {
             case .instructions(let instructions):
-                // System message for model instructions. Labeled image
-                // attachments ride along as message images, mirroring the
-                // prompt path, so the `.vision` gate sees them and they are
-                // not silently dropped. The legend is not applied here yet
-                // (that follows in a later change); only the image inputs
-                // themselves, orientation-corrected, are carried over.
+                // System message for model instructions. Attachments are
+                // dropped, matching FoundationModels, which ignores images in
+                // an instructions entry (rdar://163210652). Dropping is also the
+                // only safe option here: the Qwen3-VL and Gemma4 templates emit
+                // no vision placeholder for system content, while `UserInput`
+                // still collects the pixels from every message, so carrying them
+                // would leave the placeholder and image counts disagreeing.
                 let text = extractText(from: instructions.segments)
-                let images = try extractLabeledImages(from: instructions.segments, in: entry)
-                    .map(\.image)
-                guard text != nil || !images.isEmpty else {
+                let dropped = try extractLabeledImages(from: instructions.segments, in: entry)
+                if !dropped.isEmpty {
                     logger.warning(
-                        "Skipping instructions entry with no text or image content")
+                        "Dropping \(dropped.count, privacy: .public) image attachment(s) in an instructions entry; attach images to a prompt instead so the model receives them"
+                    )
+                }
+                guard let text else {
+                    logger.warning("Skipping instructions entry with no text content")
                     return nil
                 }
-                return Chat.Message.system(text ?? "", images: images)
+                return Chat.Message.system(text)
 
             case .prompt(let prompt):
                 // User message for prompts. Labeled image attachments ride
@@ -142,6 +146,15 @@ struct TranscriptConverter {
                 return textSegment.content
             case .structure(let structuredSegment):
                 return structuredSegment.content.jsonString
+            case .attachment(let attachment):
+                // FoundationModels renders tool-output attachments; this adapter
+                // does not yet. Warn rather than logging at debug so a dropped
+                // image is visible in the log instead of silently missing from
+                // the model's view.
+                logger.warning(
+                    "Dropping an attachment in tool output (label: \(attachment.label ?? "none", privacy: .public)); tool-output images are not yet forwarded to the model"
+                )
+                return nil
             default:
                 logger.debug("Skipping unsupported tool-output segment")
                 return nil
@@ -222,10 +235,10 @@ struct TranscriptConverter {
 
     /// The distinct attachment labels present in `entries`, in first-seen order.
     ///
-    /// Only prompt entries are considered, because those are the only images
-    /// that reach the model: attachments in an instructions entry are dropped,
-    /// matching FoundationModels. Used to constrain a guided `ImageReference` to
-    /// a label that can actually resolve.
+    /// Only prompt entries are considered: instructions attachments are dropped
+    /// outright, matching FoundationModels, so a prompt is the only place an
+    /// image with a label reaches the model. Used to constrain a guided
+    /// `ImageReference` to a label that can actually resolve.
     static func attachmentLabels(in entries: some Collection<Transcript.Entry>) -> [String] {
         var seen = Set<String>()
         var ordered: [String] = []

@@ -482,9 +482,14 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testInstructionsImageAttachmentBecomesSystemMessageImage() throws {
+    func testInstructionsImageAttachmentIsDropped() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
+        // FoundationModels drops images attached to instructions (see
+        // rdar://163210652), and both Qwen3-VL and Gemma4 mishandle a system
+        // message that carries images: the templates emit no vision placeholder
+        // for them while the processor is still handed the pixels, so the counts
+        // disagree. Dropping matches the framework and avoids that mismatch.
         let attachment = Transcript.AttachmentSegment(
             content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
             label: "reference")
@@ -501,7 +506,22 @@ struct TranscriptConverterTests {
         #expect(messages.count == 1)
         #expect(messages[0].role == .system)
         #expect(messages[0].content == "Use this reference:")
-        #expect(messages[0].images.count == 1)
+        #expect(messages[0].images.isEmpty)
+    }
+
+    @Test
+    func testInstructionsWithOnlyAnImageProducesNoMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let attachment = Transcript.AttachmentSegment(
+            content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+            label: "reference")
+        let instructions = Transcript.Instructions(
+            segments: [.attachment(attachment)], toolDefinitions: [])
+
+        let messages = try TranscriptConverter.mlxMessages(for: [.instructions(instructions)])
+
+        #expect(messages.isEmpty)
     }
 
     @Test
