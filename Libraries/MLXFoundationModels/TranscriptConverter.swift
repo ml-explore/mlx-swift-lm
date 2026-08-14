@@ -269,8 +269,9 @@ struct TranscriptConverter {
 
     /// The distinct attachment labels present in `entries`, in first-seen order.
     ///
-    /// Used to constrain a guided `ImageReference` to a label that can actually
-    /// resolve.
+    /// `ImageReference.attachmentLabel` is an unconstrained `String`, so nothing
+    /// requires a generated label to be one of these; this is just the set an
+    /// app can look an image up by.
     static func attachmentLabels(in entries: some Collection<Transcript.Entry>) -> [String] {
         labeledAttachments(in: entries).map(\.label)
     }

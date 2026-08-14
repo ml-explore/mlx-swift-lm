@@ -26,7 +26,8 @@ import MLXLMCommon
 /// misaligns the feature scatter and the rotary position counts. Rejecting the
 /// label is the only outcome that keeps the label usable as an identifier: a
 /// silently stripped or rewritten label no longer matches what the app looks up,
-/// or what a guided `ImageReference` was pinned to.
+/// or what a model-generated `ImageReference.attachmentLabel` would need to
+/// equal to resolve back to it.
 ///
 /// ## The rule is about special tokens, not image placeholders
 ///

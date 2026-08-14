@@ -167,8 +167,8 @@ struct VisionIntegrationTests {
 
         // Greedy for the same reason as the test above: which of two labels the
         // model picks is a choice, and sampling makes that choice unstable.
-        // Constraining the label to the two present ones stops the model
-        // inventing a name, but it does not stop it choosing the wrong one.
+        // Nothing constrains the label to the two present ones, so this only
+        // rules out sampling noise, not the model inventing or misspelling a name.
         let response = try await session.respond(
             generating: ColorReport.self,
             options: GenerationOptions(samplingMode: .greedy)
@@ -178,9 +178,14 @@ struct VisionIntegrationTests {
             Attachment(VisionTestImages.solidColor(.blue)).label("Photo_D4E5F6")
         }
 
-        // The schema pins the label to the transcript's labels, so this must be
-        // one of them and must resolve. Without that constraint the model is
-        // free to paraphrase and the lookup returns nil.
+        // The prompt names each image as `[label]` (see
+        // AttachmentLabelRenderer), matching what FoundationModels itself emits,
+        // and `ImageReference.resolved(in:)` matches that label exactly before
+        // falling back to extracting a bracketed substring. Nothing constrains
+        // what the model writes here: `attachmentLabel` is an unconstrained
+        // `String` in FoundationModels, so a model that paraphrased the label
+        // instead of echoing it would fail the assertion below rather than being
+        // prevented from paraphrasing.
         #expect(response.content.image.attachmentLabel == "Photo_D4E5F6")
         let resolved = response.content.image.resolved(in: session.transcript)
         #expect(resolved != nil, "expected the reference to resolve to an attachment")
