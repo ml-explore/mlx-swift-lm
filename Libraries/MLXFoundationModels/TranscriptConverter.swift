@@ -3,8 +3,10 @@
 #if FoundationModelsIntegration
 #if canImport(FoundationModels, _version: 2)
 
+import CoreImage
 import Foundation
 import FoundationModels
+import ImageIO
 import MLXLMCommon
 import os.log
 
@@ -19,18 +21,21 @@ struct TranscriptConverter {
     ///
     /// - Parameter entries: Transcript entries from FoundationModels
     /// - Returns: Array of MLX Chat.Message objects
-    static func mlxMessages(for entries: some Collection<Transcript.Entry>) -> [Chat
+    static func mlxMessages(for entries: some Collection<Transcript.Entry>) throws -> [Chat
         .Message]
     {
-        entries.compactMap { entry -> Chat.Message? in
+        try entries.compactMap { entry -> Chat.Message? in
             switch entry {
             case .instructions(let instructions):
                 // System message for model instructions. Labeled image
                 // attachments ride along as message images, mirroring the
                 // prompt path, so the `.vision` gate sees them and they are
-                // not silently dropped.
+                // not silently dropped. The legend is not applied here yet
+                // (that follows in a later change); only the image inputs
+                // themselves, orientation-corrected, are carried over.
                 let text = extractText(from: instructions.segments)
-                let images = extractImages(from: instructions.segments)
+                let images = try extractLabeledImages(from: instructions.segments, in: entry)
+                    .map(\.image)
                 guard text != nil || !images.isEmpty else {
                     logger.warning(
                         "Skipping instructions entry with no text or image content")
@@ -39,16 +44,23 @@ struct TranscriptConverter {
                 return Chat.Message.system(text ?? "", images: images)
 
             case .prompt(let prompt):
-                // User message for prompts. Labeled image attachments
-                // (public `.attachment` segments) ride along as message
-                // images; text is still concatenated as before.
+                // User message for prompts. Labeled image attachments ride
+                // along as message images, and the renderer names them in the
+                // text so the model can refer to a specific picture and quote
+                // the label back.
                 let text = extractText(from: prompt.segments)
-                let images = extractImages(from: prompt.segments)
-                guard text != nil || !images.isEmpty else {
+                let labeled = try extractLabeledImages(from: prompt.segments, in: entry)
+                let legend = AttachmentLabelRenderer.default.legend(
+                    for: labeled.map(\.label))
+                // Legend first: the images render ahead of the text, so the
+                // legend's "above" is accurate and the caller's own text stays
+                // last, closest to the model's turn.
+                let content = [legend, text].compactMap { $0 }.joined(separator: "\n")
+                guard !content.isEmpty || !labeled.isEmpty else {
                     logger.warning("Skipping prompt entry with no text or image content")
                     return nil
                 }
-                return Chat.Message.user(text ?? "", images: images)
+                return Chat.Message.user(content, images: labeled.map(\.image))
 
             case .response(let response):
                 // Assistant message for previous responses
@@ -161,24 +173,72 @@ struct TranscriptConverter {
         return combined.isEmpty ? nil : combined
     }
 
-    /// Extracts image inputs from image attachment segments.
+    /// One image input plus its label, in segment order.
+    private struct LabeledImage {
+        let image: UserInput.Image
+        let label: String?
+    }
+
+    /// Extracts image inputs and their labels from attachment segments.
     ///
-    /// Each image attachment is handed over as its already-decoded
-    /// `CIImage`. Segments that carry no image produce no input.
+    /// Two things happen here that the naive reading of the SDK misses. First,
+    /// `Transcript.ImageAttachment` keeps `orientation` as metadata and hands
+    /// back unrotated pixels from `ciImage`, so the transform has to be applied
+    /// here or an attachment created with an explicit orientation reaches the
+    /// model sideways. FoundationModels itself passes the whole image buffer,
+    /// orientation included, down to its own renderer. Second, the label rides
+    /// along so the message text can name each image.
     ///
-    /// - Parameter segments: Array of transcript segments
-    /// - Returns: The image inputs found, in segment order
-    private static func extractImages(from segments: [Transcript.Segment])
-        -> [UserInput.Image]
-    {
-        segments.compactMap { segment -> UserInput.Image? in
-            guard case .attachment(let attachment) = segment,
-                case .image(let imageAttachment) = attachment.content
-            else {
-                return nil
+    /// - Parameters:
+    ///   - segments: Array of transcript segments
+    ///   - entry: The entry these segments belong to, for error reporting
+    /// - Returns: The labeled image inputs found, in segment order
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
+    ///   attachment carries content this adapter cannot render. FoundationModels
+    ///   throws the same error for its own non-image attachment case, and the
+    ///   `@unknown default` makes a future SDK attachment kind surface as a
+    ///   typed error rather than a silently missing input.
+    private static func extractLabeledImages(
+        from segments: [Transcript.Segment],
+        in entry: Transcript.Entry
+    ) throws -> [LabeledImage] {
+        try segments.compactMap { segment -> LabeledImage? in
+            guard case .attachment(let attachment) = segment else { return nil }
+            switch attachment.content {
+            case .image(let imageAttachment):
+                return LabeledImage(
+                    image: .ciImage(imageAttachment.ciImage.oriented(imageAttachment.orientation)),
+                    label: attachment.label)
+            @unknown default:
+                throw LanguageModelError.unsupportedTranscriptContent(
+                    LanguageModelError.UnsupportedTranscriptContent(
+                        unsupportedContent: [entry],
+                        debugDescription:
+                            "This attachment carries content the MLX adapter cannot render. Only image attachments are supported."
+                    ))
             }
-            return .ciImage(imageAttachment.ciImage)
         }
+    }
+
+    /// The distinct attachment labels present in `entries`, in first-seen order.
+    ///
+    /// Only prompt entries are considered, because those are the only images
+    /// that reach the model: attachments in an instructions entry are dropped,
+    /// matching FoundationModels. Used to constrain a guided `ImageReference` to
+    /// a label that can actually resolve.
+    static func attachmentLabels(in entries: some Collection<Transcript.Entry>) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for entry in entries {
+            guard case .prompt(let prompt) = entry else { continue }
+            for segment in prompt.segments {
+                guard case .attachment(let attachment) = segment,
+                    let label = attachment.label
+                else { continue }
+                if seen.insert(label).inserted { ordered.append(label) }
+            }
+        }
+        return ordered
     }
 }
 

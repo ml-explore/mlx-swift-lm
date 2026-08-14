@@ -953,7 +953,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             model: MLXLanguageModel,
             streamingInto channel: LanguageModelExecutorGenerationChannel
         ) async throws {
-            var collected = TranscriptConverter.mlxMessages(for: request.transcript)
+            var collected = try TranscriptConverter.mlxMessages(for: request.transcript)
             // MLX tokenizer crashes on empty chat input; provide a fallback.
             if collected.isEmpty {
                 collected = [Chat.Message.user("")]
