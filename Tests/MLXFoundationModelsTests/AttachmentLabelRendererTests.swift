@@ -54,7 +54,8 @@ struct AttachmentLabelRendererTests {
         #expect(
             AttachmentLabelRenderer.default.legend(
                 for: ["Photo_A1B2C3", "Photo_D4E5F6", "Photo_7788AA"])
-                == "The 3 images above are, in order: [Photo_A1B2C3], [Photo_D4E5F6], [Photo_7788AA].")
+                == "The 3 images above are, in order: [Photo_A1B2C3], [Photo_D4E5F6], [Photo_7788AA]."
+        )
     }
 }
 
