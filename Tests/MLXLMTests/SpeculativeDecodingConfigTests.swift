@@ -134,6 +134,8 @@ private func makeDraftModelContainer() -> ModelContainer {
 }
 
 private final class ConfigTestMTPDrafter: Module, MTPDrafterModel {
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
     func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,

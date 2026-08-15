@@ -220,6 +220,8 @@ private final class EarlyTerminationMTPDrafter: Module, StatefulMTPDrafterModel 
     var requiresPromptPrefill: Bool { true }
     var requiresGreedySampling: Bool { true }
 
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
     func makeState(parameters _: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])
     }

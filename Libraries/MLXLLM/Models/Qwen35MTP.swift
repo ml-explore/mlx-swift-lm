@@ -106,6 +106,16 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
                 preconvertedNorms: preconvertedNorms))
     }
 
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard target is Qwen35Model || target is Qwen35TextModel else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35MTPDraftModel",
+                expected: "a Qwen3.5 text target",
+                actual: String(describing: type(of: target))
+            )
+        }
+    }
+
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: mtp.newCache())
     }
