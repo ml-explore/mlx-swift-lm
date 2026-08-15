@@ -1194,13 +1194,24 @@ public final class ChatSession {
                                 !$0.shouldUseSpeculativeDecoding && $0.action != .fail
                             } ?? false
 
-                        let usesMTP: Bool
+                        let mtpDrafter: (any MTPDrafterModel)?
                         if let speculativeDecoding,
-                            case .mtp = speculativeDecoding.strategy
+                            case .mtp(let drafterContainer, _) = speculativeDecoding.strategy
                         {
-                            usesMTP = true
+                            mtpDrafter = await drafterContainer.perform { context in
+                                SendableBox(context.model)
+                            }.consume()
                         } else {
-                            usesMTP = false
+                            mtpDrafter = nil
+                        }
+                        let usesMTP = mtpDrafter != nil
+                        let speculationIsEligibleForParameters: Bool
+                        if let mtpDrafter {
+                            speculationIsEligibleForParameters =
+                                !mtpDrafter.requiresGreedySampling
+                                || generateParameters.temperature == 0
+                        } else {
+                            speculationIsEligibleForParameters = speculativeDecoding != nil
                         }
 
                         var reusedMainCacheWithoutDraft = false
@@ -1252,7 +1263,7 @@ public final class ChatSession {
                                 previousGenerationUncommittedTokens:
                                     currentConversation.uncommittedTokens,
                                 structuredToolCallCount: structuredToolCallCount,
-                                usesSpeculativeDecoding: speculativeDecoding != nil,
+                                usesSpeculativeDecoding: speculationIsEligibleForParameters,
                                 canSplitPreparedMedia: model is PreparedInputSplitting)
                             let cacheState = PromptCacheState(
                                 cachedTokens: cachedTokenIds,
@@ -1267,7 +1278,9 @@ public final class ChatSession {
                             // a warm main-cache suffix. Rebuild from the complete rendered prompt
                             // for every text generation and every automatic tool restart.
                             var decision =
-                                if usesMTP && !carriesPreparedMedia {
+                                if usesMTP && speculationIsEligibleForParameters
+                                    && !carriesPreparedMedia
+                                {
                                     PromptCacheReuseDecision.rebuild
                                 } else {
                                     promptCachePolicy.decide(turn: turn, cache: cacheState)
@@ -1365,7 +1378,7 @@ public final class ChatSession {
 
                             reusedMainCacheWithoutDraft =
                                 decision.reusesCachedPrefix
-                                && speculativeDecoding != nil
+                                && speculationIsEligibleForParameters
                                 && !willFallBackBeforeLoadingDraft
                                 && draftKVCache == nil
 
@@ -1429,15 +1442,12 @@ public final class ChatSession {
                             requiresMainOnlyContinuation = true
                         }
 
-                        if speculativeDecoding != nil, requiresMainOnlyContinuation {
+                        if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
                             generation = try defaultGeneration()
                         } else if let speculativeDecoding,
-                            case .mtp(let drafterContainer, let blockSize) =
-                                speculativeDecoding.strategy
+                            case .mtp(_, let blockSize) = speculativeDecoding.strategy,
+                            let drafter = mtpDrafter
                         {
-                            let drafter = await drafterContainer.perform { context in
-                                SendableBox(context.model)
-                            }.consume()
                             let iterator = try MTPSpeculativeTokenIterator(
                                 input: input,
                                 mainModel: model,
