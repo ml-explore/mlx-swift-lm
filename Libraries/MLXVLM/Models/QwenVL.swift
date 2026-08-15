@@ -412,7 +412,15 @@ public struct QwenVL {
         var rowCounts: [Int] = []
         padCounts.reserveCapacity(frames.count)
         rowCounts.reserveCapacity(frames.count)
+        // Still images only. A `t > 1` grid is a temporal stack, and the reason
+        // ``splitPreparedInput`` refuses video applies to any temporal grid whatever
+        // payload carries it: the vision full-attention mask mis-accumulates
+        // `cuSeqlens` across temporal slices, so those rows are not isolated from the
+        // rest of the buffer and dropping earlier rows changes the features of the
+        // rows that are kept. The video guard catches the usual case; this catches a
+        // temporal grid handed in as an image.
         for frame in frames {
+            guard frame.t == 1 else { return nil }
             guard frame.product > 0, frame.product % mergeLength == 0 else { return nil }
             padCounts.append(frame.product / mergeLength)
             rowCounts.append(frame.product)

@@ -210,8 +210,55 @@ public class ChatSessionTests: XCTestCase {
             base(input, cache: cache, state: state)
         }
 
-        func newCache(parameters: GenerateParameters?) -> [KVCache] {
-            base.newCache(parameters: parameters)
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
+        }
+    }
+
+    /// A conformer that honors the protocol's shape but not its contract: it returns
+    /// a suffix starting `extraDrop` tokens past the boundary it was handed. It never
+    /// returns `nil`, so a nil-only check would let it through.
+    private final class MisSplittingLanguageModel: Module, LanguageModel,
+        PreparedInputSplitting
+    {
+        let base: any LanguageModel
+        let extraDrop: Int
+
+        init(_ base: any LanguageModel, extraDrop: Int) {
+            self.base = base
+            self.extraDrop = extraDrop
+            super.init()
+        }
+
+        func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+            -> LMInput?
+        {
+            let ids = input.text.tokens.asArray(Int.self)
+            let wrongStart = prefixTokenCount + extraDrop
+            guard wrongStart > 0, wrongStart < ids.count else { return nil }
+            return LMInput(
+                text: .init(tokens: MLXArray(Array(ids[wrongStart...]))),
+                image: input.image)
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            try base.prepare(
+                LMInput(tokens: input.text.tokens),
+                cache: cache,
+                state: state,
+                prefill: prefill)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
         }
     }
 
@@ -855,6 +902,52 @@ public class ChatSessionTests: XCTestCase {
         let thirdRenderedLengthValue = await lengthIterator.next()
         let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
         XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
+    }
+
+    /// Returning *a* suffix is not enough. A conformer that returns the wrong tokens
+    /// must be treated exactly like one that declines: the ledger advances to
+    /// `representedTokens` on the strength of the requested boundary, so accepting
+    /// any other suffix would leave the record describing a cache never built.
+    func testAppendOnlyMediaRebuildsWhenModelSplitsAtTheWrongBoundary() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+
+        var context = Self.makeModel(
+            processor: processor,
+            configuration: processor.configuration,
+            tokenizer: processor.tokenizer)
+        context.model = MisSplittingLanguageModel(context.model, extraDrop: 2)
+
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        _ = await lengthIterator.next()
+
+        for try await _ in session.streamDetails(to: "describe it") {}
+        _ = await lengthIterator.next()
+
+        var newMediaInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(
+            to: "now inspect this",
+            role: .user,
+            images: [.array(MLXArray([Float(1)]))],
+            videos: [])
+        {
+            if let info = item.info {
+                newMediaInfo = info
+            }
+        }
+        let thirdRenderedLengthValue = await lengthIterator.next()
+        let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
+
+        XCTAssertEqual(
+            newMediaInfo?.promptTokenCount, thirdRenderedLength,
+            "a wrong-boundary split must downgrade to a full rebuild")
     }
 
     func testLongestCommonPrefixTrimmingFallsBackForHistoricalMedia() async throws {

@@ -215,6 +215,33 @@ final class QwenVLPreparedInputSplitTests: XCTestCase {
 
     // MARK: - Refusals
 
+    /// A temporal grid (`t > 1`) carried in the *image* payload is refused for the
+    /// same reason video is: the vision full-attention mask mis-accumulates
+    /// `cuSeqlens` across temporal slices, so those rows are not independently
+    /// reusable. Refused whether the temporal frame is dropped with the prefix or
+    /// retained in the suffix.
+    func testSplitRefusesTemporalImageFrame() throws {
+        let dropped = THW(2, 4, 4)
+        let plain = THW(1, 2, 4)
+
+        let prefixIds = turnTokens(frame: dropped, leadingText: 3, trailingText: 4)
+        let suffixIds = turnTokens(frame: plain, leadingText: 2, trailingText: 3)
+        XCTAssertNil(
+            split(
+                input(ids: prefixIds + suffixIds, frames: [dropped, plain]),
+                droppingFirst: prefixIds.count),
+            "a temporal frame in the cached prefix must refuse")
+
+        let retainedPrefixIds = turnTokens(frame: plain, leadingText: 3, trailingText: 4)
+        let retainedSuffixIds = turnTokens(frame: dropped, leadingText: 2, trailingText: 3)
+        XCTAssertNil(
+            split(
+                input(
+                    ids: retainedPrefixIds + retainedSuffixIds, frames: [plain, dropped]),
+                droppingFirst: retainedPrefixIds.count),
+            "a temporal frame retained in the suffix must refuse")
+    }
+
     /// A boundary inside a vision block would hand the suffix a partial run of
     /// placeholders. The split must decline rather than guess.
     func testSplitRefusesBoundaryInsideAnImageBlock() throws {
