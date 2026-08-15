@@ -1116,11 +1116,18 @@ public final class ChatSession {
                         } else {
                             speculationIsEligibleForParameters = speculativeDecoding != nil
                         }
+                        if let mtpDrafter, speculationIsEligibleForParameters {
+                            try mtpDrafter.validateCompatibility(with: model)
+                        }
+
+                        let mtpRequiresPromptPrefill =
+                            mtpDrafter?.requiresPromptPrefill == true
 
                         var reusedMainCacheWithoutDraft = false
                         // A raw prompt cache has no transcript from which Qwen can rebuild its
                         // private MTP cache. Preserve that cache and continue with the target only.
-                        var requiresMainOnlyContinuation = usesMTP && conversation == nil
+                        var requiresMainOnlyContinuation =
+                            mtpRequiresPromptPrefill && conversation == nil
                         // Prompt tokens this turn does not prefill because the cache
                         // already represents them. Reported to the caller on `.info`.
                         var cachedPromptTokenCount = 0
@@ -1172,11 +1179,11 @@ public final class ChatSession {
                                 isTrimmable: canTrimPromptCache(kvCache.cache)
                                     && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
 
-                            // Qwen's drafter state is iterator-owned and currently cannot consume
-                            // a warm main-cache suffix. Rebuild from the complete rendered prompt
-                            // for every text generation and every automatic tool restart.
+                            // A drafter with private iterator-owned state cannot consume a warm
+                            // main-cache suffix. Stateless drafters such as Gemma can follow the
+                            // ordinary prompt-cache policy and reuse that suffix.
                             var decision =
-                                if usesMTP && speculationIsEligibleForParameters
+                                if mtpRequiresPromptPrefill && speculationIsEligibleForParameters
                                     && !carriesPreparedMedia
                                 {
                                     PromptCacheReuseDecision.rebuild
@@ -1293,7 +1300,8 @@ public final class ChatSession {
                         // there is nothing to re-prefill the draft from, and handing mismatched
                         // caches to the iterator would throw rather than fall back.
                         let draftCacheIsRecoverable =
-                            draftKVCache != nil || kvCache.processedTokenCount == 0
+                            (usesMTP && !mtpRequiresPromptPrefill)
+                            || draftKVCache != nil || kvCache.processedTokenCount == 0
                             || reusedMainCacheWithoutDraft
                         if carriesPreparedMedia || !draftCacheIsRecoverable {
                             // Drop the draft cache as `.appendSuffixToMain` does: retaining it
