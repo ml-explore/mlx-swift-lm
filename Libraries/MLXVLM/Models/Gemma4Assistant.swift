@@ -201,8 +201,14 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         super.init()
     }
 
-    public func isCompatible(with target: any LanguageModel) -> Bool {
-        target is Gemma4BackboneProviding
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard target is any Gemma4BackboneProviding else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Gemma4AssistantDraftModel",
+                expected: "a Gemma 4 VLM target",
+                actual: String(describing: type(of: target))
+            )
+        }
     }
 
     public func draftBlock(
