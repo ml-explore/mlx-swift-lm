@@ -14,6 +14,8 @@ import Testing
 private final class MockMTPDrafter: Module, MTPDrafterModel {
     private(set) var draftCallCount = 0
 
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
     func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
