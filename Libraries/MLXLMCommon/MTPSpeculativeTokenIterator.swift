@@ -131,6 +131,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         blockSize: Int,
         components: GenerationComponents = .init()
     ) throws {
+        try drafter.validateCompatibility(with: mainModel)
+
         let kvCachePlan = try parameters.kvCachePlan()
         try self.init(
             input: input,
@@ -152,18 +154,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         blockSize: Int,
         components: GenerationComponents = .init()
     ) throws {
+        try drafter.validateCompatibility(with: mainModel)
+
         guard blockSize >= 2 else {
             throw KVCacheError(
                 message:
                     "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)"
             )
         }
-        guard drafter.isCompatible(with: mainModel) else {
-            throw ModelFactoryError.invalidConfiguration(
-                "MTP drafter \(type(of: drafter)) is incompatible with target "
-                    + "\(type(of: mainModel))")
-        }
-
         let kvCachePlan = mainCacheStorage.plan
         let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
         let mainCache = mainCacheStorage.cache

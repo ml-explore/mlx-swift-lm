@@ -79,6 +79,22 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.passthroughReason == nil)
     }
 
+    @Test("stateless MTP reuses the warm main cache on the second text turn")
+    func statelessMTPUsesWarmMainCache() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(requiresPromptPrefill: false),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        let second = try await collect(session.streamDetails(to: "b"))
+
+        #expect(second.info.promptTokenCount < 13)
+        #expect((second.info.proposedDraftTokens ?? 0) > 0)
+        #expect(second.info.passthroughReason == nil)
+    }
+
     @Test("raw prompt cache keeps its prefix and falls back to target-only generation")
     func rawPromptCacheFallsBackWithoutDiscardingPrefix() async throws {
         let rawCache = KVCacheSimple()
@@ -243,11 +259,13 @@ struct ChatSessionQwenTextMTPTests {
         )
     }
 
-    private func makeMTPConfiguration() throws -> SpeculativeDecodingConfig {
+    private func makeMTPConfiguration(
+        requiresPromptPrefill: Bool = true
+    ) throws -> SpeculativeDecodingConfig {
         let container = MTPDrafterContainer(
             context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "qwen-mtp-test"),
-                model: QwenStyleMTPDrafter()
+                model: QwenStyleMTPDrafter(requiresPromptPrefill: requiresPromptPrefill)
             )
         )
         return try SpeculativeDecodingConfig(mtpDrafter: container, blockSize: 2)
@@ -565,9 +583,16 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
 /// no dependency on target-shared K/V, and one drafted token per round.
 private final class QwenStyleMTPDrafter: Module, StatefulMTPDrafterModel {
     var maximumBlockSize: Int? { 2 }
-    var requiresSharedTargetKV: Bool { false }
-    var requiresPromptPrefill: Bool { true }
+    var requiresSharedTargetKV: Bool { !requiresPromptPrefill }
+    let requiresPromptPrefill: Bool
     var requiresGreedySampling: Bool { true }
+
+    init(requiresPromptPrefill: Bool = true) {
+        self.requiresPromptPrefill = requiresPromptPrefill
+        super.init()
+    }
+
+    func validateCompatibility(with _: any LanguageModel) throws {}
 
     func makeState(parameters _: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])

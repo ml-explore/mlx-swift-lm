@@ -109,8 +109,12 @@ func testGemma4AssistantDraftModelInstantiatesAndShape() {
 
 @Test
 func testGemma4AssistantRejectsNonGemmaTarget() {
-    let model = Gemma4AssistantDraftModel(syntheticConfig(tieWordEmbeddings: true))
-    #expect(!model.isCompatible(with: NonGemmaTarget()))
+    let drafter = Gemma4AssistantDraftModel(syntheticConfig(tieWordEmbeddings: true))
+    #expect(!drafter.isCompatible(with: NonGemmaTarget()))
+
+    #expect(throws: MTPDrafterCompatibilityError.self) {
+        try drafter.validateCompatibility(with: NonGemmaTarget())
+    }
 }
 
 // MARK: - MaskedEmbedder forward (use_ordered_embeddings)
@@ -414,6 +418,7 @@ func testDraftBlockAcceptsGemma4UnifiedTarget() throws {
         Gemma4AssistantConfiguration.self, from: Data(drafterJSON.utf8))
     let drafter = Gemma4AssistantDraftModel(drafterConfig)
     #expect(drafter.isCompatible(with: target))
+    try drafter.validateCompatibility(with: target)
 
     let lastHiddenSlice = lastHidden[0..., (-1)..., 0...]
     let proposed = drafter.draftBlock(
@@ -434,12 +439,15 @@ private final class NonGemmaTarget: Module, LanguageModel, KVCacheDimensionProvi
     var kvHeads: [Int] { [] }
 
     func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+        _ input: LMInput,
+        cache _: [KVCache],
+        state _: LMOutput.State?,
+        prefill _: PrefillParameters
     ) throws -> PrepareResult {
         .tokens(input.text)
     }
 
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        MLXArray.zeros([1, 1, 1])
+    func callAsFunction(_ inputs: MLXArray, cache _: [KVCache]?) -> MLXArray {
+        MLXArray.zeros([1, inputs.dim(-1), 1])
     }
 }
