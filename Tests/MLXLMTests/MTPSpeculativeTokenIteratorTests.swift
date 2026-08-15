@@ -300,6 +300,46 @@ private final class NonTrimmableCountingKVCache: CountingKVCache {
 
 @Suite("MTP KV-cache configuration")
 struct MTPKVCacheConfigurationTests {
+    @Test func invalidBlockSizeThrowsInsteadOfTrapping() throws {
+        let main = MockMainModel(nextLogitTokens: [0, 0, 7])
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+        #expect(throws: KVCacheError.self) {
+            _ = try MTPSpeculativeTokenIterator(
+                input: input,
+                mainModel: main,
+                drafter: MockDrafter(draftedTokenValue: 7),
+                parameters: GenerateParameters(maxTokens: 1, temperature: 0),
+                blockSize: 1)
+        }
+    }
+
+    @Test func packageInitializerPreservesCanonicalStorage() throws {
+        let main = MockMainModel(nextLogitTokens: [0, 0, 7])
+        let drafter = MockDrafter(draftedTokenValue: 7)
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+        let parameters = GenerateParameters(maxTokens: 1, temperature: 0)
+        let storage = KVCacheStorage(
+            main.newCache(parameters: parameters),
+            plan: try parameters.kvCachePlan())
+
+        let iterator = try MTPSpeculativeTokenIterator(
+            input: input,
+            mainModel: main,
+            drafter: drafter,
+            mainCacheStorage: storage,
+            parameters: parameters,
+            blockSize: 2)
+
+        #expect(iterator.mainCacheStorage === storage)
+
+        let replacement = CountingKVCache()
+        replacement.offset = storage.processedTokenCount
+        storage.replace(with: [replacement])
+
+        #expect(iterator.mainCache.first as AnyObject === replacement as AnyObject)
+    }
+
     @Test func legacyTurboSchemeUsesTypedDispatcher() throws {
         let main = MockMainModel(nextLogitTokens: [0, 0, 7])
         let drafter = MockDrafter(draftedTokenValue: 7)

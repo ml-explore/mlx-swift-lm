@@ -112,18 +112,42 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         blockSize: Int,
         components: GenerationComponents = .init()
     ) throws {
-        precondition(
-            blockSize >= 2,
-            "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)")
-
         let kvCachePlan = try parameters.kvCachePlan()
-        let mainCache = try kvCachePlan.validated(
-            mainCache ?? (try mainModel.newCache(parameters: parameters)))
+        try self.init(
+            input: input,
+            mainModel: mainModel,
+            drafter: drafter,
+            mainCacheStorage: KVCacheStorage(
+                mainCache ?? (try mainModel.newCache(parameters: parameters)), plan: kvCachePlan),
+            parameters: parameters,
+            blockSize: blockSize,
+            components: components)
+    }
+
+    package init(
+        input: LMInput,
+        mainModel: any LanguageModel,
+        drafter: any MTPDrafterModel,
+        mainCacheStorage: KVCacheStorage,
+        parameters: GenerateParameters,
+        blockSize: Int,
+        components: GenerationComponents = .init()
+    ) throws {
+        guard blockSize >= 2 else {
+            throw KVCacheError(
+                message:
+                    "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)"
+            )
+        }
+
+        let kvCachePlan = mainCacheStorage.plan
+        let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
+        let mainCache = mainCacheStorage.cache
         self.y = input.text
         self.mainModel = mainModel
         self.drafter = drafter
 
-        self.mainCacheStorage = KVCacheStorage(mainCache, plan: kvCachePlan)
+        self.mainCacheStorage = mainCacheStorage
         self.drafterState = (drafter as? any StatefulMTPDrafterModel)?
             .makeState(parameters: parameters)
 
