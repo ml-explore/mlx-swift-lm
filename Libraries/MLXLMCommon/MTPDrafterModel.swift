@@ -4,6 +4,19 @@ import Foundation
 import MLX
 import MLXNN
 
+/// A target model cannot provide the architecture-specific state required by
+/// an MTP drafter.
+public enum MTPDrafterCompatibilityError: Error, Sendable, Equatable, LocalizedError {
+    case incompatibleTarget(drafter: String, expected: String, actual: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .incompatibleTarget(let drafter, let expected, let actual):
+            "\(drafter) requires \(expected); received \(actual)."
+        }
+    }
+}
+
 /// Protocol for Multi-Token Prediction (MTP) speculative drafter models.
 ///
 /// Mirrors `EmbeddingModel`'s relationship to `BaseLanguageModel`: this
@@ -43,6 +56,14 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// This keeps stochastic generation on the ordinary target path until a
     /// probability-ratio acceptance sampler is available.
     var requiresGreedySampling: Bool { get }
+
+    /// Validate that `target` provides the architecture-specific state and
+    /// model structure required by this drafter.
+    ///
+    /// Callers must invoke this before prefill or drafting. Implementations
+    /// should keep this check side-effect free and throw
+    /// ``MTPDrafterCompatibilityError`` for unsupported pairings.
+    func validateCompatibility(with target: any LanguageModel) throws
 
     /// K-step drafting from a constant position.
     ///

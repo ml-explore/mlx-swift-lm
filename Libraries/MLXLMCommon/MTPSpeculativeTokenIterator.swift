@@ -112,6 +112,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         blockSize: Int,
         components: GenerationComponents = .init()
     ) throws {
+        try drafter.validateCompatibility(with: mainModel)
+
         let kvCachePlan = try parameters.kvCachePlan()
         try self.init(
             input: input,
@@ -133,6 +135,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         blockSize: Int,
         components: GenerationComponents = .init()
     ) throws {
+        try drafter.validateCompatibility(with: mainModel)
+
         guard blockSize >= 2 else {
             throw KVCacheError(
                 message:

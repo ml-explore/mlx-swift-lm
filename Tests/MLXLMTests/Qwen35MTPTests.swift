@@ -27,6 +27,31 @@ func testQwen35VLMTextConfigurationDecodesMTPFields() throws {
 }
 
 @Test
+func testQwen35MTPDraftersValidateTargetFamily() throws {
+    let textConfig = try JSONDecoder().decode(
+        MLXLLM.Qwen35TextConfiguration.self,
+        from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+    let textTarget = MLXLLM.Qwen35TextModel(textConfig)
+    let textDrafter = MLXLLM.Qwen35MTPDraftModel(textConfig)
+
+    let vlmConfig = try JSONDecoder().decode(
+        MLXVLM.Qwen35Configuration.self,
+        from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+    let vlmTarget = MLXVLM.Qwen35(vlmConfig)
+    let vlmDrafter = MLXVLM.Qwen35VLMNextNDraftModel(vlmConfig)
+
+    try textDrafter.validateCompatibility(with: textTarget)
+    try vlmDrafter.validateCompatibility(with: vlmTarget)
+
+    #expect(throws: MTPDrafterCompatibilityError.self) {
+        try textDrafter.validateCompatibility(with: vlmTarget)
+    }
+    #expect(throws: MTPDrafterCompatibilityError.self) {
+        try vlmDrafter.validateCompatibility(with: textTarget)
+    }
+}
+
+@Test
 func testQwen35MTPDraftSanitizeKeepsAndShiftsMTPNorms() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,

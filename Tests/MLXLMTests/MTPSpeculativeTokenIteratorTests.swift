@@ -18,6 +18,7 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
     private(set) var draftBlockCallCount = 0
     var draftedTokenValue: Int32
     let requiresGreedySampling: Bool
+    let compatibilityError: MTPDrafterCompatibilityError?
     /// Per-call record of what the iterator handed `draftBlock`: the
     /// sequence-axis span of each sharedKV entry, and the query offset.
     /// Lets tests assert the state the drafter conditions on, not just the
@@ -27,10 +28,21 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
     private(set) var receivedPositionDeltaValues: [Int?] = []
     private(set) var receivedCacheOffsets: [Int?] = []
 
-    init(draftedTokenValue: Int32 = 7, requiresGreedySampling: Bool = false) {
+    init(
+        draftedTokenValue: Int32 = 7,
+        requiresGreedySampling: Bool = false,
+        compatibilityError: MTPDrafterCompatibilityError? = nil
+    ) {
         self.draftedTokenValue = draftedTokenValue
         self.requiresGreedySampling = requiresGreedySampling
+        self.compatibilityError = compatibilityError
         super.init()
+    }
+
+    func validateCompatibility(with _: any LanguageModel) throws {
+        if let compatibilityError {
+            throw compatibilityError
+        }
     }
 
     func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
@@ -300,6 +312,27 @@ private final class NonTrimmableCountingKVCache: CountingKVCache {
 
 @Suite("MTP KV-cache configuration")
 struct MTPKVCacheConfigurationTests {
+    @Test func incompatibleTargetThrowsBeforePrefill() throws {
+        let main = MockMainModel(nextLogitTokens: [0, 0, 7])
+        let error = MTPDrafterCompatibilityError.incompatibleTarget(
+            drafter: "MockDrafter",
+            expected: "MockMainModelWithMTPState",
+            actual: "MockMainModel"
+        )
+        let drafter = MockDrafter(compatibilityError: error)
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+        #expect(throws: error) {
+            _ = try MTPSpeculativeTokenIterator(
+                input: input,
+                mainModel: main,
+                drafter: drafter,
+                parameters: GenerateParameters(maxTokens: 1, temperature: 0),
+                blockSize: 2)
+        }
+        #expect(main.callCount == 0)
+    }
+
     @Test func invalidBlockSizeThrowsInsteadOfTrapping() throws {
         let main = MockMainModel(nextLogitTokens: [0, 0, 7])
         let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
