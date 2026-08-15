@@ -32,6 +32,34 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.passthroughReason == nil)
     }
 
+    @Test("default sampling bypasses Qwen MTP before cache policy")
+    func defaultSamplingUsesOrdinaryWarmCacheGeneration() async throws {
+        // Keep GenerateParameters' default temperature (0.6), which Qwen MTP
+        // cannot speculate with until stochastic acceptance is implemented.
+        let parameters = GenerateParameters(maxTokens: 4)
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: parameters
+        )
+        let regularSession = ChatSession(
+            makeModelContext(),
+            generateParameters: parameters
+        )
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        _ = try await collect(regularSession.streamDetails(to: "a"))
+        let result = try await collect(session.streamDetails(to: "b"))
+        let regularResult = try await collect(regularSession.streamDetails(to: "b"))
+
+        #expect(result.text == regularResult.text)
+        #expect(result.info.promptTokenCount == regularResult.info.promptTokenCount)
+        #expect(result.info.speculativeDecodingTelemetry == nil)
+        #expect(result.info.proposedDraftTokens == nil)
+        #expect(result.info.acceptedDraftTokens == nil)
+        #expect(result.info.passthroughReason == nil)
+    }
+
     @Test("second text turn rebuilds MTP from the full rendered transcript")
     func secondTextTurnUsesFullTranscriptColdRebuild() async throws {
         let session = ChatSession(
