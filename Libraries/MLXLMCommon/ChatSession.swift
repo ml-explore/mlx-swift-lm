@@ -1133,10 +1133,21 @@ public final class ChatSession {
                             // and downgrade to a rebuild before prefilling.
                             var mediaSuffixInput: LMInput?
                             if case .appendMediaSuffix(let suffixStart, _) = decision {
-                                mediaSuffixInput = (model as? PreparedInputSplitting)?
+                                let splitInput = (model as? PreparedInputSplitting)?
                                     .splitPreparedInput(
                                         preparedInput, droppingFirst: suffixStart)
-                                if mediaSuffixInput == nil {
+                                // Returning *a* value is not enough: the ledger below
+                                // advances to `representedTokens` on the strength of the
+                                // requested boundary, so a suffix carrying any other
+                                // tokens would be prefilled verbatim and leave the record
+                                // describing a cache that was never built. Accept only the
+                                // exact tokens the boundary names.
+                                if let splitInput,
+                                    splitInput.text.tokens.asArray(Int.self)
+                                        == Array(promptTokenIds[suffixStart...])
+                                {
+                                    mediaSuffixInput = splitInput
+                                } else {
                                     decision = .rebuild
                                 }
                             }
