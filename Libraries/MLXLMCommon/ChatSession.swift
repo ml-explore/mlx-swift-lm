@@ -7,6 +7,18 @@ import MLX
 import CoreGraphics
 #endif
 
+/// Validation failures for speculative-decoding configuration.
+public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, LocalizedError {
+    case invalidMTPBlockSize(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidMTPBlockSize(let value):
+            "MTP verification block size must be at least 2; received \(value)."
+        }
+    }
+}
+
 /// Configuration for speculative decoding in a `ChatSession`.
 ///
 /// Speculative decoding uses a small draft model to propose candidate tokens
@@ -47,22 +59,31 @@ public struct SpeculativeDecodingConfig: Sendable {
         case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
     }
 
-    package let draftModelSource: DraftModelSource
+    package enum Strategy: Sendable {
+        case draftModel(DraftModelSource)
+        case mtp(MTPDrafterContainer, blockSize: Int)
+    }
+
+    package let strategy: Strategy
 
     /// The lightweight model used to propose candidate tokens, when it was provided eagerly.
     ///
     /// Configurations initialized with a loader closure return `nil` because the
     /// draft model is loaded asynchronously by ``ChatSession`` only when speculation
-    /// is admitted by the memory policy.
+    /// is admitted by the memory policy. MTP configurations also return `nil`
+    /// because their drafter uses ``MTPDrafterContainer`` instead.
     public var draftModel: ModelContainer? {
-        if case .loaded(let draftModel) = draftModelSource {
+        if case .draftModel(.loaded(let draftModel)) = strategy {
             return draftModel
         }
         return nil
     }
 
-    /// Number of tokens proposed by the draft model per verification cycle.
-    /// The default value of 5 offers a good balance between speed and accuracy.
+    /// Number of candidate tokens proposed per verification cycle.
+    ///
+    /// The draft-model initializers default to 5. For MTP configurations this
+    /// is `blockSize - 1`, because the verification block also includes the
+    /// target model's current token.
     public let numDraftTokens: Int
 
     /// Optional memory policy used to decide whether auxiliary-model speculation should run.
@@ -76,7 +97,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         numDraftTokens: Int = 5,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) {
-        self.draftModelSource = .loaded(draftModel)
+        self.strategy = .draftModel(.loaded(draftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
     }
@@ -99,24 +120,49 @@ public struct SpeculativeDecodingConfig: Sendable {
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
         loadDraftModel: @escaping @Sendable () async throws -> ModelContainer
     ) {
-        self.draftModelSource = .deferred(bytes: max(0, draftModelBytes), loadDraftModel)
+        self.strategy = .draftModel(
+            .deferred(bytes: max(0, draftModelBytes), loadDraftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
     }
 
+    /// Initialize speculative decoding with an MTP drafter.
+    ///
+    /// - Parameters:
+    ///   - mtpDrafter: drafter that proposes `blockSize - 1` tokens per verification cycle
+    ///   - blockSize: total number of tokens in each verification block
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2.
+    public init(
+        mtpDrafter: MTPDrafterContainer,
+        blockSize: Int = 2
+    ) throws {
+        guard blockSize >= 2 else {
+            throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
+        }
+
+        self.strategy = .mtp(mtpDrafter, blockSize: blockSize)
+        self.numDraftTokens = blockSize - 1
+        self.memoryPolicy = nil
+    }
+
     package var estimatedDraftModelBytes: Int? {
-        guard case .deferred(let bytes, _) = draftModelSource else {
+        guard case .draftModel(.deferred(let bytes, _)) = strategy else {
             return nil
         }
         return bytes
     }
 
     package func loadDraftModel() async throws -> ModelContainer {
-        switch draftModelSource {
+        guard case .draftModel(let source) = strategy else {
+            preconditionFailure("MTP speculation does not use a draft ModelContainer")
+        }
+
+        switch source {
         case .loaded(let draftModel):
-            draftModel
+            return draftModel
         case .deferred(_, let load):
-            try await load()
+            return try await load()
         }
     }
 }
@@ -1051,8 +1097,19 @@ public final class ChatSession {
                                 !$0.shouldUseSpeculativeDecoding && $0.action != .fail
                             } ?? false
 
+                        let usesMTP: Bool
+                        if let speculativeDecoding,
+                            case .mtp = speculativeDecoding.strategy
+                        {
+                            usesMTP = true
+                        } else {
+                            usesMTP = false
+                        }
+
                         var reusedMainCacheWithoutDraft = false
-                        var requiresMainOnlyContinuation = false
+                        // A raw prompt cache has no transcript from which Qwen can rebuild its
+                        // private MTP cache. Preserve that cache and continue with the target only.
+                        var requiresMainOnlyContinuation = usesMTP && conversation == nil
                         // Prompt tokens this turn does not prefill because the cache
                         // already represents them. Reported to the caller on `.info`.
                         var cachedPromptTokenCount = 0
@@ -1104,7 +1161,15 @@ public final class ChatSession {
                                 isTrimmable: canTrimPromptCache(kvCache.cache)
                                     && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
 
-                            var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
+                            // Qwen's drafter state is iterator-owned and currently cannot consume
+                            // a warm main-cache suffix. Rebuild from the complete rendered prompt
+                            // for every text generation and every automatic tool restart.
+                            var decision =
+                                if usesMTP && !carriesPreparedMedia {
+                                    PromptCacheReuseDecision.rebuild
+                                } else {
+                                    promptCachePolicy.decide(turn: turn, cache: cacheState)
+                                }
 
                             // Rewinding is the one decision that can fail while being
                             // applied: a cache may trim fewer tokens than requested.
@@ -1226,6 +1291,30 @@ public final class ChatSession {
 
                         if speculativeDecoding != nil, requiresMainOnlyContinuation {
                             generation = try defaultGeneration()
+                        } else if let speculativeDecoding,
+                            case .mtp(let drafterContainer, let blockSize) =
+                                speculativeDecoding.strategy
+                        {
+                            let drafter = await drafterContainer.perform { context in
+                                SendableBox(context.model)
+                            }.consume()
+                            let iterator = try MTPSpeculativeTokenIterator(
+                                input: input,
+                                mainModel: model,
+                                drafter: drafter,
+                                mainCacheStorage: kvCache,
+                                parameters: generateParameters,
+                                blockSize: blockSize,
+                                components: components
+                            )
+
+                            generation = GenerationRun(
+                                MLXLMCommon.generateTaskRecordingTokens(
+                                    promptTokenCount: input.text.tokens.size,
+                                    modelConfiguration: modelConfiguration,
+                                    tokenizer: tokenizer,
+                                    iterator: iterator,
+                                    tools: tools))
                         } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {
