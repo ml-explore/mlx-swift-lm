@@ -588,6 +588,22 @@ public func loadParoQuantModel<T: LanguageModel>(
         toolCallFormat: toolCallFormat)
     config.eosTokenIds = eosTokenIds
 
+    // Chat conventions. Same precedence as the model factories: an explicit
+    // value from the caller wins; then a registered resolver, which sees the
+    // model id the model cannot; then the model's own declaration.
+    if config.toolCallFormat == nil {
+        config.toolCallFormat =
+            ChatConventionsRegistry.shared.toolCallFormat(
+                modelId: config.name, modelType: baseConfig.modelType)
+            ?? model.toolCallFormat
+    }
+    if config.reasoningConfig == nil {
+        config.reasoningConfig =
+            ChatConventionsRegistry.shared.reasoningConfig(
+                modelId: config.name, modelType: baseConfig.modelType)
+            ?? model.reasoningConfig
+    }
+
     // 5. Load weights. A fresh Prepared Checkpoint (the once-converted
     //    MLX-native form, see `ParoQuantPreparedCheckpoint`) skips steps
     //    6–6c entirely; otherwise load raw safetensors (top-level only; do
