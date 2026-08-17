@@ -426,9 +426,12 @@ public final class VLMModelFactory: GenericModelFactory {
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
+        let processorFallback = try qwenProcessorFallback(
+            modelType: baseConfig.modelType, model: model)
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
-        async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
+        async let processorConfigTask = loadProcessorConfig(
+            from: modelDirectory, fallback: processorFallback)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
@@ -493,23 +496,56 @@ public final class VLMModelFactory: GenericModelFactory {
 }
 
 /// Error wrapper that includes the filename for better error messages.
-private struct ProcessorConfigError: Error {
+struct ProcessorConfigError: Error {
     let filename: String
     let underlying: Error
+}
+
+func qwenProcessorFallback(
+    modelType: String, model: any LanguageModel
+) throws -> (Data, BaseProcessorConfiguration)? {
+    guard modelType == "qwen3_5" || modelType == "qwen3_5_moe",
+        let model = model as? Qwen35
+    else {
+        return nil
+    }
+
+    let configuration = Qwen3VLProcessorConfiguration(
+        qwen35VisionConfiguration: model.config.visionConfiguration)
+    return (
+        try JSONEncoder().encode(configuration),
+        BaseProcessorConfiguration(processorClass: "Qwen3VLProcessor")
+    )
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
 /// Marked async to enable parallel scheduling via async let, though the underlying I/O is synchronous.
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
-private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
+func loadProcessorConfig(
+    from modelDirectory: URL,
+    fallback: (Data, BaseProcessorConfiguration)? = nil
+) async throws -> (
     Data, BaseProcessorConfiguration
 ) {
     let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
-    let url =
-        FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
-        ? preprocessorConfigURL
-        : processorConfigURL
+
+    if FileManager.default.fileExists(atPath: preprocessorConfigURL.path) {
+        return try readProcessorConfig(from: preprocessorConfigURL)
+    }
+    if FileManager.default.fileExists(atPath: processorConfigURL.path) {
+        return try readProcessorConfig(from: processorConfigURL)
+    }
+    if let fallback {
+        return fallback
+    }
+
+    return try readProcessorConfig(from: processorConfigURL)
+}
+
+private func readProcessorConfig(from url: URL) throws -> (
+    Data, BaseProcessorConfiguration
+) {
     do {
         let data = try Data(contentsOf: url)
         let config = try JSONDecoder.json5().decode(BaseProcessorConfiguration.self, from: data)

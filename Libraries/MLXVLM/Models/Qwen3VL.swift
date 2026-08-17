@@ -287,6 +287,20 @@ public struct Qwen3VLProcessorConfiguration: Codable, Sendable {
     }
 }
 
+extension Qwen3VLProcessorConfiguration {
+    init(qwen35VisionConfiguration config: Qwen3VLConfiguration.VisionConfiguration) {
+        self.imageMean = [0.5, 0.5, 0.5]
+        self.imageStd = [0.5, 0.5, 0.5]
+        self._minPixels = 65_536
+        self._maxPixels = 16_777_216
+        self._size = nil
+        self.mergeSize = config.spatialMergeSize
+        self.patchSize = config.patchSize
+        self.temporalPatchSize = config.temporalPatchSize
+        self.imageProcessorType = "Qwen2VLImageProcessorFast"
+    }
+}
+
 // MARK: - Model Configuration
 
 public struct Qwen3VLConfiguration: Codable, Sendable {
