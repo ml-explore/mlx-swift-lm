@@ -143,6 +143,9 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
     var headDim: Int?
     var ropeScaling: [String: StringOrNumber]?
     var fullAttentionInterval: Int = 4
+    var layerTypes: [String]?
+    var resolvedLayerTypes: [String] = []
+    var fullAttentionLayerIndex: Int? = nil
     var mtpNumHiddenLayers: Int = 0
     var mtpUseDedicatedEmbeddings: Bool = false
 
@@ -176,6 +179,7 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
         case headDim = "head_dim"
         case ropeScaling = "rope_scaling"
         case fullAttentionInterval = "full_attention_interval"
+        case layerTypes = "layer_types"
         case mtpNumHiddenLayers = "mtp_num_hidden_layers"
         case mtpUseDedicatedEmbeddings = "mtp_use_dedicated_embeddings"
         case numExperts = "num_experts"
@@ -224,6 +228,14 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
         self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
         self.fullAttentionInterval =
             try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+        self.layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes)
+        let layerSchedule = try HybridAttentionSchedule(
+            hiddenLayerCount: hiddenLayers,
+            fullAttentionInterval: fullAttentionInterval,
+            explicitLayerTypes: layerTypes
+        )
+        self.resolvedLayerTypes = layerSchedule.layerTypes
+        self.fullAttentionLayerIndex = layerSchedule.firstFullAttentionIndex
         self.mtpNumHiddenLayers =
             try container.decodeIfPresent(Int.self, forKey: .mtpNumHiddenLayers) ?? 0
         self.mtpUseDedicatedEmbeddings =
@@ -723,7 +735,8 @@ final class Qwen35DecoderLayer: Module {
 
     init(_ args: Qwen35TextConfiguration, layerIdx: Int, forceFullAttention: Bool = false) {
         self.isLinear =
-            forceFullAttention ? false : (layerIdx + 1) % args.fullAttentionInterval != 0
+            forceFullAttention
+            ? false : args.resolvedLayerTypes[layerIdx] == HybridAttentionSchedule.linearAttention
 
         if isLinear {
             _linearAttn.wrappedValue = Qwen35GatedDeltaNet(args)
@@ -903,7 +916,7 @@ final class Qwen35DecoderLayer: Module {
 public class Qwen35TextModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [Qwen35DecoderLayer]
+    let layers: [Qwen35DecoderLayer]
     let norm: RMSNorm
 
     let ssmIdx: Int
@@ -925,8 +938,7 @@ public class Qwen35TextModelInner: Module {
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
         self.ssmIdx = 0
-        self.faIdx = args.fullAttentionInterval - 1
-
+        self.faIdx = args.fullAttentionLayerIndex ?? (args.fullAttentionInterval - 1)
         let segments = Self.decodeSchedule(for: layers)
         self.decodeSegments = segments
         self.compiledSegments = Array(repeating: nil, count: segments.count)
@@ -1307,7 +1319,9 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = [String: MLXArray]()
         for (key, value) in weights {
-            if key.hasPrefix("vision_tower") || key.hasPrefix("model.visual") {
+            if key.hasPrefix("vision_tower") || key.hasPrefix("model.visual")
+                || key.hasPrefix("visual.")
+            {
                 continue
             }
 

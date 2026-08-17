@@ -246,6 +246,7 @@ public enum IntegrationTestModelIDs {
     public static let mistral3 = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
     public static let nemotron = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
     public static let qwen35 = "mlx-community/Qwen3.5-2B-4bit"
+    public static let qwen38 = "mlx-community/Qwen3.8-27B-4bit"
 }
 
 // MARK: - Model Loading

@@ -17,6 +17,11 @@ final class Qwen35VLMNextNPredictor: Module {
         var mtpArgs = args
         mtpArgs.hiddenLayers = max(args.mtpNumHiddenLayers, 1)
         mtpArgs.fullAttentionInterval = 1
+        let layerTypes = Array(
+            repeating: HybridAttentionSchedule.fullAttention, count: mtpArgs.hiddenLayers)
+        mtpArgs.layerTypes = layerTypes
+        mtpArgs.resolvedLayerTypes = layerTypes
+        mtpArgs.fullAttentionLayerIndex = 0
 
         if args.mtpUseDedicatedEmbeddings {
             _embedTokens.wrappedValue = Embedding(
@@ -106,6 +111,10 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
 
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: mtp.newCache())
+    }
+
+    public func isCompatible(with target: any LanguageModel) -> Bool {
+        target is Qwen35
     }
 
     public func prepareDrafterState(
