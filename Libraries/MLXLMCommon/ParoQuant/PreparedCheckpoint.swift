@@ -161,9 +161,11 @@ public enum ParoQuantPreparedCheckpoint {
 
     /// Serialize `weights` with the manifest embedded and atomically publish
     /// the artifact (temp file + rename). Skips — with a notice — when free
-    /// disk space is below `freeSpaceSafetyFactor ×` the estimated artifact
-    /// size. Failures only log: the loaded model is unaffected and the next
-    /// load simply converts again.
+    /// disk space is known to be below `freeSpaceSafetyFactor ×` the
+    /// estimated artifact size; when no capacity value resolves the write
+    /// proceeds and a genuinely full volume fails into the catch instead.
+    /// Failures only log: the loaded model is unaffected and the next load
+    /// simply converts again.
     static func write(weights: [String: MLXArray], manifest: Manifest, directory: URL) {
         let clock = ContinuousClock()
         let start = clock.now
@@ -171,11 +173,19 @@ public enum ParoQuantPreparedCheckpoint {
         let tmpURL = directory.appendingPathComponent(temporaryFileName, isDirectory: false)
         do {
             let estimatedBytes = weights.values.reduce(Int64(0)) { $0 + Int64($1.nbytes) }
+            // The quota-aware importantUsage capacity resolves through the
+            // system's cache-management machinery, which some hosts (CI
+            // runners, VMs) don't provide — it reports nil or 0 there. Fall
+            // back to the statfs-backed value; the guard is advisory, so an
+            // unknown capacity must never veto the write.
+            let capacity = try? directory.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
+            ])
+            let importantUsage = capacity?.volumeAvailableCapacityForImportantUsage ?? 0
             let free =
-                try directory
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                .volumeAvailableCapacityForImportantUsage ?? 0
-            guard free >= estimatedBytes * freeSpaceSafetyFactor else {
+                importantUsage > 0
+                ? importantUsage : Int64(capacity?.volumeAvailableCapacity ?? 0)
+            if free > 0, free < estimatedBytes * freeSpaceSafetyFactor {
                 logger.notice(
                     "Prepared Checkpoint write skipped — free space \(free, privacy: .public)B < \(freeSpaceSafetyFactor, privacy: .public)× estimated \(estimatedBytes, privacy: .public)B"
                 )
