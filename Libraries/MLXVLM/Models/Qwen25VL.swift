@@ -1280,12 +1280,12 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
 
 extension Qwen25VL: PreparedInputSplitting {
 
-    /// Opt into ``ChatSession`` warm-cache reuse for append-only media turns.
+    /// Opt into `ChatSession` warm-cache reuse for append-only media turns.
     ///
-    /// The continuation path (``prepareContinuation(_:cache:state:windowSize:)``)
+    /// The continuation path (`prepareContinuation(_:cache:state:windowSize:)`)
     /// already prefills a media-bearing remainder at a `positionOffset` carried in
-    /// ``LMOutput/State``; what it needs is a remainder whose media payload matches
-    /// its tokens. ``QwenVL/splitPreparedInput(_:droppingFirst:imageTokenId:videoTokenId:mergeSize:)``
+    /// `LMOutput.State`; what it needs is a remainder whose media payload matches
+    /// its tokens. `QwenVL.splitPreparedInput(_:droppingFirst:imageTokenId:videoTokenId:mergeSize:)`
     /// produces exactly that, or `nil` when it cannot prove the split is sound.
     public func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
         -> LMInput?

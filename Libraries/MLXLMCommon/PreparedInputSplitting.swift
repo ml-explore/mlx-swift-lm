@@ -35,7 +35,7 @@ import Foundation
 /// the features computed for the items that remain, and the continuation no longer
 /// matches a cold prefill even when the token positions line up exactly.
 ///
-/// This is a real distinction and not a hypothetical one: ``Qwen25VL`` builds a
+/// This is a real distinction and not a hypothetical one: `Qwen25VL` builds a
 /// per-frame vision attention mask and so conforms, while `Qwen2VL` runs its vision
 /// attention unmasked over the whole concatenated buffer and so does not.
 public protocol PreparedInputSplitting {
