@@ -13,16 +13,36 @@ private struct SafetensorsIndex: Decodable {
 }
 
 package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
+    let fileManager = FileManager.default
     let indexURL = modelDirectory.appendingPathComponent("model.safetensors.index.json")
-    if FileManager.default.fileExists(atPath: indexURL.path) {
+    if fileManager.fileExists(atPath: indexURL.path) {
         let data = try Data(contentsOf: indexURL)
         let index = try JSONDecoder().decode(SafetensorsIndex.self, from: data)
-        return Set(index.weightMap.values)
-            .sorted()
-            .map { modelDirectory.appendingPathComponent($0) }
+        // Some Hub packs (e.g. majentik Unlimited-OCR MLX) list
+        // `model-00001-of-000001.safetensors` while shipping `model.safetensors`.
+        let modelWeights = modelDirectory.appendingPathComponent("model.safetensors")
+        let modelWeightsExist = fileManager.fileExists(atPath: modelWeights.path)
+        var seenPaths = Set<String>()
+        var urls: [URL] = []
+        for name in Set(index.weightMap.values).sorted() {
+            let indexed = modelDirectory.appendingPathComponent(name)
+            let resolved: URL
+            if fileManager.fileExists(atPath: indexed.path) {
+                resolved = indexed
+            } else if modelWeightsExist {
+                resolved = modelWeights
+            } else {
+                // Keep the missing path so loadWeights surfaces a clear I/O error.
+                resolved = indexed
+            }
+            if seenPaths.insert(resolved.standardizedFileURL.path).inserted {
+                urls.append(resolved)
+            }
+        }
+        return urls
     }
 
-    let enumerator = FileManager.default.enumerator(
+    let enumerator = fileManager.enumerator(
         at: modelDirectory, includingPropertiesForKeys: nil)!
     return enumerator.compactMap { item -> URL? in
         guard let url = item as? URL, url.pathExtension == "safetensors" else {

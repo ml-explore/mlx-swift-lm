@@ -79,7 +79,99 @@ Currently supported model types are:
 - idefics3
 - gemma3
 - smolvlm
+- deepseekocr
+- unlimited-ocr / unlimited_ocr
 - muse_glimmer
+
+Tried DeepSeek-OCR Hub packs:
+
+- `mlx-community/DeepSeek-OCR-5bit` (`VLMRegistry.deepseekOCR5bit`)
+
+```swift
+let container = try await VLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    configuration: VLMRegistry.deepseekOCR5bit)
+let text = try await ChatSession(
+    container,
+    generateParameters: GenerateParameters(maxTokens: 2048, temperature: 0),
+    processing: .init(),
+    additionalContext: DeepseekOCRProcessor.modeContext(.gundam)
+).respond(to: "Free OCR.", image: .url(pageURL))
+```
+
+Opt-in IntegrationTesting: `DeepseekOCRIntegrationTests`
+(`MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1` or cached DeepSeek-OCR-5bit).
+
+Tried Unlimited-OCR Hub packs:
+
+- `majentik/Unlimited-OCR-MLX-6bit` (`VLMRegistry.unlimitedOCR6bit`)
+
+Unlimited-OCR (`model_type`: `unlimited-ocr` / `unlimited_ocr`) reuses the whole
+DeepSeek-OCR stack and swaps the decode cache for `RingSlidingKVCache` (R-SWA), so
+the KV cache stays constant-size no matter how long the output runs. Load it the
+same way, with `VLMRegistry.unlimitedOCR6bit` and its default prompt
+`"document parsing. "`.
+
+> Note: these packs ship `model_type: deepseekocr` with
+> `_orig_model_type: unlimited-ocr` as a back-compat shim for loaders predating the
+> Unlimited registration. `VLMModelFactory` honors the original type by default, so
+> such a pack loads as `UnlimitedOCR`. Pass `honorOrigModelType: false` to one of the
+> `load` / `loadContainer` overloads to force the plain DeepSeek-OCR path instead.
+
+### DeepSeek-OCR processor modes
+
+`DeepseekOCRProcessor` (also used as `UnlimitedOCRProcessor`) supports two modes,
+selected via `ChatSession` / `UserInput` additional context:
+
+| Mode | Context | Behavior (matches Python) |
+|------|---------|---------------------------|
+| `gundam` (default) | omit or `DeepseekOCRProcessor.modeContext(.gundam)` | 1024² global + 640² local tiles when page > 640×640 (`cropping=True`; `max_num` 9, or 32 via `unlimitedContext(.gundam)`) |
+| `base` | `DeepseekOCRProcessor.modeContext(.base)` | Single-page: 640² padded view. Multipage (`images.count > 1`): 1024² per page (Unlimited PDF/`infer_multi`). No local tiles (`cropping=False`). |
+
+```swift
+// Fused multipage (Python Unlimited: prompt + N pages @ 1024 base, one generation)
+let parameters = GenerateParameters(maxTokens: 8192, temperature: 0)
+let components = GenerationComponents(
+    logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRMultiPage() }
+)
+let text = try await ChatSession(
+    container,
+    generateParameters: parameters,
+    components: components,
+    processing: .init(),  // keep native resolution for tiling
+    additionalContext: DeepseekOCRProcessor.modeContext(.base)
+).respond(
+    to: "Multi page parsing.",
+    images: pageURLs.map { .url($0) },
+    videos: [],
+    audios: [])
+```
+
+### DeepSeek-OCR grounding tokens
+
+Hub tokenizers ship `<|grounding|>`, `<|ref|>`/`<|/ref|>`, `<|det|>`/`<|/det|>`
+(IDs 128816–128820). `DeepseekOCRSpecialTokens` resolves IDs through the
+tokenizer and builds prompts (`groundingPrompt()`, `groundingMarkdownPrompt()`,
+`locatePrompt(_:)`). Decode with `skipSpecialTokens: false` so layout tags
+survive; `<|det|>[[x1,y1,x2,y2]]` coordinates are normalized 0–1000 and
+`parseDetections(from:)` extracts boxes. Full structured layout-tree parsing is
+deferred — see the `DeepseekOCRSpecialTokens` doc comment.
+
+### Optional sliding-window no-repeat n-gram
+
+`SlidingWindowNoRepeatNGramProcessor` ports the DeepSeek / Unlimited-OCR
+repetition guard. It is **opt-in** (mlx-vlm / Unlimited defaults leave it off):
+
+```swift
+let parameters = GenerateParameters(temperature: 0, maxTokens: 8192)
+let components = GenerationComponents(
+    logitProcessorFactory: { SlidingWindowNoRepeatNGramProcessor.unlimitedOCRSingleImage() }
+)
+// Multi-page/PDF examples often use .unlimitedOCRMultiPage() (window 1024).
+```
+
+See `UnlimitedOCR` model docs and `GenerationComponents.logitProcessorFactory`.
 
 See [llm-tool](../../Tools/llm-tool)
 

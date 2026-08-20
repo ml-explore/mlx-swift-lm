@@ -106,6 +106,9 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
+        "unlimited_ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
+        "unlimited-ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
         "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
     ])
 }
@@ -142,6 +145,12 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "DeepseekOCRProcessor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "DeepseekVLV2Processor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "UnlimitedOCRProcessor": create(
+            UnlimitedOCRProcessorConfiguration.self, UnlimitedOCRProcessor.init),
         "MuseGlimmerProcessor": create(
             MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
     ])
@@ -272,6 +281,27 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    /// DeepSeek-OCR.
+    ///
+    /// > Note: For both OCR entries below the prompt acts as a **mode selector**
+    /// > rather than an instruction — the decoder is a transcription specialist,
+    /// > and the prompt picks which transcription mode to run. A general-VLM
+    /// > default such as "Describe the image in English" would ask it to caption
+    /// > instead, which is why each entry defaults to its own family's mode
+    /// > string. Other DeepSeek-OCR modes include
+    /// > `"<|grounding|>Convert the document to markdown."`; see
+    /// > ``DeepseekOCRSpecialTokens`` for the grounding prompt builders.
+    static public let deepseekOCR5bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-OCR-5bit",
+        defaultPrompt: "Free OCR."
+    )
+
+    /// Unlimited-OCR (DeepSeek-OCR encoder + decoder with R-SWA attention).
+    static public let unlimitedOCR6bit = ModelConfiguration(
+        id: "majentik/Unlimited-OCR-MLX-6bit",
+        defaultPrompt: "document parsing. "
+    )
+
     static public let museGlimmer30B4bit = ModelConfiguration(
         id: "mlx-community/Muse-Glimmer-30B-4bit",
         defaultPrompt: "Describe the image in English",
@@ -303,6 +333,8 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             fastvlm,
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
+            deepseekOCR5bit,
+            unlimitedOCR6bit,
             museGlimmer30B4bit,
         ]
     }
@@ -355,9 +387,50 @@ public final class VLMModelFactory: GenericModelFactory {
     /// by the model itself, e.g. DeepSeek-R1
     public let conventionsRegistry: ChatConventionsRegistry
 
+    /// Default remap policy: honor a pack's `_orig_model_type`.
+    ///
+    /// Unlimited-OCR packs ship `model_type: deepseekocr` with
+    /// `_orig_model_type: unlimited-ocr` so that loaders which predate the
+    /// Unlimited registration still resolve *something*. Honoring the original
+    /// type is therefore the correct default; pass `false` to load such a pack
+    /// through the plain DeepSeek-OCR path.
+    public static let defaultHonorOrigModelType = true
+
+    /// ``GenericModelFactory`` conformance — loads with the default remap
+    /// policy (``defaultHonorOrigModelType``).
+    ///
+    /// Callers that need to pin the policy explicitly should use
+    /// ``_load(configuration:tokenizerLoader:honorOrigModelType:)`` or one of
+    /// the `load`/`loadContainer` overloads that take `honorOrigModelType`.
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
+    ) async throws -> sending ModelContext {
+        try await _load(
+            configuration: configuration,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: Self.defaultHonorOrigModelType)
+    }
+
+    /// Loads a VLM from already-resolved local URLs, with an explicit
+    /// `_orig_model_type` remap policy.
+    ///
+    /// - Parameters:
+    ///   - configuration: resolved model + tokenizer directories.
+    ///   - tokenizerLoader: tokenizer loader for the tokenizer directory.
+    ///   - honorOrigModelType: when `true`, a pack advertising
+    ///     `_orig_model_type: unlimited-ocr` resolves to the `unlimited-ocr`
+    ///     registry entry (``UnlimitedOCR``, R-SWA cache) even though its
+    ///     `model_type` is the DeepSeek shim. When `false`, the pack's own
+    ///     `model_type` is used (``DeepseekOCR``, plain KV cache).
+    ///
+    /// > Note: This is a per-call argument rather than process-global state on
+    /// > purpose: a caller loading two families concurrently would otherwise
+    /// > have to serialize the set-then-load pair itself.
+    public func _load(
+        configuration: ResolvedModelConfiguration,
+        tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
     ) async throws -> sending ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -378,10 +451,12 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        let modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
+
         let model: LanguageModel
         do {
             model = try await typeRegistry.createModel(
-                configuration: configData, modelType: baseConfig.modelType)
+                configuration: configData, modelType: modelType)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -459,9 +534,13 @@ public final class VLMModelFactory: GenericModelFactory {
         let processorTypeOverrides: [String: String] = [
             "mistral3": "Mistral3Processor",
             "gemma4_unified": "Gemma4UnifiedProcessor",
+            // Hub packs often ship DeepseekVLV2Processor; native unlimited-ocr
+            // routing prefers UnlimitedOCRProcessor (same tokenize path).
+            "unlimited-ocr": "UnlimitedOCRProcessor",
+            "unlimited_ocr": "UnlimitedOCRProcessor",
         ]
         let processorType =
-            processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
+            processorTypeOverrides[modelType] ?? baseProcessorConfig.processorClass
 
         let baseProcessor = try await processorRegistry.createModel(
             configuration: processorConfigData,
@@ -495,6 +574,87 @@ public final class VLMModelFactory: GenericModelFactory {
             tokenizer: tokenizer)
     }
 
+}
+
+// MARK: - Explicit `_orig_model_type` remap policy
+
+/// Loading entry points that take the `_orig_model_type` remap policy as an
+/// argument.
+///
+/// These mirror ``GenericModelFactory``'s `load` / `loadContainer` helpers. The
+/// protocol's own overloads (no `honorOrigModelType:` label) keep
+/// ``VLMModelFactory/defaultHonorOrigModelType``.
+extension VLMModelFactory {
+
+    /// Loads a model from a local directory with an explicit remap policy.
+    ///
+    /// - Parameters:
+    ///   - directory: local MLX weights directory.
+    ///   - tokenizerLoader: tokenizer loader.
+    ///   - honorOrigModelType: see
+    ///     `_load(configuration:tokenizerLoader:honorOrigModelType:)`.
+    public func load(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
+    ) async throws -> sending ModelContext {
+        try await _load(
+            configuration: .init(directory: directory),
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+    }
+
+    /// Loads a model from a local directory into a `ModelContainer` with an
+    /// explicit remap policy.
+    public func loadContainer(
+        from directory: URL,
+        using tokenizerLoader: any TokenizerLoader,
+        honorOrigModelType: Bool
+    ) async throws -> ModelContainer {
+        let context = try await _load(
+            configuration: .init(directory: directory),
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+        return _wrap(context)
+    }
+
+    /// Loads a model via a `Downloader` with an explicit remap policy.
+    public func load(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        honorOrigModelType: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> sending ModelContext {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        return try await _load(
+            configuration: resolved,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+    }
+
+    /// Loads a model via a `Downloader` into a `ModelContainer` with an
+    /// explicit remap policy.
+    public func loadContainer(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        honorOrigModelType: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> ModelContainer {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        let context = try await _load(
+            configuration: resolved,
+            tokenizerLoader: tokenizerLoader,
+            honorOrigModelType: honorOrigModelType)
+        return _wrap(context)
+    }
 }
 
 /// Error wrapper that includes the filename for better error messages.
