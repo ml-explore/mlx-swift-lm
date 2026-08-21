@@ -164,7 +164,7 @@ func makeExecutorRequest(
     schema: GenerationSchema? = nil,
     generationOptions: GenerationOptions = GenerationOptions(),
     contextOptions: ContextOptions = ContextOptions(),
-    metadata: [String: any Sendable & Codable & Equatable] = [:]
+    metadata: [String: any ConvertibleToGeneratedContent] = [:]
 ) -> LanguageModelExecutorGenerationRequest {
     LanguageModelExecutorGenerationRequest(
         id: id,

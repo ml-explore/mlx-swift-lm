@@ -562,7 +562,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
         self.load = load
@@ -649,6 +649,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // per the Metal teardown invariant. `prepare` is CPU-only, so on a
             // pre-forward-pass throw this just synchronizes an idle stream.
             defer { Stream.gpu.synchronize() }
+            // A literal prompt, so no attachment label reaches the tokenizer here.
+            // Anything that made this prepare a real transcript would need the
+            // `AttachmentLabelValidator` call that `respond` makes first.
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [.user("warmup")]))
             let params = GenerateParameters(maxTokens: 1)
@@ -683,7 +686,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             enum Destination: Sendable { case response, reasoning }
             case appendText(String, entryID: String?, destination: Destination)
             case toolCall(id: String, name: String, arguments: String)
-            case updateMetadata([String: any Sendable & Codable & Equatable], entryID: String?)
+            // `ConvertibleToGeneratedContent` is what the SDK's channel action
+            // takes, but it is not `Sendable`, so compose it with `Sendable`
+            // here to keep `GenerationEvent: Sendable`.
+            case updateMetadata(
+                [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?)
             case updateUsage(
                 input: LanguageModelExecutorGenerationChannel.Usage.Input,
                 output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -711,11 +718,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         static func emitMetadata(
-            _ values: [String: any Sendable & Codable & Equatable], entryID: String?,
+            _ values: [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
             generationObserver?(.updateMetadata(values, entryID: entryID))
-            await channel.send(.response(entryID: entryID, action: .updateMetadata(values)))
+            // The channel action takes the bare existential. Dictionary values
+            // do not convert implicitly between existential types, so widen
+            // explicitly.
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateMetadata(
+                        values.mapValues { $0 as any ConvertibleToGeneratedContent })))
         }
 
         static func emitUsage(
@@ -942,20 +956,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             model: MLXLanguageModel,
             streamingInto channel: LanguageModelExecutorGenerationChannel
         ) async throws {
-            var collected = TranscriptConverter.mlxMessages(for: request.transcript)
+            var collected = try TranscriptConverter.mlxMessages(for: request.transcript)
             // MLX tokenizer crashes on empty chat input; provide a fallback.
             if collected.isEmpty {
                 collected = [Chat.Message.user("")]
             }
             let messages = collected
 
-            // Vision capability gate (adapter-side). Labeled image
-            // attachments arrive as public `.attachment` segments that
-            // the SDK's own vision guard never inspects, so the adapter
-            // is the only place that can enforce `.vision` for this path.
-            // Throw the same typed error the SDK would, before loading
-            // any weights, so a model declared without `.vision` fails
-            // fast and identically across the tool / schema / plain paths.
+            // Vision capability gate (adapter-side). A labeled image arrives as
+            // a public `.attachment` segment that the SDK's own vision guard
+            // never inspects, so the adapter is the only place that can enforce
+            // `.vision` for this path. Throw the same typed error the SDK would,
+            // before loading any weights, so a model declared without `.vision`
+            // fails fast and identically across the tool / schema / plain paths.
+            //
+            // This sees prompt attachments only, because conversion above drops
+            // instructions and tool-output attachments before they become message
+            // images. So a request whose only image is in its instructions passes
+            // this gate even without `.vision` declared; the image was already
+            // discarded and never reaches the model. An app can observe that: the
+            // same request threw `unsupportedCapability(.vision)` when an
+            // instructions image was still carried into the system message and
+            // counted here.
             if !model.capabilities.contains(.vision),
                 messages.contains(where: { !$0.images.isEmpty })
             {
@@ -1003,6 +1025,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // reasoning config we route on.
             let declaresReasoning = model.capabilities.contains(.reasoning)
             let configurationResolver = model.configurationResolver
+            // Attachment labels, paired with the prompt entry each came from so a
+            // rejection can name it. Captured here, before the actor hop, because
+            // `Transcript.Entry` is `Sendable` but `request` should not be caught
+            // in the perform closure.
+            let labeledAttachments = TranscriptConverter.labeledAttachments(in: request.transcript)
 
             do {
                 // Send metadata first
@@ -1015,6 +1042,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // .Video are not Sendable), so route the array through
                 // perform(nonSendable:_:) which boxes it across the actor hop.
                 try await container.perform(nonSendable: messages) { context, messages in
+                    // Reject a label the tokenizer would turn into a special
+                    // token, before it is tokenized into the prompt. This runs
+                    // here rather than beside the vision gate above because the
+                    // answer is per-model and the tokenizer only exists through
+                    // the loaded container: the gate can fail before any download,
+                    // this cannot. The asymmetry is deliberate. Ordering within
+                    // the request is still stable, since the gate runs first.
+                    try AttachmentLabelValidator.default.validate(
+                        labeledAttachments, with: context.tokenizer)
+
                     // Render the prompt through the model's UserInputProcessor.
                     let userInput = UserInput(chat: messages)
                     let input = try await context.processor.prepare(input: userInput)
