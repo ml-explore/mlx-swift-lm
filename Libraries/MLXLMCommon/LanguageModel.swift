@@ -374,7 +374,7 @@ public enum PrepareResult {
 }
 
 /// Feature flags that describe generation behavior supported by a language model.
-public struct LanguageModelCapabilities: OptionSet, Sendable {
+public struct LMModelCapabilities: OptionSet, Sendable {
     public let rawValue: Int
 
     public init(rawValue: Int) {
@@ -403,7 +403,7 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     func prepare() throws
 
     /// Feature flags that describe generation behavior supported by the model.
-    var capabilities: LanguageModelCapabilities { get }
+    var capabilities: LMModelCapabilities { get }
 
     /// Prepare the cache state and consume the ``LMInput``.
     ///
@@ -542,8 +542,8 @@ extension LanguageModel {
     /// Most language models have no derived inference state to prepare.
     public func prepare() throws {}
 
-    public var capabilities: LanguageModelCapabilities {
-        var capabilities: LanguageModelCapabilities = []
+    public var capabilities: LMModelCapabilities {
+        var capabilities: LMModelCapabilities = []
         if self is any BlockDiffusionLanguageModel {
             capabilities.insert(.blockDiffusion)
         }
