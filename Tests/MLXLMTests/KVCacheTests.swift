@@ -13,6 +13,38 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     { MambaCache() },
 ]
 
+@Test func testRewindableConvolutionCacheRoundTripsPromptCacheState() throws {
+    let cache = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    let initial = MLXArray.zeros([1, 2, 4])
+    let input = MLXArray((0 ..< 20).map(Float.init)).reshaped(1, 5, 4)
+    cache.record(
+        input: input, initialState: initial,
+        currentState: input[0..., (-2)..., 0...])
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try savePromptCache(url: url, cache: [cache], metadata: [:])
+    let (loaded, _) = try loadPromptCache(url: url)
+    let restored = try #require(loaded.first as? RewindableConvolutionCache)
+
+    #expect(restored.offset == 5)
+    #expect(restored.stateLength == 2)
+    #expect(restored.rollbackCapacity == 8)
+    assertArraysClose(restored.state, cache.state)
+    #expect(restored.trim(2) == 2)
+    #expect(restored.offset == 3)
+}
+
+@Test func testRewindableConvolutionCacheCopyPreservesPreparedBatchMetadata() throws {
+    let cache = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    cache.prepare(lengths: [5, 3])
+    let copy = try #require(cache.copy() as? RewindableConvolutionCache)
+
+    #expect(copy.currentLengths?.asArray(Int.self) == [5, 3])
+    #expect(copy.stateLength == 2)
+    #expect(copy.rollbackCapacity == 8)
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {

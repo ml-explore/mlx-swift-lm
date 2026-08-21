@@ -8,9 +8,8 @@ import Foundation
 /// cannot see for itself, today the Hugging Face repo id.
 ///
 /// ``ChatConventionsProviding`` covers everything a model knows about itself. Some
-/// conventions are not model-intrinsic: DeepSeek-R1-Distill checkpoints report their
-/// *base* `model_type` (`qwen2` or `llama`) and are indistinguishable from plain
-/// Qwen2.5/Llama by the model alone, so they can only be recognized by repo id.
+/// conventions are not model-intrinsic: reasoning variants can share a `model_type`
+/// with non-reasoning checkpoints and therefore can only be recognized by repo id.
 ///
 /// Register a resolver with ``ChatConventionsRegistry`` to supply such conventions,
 /// including from outside this package. Both requirements are optional; implement
@@ -48,7 +47,7 @@ public final class ChatConventionsRegistry: @unchecked Sendable {
 
     /// Shared instance, preloaded with this package's built-in resolvers.
     public static let shared = ChatConventionsRegistry(
-        resolvers: [DeepSeekR1ConventionsResolver()])
+        resolvers: [DeepSeekR1ConventionsResolver(), LFM25ConventionsResolver()])
 
     private let lock = NSLock()
     private var resolvers: [any ChatConventionsResolving]
@@ -108,5 +107,24 @@ public struct DeepSeekR1ConventionsResolver: ChatConventionsResolving {
         // "r1-distill" also catches re-uploads not prefixed "deepseek-".
         guard id.contains("deepseek-r1") || id.contains("r1-distill") else { return nil }
         return .alwaysOnThinking
+    }
+}
+
+/// Enables the always-on reasoning protocol for LFM2.5 checkpoints without
+/// applying it to every model that uses the broader `lfm2` architecture.
+public struct LFM25ConventionsResolver: ChatConventionsResolving {
+
+    public init() {}
+
+    public func reasoningConfig(modelId: String, modelType: String) -> ReasoningConfig? {
+        let supportedModelTypes = Set(["lfm2", "lfm2_moe"])
+        guard supportedModelTypes.contains(modelType.lowercased()),
+            modelId.lowercased().contains("lfm2.5")
+        else {
+            return nil
+        }
+        return ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .alwaysOn)
     }
 }

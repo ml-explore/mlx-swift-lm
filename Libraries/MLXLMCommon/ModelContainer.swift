@@ -32,6 +32,10 @@ import MLXNN
 public final class ModelContainer: Sendable {
     private let context: SerialAccessContainer<ModelContext>
 
+    /// Checkpoint-recommended sampling settings, with generic defaults used
+    /// only when the checkpoint does not provide a value.
+    public let defaultGenerateParameters: GenerateParameters
+
     public var configuration: ModelConfiguration {
         get async {
             await context.read { $0.configuration }
@@ -51,6 +55,8 @@ public final class ModelContainer: Sendable {
     }
 
     public init(context: consuming ModelContext) {
+        self.defaultGenerateParameters =
+            context.configuration.generationConfig?.applyingSamplingDefaults() ?? .init()
         self.context = .init(context)
     }
 
