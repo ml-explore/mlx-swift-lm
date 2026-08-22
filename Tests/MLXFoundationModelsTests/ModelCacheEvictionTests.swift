@@ -56,7 +56,7 @@ extension FoundationModelsCacheTests {
                 load: { configuration, progress in
                     try await loadModelContainer(
                         from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             // Drive a load that parks, then fails — populating lastErrors[id].
@@ -90,7 +90,7 @@ extension FoundationModelsCacheTests {
                         try await loadModelContainer(
                             from: BlockingDownloader(gate: gate),
                             using: EvictStubTokenizerLoader(),
-                            configuration: configuration, progressHandler: progress)
+                            configuration: configuration, progress: progress)
                     })
                 let task = Task { try? await model.preload() }
                 await gate.waitUntilStarted()
@@ -133,7 +133,7 @@ extension FoundationModelsCacheTests {
                 load: { configuration, progress in
                     try await loadModelContainer(
                         from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             // Park a genuine (non-warmup) load in flight.

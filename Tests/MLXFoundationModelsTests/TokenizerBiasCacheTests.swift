@@ -82,7 +82,7 @@ extension FoundationModelsCacheTests {
                 load: { configuration, progress in
                     try await loadModelContainer(
                         from: EvictBiasStubDownloader(), using: EvictBiasStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             _ = await MLXLanguageModel.makeTokenizerBias(modelID: idA, tokenizer: tokA)
@@ -124,7 +124,7 @@ extension FoundationModelsCacheTests {
                 load: { configuration, progress in
                     try await loadModelContainer(
                         from: EvictBiasStubDownloader(), using: EvictBiasStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             let tokSurvivor = CountingTokenizer(tokens: ["x", "y", "}", "\n"])

@@ -78,7 +78,7 @@ struct ColdHubClientFetchTests {
                 try await loadModelContainer(
                     from: #hubDownloader(HuggingFace.HubClient(cache: cache)),
                     using: #huggingFaceTokenizerLoader(),
-                    configuration: configuration, progressHandler: progress)
+                    configuration: configuration, progress: progress)
             })
 
         // Drop any in-memory entry so `loadContainer()` runs the load closure

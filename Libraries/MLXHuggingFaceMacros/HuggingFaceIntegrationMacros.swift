@@ -167,12 +167,16 @@ public struct LoadContainerMacro: ExpressionMacro {
         }
 
         let progress =
-            if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
-                .expression
+            if let handlers = node.arguments.first(where: { $0.label?.text == "progress" })?
+                .expression.description
             {
-                expr.description
+                handlers
+            } else if let legacy = node.arguments.first(where: {
+                $0.label?.text == "progressHandler"
+            })?.expression.description {
+                ".download(\(legacy))"
             } else {
-                "{ _ in }"
+                ".init()"
             }
 
         return
@@ -181,7 +185,7 @@ public struct LoadContainerMacro: ExpressionMacro {
                 from: #hubDownloader(),
                 using: #huggingFaceTokenizerLoader(),
                 configuration: \(configuration),
-                progressHandler: \(raw: progress))
+                progress: \(raw: progress))
             """
     }
 }
@@ -196,12 +200,16 @@ public struct LoadContextMacro: ExpressionMacro {
         }
 
         let progress =
-            if let expr = node.arguments.first(where: { $0.label?.text == "progressHandler" })?
-                .expression
+            if let handlers = node.arguments.first(where: { $0.label?.text == "progress" })?
+                .expression.description
             {
-                expr.description
+                handlers
+            } else if let legacy = node.arguments.first(where: {
+                $0.label?.text == "progressHandler"
+            })?.expression.description {
+                ".download(\(legacy))"
             } else {
-                "{ _ in }"
+                ".init()"
             }
 
         return
@@ -210,7 +218,7 @@ public struct LoadContextMacro: ExpressionMacro {
                 from: #hubDownloader(),
                 using: #huggingFaceTokenizerLoader(),
                 configuration: \(configuration),
-                progressHandler: \(raw: progress))
+                progress: \(raw: progress))
             """
     }
 }
@@ -240,6 +248,7 @@ public struct LanguageModelMacro: ExpressionMacro {
         if let resolver = argument("configurationResolver") {
             arguments.append("configurationResolver: \(resolver)")
         }
+        let progress = argument("progress")
         arguments.append(
             """
             weightsLocation: { id in
@@ -254,14 +263,17 @@ public struct LanguageModelMacro: ExpressionMacro {
                     return cache.repoDirectory(repo: repo, kind: .model)
                 }
             """)
+        if let progress {
+            arguments.append("progress: \(progress)")
+        }
         arguments.append(
             """
-            load: { configuration, progressHandler in
+            load: { configuration, progress in
                     try await loadModelContainer(
                         from: #hubDownloader(),
                         using: #huggingFaceTokenizerLoader(),
                         configuration: configuration,
-                        progressHandler: progressHandler)
+                        progress: progress)
                 }
             """)
 

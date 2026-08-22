@@ -39,7 +39,7 @@ extension FoundationModelsCacheTests {
                     try await loadModelContainer(
                         from: StubAvailabilityDownloader(),
                         using: StubAvailabilityTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             let availability = await model.availability
@@ -84,7 +84,7 @@ extension FoundationModelsCacheTests {
                     try await loadModelContainer(
                         from: BlockingDownloader(gate: gate),
                         using: StubAvailabilityTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             let warmTask = Task { try? await model.warmUp() }
@@ -119,7 +119,7 @@ extension FoundationModelsCacheTests {
                     try await loadModelContainer(
                         from: BlockingDownloader(gate: gate),
                         using: StubAvailabilityTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             // preload() is NOT a warmup, so its in-flight load is not suppressed —
@@ -157,7 +157,7 @@ extension FoundationModelsCacheTests {
                     try await loadModelContainer(
                         from: BlockingDownloader(gate: gate),
                         using: StubAvailabilityTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 })
 
             let warmTask = Task { try? await model.warmUp() }

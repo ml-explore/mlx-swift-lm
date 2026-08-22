@@ -140,7 +140,7 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 
 /// Load model weights.
 ///
-/// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progress:)``.
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
 /// calls ``BaseLanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
