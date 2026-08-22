@@ -128,6 +128,39 @@ private struct RingSnapshot {
     #expect(live.offset == 6, "rollback did not clamp the append-only layer back")
 }
 
+@Test func testVarianceNormalizedRoundCommitsExactlyBelowTileBoundary() throws {
+    let live = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let initial = positionedKV(0 ..< 20, headDim: 32)
+    _ = live.update(keys: initial.0, values: initial.1)
+
+    let staged = try #require(StagedRound([live], width: 4))
+    let provisional = positionedKV(20 ..< 24, headDim: 32)
+    _ = staged.caches[0].update(keys: provisional.0, values: provisional.1)
+    staged.commit(accepted: 2)
+
+    let empty = MLXArray.zeros([1, 1, 0, 32])
+    let materialized = live.update(keys: empty, values: empty)
+    let expected = positionedKV(0 ..< 22, headDim: 32)
+    eval(materialized.0, materialized.1)
+
+    #expect(live.offset == 22)
+    #expect(allClose(materialized.0, expected.0, rtol: 0, atol: 1e-5).item(Bool.self))
+    #expect(allClose(materialized.1, expected.1, rtol: 0, atol: 1e-5).item(Bool.self))
+}
+
+@Test func testVarianceNormalizedRoundRefusesCompressionBoundary() {
+    let live = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let initial = positionedKV(0 ..< 30, headDim: 32)
+    _ = live.update(keys: initial.0, values: initial.1)
+
+    #expect(live.isTrimmable(after: 1))
+    #expect(!live.isTrimmable(after: 2))
+    #expect(StagedRound([live], width: 2) == nil)
+    #expect(live.offset == 30, "refusing the round must leave the live cache untouched")
+}
+
 // MARK: - Invariant 2: the presentation is the live write path's, exactly
 
 /// The overlay's whole correctness argument: what the adapter returns is what the live cache
