@@ -419,6 +419,43 @@ public class VLMProcessorTypeRegistry: @unchecked Sendable {
                 YourModelProcessorConfiguration.self, YourModelProcessor.init),
 ```
 
+### Processor metadata supplied by an external package
+
+Some repositories omit processor metadata, or declare a generic processor that is not the
+right implementation for their model type. An external model package can handle either case
+without changing `VLMModelFactory`:
+
+```swift
+struct YourModelProcessorLoadingResolver: VLMProcessorLoadingResolving {
+    func processorConfigurationFallback(
+        for context: VLMProcessorLoadingContext
+    ) throws -> VLMProcessorConfiguration? {
+        guard context.modelType == "your_model" else { return nil }
+
+        let model = try JSONDecoder().decode(
+            YourModelConfiguration.self, from: context.configurationData)
+        let processor = YourModelProcessorConfiguration(model: model)
+        return VLMProcessorConfiguration(
+            data: try JSONEncoder().encode(processor),
+            processorType: "YourModelProcessor")
+    }
+
+    func processorTypeOverride(
+        for context: VLMProcessorLoadingContext,
+        declaredProcessorType: String
+    ) throws -> String? {
+        context.modelType == "your_model" ? "YourModelProcessor" : nil
+    }
+}
+
+VLMProcessorLoadingRegistry.shared.register(YourModelProcessorLoadingResolver())
+```
+
+Implement only the hook your model needs. A checkpoint's `preprocessor_config.json` or
+`processor_config.json` always wins over a generated fallback. Type overrides are applied
+afterward. For isolated applications and tests, pass a separate
+`VLMProcessorLoadingRegistry` to `VLMModelFactory` instead of registering globally.
+
 Add a constant for the model in the VLMRegistry (not strictly required but useful
 for callers to refer to it in code):
 

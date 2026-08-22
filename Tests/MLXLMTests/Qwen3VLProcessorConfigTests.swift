@@ -81,14 +81,16 @@ final class Qwen3VLProcessorConfigTests: XCTestCase {
 final class Qwen35ProcessorFallbackTests: XCTestCase {
 
     func testDenseFallbackEncodesVisionGeometryAndQwenDefaults() throws {
-        let model = Qwen35(try makeQwen35Configuration(modelType: "qwen3_5"))
-
         let fallback = try XCTUnwrap(
-            qwenProcessorFallback(modelType: "qwen3_5", model: model))
+            Qwen35ProcessorLoadingResolver().processorConfigurationFallback(
+                for: VLMProcessorLoadingContext(
+                    modelId: "example/qwen",
+                    modelType: "qwen3_5",
+                    configurationData: makeQwen35ConfigurationData(modelType: "qwen3_5"))))
         let config = try JSONDecoder().decode(
-            Qwen3VLProcessorConfiguration.self, from: fallback.0)
+            Qwen3VLProcessorConfiguration.self, from: fallback.data)
 
-        XCTAssertEqual(fallback.1.processorClass, "Qwen3VLProcessor")
+        XCTAssertEqual(fallback.processorType, "Qwen3VLProcessor")
         XCTAssertEqual(config.imageMean, [0.5, 0.5, 0.5])
         XCTAssertEqual(config.imageStd, [0.5, 0.5, 0.5])
         XCTAssertEqual(config.minPixels, 65_536)
@@ -100,26 +102,30 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
     }
 
     func testMoEFallbackUsesInheritedQwen35Configuration() throws {
-        let model = Qwen35MoE(
-            try makeQwen35Configuration(
-                modelType: "qwen3_5_moe", patchSize: 12, mergeSize: 2,
-                temporalPatchSize: 3))
-
         let fallback = try XCTUnwrap(
-            qwenProcessorFallback(modelType: "qwen3_5_moe", model: model))
+            Qwen35ProcessorLoadingResolver().processorConfigurationFallback(
+                for: VLMProcessorLoadingContext(
+                    modelId: "example/qwen-moe",
+                    modelType: "qwen3_5_moe",
+                    configurationData: makeQwen35ConfigurationData(
+                        modelType: "qwen3_5_moe", patchSize: 12, mergeSize: 2,
+                        temporalPatchSize: 3))))
         let config = try JSONDecoder().decode(
-            Qwen3VLProcessorConfiguration.self, from: fallback.0)
+            Qwen3VLProcessorConfiguration.self, from: fallback.data)
 
-        XCTAssertEqual(fallback.1.processorClass, "Qwen3VLProcessor")
+        XCTAssertEqual(fallback.processorType, "Qwen3VLProcessor")
         XCTAssertEqual(config.patchSize, 12)
         XCTAssertEqual(config.mergeSize, 2)
         XCTAssertEqual(config.temporalPatchSize, 3)
     }
 
     func testFallbackRejectsUnrelatedModelType() throws {
-        let model = Qwen35(try makeQwen35Configuration(modelType: "qwen3_5"))
-
-        XCTAssertNil(try qwenProcessorFallback(modelType: "qwen3_vl", model: model))
+        XCTAssertNil(
+            try Qwen35ProcessorLoadingResolver().processorConfigurationFallback(
+                for: VLMProcessorLoadingContext(
+                    modelId: "example/qwen",
+                    modelType: "qwen3_vl",
+                    configurationData: makeQwen35ConfigurationData(modelType: "qwen3_5"))))
     }
 
     func testMissingFilesUseFallback() async throws {
@@ -127,10 +133,10 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let fallback = try processorConfiguration(named: "FallbackProcessor")
 
-        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+        let resolved = try await loadProcessorConfig(from: directory) { fallback }
 
-        XCTAssertEqual(resolved.0, fallback.0)
-        XCTAssertEqual(resolved.1.processorClass, "FallbackProcessor")
+        XCTAssertEqual(resolved.data, fallback.data)
+        XCTAssertEqual(resolved.processorType, "FallbackProcessor")
     }
 
     func testPreprocessorConfigWinsOverProcessorAndFallback() async throws {
@@ -139,14 +145,14 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
         let preprocessor = try processorConfiguration(named: "Preprocessor")
         let processor = try processorConfiguration(named: "Processor")
         let fallback = try processorConfiguration(named: "Fallback")
-        try preprocessor.0.write(
+        try preprocessor.data.write(
             to: directory.appending(component: "preprocessor_config.json"))
-        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+        try processor.data.write(to: directory.appending(component: "processor_config.json"))
 
-        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+        let resolved = try await loadProcessorConfig(from: directory) { fallback }
 
-        XCTAssertEqual(resolved.0, preprocessor.0)
-        XCTAssertEqual(resolved.1.processorClass, "Preprocessor")
+        XCTAssertEqual(resolved.data, preprocessor.data)
+        XCTAssertEqual(resolved.processorType, "Preprocessor")
     }
 
     func testProcessorConfigWinsOverFallback() async throws {
@@ -154,12 +160,12 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let processor = try processorConfiguration(named: "Processor")
         let fallback = try processorConfiguration(named: "Fallback")
-        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+        try processor.data.write(to: directory.appending(component: "processor_config.json"))
 
-        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+        let resolved = try await loadProcessorConfig(from: directory) { fallback }
 
-        XCTAssertEqual(resolved.0, processor.0)
-        XCTAssertEqual(resolved.1.processorClass, "Processor")
+        XCTAssertEqual(resolved.data, processor.data)
+        XCTAssertEqual(resolved.processorType, "Processor")
     }
 
     func testMalformedPreprocessorIsNotMasked() async throws {
@@ -169,10 +175,10 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
         let fallback = try processorConfiguration(named: "Fallback")
         try Data("{".utf8).write(
             to: directory.appending(component: "preprocessor_config.json"))
-        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+        try processor.data.write(to: directory.appending(component: "processor_config.json"))
 
         do {
-            _ = try await loadProcessorConfig(from: directory, fallback: fallback)
+            _ = try await loadProcessorConfig(from: directory) { fallback }
             XCTFail("Expected malformed preprocessor_config.json to throw")
         } catch let error as ProcessorConfigError {
             XCTAssertEqual(error.filename, "preprocessor_config.json")
@@ -187,7 +193,7 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
             to: directory.appending(component: "processor_config.json"))
 
         do {
-            _ = try await loadProcessorConfig(from: directory, fallback: fallback)
+            _ = try await loadProcessorConfig(from: directory) { fallback }
             XCTFail("Expected malformed processor_config.json to throw")
         } catch let error as ProcessorConfigError {
             XCTAssertEqual(error.filename, "processor_config.json")
@@ -224,12 +230,12 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(Qwen35Configuration.self, from: data))
     }
 
-    private func makeQwen35Configuration(
+    private func makeQwen35ConfigurationData(
         modelType: String,
         patchSize: Int = 14,
         mergeSize: Int = 3,
         temporalPatchSize: Int = 4
-    ) throws -> Qwen35Configuration {
+    ) -> Data {
         let json = """
             {
                 "model_type": "\(modelType)",
@@ -264,15 +270,15 @@ final class Qwen35ProcessorFallbackTests: XCTestCase {
                 }
             }
             """
-        return try JSONDecoder().decode(
-            Qwen35Configuration.self, from: Data(json.utf8))
+        return Data(json.utf8)
     }
 
-    private func processorConfiguration(named processorClass: String) throws -> (
-        Data, BaseProcessorConfiguration
-    ) {
+    private func processorConfiguration(
+        named processorClass: String
+    ) throws -> VLMProcessorConfiguration {
         let config = BaseProcessorConfiguration(processorClass: processorClass)
-        return (try JSONEncoder().encode(config), config)
+        return VLMProcessorConfiguration(
+            data: try JSONEncoder().encode(config), processorType: processorClass)
     }
 
     private func makeTemporaryDirectory() throws -> URL {
