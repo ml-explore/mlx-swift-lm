@@ -350,48 +350,52 @@ public final class DiffusionGemma: Module, VLMModel, BlockDiffusionLanguageModel
         )
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var sanitized: [String: MLXArray] = [:]
-
-        for (key, value) in diffusionCore.sanitize(weights: weights) {
-            sanitized["diffusion_core.\(key)"] = value
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var visionRules: [CheckpointNameMapping.Rule] = [
+            .replacePrefix("model.encoder.vision_tower", with: "vision_tower"),
+            .replacePrefix("model.encoder.embed_vision", with: "embed_vision"),
+            .replacePrefix("model.vision_tower", with: "vision_tower"),
+            .replacePrefix("model.embed_vision", with: "embed_vision"),
+            .excludeModule("rotary_emb"),
+        ]
+        if !config.visionConfig.useClippedLinears {
+            visionRules += [
+                .excludeModule("input_min"), .excludeModule("input_max"),
+                .excludeModule("output_min"), .excludeModule("output_max"),
+            ]
         }
-
-        for (key, value) in weights {
-            if key.contains("audio_tower") || key.contains("embed_audio")
-                || key.contains("rotary_emb")
-                || key.contains("input_min")
-                || key.contains("input_max")
-                || key.contains("output_min")
-                || key.contains("output_max")
+        let visionMapping = CheckpointNameMapping(visionRules)
+        return try DiffusionGemmaLanguageCore.normalizeExpertWeights(checkpoint).mapNames { name in
+            guard let mapped = visionMapping.mapName(name) else { return nil }
+            if mapped == "vision_tower" || mapped.hasPrefix("vision_tower.")
+                || mapped == "embed_vision" || mapped.hasPrefix("embed_vision.")
             {
-                continue
+                return mapped
             }
-
-            if key.hasPrefix("model.encoder.vision_tower.") {
-                let rest = key.dropFirst("model.encoder.".count)
-                sanitized[String(rest)] = value
-            } else if key.hasPrefix("model.encoder.embed_vision.") {
-                let rest = key.dropFirst("model.encoder.".count)
-                sanitized[String(rest)] = value
-            } else if key.hasPrefix("model.vision_tower.") || key.hasPrefix("model.embed_vision.") {
-                let rest = key.dropFirst("model.".count)
-                sanitized[String(rest)] = value
+            let textName =
+                mapped.hasPrefix("diffusion_core.")
+                ? String(mapped.dropFirst("diffusion_core.".count)) : mapped
+            guard let textName = DiffusionGemmaLanguageCore.textCheckpointName(textName) else {
+                return nil
             }
+            if config.tieWordEmbeddings && (textName == "lm_head" || textName.hasPrefix("lm_head."))
+            {
+                return nil
+            }
+            return "diffusion_core.\(textName)"
         }
-
-        return sanitized
     }
 
-    public func quantizationConfigurationPath(for modulePath: String) -> String {
-        if modulePath.hasPrefix("diffusion_core.") {
-            return String(modulePath.dropFirst("diffusion_core.".count))
-        }
-        if modulePath.hasPrefix("vision_tower.") || modulePath.hasPrefix("embed_vision.") {
-            return "model.encoder.\(modulePath)"
-        }
-        return modulePath
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        try prepareCheckpoint(ModelCheckpoint(weights: weights)).weights
     }
+
+}
+
+// MARK: - Chat conventions
+
+extension DiffusionGemma {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
 }
 
 public struct DiffusionGemma4Processor: UserInputProcessor {

@@ -1623,9 +1623,11 @@ public final class ChatSession {
                             }
                             let iterator = try BlockDiffusionTokenIterator(
                                 input: input, model: diffusionModel, cacheStorage: kvCache,
-                                parameters: generateParameters)
+                                parameters: generateParameters, components: components)
                             generation = startGeneration(iterator)
-                        } else if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                        } else if !speculationIsEligibleForParameters
+                            || requiresMainOnlyContinuation
+                        {
                             if speculativeDecoding != nil {
                                 if !speculationIsEligibleForParameters {
                                     speculativeDecodingFallbackReason = .unsupportedSampling

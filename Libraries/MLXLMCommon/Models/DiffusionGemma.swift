@@ -364,21 +364,7 @@ private enum DiffusionGemmaAttentionMode {
 }
 
 private func diffusionGemmaCacheState(_ cache: KVCache?) -> (MLXArray, MLXArray)? {
-    guard let cache else {
-        return nil
-    }
-
-    let state =
-        if let rotatingCache = cache as? RotatingKVCache {
-            rotatingCache.temporalState
-        } else {
-            cache.state
-        }
-
-    guard state.count == 2 else {
-        return nil
-    }
-    return (state[0], state[1])
+    cache?.currentKeyValues()
 }
 
 private func diffusionGemmaDecoderMask(
@@ -436,12 +422,12 @@ private func diffusionGemmaEncoderMask(
         return createAttentionMask(h: h, cache: cache, windowSize: windowSize)
     }
 
-    let offset = cache?.offset ?? 0
+    let baseMask = createAttentionMask(
+        h: h, cache: cache, windowSize: windowSize, returnArray: true)
+    guard case .array(let causalMask) = baseMask else { return baseMask }
     let length = h.dim(1)
-    let keyLength = offset + length
-    if length <= 1 && keyLength <= 1 {
-        return .none
-    }
+    let keyLength = causalMask.dim(-1)
+    let offset = keyLength - length
 
     let rawTypes =
         multimodalTokenTypes.ndim == 2
@@ -467,26 +453,18 @@ private func diffusionGemmaEncoderMask(
     var values = [Bool]()
     values.reserveCapacity(length * keyLength)
     for query in 0 ..< length {
-        let absoluteQuery = offset + query
         for key in 0 ..< keyLength {
-            let causal = absoluteQuery >= key
-            let windowed =
-                if let windowSize {
-                    causal && absoluteQuery < key + windowSize
-                } else {
-                    causal
-                }
             let localKey = key - offset
             let sameVisualBlock =
                 localKey >= 0 && localKey < length
                 && visualBlockIds[query] >= 0
                 && visualBlockIds[query] == visualBlockIds[localKey]
-            values.append(windowed || sameVisualBlock)
+            values.append(sameVisualBlock)
         }
     }
 
     let mask = MLXArray(values, [length, keyLength])
-    return .array(mask[.newAxis, .newAxis, 0..., 0...])
+    return .array(causalMask | mask[.newAxis, .newAxis, 0..., 0...])
 }
 
 private final class DiffusionGemmaAttention: Module {
@@ -516,12 +494,16 @@ private final class DiffusionGemmaAttention: Module {
         self.numHeads = config.attentionHeads
         self.numKVHeads = isSliding ? config.kvHeads : config.globalKVHeads
 
-        _qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        _kProj.wrappedValue = Linear(config.hiddenSize, numKVHeads * headDim, bias: false)
+        _qProj.wrappedValue = Linear(
+            config.hiddenSize, numHeads * headDim, bias: config.attentionBias)
+        _kProj.wrappedValue = Linear(
+            config.hiddenSize, numKVHeads * headDim, bias: config.attentionBias)
         if isSliding {
-            _vProj.wrappedValue = Linear(config.hiddenSize, numKVHeads * headDim, bias: false)
+            _vProj.wrappedValue = Linear(
+                config.hiddenSize, numKVHeads * headDim, bias: config.attentionBias)
         }
-        _oProj.wrappedValue = Linear(numHeads * headDim, config.hiddenSize, bias: false)
+        _oProj.wrappedValue = Linear(
+            numHeads * headDim, config.hiddenSize, bias: config.attentionBias)
         _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         _vNorm.wrappedValue = DiffusionGemmaRMSNormNoScale(eps: config.rmsNormEps)
@@ -532,7 +514,7 @@ private final class DiffusionGemmaAttention: Module {
             base: ropeConfig?["rope_theta"]?.asFloat() ?? (isSliding ? 10_000 : 1_000_000),
             traditional: false,
             scalingConfig: ropeConfig,
-            maxPositionEmbeddings: nil)
+            maxPositionEmbeddings: config.maxPositionEmbeddings)
 
         super.init()
     }
@@ -567,16 +549,14 @@ private final class DiffusionGemmaAttention: Module {
         let finalValues: MLXArray
         switch mode {
         case .encoder:
-            if let cache {
-                (finalKeys, finalValues) = cache.update(keys: keys, values: values)
-            } else {
-                finalKeys = keys
-                finalValues = values
-            }
+            let output = attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values, cache: cache,
+                scale: 1.0, mask: attentionMask)
+            return oProj(output.transposed(0, 2, 1, 3).reshaped(batch, length, -1))
         case .decoder:
             if let (cachedKeys, cachedValues) = diffusionGemmaCacheState(cache) {
-                var encoderKeys = cachedKeys
-                var encoderValues = cachedValues
+                var encoderKeys = cachedKeys.asType(keys.dtype)
+                var encoderValues = cachedValues.asType(values.dtype)
 
                 if isSliding {
                     let windowPrefix = Swift.max(config.slidingWindow - 1, 0)
@@ -839,12 +819,11 @@ private final class DiffusionGemmaDecoder: Module {
         if let selfConditioningEmbeddings {
             signal = selfConditioningEmbeddings.asType(h.dtype)
         } else if let selfConditioningLogits {
-            let probabilities = softmax(
-                selfConditioningLogits.asType(h.dtype), axis: -1, precise: true)
+            let probabilities = softmax(selfConditioningLogits, axis: -1, precise: true)
             let projected: MLXArray
             if let quantizedEmbedding = embedTokens as? QuantizedEmbedding {
                 projected = quantizedMM(
-                    probabilities,
+                    probabilities.asType(h.dtype),
                     quantizedEmbedding.weight,
                     scales: quantizedEmbedding.scales,
                     biases: quantizedEmbedding.biases,
@@ -853,10 +832,10 @@ private final class DiffusionGemmaDecoder: Module {
                     bits: quantizedEmbedding.bits,
                     mode: quantizedEmbedding.mode)
             } else {
-                projected = matmul(
-                    probabilities.asType(embedTokens.weight.dtype), embedTokens.weight)
+                projected = matmul(probabilities, embedTokens.weight)
             }
-            signal = projected * MLXArray(embedScale, dtype: .float32).asType(h.dtype)
+            signal =
+                projected.asType(h.dtype) * MLXArray(embedScale, dtype: .float32).asType(h.dtype)
         } else {
             signal = MLXArray.zeros(h.shape, dtype: h.dtype)
         }
@@ -955,7 +934,7 @@ public final class DiffusionGemmaLanguageCore: Module, BlockDiffusionLanguageMod
         multimodalTokenTypes: MLXArray? = nil
     ) {
         let tokens = tokens.ndim == 1 ? tokens.expandedDimensions(axis: 0) : tokens
-        let chunkSize = windowSize ?? 512
+        let chunkSize = Swift.max(1, windowSize ?? 512)
         var start = 0
 
         while start < tokens.dim(1) {
@@ -1033,7 +1012,7 @@ public final class DiffusionGemmaLanguageCore: Module, BlockDiffusionLanguageMod
         }
 
         if compactedTokenTypes == nil {
-            let chunkSize = windowSize ?? 512
+            let chunkSize = Swift.max(1, windowSize ?? 512)
             if compactedEmbeddings.dim(1) > chunkSize {
                 var start = 0
                 while start < compactedEmbeddings.dim(1) {
@@ -1131,33 +1110,59 @@ public final class DiffusionGemmaLanguageCore: Module, BlockDiffusionLanguageMod
         }
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var sanitized = weights.filter { key, _ in
-            !key.hasPrefix("model.encoder.vision_tower")
-                && !key.hasPrefix("model.encoder.embedder")
-                && !key.hasPrefix("model.vision_tower")
-                && !key.hasPrefix("model.embed_vision")
-                && !(key.hasPrefix("model.encoder.language_model.")
-                    && !key.hasSuffix(".layer_scalar"))
-                && !key.contains("rotary_emb")
-                && !key.contains("input_min")
-                && !key.contains("input_max")
-                && !key.contains("output_min")
-                && !key.contains("output_max")
-        }
+    private static let textCheckpointMapping = CheckpointNameMapping([
+        .excludePrefix("model.encoder.vision_tower"),
+        .excludePrefix("model.encoder.embedder"),
+        .excludePrefix("model.encoder.embed_vision"),
+        .excludePrefix("model.vision_tower"),
+        .excludePrefix("model.embed_vision"),
+        .excludePrefix("model.encoder.audio_tower"),
+        .excludePrefix("model.encoder.embed_audio"),
+        .excludePrefix("audio_tower"),
+        .excludePrefix("embed_audio"),
+        .excludeModule("rotary_emb"),
+        .excludeModule("input_min"),
+        .excludeModule("input_max"),
+        .excludeModule("output_min"),
+        .excludeModule("output_max"),
+    ])
 
-        if config.tieWordEmbeddings {
-            sanitized = sanitized.filter { key, _ in
-                !key.hasPrefix("lm_head.")
-            }
-        } else if sanitized["lm_head.weight"] == nil,
-            let embedWeight = sanitized["model.decoder.embed_tokens.weight"]
-        {
-            sanitized["lm_head.weight"] = embedWeight
+    package static func textCheckpointName(_ name: String) -> String? {
+        guard let name = textCheckpointMapping.mapName(name) else { return nil }
+        if name.hasPrefix("model.encoder.language_model.") && !name.hasSuffix(".layer_scalar") {
+            return nil
         }
-
-        return sanitized
+        return name
     }
+
+    package static func normalizeExpertWeights(_ checkpoint: ModelCheckpoint) throws
+        -> ModelCheckpoint
+    {
+        var checkpoint = checkpoint
+        let precision = checkpoint.perLayerQuantization
+        checkpoint.perLayerQuantization = nil
+        checkpoint = try checkpoint.mapNames { name in
+            if name.hasSuffix(".experts.down_proj") || name.hasSuffix(".experts.gate_up_proj") {
+                return name + ".weight"
+            }
+            return name
+        }
+        checkpoint.perLayerQuantization = precision
+        return checkpoint
+    }
+
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        let checkpoint = try Self.normalizeExpertWeights(checkpoint).mapNames(
+            Self.textCheckpointName)
+        return try checkpoint.mapNames(
+            using: CheckpointNameMapping(
+                config.tieWordEmbeddings ? [.excludePrefix("lm_head")] : []))
+    }
+
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        try prepareCheckpoint(ModelCheckpoint(weights: weights)).weights
+    }
+
 }
 
 extension DiffusionGemmaLanguageCore: LoRAModel {

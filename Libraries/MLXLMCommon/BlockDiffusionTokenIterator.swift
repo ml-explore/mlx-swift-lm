@@ -46,22 +46,27 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         input: LMInput,
         model: any BlockDiffusionLanguageModel,
         cache: [KVCache]? = nil,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        components: GenerationComponents = .init()
     ) throws {
+        try Self.validate(parameters: parameters, components: components, model: model)
         let plan = try parameters.kvCachePlan()
         try self.init(
             input: input, model: model,
             cacheStorage: KVCacheStorage(
                 cache ?? (try model.newCache(parameters: parameters)), plan: plan),
-            parameters: parameters)
+            parameters: parameters,
+            components: .init())
     }
 
     package init(
         input: LMInput,
         model: any BlockDiffusionLanguageModel,
         cacheStorage: KVCacheStorage,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        components: GenerationComponents = .init()
     ) throws {
+        try Self.validate(parameters: parameters, components: components, model: model)
         let promptTokenCount = try Self.validatePrompt(input.text, model: model)
         let kvCachePlan = cacheStorage.plan
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
@@ -109,6 +114,36 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         }
 
         try kvCachePlan.applyAndValidate(to: cacheStorage)
+    }
+
+    private static func validate(
+        parameters: GenerateParameters, components: GenerationComponents,
+        model: any BlockDiffusionLanguageModel
+    ) throws {
+        try components.validate(parameters: parameters)
+        guard components.logitProcessorFactory == nil else {
+            throw GenerateError.invalidDiffusionConfiguration(
+                "Autoregressive logit processors cannot be applied to a denoising canvas.")
+        }
+        guard model.diffusionCanvasLength > 0, model.diffusionVocabularySize > 0,
+            model.diffusionMaxDenoisingSteps > 0, model.diffusionStabilityThreshold >= 0,
+            model.diffusionTemperatureMin.isFinite, model.diffusionTemperatureMin > 0,
+            model.diffusionTemperatureMax.isFinite, model.diffusionTemperatureMax > 0,
+            model.diffusionEntropyBound.isFinite, model.diffusionEntropyBound >= 0,
+            model.diffusionConfidenceThreshold.isFinite,
+            model.diffusionConfidenceThreshold >= 0,
+            parameters.diffusion.temperature.isFinite, parameters.diffusion.temperature >= 0
+        else {
+            throw GenerateError.invalidDiffusionConfiguration(
+                "Canvas size, vocabulary, and denoising steps must be positive; temperatures and thresholds must be finite and valid."
+            )
+        }
+        if case .confidenceThreshold(let threshold) = parameters.diffusion.sampler,
+            !threshold.isFinite || !(0 ... 1).contains(threshold)
+        {
+            throw GenerateError.invalidDiffusionConfiguration(
+                "The confidence threshold must be between 0 and 1.")
+        }
     }
 
     private static func validatePrompt(
@@ -244,7 +279,7 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         var draftCanvas = currentCanvas
         argmaxCanvasHistory = nil
 
-        for curStep in stride(from: maxDenoisingSteps, through: 1, by: -1) {
+        denoisingLoop: for curStep in stride(from: maxDenoisingSteps, through: 1, by: -1) {
             let rawLogits =
                 if prefersLogitsSelfConditioning {
                     model.diffusionLogits(
@@ -293,7 +328,7 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
 
                 if draftRevealMask.all().item(Bool.self) {
                     argmaxCanvas = draftCanvas
-                    break
+                    break denoisingLoop
                 }
             }
 

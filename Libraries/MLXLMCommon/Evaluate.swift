@@ -443,6 +443,7 @@ public enum GenerateError: LocalizedError {
     case unsupportedMultimodalGeneration(String)
     case unsupportedBatchSize(modelName: String, batchSize: Int)
     case invalidAttentionMask(String)
+    case invalidDiffusionConfiguration(String)
 
     public var errorDescription: String? {
         switch self {
@@ -460,6 +461,8 @@ public enum GenerateError: LocalizedError {
                 "\(modelName) block-diffusion streaming supports batch size 1, but received batch size \(batchSize)."
         case .invalidAttentionMask(let reason):
             return "Invalid block-diffusion attention mask: \(reason)"
+        case .invalidDiffusionConfiguration(let reason):
+            return "Invalid block-diffusion configuration: \(reason)"
         }
     }
 }
@@ -2228,7 +2231,8 @@ public func generate(
         input: input, modelConfiguration: context.configuration, tokenizer: context.tokenizer)
     if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
         let iterator = try BlockDiffusionTokenIterator(
-            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+            input: input, model: diffusionModel, cache: cache, parameters: parameters,
+            components: components)
         let (stream, _) = generateTask(
             promptTokenCount: input.text.tokens.size,
             modelConfiguration: context.configuration,
@@ -2554,7 +2558,8 @@ public func generateTokens(
 ) throws -> AsyncStream<TokenGeneration> {
     if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
         let iterator = try BlockDiffusionTokenIterator(
-            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+            input: input, model: diffusionModel, cache: cache, parameters: parameters,
+            components: components)
         let (stream, _) = generateTokenTask(
             promptTokenCount: input.text.tokens.size,
             modelConfiguration: context.configuration,
@@ -2796,7 +2801,8 @@ public func generateTokensTask(
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
     if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
         let iterator = try BlockDiffusionTokenIterator(
-            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+            input: input, model: diffusionModel, cache: cache, parameters: parameters,
+            components: components)
         return generateTokenTask(
             promptTokenCount: input.text.tokens.size,
             modelConfiguration: context.configuration,

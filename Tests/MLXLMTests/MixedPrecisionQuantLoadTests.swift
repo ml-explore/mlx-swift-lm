@@ -267,15 +267,7 @@ private final class NamespacedQuantizationModel: Module, BaseLanguageModel {
         super.init()
     }
 
-    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        Dictionary(
-            uniqueKeysWithValues: weights.map { key, value in
-                ("runtime.\(key)", value)
-            })
-    }
-
-    func quantizationConfigurationPath(for modulePath: String) -> String {
-        modulePath.hasPrefix("runtime.")
-            ? String(modulePath.dropFirst("runtime.".count)) : modulePath
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        try checkpoint.mapNames(using: .init([.replacePrefix("", with: "runtime")]))
     }
 }

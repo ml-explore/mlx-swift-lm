@@ -3,6 +3,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import MLXScriptedLM
 import MLXVLM
 import Testing
 
@@ -235,6 +236,61 @@ struct DiffusionGemmaTests {
         #expect(cache.allSatisfy { $0.offset == 2 })
     }
 
+    @Test("DiffusionGemma VLM uses Gemma 4 tool-call conventions")
+    func vlmUsesGemma4ToolCallConventions() throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
+
+        #expect(DiffusionGemma(config).toolCallFormat == .gemma4)
+    }
+
+    @Test("DiffusionGemma reads live K/V independently of serialized cache layout")
+    func decoderUsesLiveKeyValuesInsteadOfSerializedState() throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        eval(model)
+
+        let cache = try model.newCache(parameters: nil)
+        try model.prepareDiffusion(
+            LMInput(tokens: MLXArray([2, 7, 11]).reshaped([1, 3])),
+            cache: cache,
+            windowSize: nil)
+        let fullAttentionKV = try #require(cache[1].currentKeyValues())
+        let opaqueCache = SerializationOpaqueKVCache(
+            keys: fullAttentionKV.keys,
+            values: fullAttentionKV.values,
+            offset: cache[1].offset)
+        let canvas = MLXArray([4, 5, 6, 7]).reshaped([1, 4])
+
+        let reference = model.diffusionLogits(
+            canvasTokens: canvas, cache: cache, selfConditioningLogits: nil)
+        let opaqueStateResult = model.diffusionLogits(
+            canvasTokens: canvas,
+            cache: [cache[0], opaqueCache],
+            selfConditioningLogits: nil)
+        eval(reference, opaqueStateResult)
+
+        #expect(opaqueCache.state.count == 4)
+        #expect(abs(reference - opaqueStateResult).max().item(Float.self) < 1e-6)
+    }
+
+    @Test("Quantized KV cache exposes dense live K/V without serialization assumptions")
+    func quantizedCacheExposesLiveKeyValues() throws {
+        let keys = MLXArray((0 ..< 96).map { Float($0) / 100 }).reshaped([1, 1, 3, 32])
+        let values = MLXArray((0 ..< 96).map { Float(95 - $0) / 100 })
+            .reshaped([1, 1, 3, 32])
+        let cache = QuantizedKVCache(groupSize: 32, bits: 8)
+        _ = cache.updateQuantized(keys: keys, values: values)
+
+        let live = try #require(cache.currentKeyValues())
+        eval(live.keys, live.values)
+
+        #expect(cache.state.count == 6)
+        #expect(live.keys.shape == keys.shape)
+        #expect(live.values.shape == values.shape)
+        #expect(abs(live.keys - keys).max().item(Float.self) < 0.01)
+        #expect(abs(live.values - values).max().item(Float.self) < 0.01)
+    }
+
     @Test("Quantized DiffusionGemma self-conditions without a dense embedding table")
     func quantizedSelfConditioningUsesLogits() throws {
         let model = DiffusionGemmaLanguageCore(try Self.configuration())
@@ -256,6 +312,59 @@ struct DiffusionGemmaTests {
         #expect(tokens.count == 4)
     }
 
+    @Test("Quantized DiffusionGemma softmaxes self-conditioning logits before dtype conversion")
+    func quantizedSelfConditioningPreservesLogitPrecision() throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        let bfloat16Parameters = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { key, value in
+                (key, value.asType(.bfloat16))
+            })
+        try model.update(
+            parameters: ModuleParameters.unflattened(bfloat16Parameters), verify: [.all])
+        quantize(model: model, groupSize: 32, bits: 4) { path, _ in
+            path == "model.decoder.embed_tokens"
+        }
+
+        let parameters = Dictionary(uniqueKeysWithValues: model.parameters().flattened())
+        let weight = try #require(parameters["model.decoder.embed_tokens.weight"])
+        let scales = try #require(parameters["model.decoder.embed_tokens.scales"])
+        let biases = try #require(parameters["model.decoder.embed_tokens.biases"])
+
+        let values = (0 ..< 4).flatMap { row in
+            (0 ..< 32).map { column in
+                Float(16) + Float((column + row * 7) % 32) * 0.02
+            }
+        }
+        let logits = MLXArray(values).reshaped([1, 4, 32])
+        let probabilities = softmax(logits, axis: -1, precise: true)
+        let projected = quantizedMM(
+            probabilities.asType(.bfloat16),
+            weight,
+            scales: scales,
+            biases: biases,
+            transpose: false,
+            groupSize: 32,
+            bits: 4)
+        let referenceEmbeddings =
+            projected.asType(.bfloat16)
+            * MLXArray(sqrt(Float(32)), dtype: .bfloat16)
+
+        let canvas = MLXArray([4, 5, 6, 7]).reshaped([1, 4])
+        let cache = try model.newCache(parameters: nil)
+        let logitsPath = model.diffusionLogits(
+            canvasTokens: canvas,
+            cache: cache,
+            selfConditioningLogits: logits)
+        let referencePath = model.diffusionLogits(
+            canvasTokens: canvas,
+            cache: cache,
+            selfConditioningEmbeddings: referenceEmbeddings)
+        eval(logitsPath, referencePath)
+
+        let maxDifference = abs(logitsPath - referencePath).max().item(Float.self)
+        #expect(maxDifference < 1e-5, "mlx-vlm parity difference: \(maxDifference)")
+    }
+
     @Test("DiffusionGemma keeps official shared text checkpoint layout")
     func keepsOfficialSharedTextCheckpointLayout() throws {
         let model = DiffusionGemmaLanguageCore(try Self.configuration())
@@ -271,7 +380,7 @@ struct DiffusionGemmaTests {
             "lm_head.weight": tensor,
         ]
 
-        let sanitized = model.sanitize(weights: weights)
+        let sanitized = try model.sanitize(weights: weights)
 
         #expect(sanitized["model.decoder.embed_tokens.weight"] != nil)
         #expect(sanitized["model.decoder.embed_tokens.scales"] != nil)
@@ -299,28 +408,8 @@ struct DiffusionGemmaTests {
             }
         }
 
-        let sanitized = model.sanitize(weights: officialStyleWeights)
+        let sanitized = try model.sanitize(weights: officialStyleWeights)
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: [.all])
-    }
-
-    @Test("DiffusionGemma VLM preserves checkpoint quantization paths")
-    func vlmPreservesCheckpointQuantizationPaths() throws {
-        let config = try JSONDecoder().decode(
-            DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
-        let model = DiffusionGemma(config)
-
-        #expect(
-            model.quantizationConfigurationPath(
-                for: "diffusion_core.model.decoder.layers.0.mlp.gate_proj")
-                == "model.decoder.layers.0.mlp.gate_proj")
-        #expect(
-            model.quantizationConfigurationPath(
-                for: "diffusion_core.model.decoder.layers.0.router.proj")
-                == "model.decoder.layers.0.router.proj")
-        #expect(
-            model.quantizationConfigurationPath(
-                for: "vision_tower.encoder.layers.0.self_attn.q_proj")
-                == "model.encoder.vision_tower.encoder.layers.0.self_attn.q_proj")
     }
 
     @Test("DiffusionGemma VLM decodes released processor config")
@@ -503,7 +592,7 @@ struct DiffusionGemmaTests {
             "model.encoder.audio_tower.layers.0.weight": tensor,
         ]
 
-        let sanitized = model.sanitize(weights: weights)
+        let sanitized = try model.sanitize(weights: weights)
 
         #expect(sanitized["diffusion_core.model.decoder.embed_tokens.weight"] != nil)
         #expect(
@@ -600,6 +689,7 @@ struct DiffusionGemmaTests {
         }
 
         #expect(tokens == [1, 2, 3])
+        #expect(model.decoderCalls == 1)
     }
 
     @Test("Block diffusion iterator does not apply autoregressive logit processors")
@@ -617,6 +707,328 @@ struct DiffusionGemmaTests {
 
         #expect(iterator.next() == 1)
         #expect(iterator.next() == nil)
+    }
+
+    @Test(
+        "Diffusion checkpoints map tensors, provenance, and precision together",
+        arguments: ["model.encoder.", "model.", ""])
+    func checkpointMappingPreservesPrecision(visionPrefix: String) throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
+        let model = DiffusionGemma(config)
+        let textPath = "model.decoder.layers.0.mlp.gate_proj"
+        let visionPath = "\(visionPrefix)vision_tower.encoder.layers.0.self_attn.q_proj"
+        let excluded = [
+            "model.encoder.language_model.layers.0.self_attn.q_proj",
+            "model.encoder.audio_tower.layers.0",
+            "lm_head",
+        ]
+        let paths = [textPath, visionPath] + excluded
+        let weights = Dictionary(
+            uniqueKeysWithValues: paths.map { ($0 + ".weight", MLXArray.ones([1])) })
+        let settings = Dictionary(
+            uniqueKeysWithValues: paths.map {
+                ($0, BaseConfiguration.QuantizationOption.quantize(.init(groupSize: 32, bits: 8)))
+            })
+        let sourceMetadata = ["format": "mlx", "source": "vision"]
+        let prepared = try model.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: weights,
+                weightMetadata: [visionPath + ".weight": sourceMetadata],
+                perLayerQuantization: .init(
+                    quantization: .init(groupSize: 32, bits: 4), perLayerQuantization: settings)))
+        let runtimeTextPath = "diffusion_core.\(textPath)"
+        let runtimeVisionPath = "vision_tower.encoder.layers.0.self_attn.q_proj"
+        #expect(
+            Set(prepared.weights.keys) == [
+                runtimeTextPath + ".weight", runtimeVisionPath + ".weight",
+            ])
+        #expect(prepared.metadata(forWeight: runtimeVisionPath + ".weight") == sourceMetadata)
+        let precision = try #require(prepared.perLayerQuantization)
+        #expect(precision.quantization(layer: runtimeTextPath)?.bits == 8)
+        #expect(precision.quantization(layer: runtimeVisionPath)?.bits == 8)
+        #expect(precision.perLayerQuantization.count == 2)
+    }
+
+    @Test("Diffusion checkpoints reject conflicting tensor and precision aliases")
+    func checkpointMappingRejectsAliases() throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
+        let model = DiffusionGemma(config)
+        let paths = ["model.encoder.embed_vision.projection", "model.embed_vision.projection"]
+        #expect(throws: ModelCheckpoint.MappingError.self) {
+            try model.prepareCheckpoint(
+                ModelCheckpoint(
+                    weights: Dictionary(
+                        uniqueKeysWithValues: paths.map { ($0 + ".weight", MLXArray.ones([1])) })))
+        }
+        #expect(throws: ModelCheckpoint.MappingError.self) {
+            try model.prepareCheckpoint(
+                ModelCheckpoint(
+                    weights: [:],
+                    perLayerQuantization: .init(
+                        quantization: .init(groupSize: 32, bits: 4),
+                        perLayerQuantization: Dictionary(
+                            uniqueKeysWithValues: paths.map {
+                                (
+                                    $0,
+                                    BaseConfiguration.QuantizationOption.quantize(
+                                        .init(groupSize: 32, bits: 8))
+                                )
+                            }))))
+        }
+    }
+
+    @Test("Diffusion checkpoints preserve unknown tensors for strict validation")
+    func checkpointMappingPreservesUnknownWeights() throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
+        let model = DiffusionGemma(config)
+        let prepared = try model.prepareCheckpoint(
+            ModelCheckpoint(weights: [
+                "unexpected.weight": MLXArray.ones([1])
+            ]))
+        #expect(prepared.weights["diffusion_core.unexpected.weight"] != nil)
+        #expect(throws: (any Error).self) {
+            try model.update(
+                parameters: ModuleParameters.unflattened(prepared.weights), verify: [.all])
+        }
+    }
+
+    @Test(
+        "Diffusion VLM strict-loads mixed precision from each vision namespace",
+        arguments: ["model.encoder.", "model.", ""])
+    func strictLoadsMixedPrecisionCheckpoint(visionPrefix: String) throws {
+        let json = Self.vlmConfigurationJSON
+            .replacingOccurrences(of: "\"hidden_size\": 16", with: "\"hidden_size\": 64")
+            .replacingOccurrences(of: "\"hidden_size\": 8", with: "\"hidden_size\": 32")
+            .replacingOccurrences(
+                of: "\"intermediate_size\": 32", with: "\"intermediate_size\": 128"
+            )
+            .replacingOccurrences(
+                of: "\"intermediate_size\": 16", with: "\"intermediate_size\": 64"
+            )
+            .replacingOccurrences(
+                of: "\"moe_intermediate_size\": 8", with: "\"moe_intermediate_size\": 32"
+            )
+            .replacingOccurrences(of: "head_dim\": 8", with: "head_dim\": 32")
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(json.utf8))
+        let reference = DiffusionGemma(config)
+        let overrides = [
+            "diffusion_core.model.decoder.layers.0.mlp.gate_proj",
+            "vision_tower.encoder.layers.0.self_attn.q_proj.linear",
+        ]
+        quantize(model: reference) { path, module in
+            if overrides.contains(path) { return (32, 8, .affine) }
+            if module is Linear || module is Embedding { return (32, 4, .affine) }
+            return nil
+        }
+        func checkpointPath(_ path: String) -> String {
+            if path.hasPrefix("diffusion_core.") {
+                return String(path.dropFirst("diffusion_core.".count))
+            }
+            return visionPrefix + path
+        }
+        let arrays = Dictionary(
+            uniqueKeysWithValues: reference.parameters().flattened()
+                .filter {
+                    !$0.0.hasPrefix("diffusion_core.model.encoder.language_model.")
+                        || $0.0.hasSuffix(".layer_scalar")
+                }
+                .map { key, value in
+                    var name = checkpointPath(key)
+                    if name.hasSuffix(".experts.down_proj.weight")
+                        || name.hasSuffix(".experts.gate_up_proj.weight")
+                    {
+                        name = String(name.dropLast(".weight".count))
+                    }
+                    return (name, value)
+                })
+        let directory = URL(filePath: NSTemporaryDirectory()).appending(
+            component: "diffusion-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try save(arrays: arrays, url: directory.appending(component: "model.safetensors"))
+        let settings = Dictionary(
+            uniqueKeysWithValues: overrides.map {
+                (
+                    checkpointPath($0),
+                    BaseConfiguration.QuantizationOption.quantize(.init(groupSize: 32, bits: 8))
+                )
+            })
+        let model = DiffusionGemma(config)
+        try loadWeights(
+            modelDirectory: directory, model: model,
+            perLayerQuantization: .init(
+                quantization: .init(groupSize: 32, bits: 4), perLayerQuantization: settings))
+        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
+        for path in overrides {
+            #expect((modules[path] as? QuantizedLinear)?.bits == 8)
+        }
+        #expect(
+            (modules["diffusion_core.model.decoder.embed_tokens"] as? QuantizedEmbedding)?.bits == 4
+        )
+        var iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([2, 7, 11])), model: model,
+            parameters: GenerateParameters(maxTokens: 8, seed: 7))
+        var tokens = [Int]()
+        while let token = iterator.next() { tokens.append(token) }
+        #expect(tokens.count == 8)
+    }
+
+    @Test("Diffusion generation updates quantized caches across multiple canvases")
+    func generatesWithQuantizedCaches() throws {
+        var config = try Self.configuration()
+        config.textConfig.headDim = 32
+        config.textConfig.globalHeadDim = 32
+        let model = DiffusionGemmaLanguageCore(config)
+        let cache: [KVCache] = (0 ..< 2).map { _ in QuantizedKVCache(groupSize: 32, bits: 8) }
+        var iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([2, 7, 11])), model: model, cache: cache,
+            parameters: GenerateParameters(maxTokens: 8, seed: 7))
+        var tokens = [Int]()
+        while let token = iterator.next() { tokens.append(token) }
+        #expect(tokens.count == 8)
+        #expect(cache.allSatisfy { $0.offset == 11 })
+        #expect(tokens.allSatisfy { (0 ..< model.vocabularySize).contains($0) })
+    }
+
+    @Test("Raw expert weights normalize without renaming their precision settings")
+    func rawExpertCheckpointNames() throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        let path = "model.decoder.layers.0.experts.gate_up_proj"
+        let prepared = try model.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: [path: MLXArray.ones([1])],
+                weightMetadata: [path: ["source": "raw"]],
+                perLayerQuantization: .init(
+                    quantization: .init(groupSize: 32, bits: 4),
+                    perLayerQuantization: [path: .quantize(.init(groupSize: 32, bits: 8))])))
+        #expect(prepared.weights[path + ".weight"] != nil)
+        #expect(prepared.metadata(forWeight: path + ".weight") == ["source": "raw"])
+        #expect(prepared.perLayerQuantization?.quantization(layer: path)?.bits == 8)
+        #expect(throws: ModelCheckpoint.MappingError.self) {
+            try model.prepareCheckpoint(
+                ModelCheckpoint(weights: [
+                    path: MLXArray.ones([1]), path + ".weight": MLXArray.ones([1]),
+                ]))
+        }
+    }
+
+    @Test("Vision clipping calibration is retained only when configured", arguments: [false, true])
+    func retainsVisionClippingCalibration(useClipping: Bool) throws {
+        let json = Self.vlmConfigurationJSON.replacingOccurrences(
+            of: "\"model_type\": \"gemma4_vision\",",
+            with: "\"model_type\": \"gemma4_vision\", \"use_clipped_linears\": \(useClipping),")
+        let config = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self, from: Data(json.utf8))
+        let model = DiffusionGemma(config)
+        let source = "model.encoder.vision_tower.encoder.layers.0.self_attn.q_proj.input_min"
+        let prepared = try model.prepareCheckpoint(ModelCheckpoint(weights: [source: MLXArray(-1)]))
+        #expect(
+            (prepared.weights["vision_tower.encoder.layers.0.self_attn.q_proj.input_min"] != nil)
+                == useClipping)
+    }
+
+    @Test("Untied checkpoints require their own output projection")
+    func untiedCheckpointRequiresOutputProjection() throws {
+        var config = try Self.configuration()
+        config.tieWordEmbeddings = false
+        let model = DiffusionGemmaLanguageCore(config)
+        let weights = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().filter {
+                !$0.0.hasPrefix("lm_head.")
+            })
+        let prepared = try model.prepareCheckpoint(ModelCheckpoint(weights: weights))
+        #expect(prepared.weights["lm_head.weight"] == nil)
+        #expect(throws: (any Error).self) {
+            try model.update(
+                parameters: ModuleParameters.unflattened(prepared.weights), verify: [.all])
+        }
+    }
+
+    @Test("Diffusion EOS finalization commits only emitted tokens", arguments: [false, true])
+    func eosFinalizationCommitsEmittedTokens(includeStopToken: Bool) async throws {
+        let model = StableCanvasDiffusionModel()
+        let iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([9])), model: model,
+            parameters: GenerateParameters(maxTokens: 3))
+        let (stream, task) = generateTokenTask(
+            promptTokenCount: 1, modelConfiguration: .init(id: "test", eosTokenIds: [2]),
+            tokenizer: ScriptedTokenizer(corpus: [], eos: .none), iterator: iterator,
+            includeStopToken: includeStopToken)
+        var tokens = [Int]()
+        var reason: GenerateStopReason?
+        for await event in stream {
+            switch event {
+            case .token(let token): tokens.append(token)
+            case .info(let info): reason = info.stopReason
+            }
+        }
+        await task.value
+        #expect(tokens == (includeStopToken ? [1, 2] : [1]))
+        #expect(model.committedTokens == tokens)
+        #expect(reason == .stop)
+    }
+
+    @Test("Diffusion validates components before prefill")
+    func validatesComponentsBeforePrefill() throws {
+        let model = StableCanvasDiffusionModel()
+        let components = GenerationComponents(parameterValidator: { _ in
+            throw GenerateError.invalidDiffusionConfiguration("test validator")
+        })
+        #expect(throws: GenerateError.self) {
+            try BlockDiffusionTokenIterator(
+                input: LMInput(tokens: MLXArray([9])), model: model,
+                parameters: GenerateParameters(), components: components)
+        }
+        #expect(model.prefillCalls == 0)
+    }
+
+    @Test(
+        "Diffusion rejects invalid settings before prefill",
+        arguments: [Float.nan, -1, Float.infinity])
+    func rejectsInvalidDiffusionSettings(temperature: Float) throws {
+        let model = StableCanvasDiffusionModel()
+        #expect(throws: GenerateError.self) {
+            try BlockDiffusionTokenIterator(
+                input: LMInput(tokens: MLXArray([9])), model: model,
+                parameters: GenerateParameters(diffusion: .init(temperature: temperature)))
+        }
+        #expect(model.prefillCalls == 0)
+    }
+
+    @Test("Visual prefill uses the visible rotating-cache mask after wrap")
+    func visualPrefillAfterRotatingCacheWrap() throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        let cache = try model.newCache(parameters: nil)
+        try model.prepareDiffusion(
+            LMInput(tokens: MLXArray(Array(repeating: 2, count: 12))), cache: cache, windowSize: nil
+        )
+        try model.prepareDiffusion(
+            inputEmbeddings: model.inputEmbeddings(inputIds: MLXArray([2, 3, 4, 5])),
+            attentionMask: nil, multimodalTokenTypes: MLXArray([1, 1, 1, 1]).reshaped([1, 4]),
+            cache: cache, windowSize: nil)
+        #expect(cache.allSatisfy { $0.offset == 16 })
+        let logits = model.diffusionLogits(
+            canvasTokens: MLXArray([2, 3, 4, 5]), cache: cache, selfConditioningLogits: nil)
+        eval(logits)
+        #expect(!MLX.isNaN(logits).any().item(Bool.self))
+    }
+
+    @Test("Diffusion rejects custom autoregressive processors before prefill")
+    func rejectsCustomLogitProcessors() throws {
+        let model = StableCanvasDiffusionModel()
+        #expect(throws: GenerateError.self) {
+            try BlockDiffusionTokenIterator(
+                input: LMInput(tokens: MLXArray([9])), model: model,
+                parameters: GenerateParameters(),
+                components: .init(logitProcessorFactory: {
+                    RepetitionContext(repetitionPenalty: 1.1, repetitionContextSize: 20)
+                }))
+        }
+        #expect(model.prefillCalls == 0)
     }
 
     private static func configuration() throws -> DiffusionGemmaConfiguration {
@@ -737,6 +1149,54 @@ private struct DiffusionGemmaPromptTokenizer: Tokenizer {
     }
 }
 
+private final class SerializationOpaqueKVCache: KVCache {
+    private let liveKeys: MLXArray
+    private let liveValues: MLXArray
+    var offset: Int
+    var maxSize: Int? { nil }
+
+    init(keys: MLXArray, values: MLXArray, offset: Int) {
+        self.liveKeys = keys
+        self.liveValues = values
+        self.offset = offset
+    }
+
+    var state: [MLXArray] {
+        get { [liveKeys, liveKeys, liveValues, liveValues] }
+        set {}
+    }
+
+    var metaState: [String] {
+        get { [] }
+        set {}
+    }
+
+    var isTrimmable: Bool { false }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+
+    func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
+        (liveKeys, liveValues)
+    }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int { 0 }
+
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .none
+    }
+
+    func copy() -> any KVCache {
+        SerializationOpaqueKVCache(keys: liveKeys, values: liveValues, offset: offset)
+    }
+
+    func innerState() -> [MLXArray] { [liveKeys, liveValues] }
+}
+
 private final class PenaltySensitiveDiffusionModel: Module, BlockDiffusionLanguageModel {
     let diffusionCanvasLength = 1
     let diffusionMinimumCanvasLength = 1
@@ -780,6 +1240,8 @@ private final class StableCanvasDiffusionModel: Module, BlockDiffusionLanguageMo
     let diffusionDefaultMaxTokens: Int?
     var decoderCalls = 0
     var requestedCanvasLengths = [Int]()
+    var committedTokens = [Int]()
+    var prefillCalls = 0
 
     init(
         canvasLength: Int = 3,
@@ -792,9 +1254,13 @@ private final class StableCanvasDiffusionModel: Module, BlockDiffusionLanguageMo
         super.init()
     }
 
-    func prepareDiffusion(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws {}
+    func prepareDiffusion(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws {
+        prefillCalls += 1
+    }
 
-    func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?) {}
+    func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?) {
+        committedTokens.append(contentsOf: tokens.asArray(Int.self))
+    }
 
     func diffusionLogits(
         canvasTokens: MLXArray,

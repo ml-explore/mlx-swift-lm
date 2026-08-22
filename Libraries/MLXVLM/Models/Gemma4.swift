@@ -1353,7 +1353,6 @@ package typealias Gemma4VisionModel = MLXLMCommon.Gemma4VisionModel
 package typealias Gemma4AudioModel = MLXLMCommon.Gemma4AudioModel
 package typealias Gemma4MultimodalEmbedder = MLXLMCommon.Gemma4MultimodalEmbedder
 
-
 // MARK: - Model
 
 public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, SuppressedTokensProviding {

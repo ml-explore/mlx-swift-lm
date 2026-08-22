@@ -77,10 +77,6 @@ extension BaseLanguageModel {
     {
         try sanitize(weights: weights)
     }
-
-    public func quantizationConfigurationPath(for modulePath: String) -> String {
-        modulePath
-    }
 }
 
 /// Removes checkpoint tensors owned by an `lm_head` module when the model uses its token

@@ -698,6 +698,7 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
     private var valPackedMSE: MLXArray?
     private var valNorms: MLXArray?
     private var compressedAllocSteps = 0
+    private var headDim: Int?
 
     /// Per-dimension key calibration scale s ∈ ℝ^dim, computed once at
     /// compressRawCache time from the full prefill K cache and reused for
@@ -820,6 +821,7 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
     /// Prefill update: store raw K/V, return raw. Zero encoding overhead.
     /// Uses KVCacheSimple-style allocation with concatenated growth.
     override public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        headDim = keys.dim(-1)
         let previous = self.offset
 
         let reset =
@@ -1029,6 +1031,7 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
     /// Only values are encoded via the fused Metal kernel.
     private func encodeNewToken(keys: MLXArray, values: MLXArray) {
         let headDim = keys.dim(-1)
+        self.headDim = headDim
         let B = keys.dim(0)
         let H = keys.dim(1)
         let numSteps = keys.dim(2)
@@ -1492,6 +1495,58 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
         return output.dtype == queries.dtype ? output : output.asType(queries.dtype)
     }
 
+    override public func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
+        guard offset > 0 else { return nil }
+
+        if !isCompressed {
+            guard let rawKeys, let rawValues else { return nil }
+            return (
+                rawKeys[.ellipsis, ..<offset, 0...],
+                rawValues[.ellipsis, ..<offset, 0...]
+            )
+        }
+
+        guard let valPackedMSE, let valNorms else { return nil }
+        let resolvedHeadDim =
+            headDim ?? rawKeys?.dim(-1)
+            ?? (valPackedMSE.dim(-1) * 32 / valueBits)
+        ensureCodecs(headDim: resolvedHeadDim)
+        guard let valueMSECodec else { return nil }
+
+        let valueState = MSECodecState(
+            norms: valNorms[.ellipsis, ..<offset],
+            packedIndices: valPackedMSE[.ellipsis, ..<offset, 0...],
+            tokenCount: offset,
+            dim: resolvedHeadDim,
+            bits: valueBits)
+        let denseValues = valueMSECodec.decode(valueState)
+
+        let denseKeys: MLXArray
+        if rawKeyMode {
+            guard let rawKeys else { return nil }
+            denseKeys = rawKeys[.ellipsis, ..<offset, 0...]
+        } else if affineKeyMode {
+            guard let affKeyW, let affKeyScales, let affKeyBiases else { return nil }
+            denseKeys = dequantized(
+                affKeyW[.ellipsis, ..<offset, 0...],
+                scales: affKeyScales[.ellipsis, ..<offset, 0...],
+                biases: affKeyBiases[.ellipsis, ..<offset, 0...],
+                groupSize: keyGroupSize,
+                bits: 8)
+        } else {
+            guard let keyPackedMSE, let keyNorms, let keyMSECodec else { return nil }
+            let keyState = MSECodecState(
+                norms: keyNorms[.ellipsis, ..<offset],
+                packedIndices: keyPackedMSE[.ellipsis, ..<offset, 0...],
+                tokenCount: offset,
+                dim: resolvedHeadDim,
+                bits: keyBits)
+            denseKeys = keyMSECodec.decode(keyState, scale: keyCalibScale)
+        }
+
+        return (denseKeys, denseValues)
+    }
+
     // MARK: - Memory Reporting
 
     /// Actual memory footprint: compressed storage (packed indices + norms) for K and V,
@@ -1610,13 +1665,19 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
 
     override public var metaState: [String] {
         get {
-            ["\(offset)", "\(bits)", "\(keyBits)", "\(valueBits)", "\(seed)"]
+            [
+                "\(offset)", "\(bits)", "\(keyBits)", "\(valueBits)", "\(seed)",
+                headDim.map(String.init) ?? "None",
+            ]
         }
         set {
             guard newValue.count >= 5,
                 let o = Int(newValue[0])
             else { return }
             offset = o
+            if newValue.count >= 6, newValue[5] != "None" {
+                headDim = Int(newValue[5])
+            }
         }
     }
 
@@ -1648,6 +1709,7 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
             bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed,
             keyGroupSize: keyGroupSize)
         new.offset = offset
+        new.headDim = headDim
         new.keyMSECodec = keyMSECodec
         new.valueMSECodec = valueMSECodec
         // Like `state`, keep only the positions this cache holds. A slice is a new array
