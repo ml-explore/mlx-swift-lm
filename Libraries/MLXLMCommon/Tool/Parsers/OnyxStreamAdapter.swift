@@ -225,6 +225,21 @@ private struct OnyxProtocolDecoder {
                 else {
                     return .protocolError("Rejected Onyx tool frame for recipient \(recipient)")
                 }
+                // The ATEM parser already enforces required parameters and
+                // typed values; check the full schema before the call leaves.
+                if case .invalid(let violations) = ToolSchemaValidator.validate(
+                    arguments: call.function.arguments,
+                    forToolNamed: call.function.name,
+                    in: tools)
+                {
+                    return .rejectedToolCall(
+                        RejectedToolCall(
+                            reason: .invalidArguments,
+                            format: .atem,
+                            toolName: call.function.name,
+                            rawText: text,
+                            detail: ToolSchemaValidator.describe(violations)))
+                }
                 return .toolCall(
                     ToolCall(
                         function: call.function,
@@ -244,6 +259,7 @@ private struct OnyxProtocolDecoder {
 struct OnyxStreamAdapter: TokenStreamDecoder {
     private var protocolDecoder: OnyxProtocolDecoder
     private var stopStringFilter: StopStringFilter
+    private(set) var rejectedToolCallCount = 0
     let additionalStopTokenIDs: Set<Int>
     let receivesStopTokens = true
 
@@ -295,6 +311,7 @@ struct OnyxStreamAdapter: TokenStreamDecoder {
             }
             return emit(.toolCall(call))
         case .rejectedToolCall(let rejection):
+            rejectedToolCallCount += 1
             if let response = stopStringFilter.finish(), !emit(.response(response)) {
                 return false
             }

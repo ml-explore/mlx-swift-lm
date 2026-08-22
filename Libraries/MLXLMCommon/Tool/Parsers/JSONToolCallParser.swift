@@ -28,9 +28,16 @@ public struct JSONToolCallParser: ToolCallParser, Sendable {
             text = String(text[..<endRange.lowerBound])
         }
 
-        let jsonStr = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return parsePayload(text)
+    }
 
-        return parseToolCall(from: jsonStr) ?? parseRedundantOuterBraces(from: jsonStr)
+    /// Parse an already-extracted JSON payload without searching for protocol
+    /// delimiters again. Framing-aware callers use this after finding the
+    /// structural outer close, so a literal end-tag string inside an argument
+    /// remains JSON data rather than truncating the payload.
+    func parsePayload(_ payload: String) -> ToolCall? {
+        let json = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        return parseToolCall(from: json) ?? parseRedundantOuterBraces(from: json)
     }
 
     /// Some Qwen chat templates emit an EOS-delimited JSON call with a

@@ -4,6 +4,20 @@ import Foundation
 
 /// Parser for XML function format: <function=name><parameter=key>value</parameter></function>
 /// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/qwen3_coder.py
+///
+/// Structure is validated with the shared `QwenXMLPayloadScanner`, the same
+/// grammar used by ``Qwen35ToolCallParser`` and by cross-dialect recovery. A
+/// payload becomes a call only when it is canonical in full:
+///
+/// - the function close is the *structural* close rather than the first textual
+///   `</function>`, so a parameter value may contain that literal verbatim;
+/// - every `<parameter=` must close with `</parameter>`;
+/// - nothing but whitespace may follow the payload inside its frame.
+///
+/// A malformed payload yields `nil` instead of a partially populated call. This
+/// matters most at end of stream, where a truncated frame must be rejected
+/// rather than executed with silently missing arguments — structural validity
+/// must never depend on whether the caller's schema declares `required`.
 public struct XMLFunctionParser: ToolCallParser, Sendable {
     public let startTag: String?
     public let endTag: String?
@@ -14,59 +28,12 @@ public struct XMLFunctionParser: ToolCallParser, Sendable {
     }
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Pattern: <function=(content)</function> — [\s\S] matches newlines
         guard
-            let funcMatch = content.range(
-                of: #"<function=([\s\S]*?)</function>"#, options: .regularExpression)
+            let payload = QwenXMLPayloadScanner.framedPayload(
+                in: content, startTag: startTag, endTag: endTag),
+            payload.hasPrefix(QwenXMLPayloadScanner.functionOpen)
         else { return nil }
 
-        let funcContent = String(content[funcMatch])
-
-        // Extract function name (everything between <function= and first >)
-        guard let nameStart = funcContent.range(of: "<function="),
-            let nameEnd = funcContent.range(
-                of: ">", range: nameStart.upperBound ..< funcContent.endIndex)
-        else { return nil }
-
-        let funcName = String(funcContent[nameStart.upperBound ..< nameEnd.lowerBound])
-        let paramSection = String(funcContent[nameEnd.upperBound...])
-
-        var arguments: [String: any Sendable] = [:]
-
-        // Find all parameter tags
-        var searchRange = paramSection.startIndex ..< paramSection.endIndex
-        while let paramStart = paramSection.range(of: "<parameter=", range: searchRange) {
-            // Find the parameter name (between = and >)
-            guard
-                let nameEnd = paramSection.range(
-                    of: ">", range: paramStart.upperBound ..< paramSection.endIndex)
-            else { break }
-
-            let paramName = String(paramSection[paramStart.upperBound ..< nameEnd.lowerBound])
-
-            // Find the closing </parameter> tag
-            guard
-                let paramEnd = paramSection.range(
-                    of: "</parameter>", range: nameEnd.upperBound ..< paramSection.endIndex)
-            else { break }
-
-            var paramValue = String(paramSection[nameEnd.upperBound ..< paramEnd.lowerBound])
-
-            // Trim leading/trailing newlines (matching Python behavior)
-            if paramValue.hasPrefix("\n") {
-                paramValue = String(paramValue.dropFirst())
-            }
-            if paramValue.hasSuffix("\n") {
-                paramValue = String(paramValue.dropLast())
-            }
-
-            // Convert value based on schema type
-            arguments[paramName] = convertParameterValue(
-                paramValue, paramName: paramName, funcName: funcName, tools: tools)
-
-            searchRange = paramEnd.upperBound ..< paramSection.endIndex
-        }
-
-        return ToolCall(function: .init(name: funcName, arguments: arguments))
+        return QwenXMLPayloadScanner.parseCanonical(payload[...], tools: tools)
     }
 }

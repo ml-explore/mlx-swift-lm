@@ -23,9 +23,7 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
             return nil
         }
         self.parser = parser
-        self.router = HarmonyOutputRouter(
-            tokenizer: tokenizer,
-            allowedToolNames: HarmonyOutputRouter.allowedToolNames(from: tools))
+        self.router = HarmonyOutputRouter(tokenizer: tokenizer, tools: tools)
         self.stopStringFilter = StopStringFilter(stopStrings: stopStrings)
         self.additionalStopTokenIDs = parser.semanticStopTokenIDs
     }
