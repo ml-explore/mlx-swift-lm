@@ -4,7 +4,7 @@
 
 Generation APIs in `MLXLMCommon` support two output modes:
 
-- Decoded output (`Generation`): text chunks, tool calls, and final completion info.
+- Decoded output (`Generation`): text chunks, reasoning, tool calls, and final completion info.
 - Raw token output (`TokenGeneration`): token IDs plus final completion info.
 
 Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
@@ -38,6 +38,10 @@ for await event in stream {
     switch event {
     case .chunk(let text):
         print(text, terminator: "")
+    case .reasoning(let text):
+        // Thinking, with the protocol's delimiters removed. Keep it out of any
+        // history you replay: these families' own chat templates drop it.
+        print(text, terminator: "")
     case .toolCall(let call):
         print("\nTool requested: \(call.function.name)")
     case .info(let info):
@@ -45,6 +49,14 @@ for await event in stream {
     }
 }
 ```
+
+`.reasoning` arrives only for models whose response protocol frames thinking: a
+resolved `ModelConfiguration.reasoningConfig` (`<think>` families, Gemma 4's labeled
+channels) or a framed token protocol that carries its own reasoning channel (GPT-OSS
+Harmony, Onyx). Everything else streams as `.chunk` exactly as before.
+
+`ChatSession.streamResponse` yields the answer only; use `streamDetails` to observe
+`.reasoning` alongside tool calls.
 
 ## Task-Handle Pattern for Early Stop
 

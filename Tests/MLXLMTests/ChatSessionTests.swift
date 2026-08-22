@@ -485,6 +485,54 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(calls[1].first?.content, "second question")
     }
 
+    /// A turn that produces only reasoning is still a turn.
+    ///
+    /// Reasoning is deliberately excluded from the recorded assistant content, so a model
+    /// that runs out of `maxTokens` inside its thought block yields an empty `content`.
+    /// Without `producedReasoning` that is indistinguishable from a cancelled or empty
+    /// generation, and the rollback in `respond` would take the USER's message out of the
+    /// transcript with it - the caller's prompt would simply vanish. Contrast
+    /// `testEmptyGenerationRollsBackIncompleteTurn`, where rolling back IS correct.
+    func testReasoningOnlyGenerationStillRecordsTheTurn() async throws {
+        let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: ReasoningOnlyTokenizer(),
+            configuration: ModelConfiguration(
+                id: "test", reasoningConfig: .alwaysOnThinking),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let session = ChatSession(
+            Self.makeModel(
+                processor: processor,
+                configuration: processor.configuration,
+                tokenizer: processor.tokenizer),
+            generateParameters: GenerateParameters(maxTokens: 4))
+
+        // The thought block never closes, so nothing reaches `.chunk`.
+        let response = try await session.respond(to: "first question")
+        XCTAssertEqual(response, "")
+
+        _ = try await session.respond(to: "second question")
+        continuation.finish()
+
+        var calls: [[RecordedMessage]] = []
+        for await call in recordedMessages {
+            calls.append(call)
+        }
+
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[0].map(\.role), [.user])
+        // The user turn survived and an assistant turn was recorded for it, so the
+        // second request renders user/assistant/user rather than a bare user.
+        XCTAssertEqual(calls[1].map(\.role), [.user, .assistant, .user])
+        XCTAssertEqual(calls[1].first?.content, "first question")
+        XCTAssertEqual(calls[1].last?.content, "second question")
+        // The other half of the contract: the turn is recorded, but the reasoning is
+        // NOT replayed as assistant content. Without this the test would also pass for
+        // a "fix" that accumulated reasoning into `content`, which is the behavior this
+        // change deliberately removes.
+        XCTAssertEqual(calls[1][1].content, "")
+    }
+
     func testInterruptedGenerationRollsBackIncompleteTurn() async throws {
         let (recordedMessages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
         let processor = TestInputProcessor(
