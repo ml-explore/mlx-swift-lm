@@ -483,9 +483,9 @@ struct HardReserveStressTests {
     @Test("Cleanup: release GPU resources after stress tests")
     func releaseGPUResources() async {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let before = GPU.snapshot()
+        let before = Memory.snapshot()
         await releaseAllGPUMemory()
-        let after = GPU.snapshot()
+        let after = Memory.snapshot()
         let freed = before.activeMemory - after.activeMemory
         print(
             "[HardReserveCleanup] freed \(freed / (1024 * 1024))MB active, "

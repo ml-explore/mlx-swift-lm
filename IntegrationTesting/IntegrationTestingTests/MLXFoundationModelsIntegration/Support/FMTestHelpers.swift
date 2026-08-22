@@ -324,7 +324,7 @@ func releaseAllGPUMemory() async {
     Stream.gpu.synchronize()
     await MLXLanguageModel.evictAll()
     Stream.gpu.synchronize()
-    GPU.clearCache()
+    Memory.clearCache()
 }
 
 #endif  // FoundationModelsIntegration
