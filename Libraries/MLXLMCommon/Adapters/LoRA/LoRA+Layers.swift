@@ -110,7 +110,13 @@ public class LoRALinear: Linear, LoRALayer {
         let y = super.callAsFunction(x.asType(weight.dtype))
         if !loraEnabled { return y }
         let z = matmul(matmul(dropout(x), self.loraA), self.loraB)
-        return y + scale * z
+        // Adapter checkpoints and base weights can use different 16-bit
+        // formats (commonly fp16 LoRA over a bf16 model). MLX promotes
+        // bf16 + fp16 to fp32, so adding `z` directly silently changes the
+        // projection's public dtype and every downstream kernel
+        // specialization. Keep the replacement layer's output contract
+        // identical to the base layer, matching mlx-lm's LoRA path.
+        return y + (scale * z).asType(y.dtype)
     }
 }
 
@@ -211,6 +217,6 @@ public class QLoRALinear: QuantizedLinear, LoRALayer {
         let y = super.callAsFunction(x.asType(scales.dtype))
         if !loraEnabled { return y }
         let z = matmul(matmul(dropout(x), self.loraA), self.loraB)
-        return y + scale * z
+        return y + (scale * z).asType(y.dtype)
     }
 }
