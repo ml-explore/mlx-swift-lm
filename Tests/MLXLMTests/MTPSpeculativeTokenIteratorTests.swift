@@ -88,6 +88,8 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
 /// `mtpEmitFlagKey` is true. Returns shaped logits and a trimmable KV cache.
 private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvider {
     var kvHeads: [Int] { [1] }
+    let reportedCapabilities: LMModelCapabilities
+    var capabilities: LMModelCapabilities { reportedCapabilities }
     /// Sequence of token values returned in increasing position order. Length
     /// must cover all positions the iterator will sample across the run.
     var nextLogitTokens: [Int32]
@@ -109,8 +111,9 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     /// span fidelity (see the emit block below).
     private(set) var emittedSharedKVSpans: [Int] = []
 
-    init(nextLogitTokens: [Int32]) {
+    init(nextLogitTokens: [Int32], capabilities: LMModelCapabilities = []) {
         self.nextLogitTokens = nextLogitTokens
+        self.reportedCapabilities = capabilities
         super.init()
     }
 
@@ -317,6 +320,25 @@ struct MTPKVCacheConfigurationTests {
         iterator.kvCachePlan.apply(to: &cache)
 
         #expect(cache[0] is TurboQuantKVCache)
+    }
+}
+
+@Test
+func testMTPIteratorRejectsBlockDiffusionTarget() {
+    let main = MockMainModel(nextLogitTokens: [0], capabilities: .blockDiffusion)
+
+    do {
+        _ = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(1)])),
+            mainModel: main,
+            drafter: MockDrafter(),
+            parameters: GenerateParameters(maxTokens: 1, temperature: 0),
+            blockSize: 2)
+        Issue.record("Expected block-diffusion MTP target to be rejected")
+    } catch GenerateError.unsupportedSpeculativeDecoding(let modelName) {
+        #expect(modelName.contains("MockMainModel"))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
     }
 }
 
