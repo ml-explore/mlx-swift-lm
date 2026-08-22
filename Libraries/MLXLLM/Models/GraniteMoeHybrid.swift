@@ -281,8 +281,16 @@ class GraniteMoeHybridTopKGating: Module {
 
     func callAsFunction(_ hiddenStates: MLXArray) -> (MLXArray, MLXArray) {
         let logits = layer(hiddenStates)
-        let indices = MLX.argPartition(-logits, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
-        let topKLogits = MLX.takeAlong(logits, indices, axis: -1)
+        let indices: MLXArray
+        let topKLogits: MLXArray
+        if supportsFusedRouterTopK(logits, k: topK) {
+            (indices, topKLogits) = fusedRouterTopK(
+                selection: logits, values: logits, k: topK,
+                normalize: false, order: .descending)
+        } else {
+            indices = MLX.argPartition(-logits, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+            topKLogits = MLX.takeAlong(logits, indices, axis: -1)
+        }
         let gates = MLX.softmax(topKLogits, axis: -1, precise: true)
         return (indices, gates)
     }
