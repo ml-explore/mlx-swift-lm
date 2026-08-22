@@ -703,13 +703,6 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
 // MARK: - Decoder Layer
 
-/// Caches the compiled decode path can drive: their attention is the plain
-/// `cache.update` + SDPA route in `attentionWithCacheUpdate`. Quantized and
-/// turbo caches have their own routes and take the general path.
-private func hasPlainAttentionRoute(_ cache: KVCache) -> Bool {
-    !(cache is QuantizedKVCacheProtocol) && !(cache is TurboQuantKVCache)
-}
-
 final class Qwen35DecoderLayer: Module {
     let isLinear: Bool
 
@@ -767,7 +760,7 @@ final class Qwen35DecoderLayer: Module {
             if isLinear, let mambaCache = cache as? MambaCache {
                 return decodeLinearLayer(x, cache: mambaCache)
             }
-            if !isLinear, let cache, hasPlainAttentionRoute(cache) {
+            if !isLinear, let cache, usesPlainAttentionCacheRoute(cache) {
                 return decodeAttentionLayer(x, mask: attentionMask, cache: cache)
             }
         }
@@ -927,9 +920,10 @@ public class Qwen35TextModelInner: Module {
         self.ssmIdx = 0
         self.faIdx = args.fullAttentionInterval - 1
 
-        let segments = Self.decodeSchedule(for: layers)
+        let segments = CompiledDecodeSegment.schedule(
+            linearLayers: layers.map(\.isLinear))
         self.decodeSegments = segments
-        self.compiledSegments = Array(repeating: nil, count: segments.count)
+        self.compiledSegments = CompiledDecodeSegmentCache(count: segments.count)
 
         super.init()
     }
@@ -983,38 +977,8 @@ public class Qwen35TextModelInner: Module {
     /// One traced piece of a decode step: the tail of the previous
     /// full-attention layer, a run of GDN layers, then the head of the next
     /// one (whose SDPA runs between this segment and the next).
-    private struct DecodeSegment {
-        var attentionPostLayer: Int?
-        var linearLayers: [Int] = []
-        var attentionPreLayer: Int?
-
-        /// First conv/recurrent state slot in the input list (after `x` and
-        /// any [attention, gate] pair).
-        var stateInputOffset: Int { attentionPostLayer == nil ? 1 : 3 }
-        /// First [queries, gate, keys, values] slot in the output list.
-        var attentionOutputOffset: Int { 1 + 2 * linearLayers.count }
-    }
-
-    private let decodeSegments: [DecodeSegment]
-    // Lock rationale: see Qwen35SparseMoeBlock.compileLock.
-    private let compileLock = NSLock()
-    private var compiledSegments: [(([MLXArray]) -> [MLXArray])?]
-
-    private static func decodeSchedule(for layers: [Qwen35DecoderLayer]) -> [DecodeSegment] {
-        var segments: [DecodeSegment] = []
-        var current = DecodeSegment()
-        for (i, layer) in layers.enumerated() {
-            if layer.isLinear {
-                current.linearLayers.append(i)
-            } else {
-                current.attentionPreLayer = i
-                segments.append(current)
-                current = DecodeSegment(attentionPostLayer: i)
-            }
-        }
-        segments.append(current)
-        return segments
-    }
+    private let decodeSegments: [CompiledDecodeSegment]
+    private let compiledSegments: CompiledDecodeSegmentCache
 
     /// Flat argument/result lists because `compile` takes `[MLXArray]`.
     /// In: `[x]` (token ids for segment 0), then `[attention, gate]` when
@@ -1079,7 +1043,7 @@ public class Qwen35TextModelInner: Module {
                 else { return nil }
                 mambaCaches[i] = mambaCache
             } else {
-                guard let kv = cache[i], hasPlainAttentionRoute(kv) else { return nil }
+                guard let kv = cache[i], usesPlainAttentionCacheRoute(kv) else { return nil }
             }
         }
 
@@ -1094,16 +1058,11 @@ public class Qwen35TextModelInner: Module {
                 args.append(mambaCache[1]!)
             }
 
-            compileLock.lock()
-            if compiledSegments[segmentIndex] == nil {
-                // [unowned self]: see Qwen35SparseMoeBlock.callAsFunction.
-                compiledSegments[segmentIndex] = compile { [unowned self] segmentArgs in
-                    segmentBody(at: segmentIndex, segmentArgs)
-                }
+            let outputs = compiledSegments.call(
+                at: segmentIndex, arguments: args
+            ) { [unowned self] segmentArgs in
+                segmentBody(at: segmentIndex, segmentArgs)
             }
-            let fn = compiledSegments[segmentIndex]!
-            compileLock.unlock()
-            let outputs = fn(args)
 
             carry = outputs[0]
             for (i, layerIndex) in segment.linearLayers.enumerated() {

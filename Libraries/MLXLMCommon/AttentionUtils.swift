@@ -1,6 +1,14 @@
 import Foundation
 import MLX
 
+/// Whether attention can be split around a plain `KVCache.update` call.
+///
+/// Quantized and TurboQuant caches own their complete attention operation, so
+/// compiled model segments must leave those cache routes on the general path.
+package func usesPlainAttentionCacheRoute(_ cache: KVCache) -> Bool {
+    !(cache is QuantizedKVCacheProtocol) && !(cache is TurboQuantKVCache)
+}
+
 /// Attention utilities that match Python mlx-lm's interface
 ///
 /// This provides a single function that automatically routes to quantized or regular
