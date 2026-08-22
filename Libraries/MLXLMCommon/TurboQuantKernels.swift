@@ -1726,23 +1726,37 @@ enum TurboQuantKernelOps {
     nonisolated(unsafe) private static var flashSinglePassKernels: [String: MLXFast.MLXFastKernel] =
         [:]
 
-    /// NR0: number of query rows processed per SIMD group in the multi-row amortized kernel.
-    ///
-    /// Ported from llama.cpp V2.1: each threadgroup loads K/V packed data once and reuses
-    /// it across NR0 queries. At NR0=2, the KV dequant cost is halved per query.
-    ///
-    /// NR0=2 is conservative, register pressure is ~24 extra floats per thread (for dim=128).
-    /// Apple M-series GPUs have 96 registers per thread (384 bytes), so this fits comfortably.
-    ///
-    /// Override via environment variable `TURBO_FLASH_NR0` (must be power of 2).
-    static let flashNR0: Int = {
+    /// Explicit NR0 override for profiling and device-specific tuning.
+    /// Values must be powers of two so query groups remain naturally aligned.
+    private static let flashNR0Override: Int? = {
         if let envValue = ProcessInfo.processInfo.environment["TURBO_FLASH_NR0"],
             let parsed = Int(envValue), parsed > 0, (parsed & (parsed - 1)) == 0
         {
             return parsed
         }
-        return 2  // default, conservative starting point
+        return nil
     }()
+
+    /// Choose the number of query rows processed by each SIMD group during decode.
+    ///
+    /// NR0=2 amortizes packed K/V decoding across two query rows and remains the
+    /// long-context default. Immediately above the single-dispatch ceiling,
+    /// however, that reuse does not repay the lost parallelism for small query
+    /// batches. Keep one row per group in the measured crossover region.
+    static func automaticFlashDecodeNR0(tokenCount: Int, totalQueries: Int, dim: Int) -> Int {
+        if tokenCount > flashSinglePassMaxTokens && tokenCount <= 256
+            && (16 ... 32).contains(totalQueries) && (dim == 64 || dim == 128)
+        {
+            return 1
+        }
+        return 2
+    }
+
+    private static func flashDecodeNR0(tokenCount: Int, totalQueries: Int, dim: Int) -> Int {
+        flashNR0Override
+            ?? automaticFlashDecodeNR0(
+                tokenCount: tokenCount, totalQueries: totalQueries, dim: dim)
+    }
 
     /// Default block size for TurboFlashAttention two-pass approach.
     /// Each SIMD group processes this many tokens per block.
@@ -2307,12 +2321,14 @@ enum TurboQuantKernelOps {
         dim: Int,
         valRotation: MLXArray? = nil,
         blockSize: Int? = nil,
-        singleDispatch: Bool? = nil
+        singleDispatch: Bool? = nil,
+        nr0: Int? = nil
     ) -> MLXArray {
         // An explicit block size is used by block-sweep callers and therefore
         // always selects the two-pass implementation. The optional override is
         // internal test/benchmark plumbing; normal callers use the conservative
         // context ceiling above.
+        // `nr0` is also internal test/benchmark plumbing for exact A/B comparisons.
         let kernelSupportsSingleDispatch =
             tokenCount > 0
             && (2 ... 4).contains(keyBits) && (2 ... 4).contains(valueBits)
@@ -2334,7 +2350,9 @@ enum TurboQuantKernelOps {
         let blockSize = blockSize ?? flashBlockSize
         let numBlocks = (tokenCount + blockSize - 1) / blockSize
         let totalQ = rotatedQueries.dim(0)
-        let nr0 = flashNR0
+        let nr0 =
+            nr0
+            ?? flashDecodeNR0(tokenCount: tokenCount, totalQueries: totalQ, dim: dim)
 
         // Use NR0 multi-row kernel when totalQ is evenly divisible by NR0 and NR0 > 1.
         // Falls back to NR0=1 (original kernel) for remainder queries or when NR0=1.
@@ -2408,7 +2426,7 @@ enum TurboQuantKernelOps {
         let blockSize = blockSize ?? flashBlockSize
         let numBlocks = (tokenCount + blockSize - 1) / blockSize
         let totalQ = rotatedQueries.dim(0)
-        let nr0 = flashNR0
+        let nr0 = flashNR0Override ?? 2
 
         // NR0 groups read one kv head (kv_indices[0]) for all rows; only valid
         // when the GQA repeat factor is a multiple of nr0 so aligned groups can
