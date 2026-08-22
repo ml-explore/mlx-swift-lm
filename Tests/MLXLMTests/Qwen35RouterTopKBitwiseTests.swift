@@ -7,7 +7,7 @@
 import MLX
 import XCTest
 
-@testable import MLXLLM
+@testable import MLXLMCommon
 
 final class Qwen35RouterTopKBitwiseTests: XCTestCase {
 
@@ -94,6 +94,34 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
                         nans, k: k, normalize: normalize, "NaN \(tag)", indicesOnly: true)
                 }
             }
+        }
+    }
+
+    func testMoERouterTopKMatchesChainAcrossDispatchPaths() {
+        let cases = [
+            (shape: [1, 256], k: 8, label: "single-row fused"),
+            (shape: [4, 256], k: 8, label: "multi-row chain"),
+            (shape: [1, 1025], k: 8, label: "expert-limit chain"),
+        ]
+
+        for testCase in cases {
+            let gates = MLX.softmax(
+                MLXRandom.normal(testCase.shape), axis: -1, precise: true
+            ).asType(.float16)
+            let (wantInds, wantScores) = chainRouterTopK(
+                gates, k: testCase.k, normalize: true)
+            let (gotInds, gotScores) = moeRouterTopK(
+                gates, k: testCase.k, normalize: true)
+            eval(wantInds, wantScores, gotInds, gotScores)
+
+            XCTAssertEqual(
+                gotInds.reshaped(-1).asArray(UInt32.self),
+                wantInds.reshaped(-1).asArray(UInt32.self),
+                "\(testCase.label): expert selection order")
+            assertBitIdentical(
+                gotScores.reshaped(-1, testCase.k),
+                wantScores.reshaped(-1, testCase.k),
+                "\(testCase.label): scores")
         }
     }
 }
