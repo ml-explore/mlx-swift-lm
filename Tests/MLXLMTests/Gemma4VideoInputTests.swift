@@ -115,8 +115,9 @@ struct Gemma4VideoInputTests {
         // Four synthetic 64x64 frames at 1s spacing.
         let frames = (0 ..< 4).map { i in
             UserInput.VideoFrame(
-                frame: CIImage(color: CIColor(red: 0.3, green: 0.5, blue: 0.7))
-                    .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64)),
+                image: .ciImage(
+                    CIImage(color: CIColor(red: 0.3, green: 0.5, blue: 0.7))
+                        .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))),
                 timeStamp: CMTime(value: Int64(i), timescale: 1))
         }
         let (pixels, frameCounts) = try await processor.processVideos(

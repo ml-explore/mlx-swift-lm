@@ -2754,14 +2754,15 @@ public struct Gemma4Processor: UserInputProcessor {
             ) { frame in
                 var userProcessing = processing ?? UserInput.Processing()
                 userProcessing.resize = targetSize
-                var image = MediaProcessing.apply(frame.frame, processing: userProcessing)
+                var image = MediaProcessing.apply(
+                    try frame.image.asCIImage(), processing: userProcessing)
                 image = MediaProcessing.inSRGBToneCurveSpace(image)
                 image = MediaProcessing.resampleBicubic(image, to: targetSize)
                 if config.doNormalize {
                     image = MediaProcessing.normalize(
                         image, mean: config.imageMeanTuple, std: config.imageStdTuple)
                 }
-                return VideoFrame(frame: image, timeStamp: frame.timeStamp)
+                return VideoFrame(image: .ciImage(image), timeStamp: frame.timeStamp)
             }
             allFrames.append(contentsOf: sequence.frames)
             frameCounts.append(sequence.frames.count)
