@@ -460,7 +460,28 @@ public class LFM2MoEModelInner: Module {
         cache: [KVCache]? = nil,
         inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
+        forward(
+            inputs,
+            attentionMask: attentionMask,
+            ssmMask: ssmMask,
+            cache: cache,
+            inputEmbeddings: inputEmbeddings,
+            captureLayerIds: []
+        ).hidden
+    }
+
+    /// Runs the target and optionally captures the output of selected decoder layers.
+    /// DSpark checkpoints train against these exact pre-final-norm features.
+    func forward(
+        _ inputs: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        ssmMask: MLXArray? = nil,
+        cache: [KVCache]? = nil,
+        inputEmbeddings: MLXArray? = nil,
+        captureLayerIds: Set<Int>
+    ) -> (hidden: MLXArray, captured: [MLXArray]) {
         var hidden = inputEmbeddings ?? embedTokens(inputs)
+        var captured = [MLXArray]()
 
         let attentionMask =
             attentionMask
@@ -482,16 +503,23 @@ public class LFM2MoEModelInner: Module {
 
         for (i, layer) in layers.enumerated() {
             hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            if captureLayerIds.contains(i) {
+                captured.append(hidden)
+            }
         }
 
-        return embeddingNorm(hidden)
+        return (embeddingNorm(hidden), captured)
     }
 }
 
-public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
+public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider,
+    SpeculativeCacheRewindModel
+{
     public let vocabularySize: Int
     public let kvHeads: [Int]
     public let configuration: LFM2MoEConfiguration
+    public let maximumNativeTargetCacheRewind =
+        LFM2RuntimeSupport.speculativeRollbackCapacity
 
     public let model: LFM2MoEModelInner
 
@@ -512,8 +540,30 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        let out = model(input.tokens, ssmMask: input.mask, cache: cache)
-        return LMOutput(logits: model.embedTokens.asLinear(out))
+        let emitDrafterState = state?[mtpEmitFlagKey] ?? false
+        let targetLayerIds = emitDrafterState ? (state?[mtpTargetLayerIdsKey] ?? []) : []
+        precondition(
+            Set(targetLayerIds).count == targetLayerIds.count
+                && targetLayerIds.allSatisfy { (0 ..< configuration.hiddenLayers).contains($0) },
+            "LFM2 MoE drafter target layer ids must be unique and in range")
+
+        let output = model.forward(
+            input.tokens,
+            ssmMask: input.mask,
+            cache: cache,
+            captureLayerIds: Set(targetLayerIds))
+        let logits = model.embedTokens.asLinear(output.hidden)
+
+        guard emitDrafterState else { return LMOutput(logits: logits) }
+
+        var outState = state ?? LMOutput.State()
+        outState[mtpLastHiddenStatesKey] =
+            output.captured.isEmpty
+            ? output.hidden : concatenated(output.captured, axis: -1)
+        outState[mtpSharedKVStatesKey] = [:]
+        outState[mtpSharedKVOffsetsKey] = [:]
+        outState[mtpSharedKVSourceIndicesKey] = [:]
+        return LMOutput(logits: logits, state: outState)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

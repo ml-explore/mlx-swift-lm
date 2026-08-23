@@ -418,7 +418,28 @@ public class LFM2ModelInner: Module {
         cache: [KVCache]? = nil,
         inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
+        forward(
+            inputs,
+            attentionMask: attentionMask,
+            ssmMask: ssmMask,
+            cache: cache,
+            inputEmbeddings: inputEmbeddings,
+            captureLayerIds: []
+        ).hidden
+    }
+
+    /// Runs the target and optionally captures the output of selected decoder layers.
+    /// DSpark checkpoints train against these exact pre-final-norm features.
+    func forward(
+        _ inputs: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        ssmMask: MLXArray? = nil,
+        cache: [KVCache]? = nil,
+        inputEmbeddings: MLXArray? = nil,
+        captureLayerIds: Set<Int>
+    ) -> (hidden: MLXArray, captured: [MLXArray]) {
         var h = inputEmbeddings ?? embedTokens(inputs)
+        var captured = [MLXArray]()
 
         let attentionMask =
             attentionMask
@@ -441,18 +462,25 @@ public class LFM2ModelInner: Module {
         for (i, layer) in layers.enumerated() {
             h = layer(
                 h, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            if captureLayerIds.contains(i) {
+                captured.append(h)
+            }
         }
 
-        return embeddingNorm(h)
+        return (embeddingNorm(h), captured)
     }
 }
 
-public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider,
+    SpeculativeCacheRewindModel
+{
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
     public let model: LFM2ModelInner
     let configuration: LFM2Configuration
+    public let maximumNativeTargetCacheRewind =
+        LFM2RuntimeSupport.speculativeRollbackCapacity
 
     public init(_ args: LFM2Configuration) {
         self.configuration = args
@@ -473,11 +501,32 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        let out = model(
+        let emitDrafterState = state?[mtpEmitFlagKey] ?? false
+        let targetLayerIds = emitDrafterState ? (state?[mtpTargetLayerIdsKey] ?? []) : []
+        precondition(
+            Set(targetLayerIds).count == targetLayerIds.count
+                && targetLayerIds.allSatisfy { (0 ..< configuration.hiddenLayers).contains($0) },
+            "LFM2 drafter target layer ids must be unique and in range")
+
+        let output = model.forward(
             input.tokens,
             ssmMask: input.mask,
-            cache: cache)
-        return LMOutput(logits: model.embedTokens.asLinear(out))
+            cache: cache,
+            captureLayerIds: Set(targetLayerIds))
+        let logits = model.embedTokens.asLinear(output.hidden)
+
+        guard emitDrafterState else { return LMOutput(logits: logits) }
+
+        var outState = state ?? LMOutput.State()
+        outState[mtpLastHiddenStatesKey] =
+            output.captured.isEmpty
+            ? output.hidden : concatenated(output.captured, axis: -1)
+        // LFM DSpark consumes hidden features, not target K/V. Keep the
+        // generic block-drafter state contract explicit with empty maps.
+        outState[mtpSharedKVStatesKey] = [:]
+        outState[mtpSharedKVOffsetsKey] = [:]
+        outState[mtpSharedKVSourceIndicesKey] = [:]
+        return LMOutput(logits: logits, state: outState)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

@@ -10,6 +10,11 @@ import MLXLMCommon
 /// prevents the two implementations from drifting on long-context, ragged-batch,
 /// and prompt-cache behavior.
 enum LFM2RuntimeSupport {
+    /// Maximum verifier tail retained by every convolution layer. DSpark
+    /// advertises this same bound before selecting the in-place hybrid-cache
+    /// path, so cache construction and speculative rollback cannot drift.
+    static let speculativeRollbackCapacity = 64
+
     static func makeHybridCache(
         hiddenLayers: Int,
         fullAttentionIndices: Set<Int>,
@@ -21,7 +26,9 @@ enum LFM2RuntimeSupport {
             if fullAttentionIndices.contains(layerIndex) {
                 attentionCache.copy()
             } else {
-                RewindableConvolutionCache(stateLength: convolutionStateLength)
+                RewindableConvolutionCache(
+                    stateLength: convolutionStateLength,
+                    rollbackCapacity: speculativeRollbackCapacity)
             }
         }
     }

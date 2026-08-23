@@ -26,7 +26,7 @@ enum MTPInitializationError: Error, LocalizedError {
 /// method argument, with the target's last hidden state and per-`layer_type`
 /// shared K/V extracted from the ``LMOutput/State`` emitted by the target on
 /// the previous main-model call.
-/// If the drafter needs its own KV cache (Qwen MTP), that cache is owned by
+/// If the drafter needs its own KV cache (Qwen MTP or DSpark), that cache is owned by
 /// this iterator, prefilled over the shifted prompt, and reconciled against
 /// accepted target tokens after every verify pass; it is never stored on the
 /// shared drafter model.
@@ -233,8 +233,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Probe by opening a round at the width rounds will actually use and discarding it,
         // rather than duplicating the leaf classification as a predicate that could drift from
-        // it. Qwen's hybrid cache is the one typed exception: its target advertises a bounded
-        // recurrent checkpoint and performs the round in place.
+        // it. Hybrid targets with bounded recurrent rollback are the typed
+        // exception and perform the round in place.
         let nativeRewindDepth =
             (mainModel as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
@@ -268,7 +268,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         if drafter.requiresGreedySampling, parameters.temperature != 0 {
             switchToPassthrough(
                 reason:
-                    "Qwen MTP currently requires temperature == 0; generating without speculation"
+                    "the selected block drafter requires temperature == 0; generating without speculation"
             )
         }
     }
@@ -307,6 +307,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let persistentState = persistentTargetState(from: mainState)
         var prefillState = persistentState ?? LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
+        prefillState[mtpTargetLayerIdsKey] = drafter.targetLayerIds
         // Stateful drafters and warm continuations need one hidden row per
         // prompt token, so their `prepare` call receives the emit flag. Other
         // drafters are primed by the explicit one-token follow-up below.
@@ -530,9 +531,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        // Attention-only targets verify through a staged round. Qwen's hybrid target instead
-        // checkpoints its recurrent entries and rewinds them in place; the typed capability and
-        // cache topology keep that exception fail-closed.
+        // Attention-only targets verify through a staged round. Hybrid targets
+        // with bounded recurrent rollback rewind in place; the typed capability
+        // and cache topology keep that exception fail-closed.
         let nativeRewindDepth =
             (mainModel as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
@@ -620,6 +621,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // in one forward call, emitting state for next round.
         var verifyState = state
         verifyState[mtpEmitFlagKey] = true
+        verifyState[mtpTargetLayerIdsKey] = drafter.targetLayerIds
         let verifyTokens = concatenated([bonusToken, flatDraftTokens])
         let verifyInput = LMInput.Text(tokens: verifyTokens)
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
@@ -708,9 +710,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     rewound == rejected,
                     "Target advertised native speculative rewind depth \(nativeRewindDepth), but rewound \(rewound) of \(rejected) positions"
                 )
-                // Qwen MTP-1: attention KV trims one token while every GDN
-                // cache restores the state captured after the committed bonus.
-                // The target's 9B weights are not replayed on rejection.
+                // Rewind attention and recurrent state together. Checkpointed
+                // recurrent caches restore an atomic step; bounded trimmable
+                // recurrent caches can discard a wider rejected suffix.
                 mainCacheStorage.commitProcessedTokens(accepted + 1)
             }
             snapshotPlaced = reconcileSharedKVState(
@@ -753,6 +755,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         passthrough = true
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
+        mainState?[mtpTargetLayerIdsKey] = nil
         mainState?[mtpCacheCheckpointIndexKey] = nil
         mainState?[mtpLastHiddenStatesKey] = nil
         mainState?[mtpSharedKVStatesKey] = nil

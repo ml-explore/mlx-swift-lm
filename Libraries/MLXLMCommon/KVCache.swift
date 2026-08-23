@@ -2663,12 +2663,16 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 package func rewindSpeculativePromptCache(
     _ cache: [KVCache], numTokens: Int
 ) -> Int {
-    guard numTokens == 1,
+    guard numTokens > 0,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
-                return entry.offset >= numTokens
+                return entry.offset >= numTokens && entry.isTrimmable(after: numTokens)
             }
-            return (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
+            // A recurrent checkpoint records one atomic verify step. Models
+            // that support wider rollback use bounded trimmable recurrent
+            // caches (for example LFM's RewindableConvolutionCache).
+            return numTokens == 1
+                && (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
         })
     else { return 0 }
 
