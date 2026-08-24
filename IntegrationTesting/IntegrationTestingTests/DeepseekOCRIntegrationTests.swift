@@ -21,6 +21,7 @@ import Tokenizers
 // short generate must succeed on the DeepSeek path.
 
 private let deepseekOCRModelId = "mlx-community/DeepSeek-OCR-5bit"
+private let unlimitedOCRModelId = "majentik/Unlimited-OCR-MLX-6bit"
 
 private var shouldRunDeepseekOCRIntegration: Bool {
     ProcessInfo.processInfo.environment["MLX_RUN_DEEPSEEK_OCR_INTEGRATION"] == "1"
@@ -75,5 +76,28 @@ struct DeepseekOCRIntegrationTests {
             to: "Free OCR.",
             image: .ciImage(page))
         #expect(!text.isEmpty, "DeepSeek-OCR produced empty output")
+    }
+}
+
+@Suite(
+    .serialized,
+    .enabled(if: hfSnapshotDir(modelId: unlimitedOCRModelId) != nil))
+struct UnlimitedOCRTokenizerIntegrationTests {
+
+    @Test
+    func checkpointTemplateRendersImagePlaceholder() async throws {
+        let directory = try #require(hfSnapshotDir(modelId: unlimitedOCRModelId))
+        let tokenizer = try await AutoTokenizer.from(modelFolder: directory)
+        let input = UserInput(
+            prompt: "document parsing. ",
+            images: [.url(URL(fileURLWithPath: "/dev/null"))])
+        let messages = DeepseekOCRMessageGenerator().generate(from: input)
+
+        let tokens = try tokenizer.applyChatTemplate(
+            messages: messages, tools: nil, additionalContext: nil)
+        let imageToken = try #require(tokenizer.convertTokenToId("<image>"))
+
+        #expect(messages[0]["content"] as? String == "<image>document parsing. ")
+        #expect(tokens.count(where: { $0 == imageToken }) == 1)
     }
 }

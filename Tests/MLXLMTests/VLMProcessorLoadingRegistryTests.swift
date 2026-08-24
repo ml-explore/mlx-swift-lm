@@ -137,33 +137,27 @@ final class VLMProcessorLoadingRegistryTests: XCTestCase {
         }
     }
 
-    func testBuiltInTypeRulesUseThePublicResolverPath() throws {
-        let resolver = ModelTypeProcessorResolver(processorTypes: [
-            "mistral3": "Mistral3Processor",
-            "gemma4_unified": "Gemma4UnifiedProcessor",
-            "unlimited-ocr": "UnlimitedOCRProcessor",
-            "unlimited_ocr": "UnlimitedOCRProcessor",
-        ])
-
+    func testSharedRegistryAppliesBuiltInModelTypeRules() throws {
+        let registry = VLMProcessorLoadingRegistry.shared
         XCTAssertEqual(
-            try resolver.processorType(
+            try registry.processorType(
                 for: context(modelType: "mistral3"),
                 declaredProcessorType: "PixtralProcessor"),
             "Mistral3Processor")
         XCTAssertEqual(
-            try resolver.processorType(
+            try registry.processorType(
                 for: context(modelType: "gemma4_unified"),
                 declaredProcessorType: "AutoProcessor"),
             "Gemma4UnifiedProcessor")
         for modelType in ["unlimited-ocr", "unlimited_ocr"] {
             XCTAssertEqual(
-                try resolver.processorType(
+                try registry.processorType(
                     for: context(modelType: modelType),
                     declaredProcessorType: "DeepseekVLV2Processor"),
                 "UnlimitedOCRProcessor")
         }
         XCTAssertNil(
-            try resolver.processorType(
+            try registry.processorType(
                 for: context(modelType: "unrelated"),
                 declaredProcessorType: "AutoProcessor"))
     }

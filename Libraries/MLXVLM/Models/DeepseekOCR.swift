@@ -431,6 +431,42 @@ public enum DeepseekOCRSpecialTokens: String, Sendable, CaseIterable {
     }
 }
 
+/// Message generator for DeepSeek-OCR and Unlimited-OCR chat templates.
+///
+/// These checkpoints render `message.content` directly, so image placeholders must be
+/// embedded in string content rather than represented as Qwen-style structured parts.
+public struct DeepseekOCRMessageGenerator: MessageGenerator {
+    public let imageToken: String
+
+    public init(imageToken: String = "<image>") {
+        self.imageToken = imageToken
+    }
+
+    public func generate(from input: UserInput) -> [Message] {
+        switch input.prompt {
+        case .text(let text):
+            generate(messages: [.user(text, images: input.images)])
+        case .messages(let messages):
+            messages
+        case .chat(let messages):
+            generate(messages: messages)
+        }
+    }
+
+    public func generate(message: Chat.Message) -> Message {
+        let placeholders = String(repeating: imageToken, count: message.images.count)
+        var dictionary: Message = [
+            "role": message.role.rawValue,
+            "content":
+                message.content.contains(imageToken)
+                ? message.content
+                : placeholders + message.content,
+        ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
+    }
+}
+
 public struct DeepseekOCRProcessor: UserInputProcessor {
     /// Image crop modes matching Python `DeepseekOCRProcessor.tokenize_with_images`.
     ///
@@ -770,7 +806,8 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
 
     @_spi(Testing)
     public func internalPrepare(input: UserInput) async throws -> PreparedImageInputs {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let messages = DeepseekOCRMessageGenerator(imageToken: config.imageToken).generate(
+            from: input)
         let promptTokens = try tokenizer.applyChatTemplate(
             messages: messages,
             tools: input.tools,

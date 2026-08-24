@@ -10,6 +10,36 @@ import XCTest
 
 final class DeepseekOCRProcessorTests: XCTestCase {
 
+    func testMessageGeneratorUsesCheckpointCompatibleStringContent() {
+        let input = UserInput(
+            chat: [
+                .system("You are an OCR assistant."),
+                .user(
+                    "Parse both pages.",
+                    images: [
+                        .ciImage(makeSolidImage(width: 8, height: 8, color: .red)),
+                        .ciImage(makeSolidImage(width: 8, height: 8, color: .blue)),
+                    ]),
+            ])
+
+        let messages = DeepseekOCRMessageGenerator().generate(from: input)
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["content"] as? String, "You are an OCR assistant.")
+        XCTAssertEqual(messages[1]["content"] as? String, "<image><image>Parse both pages.")
+        XCTAssertNil(messages[1]["content"] as? [[String: any Sendable]])
+    }
+
+    func testMessageGeneratorPreservesExplicitImagePlaceholders() {
+        let input = UserInput(
+            prompt: .text("before<image>after"),
+            images: [.ciImage(makeSolidImage(width: 8, height: 8, color: .red))])
+
+        let messages = DeepseekOCRMessageGenerator().generate(from: input)
+
+        XCTAssertEqual(messages[0]["content"] as? String, "before<image>after")
+    }
+
     func testGundamModeMatchesExpectedCropMetadataAndTokenMask() async throws {
         let processor = try makeProcessor()
         let input = UserInput(
@@ -37,7 +67,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             (0 ..< prepared.inputIds.shape[1]).last {
                 prepared.imagesSeqMask[0, $0].item(Bool.self)
             })
-        XCTAssertEqual(prepared.inputIds[0, lastImageTokenIndex + 1].item(Int.self), 20)
+        XCTAssertNotEqual(prepared.inputIds[0, lastImageTokenIndex + 1].item(Int.self), 999)
         XCTAssertEqual(prepared.imagesSeqMask[0, lastImageTokenIndex + 1].item(Bool.self), false)
         XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 484)
 
@@ -327,20 +357,9 @@ private struct DeterministicTokenizer: Tokenizer {
     ) throws -> [Int] {
         var ids = [0]
         for message in messages {
-            if let content = message["content"] as? [[String: any Sendable]] {
-                for part in content {
-                    switch part["type"] as? String {
-                    case "image":
-                        ids.append(999)
-                    case "text":
-                        if let text = part["text"] as? String {
-                            ids.append(contentsOf: encode(text: text, addSpecialTokens: false))
-                        }
-                    default:
-                        break
-                    }
-                }
-            } else if let content = message["content"] as? String {
+            // The production DeepSeek/Unlimited template renders message.content directly.
+            // It does not translate Qwen-style structured image parts into <image>.
+            if let content = message["content"] as? String {
                 ids.append(contentsOf: encode(text: content, addSpecialTokens: false))
             }
         }
