@@ -203,4 +203,79 @@ struct MixedPrecisionQuantLoadTests {
                 quantization: .init(groupSize: Self.groupSize, bits: 4))
         }
     }
+
+    @Test("Namespaced models resolve overrides against checkpoint paths")
+    func namespacedModelOverridesApplied() throws {
+        let reference = NamespacedQuantizationModel()
+        let projection = try #require(
+            Dictionary(uniqueKeysWithValues: reference.leafModules().flattened())[
+                "runtime.projection"] as? Linear)
+        let (weight, scales, biases) = quantized(
+            projection.weight, groupSize: Self.groupSize, bits: 8)
+        var arrays = [
+            "projection.weight": weight,
+            "projection.scales": scales,
+        ]
+        if let biases {
+            arrays["projection.biases"] = biases
+        }
+
+        let directory = try writeCheckpoint(arrays)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let baseConfig = try JSONDecoder.json5().decode(
+            BaseConfiguration.self,
+            from: Data(
+                """
+                {
+                  "model_type": "namespaced_fixture",
+                  "quantization": {
+                    "group_size": \(Self.groupSize),
+                    "bits": 4,
+                    "projection": {"group_size": \(Self.groupSize), "bits": 8}
+                  }
+                }
+                """.utf8))
+
+        let model = NamespacedQuantizationModel()
+        try loadWeights(
+            modelDirectory: directory,
+            model: model,
+            perLayerQuantization: baseConfig.perLayerQuantization)
+
+        let loaded = try #require(
+            Dictionary(uniqueKeysWithValues: model.leafModules().flattened())[
+                "runtime.projection"] as? QuantizedLinear)
+        #expect(loaded.bits == 8)
+        #expect(loaded.groupSize == Self.groupSize)
+    }
+}
+
+private final class NamespacedQuantizationBody: Module {
+    @ModuleInfo var projection: Linear
+
+    override init() {
+        _projection.wrappedValue = Linear(64, 64, bias: false)
+        super.init()
+    }
+}
+
+private final class NamespacedQuantizationModel: Module, BaseLanguageModel {
+    @ModuleInfo var runtime: NamespacedQuantizationBody
+
+    override init() {
+        _runtime.wrappedValue = NamespacedQuantizationBody()
+        super.init()
+    }
+
+    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        Dictionary(
+            uniqueKeysWithValues: weights.map { key, value in
+                ("runtime.\(key)", value)
+            })
+    }
+
+    func quantizationConfigurationPath(for modulePath: String) -> String {
+        modulePath.hasPrefix("runtime.")
+            ? String(modulePath.dropFirst("runtime.".count)) : modulePath
+    }
 }

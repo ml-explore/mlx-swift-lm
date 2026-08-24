@@ -115,6 +115,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         precondition(
             blockSize >= 2,
             "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)")
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
+        }
 
         let kvCachePlan = try parameters.kvCachePlan()
         let mainCache = try kvCachePlan.validated(

@@ -394,6 +394,34 @@ struct TurboQuantKVCacheTests {
             "State should have 2 or 4 arrays, got \(state.count)")
     }
 
+    @Test func compressedCachesExposeLiveKeyValues() throws {
+        let keys = MLXRandom.normal([1, 2, 8, 64])
+        let values = MLXRandom.normal([1, 2, 8, 64])
+        let newKeys = MLXRandom.normal([1, 2, 1, 64])
+        let newValues = MLXRandom.normal([1, 2, 1, 64])
+        let queries = MLXRandom.normal([1, 2, 1, 64])
+        eval(keys, values, newKeys, newValues, queries)
+
+        for (keyBits, valueBits) in [(0, 4), (8, 4), (4, 4)] {
+            let cache = TurboQuantKVCache(
+                bits: max(keyBits, valueBits), keyBits: keyBits, valueBits: valueBits)
+            _ = cache.update(keys: keys, values: values)
+            let output = cache.compressedAttention(
+                queries: queries,
+                keys: newKeys,
+                values: newValues,
+                scale: 1.0 / 8.0)
+            eval(output)
+
+            let live = try #require(cache.currentKeyValues())
+            eval(live.keys, live.values)
+            #expect(live.keys.shape == [1, 2, 9, 64])
+            #expect(live.values.shape == [1, 2, 9, 64])
+            #expect(!MLX.isNaN(live.keys).any().item(Bool.self))
+            #expect(!MLX.isNaN(live.values).any().item(Bool.self))
+        }
+    }
+
     @Test func cacheIsTrimmable() {
         let cache = TurboQuantKVCache(bits: 4)
         #expect(cache.isTrimmable == true)

@@ -158,7 +158,8 @@ public struct GenerateParameters: Sendable {
     /// (`TopPSampler` / `CategoricalSampler`) is seeded deterministically, so
     /// the same `(seed, prompt, parameters)` produces the same sampled
     /// tokens. `nil` ⇒ the sampler is seeded from system entropy (the prior
-    /// default). Inert at `temperature == 0` (argmax has no RNG).
+    /// default). Inert for autoregressive generation at `temperature == 0`;
+    /// block diffusion still uses it to initialize denoising canvases.
     public var seed: UInt64?
 
     /// Penalty factor for repeating tokens
@@ -178,6 +179,9 @@ public struct GenerateParameters: Sendable {
 
     /// number of tokens to consider for frequency penalty
     public var frequencyContextSize: Int
+
+    /// Request-level controls for block-diffusion generation.
+    public var diffusion: BlockDiffusionParameters = .init()
 
     public init(
         maxTokens: Int? = nil,
@@ -219,6 +223,55 @@ public struct GenerateParameters: Sendable {
         self.frequencyContextSize = frequencyContextSize
         self.prefill = prefill
         self.seed = seed
+    }
+
+    /// Creates generation parameters with request-level block-diffusion controls.
+    ///
+    /// The overload without `diffusion` retains its original public signature
+    /// for existing clients and initializes these controls to their defaults.
+    public init(
+        diffusion: BlockDiffusionParameters,
+        maxTokens: Int? = nil,
+        maxKVSize: Int? = nil,
+        kvCache: KVCacheConfiguration? = nil,
+        kvBits: Int? = nil,
+        kvGroupSize: Int = 64,
+        quantizedKVStart: Int = 0,
+        kvScheme: String? = nil,
+        temperature: Float = 0.6,
+        topP: Float = 1.0,
+        topK: Int = 0,
+        minP: Float = 0.0,
+        repetitionPenalty: Float? = nil,
+        repetitionContextSize: Int = 20,
+        presencePenalty: Float? = nil,
+        presenceContextSize: Int = 20,
+        frequencyPenalty: Float? = nil,
+        frequencyContextSize: Int = 20,
+        prefill: PrefillParameters = .init(),
+        seed: UInt64? = nil
+    ) {
+        self.init(
+            maxTokens: maxTokens,
+            maxKVSize: maxKVSize,
+            kvCache: kvCache,
+            kvBits: kvBits,
+            kvGroupSize: kvGroupSize,
+            quantizedKVStart: quantizedKVStart,
+            kvScheme: kvScheme,
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            minP: minP,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: repetitionContextSize,
+            presencePenalty: presencePenalty,
+            presenceContextSize: presenceContextSize,
+            frequencyPenalty: frequencyPenalty,
+            frequencyContextSize: frequencyContextSize,
+            prefill: prefill,
+            seed: seed)
+        self.diffusion = diffusion
     }
 
     @available(
@@ -313,6 +366,34 @@ public struct GenerateParameters: Sendable {
             presenceContext: presenceContext,
             frequencyContext: frequencyContext
         )
+    }
+}
+
+/// Errors raised by generation helpers before starting an invalid decode mode.
+public enum GenerateError: LocalizedError {
+    case unsupportedAutoregressiveGeneration(String)
+    case unsupportedSpeculativeDecoding(String)
+    case unsupportedMultimodalGeneration(String)
+    case unsupportedBatchSize(modelName: String, batchSize: Int)
+    case invalidAttentionMask(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedAutoregressiveGeneration(let modelName):
+            return
+                "\(modelName) is a block-diffusion model and cannot be decoded with autoregressive next-token generation."
+        case .unsupportedSpeculativeDecoding(let modelName):
+            return
+                "Speculative decoding is only supported for autoregressive language models; \(modelName) generates tokens with block diffusion."
+        case .unsupportedMultimodalGeneration(let modelName):
+            return
+                "\(modelName) is the shared DiffusionGemma language core. Use the VLM implementation for image, video, or audio inputs."
+        case .unsupportedBatchSize(let modelName, let batchSize):
+            return
+                "\(modelName) block-diffusion streaming supports batch size 1, but received batch size \(batchSize)."
+        case .invalidAttentionMask(let reason):
+            return "Invalid block-diffusion attention mask: \(reason)"
+        }
     }
 }
 
@@ -1057,6 +1138,15 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         numDraftTokens: Int,
         components: GenerationComponents = .init()
     ) throws {
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
+        }
+        guard !draftModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: draftModel)))
+        }
+
         let plan = try parameters.kvCachePlan()
         try self.init(
             input: input, mainModel: mainModel, draftModel: draftModel,
@@ -1750,6 +1840,19 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        let (stream, _) = generateTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            wiredMemoryTicket: wiredMemoryTicket,
+            tools: tools)
+        return stream
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
@@ -1828,6 +1931,13 @@ public func generate(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<Generation> {
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
+    }
+
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -1968,6 +2078,20 @@ public func generateTokens(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        let (stream, _) = generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            includeStopToken: includeStopToken,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+        return stream
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
@@ -2017,6 +2141,13 @@ public func generateTokens(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
+    if context.model.capabilities.contains(.blockDiffusion)
+        || draftModel.capabilities.contains(.blockDiffusion)
+    {
+        throw GenerateError.unsupportedSpeculativeDecoding(
+            String(describing: type(of: context.model)))
+    }
+
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -2179,6 +2310,19 @@ public func generateTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+    if let diffusionModel = context.model as? any BlockDiffusionLanguageModel {
+        let iterator = try BlockDiffusionTokenIterator(
+            input: input, model: diffusionModel, cache: cache, parameters: parameters)
+        return generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator,
+            includeStopToken: includeStopToken,
+            wiredMemoryTicket: wiredMemoryTicket
+        )
+    }
+
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
@@ -2242,6 +2386,26 @@ public func generateTokenTask(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     iterator: consuming TokenIterator,
+    includeStopToken: Bool = false,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+    generateLoopTask(
+        promptTokenCount: promptTokenCount,
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        includeStopToken: includeStopToken,
+        handler: RawTokenLoopHandler()
+    )
+}
+
+/// Low-level raw token generation using any token iterator implementation.
+public func generateTokenTask(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming any TokenIteratorProtocol,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
@@ -2404,10 +2568,12 @@ private func generateLoopTask<
                 }
             }
 
-            // Speculative iterators verify several candidates at once. A stop
-            // token, consumer termination, or token limit can leave verified
-            // but unreturned candidates in their shared caches. Remove that
-            // lookahead before ChatSession reconciles its token ledger.
+            // Speculative iterators verify several candidates at once and
+            // block-diffusion iterators denoise a whole canvas ahead of the
+            // emitted tokens. A stop token, consumer termination, or token
+            // limit can leave deferred work (verified candidates, uncommitted
+            // canvas tokens) that must be reconciled with what the loop
+            // actually emitted before ChatSession reconciles its token ledger.
             if var finalizing = iterator as? any GenerationFinalizingTokenIterator {
                 finalizing.finalizeGeneration()
                 // Write back: the cast copies the iterator, and the trim also
@@ -2415,7 +2581,6 @@ private func generateLoopTask<
                 // reference-typed caches) that later reads still observe.
                 iterator = finalizing
             }
-
             handler.onGenerationEnd(emit: continuation.yield)
 
             let now = Date.timeIntervalSinceReferenceDate
