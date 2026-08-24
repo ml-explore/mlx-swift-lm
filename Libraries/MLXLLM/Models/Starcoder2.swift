@@ -177,6 +177,10 @@ public class Starcoder2Model: Module, LLMModel, KVCacheDimensionProvider {
             return out
         }
     }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        filterLMHeadWeights(from: weights, tiedWordEmbeddings: tieWordEmbeddings)
+    }
 }
 
 public struct Starcoder2Configuration: Codable, Sendable {

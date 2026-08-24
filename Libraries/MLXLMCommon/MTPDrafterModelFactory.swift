@@ -94,7 +94,8 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            weightFileSelection: configuration.weightFileSelection
         )
 
         let modelConfig = ModelConfiguration(

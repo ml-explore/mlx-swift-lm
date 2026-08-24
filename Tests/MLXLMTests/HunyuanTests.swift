@@ -85,8 +85,8 @@ public class HunyuanTests: XCTestCase {
 
     // MARK: - Weight sanitization
 
-    /// Hunyuan ties `lm_head` to the token embeddings, so the checkpoint ships no
-    /// `lm_head.weight` and `sanitize` must drop any that appears.
+    /// Hunyuan ties `lm_head` to the token embeddings, so `sanitize` must drop the
+    /// full quantized head if a converted checkpoint contains one.
     func testSanitizeDropsTiedLmHead() throws {
         let config = try Self.tinyConfig(tied: true)
         let model = HunyuanModel(config)
@@ -95,10 +95,12 @@ public class HunyuanTests: XCTestCase {
             "model.embed_tokens.weight":
                 MLXArray.zeros([config.vocabularySize, config.hiddenSize]),
             "lm_head.weight": MLXArray.zeros([config.vocabularySize, config.hiddenSize]),
+            "lm_head.scales": MLXArray.zeros([1]),
+            "lm_head.biases": MLXArray.zeros([1]),
         ]
 
         let sanitized = model.sanitize(weights: weights)
-        XCTAssertNil(sanitized["lm_head.weight"])
+        XCTAssertFalse(sanitized.keys.contains { $0.hasPrefix("lm_head.") })
         XCTAssertNotNil(sanitized["model.embed_tokens.weight"])
     }
 

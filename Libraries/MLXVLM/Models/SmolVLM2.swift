@@ -321,6 +321,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
 
             let processedFrames = try await MediaProcessing.asProcessedSequence(
                 video,
+                processing: input.processing.video,
                 targetFPS: { duration in
                     // 1 fps for duration >= 10s, apply a multiplier if smaller
                     max((10 - 0.9 * duration.seconds) * targetVideoFPS, 1)

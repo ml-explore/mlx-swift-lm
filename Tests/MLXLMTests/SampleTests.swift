@@ -472,4 +472,79 @@ public class SampleTests: XCTestCase {
         XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
         XCTAssertEqual(values[3], 3.25, accuracy: 1e-6)
     }
+
+    private struct StatefulStructProcessor: LogitProcessor {
+        var seenTokens: [Int] = []
+
+        mutating func prompt(_ prompt: MLXArray) {
+            seenTokens.append(contentsOf: prompt.asArray(Int.self))
+        }
+
+        func process(logits: MLXArray) -> MLXArray { logits }
+
+        mutating func didSample(token: MLXArray) {
+            seenTokens.append(token.item(Int.self))
+        }
+    }
+
+    private final class StatefulClassProcessorWithCopy: LogitProcessor {
+        var seenTokens: [Int]
+
+        init(seenTokens: [Int] = []) {
+            self.seenTokens = seenTokens
+        }
+
+        func prompt(_ prompt: MLXArray) {
+            seenTokens.append(contentsOf: prompt.asArray(Int.self))
+        }
+
+        func process(logits: MLXArray) -> MLXArray { logits }
+
+        func didSample(token: MLXArray) {
+            seenTokens.append(token.item(Int.self))
+        }
+
+        func copy() -> Self {
+            StatefulClassProcessorWithCopy(seenTokens: seenTokens) as! Self
+        }
+    }
+
+    func testStructLogitProcessorCopyValueSemantics() {
+        var original = StatefulStructProcessor()
+        original.prompt(MLXArray([1, 2]))
+
+        var copy = original.copy()
+        copy.didSample(token: MLXArray([3]))
+
+        XCTAssertEqual(original.seenTokens, [1, 2])
+        XCTAssertEqual(copy.seenTokens, [1, 2, 3])
+    }
+
+    func testClassLogitProcessorCopyWithExplicitImplementation() {
+        let original = StatefulClassProcessorWithCopy(seenTokens: [1, 2])
+        let copy = original.copy()
+
+        XCTAssertFalse(original === copy, "copy() must return a distinct instance")
+        copy.didSample(token: MLXArray([3]))
+
+        XCTAssertEqual(original.seenTokens, [1, 2])
+        XCTAssertEqual(copy.seenTokens, [1, 2, 3])
+    }
+
+    func testChainedLogitProcessorCopyClonesNestedProcessors() {
+        let classProcessor = StatefulClassProcessorWithCopy(seenTokens: [10])
+        var structProcessor = StatefulStructProcessor()
+        structProcessor.prompt(MLXArray([20]))
+
+        let chained = ChainedLogitProcessor(processors: [classProcessor, structProcessor])
+        var clonedChained = chained.copy()
+
+        clonedChained.didSample(token: MLXArray([99]))
+
+        XCTAssertEqual(
+            classProcessor.seenTokens, [10],
+            "Original class processor should not be modified by clone's didSample")
+        let origLogits = MLXArray([1.0 as Float, 2.0 as Float])[.newAxis, .ellipsis]
+        _ = chained.process(logits: origLogits)
+    }
 }

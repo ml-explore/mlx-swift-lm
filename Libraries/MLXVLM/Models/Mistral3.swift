@@ -764,6 +764,8 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: config.textConfig.tieWordEmbeddings)
         var newWeights: [String: MLXArray] = [:]
 
         for (key, value) in weights {

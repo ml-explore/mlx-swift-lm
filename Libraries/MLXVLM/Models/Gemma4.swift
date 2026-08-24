@@ -2747,7 +2747,10 @@ public struct Gemma4Processor: UserInputProcessor {
         var frameCounts: [Int] = []
         for video in videos {
             let sequence = try await MediaProcessing.asProcessedSequence(
-                video, targetFPS: { _ in 1.0 }, maxFrames: config.videoMaxFrames
+                video,
+                processing: processing?.video ?? .init(),
+                targetFPS: { _ in 1.0 },
+                maxFrames: config.videoMaxFrames
             ) { frame in
                 var userProcessing = processing ?? UserInput.Processing()
                 userProcessing.resize = targetSize

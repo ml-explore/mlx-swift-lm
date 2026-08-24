@@ -125,4 +125,18 @@ struct CompositeLogitProcessorTests {
         let result = composite.process(logits: input)
         #expect(result.shape == input.shape)
     }
+
+    @Test
+    func copyProducesIndependentProcessors() {
+        var first = AddConstantProcessor(constant: 1.0)
+        var composite = CompositeLogitProcessor([first])
+        var cloned = composite.copy()
+
+        cloned.didSample(token: MLXArray(UInt32(10)))
+
+        let origResult = composite.process(logits: MLXArray([0.0] as [Float]))
+        let clonedResult = cloned.process(logits: MLXArray([0.0] as [Float]))
+        #expect(origResult.asArray(Float.self) == [1.0])
+        #expect(clonedResult.asArray(Float.self) == [1.0])
+    }
 }

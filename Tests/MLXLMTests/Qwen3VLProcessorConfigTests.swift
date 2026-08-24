@@ -2,14 +2,14 @@
 //
 // Verifies `Qwen3VLProcessorConfiguration` decodes the new-style
 // `size.{longest_edge, shortest_edge}` pixel-area budget that recent Qwen3-VL
-// configs (e.g. Qwen3.6-27B PARO) ship, in addition to the legacy
-// `min_pixels`/`max_pixels`. Pre-fix the new keys were ignored and the budget
-// silently fell back to the hardcoded defaults — wrong for every model on the
-// new config format.
+// configs ship, in addition to the legacy `min_pixels`/`max_pixels`. Also
+// verifies the narrow Qwen3.5/3.6 fallback used when otherwise valid VLM
+// repositories omit processor metadata.
 
 import Foundation
-import MLXVLM
 import XCTest
+
+@testable import MLXVLM
 
 final class Qwen3VLProcessorConfigTests: XCTestCase {
 
@@ -75,5 +75,211 @@ final class Qwen3VLProcessorConfigTests: XCTestCase {
         let cfg = try decode(config(budget: ""))
         XCTAssertEqual(cfg.minPixels, 4 * 28 * 28)
         XCTAssertEqual(cfg.maxPixels, 16384 * 28 * 28)
+    }
+}
+
+final class Qwen35ProcessorFallbackTests: XCTestCase {
+
+    func testDenseFallbackEncodesVisionGeometryAndQwenDefaults() throws {
+        let model = Qwen35(try makeQwen35Configuration(modelType: "qwen3_5"))
+
+        let fallback = try XCTUnwrap(
+            qwenProcessorFallback(modelType: "qwen3_5", model: model))
+        let config = try JSONDecoder().decode(
+            Qwen3VLProcessorConfiguration.self, from: fallback.0)
+
+        XCTAssertEqual(fallback.1.processorClass, "Qwen3VLProcessor")
+        XCTAssertEqual(config.imageMean, [0.5, 0.5, 0.5])
+        XCTAssertEqual(config.imageStd, [0.5, 0.5, 0.5])
+        XCTAssertEqual(config.minPixels, 65_536)
+        XCTAssertEqual(config.maxPixels, 16_777_216)
+        XCTAssertEqual(config.patchSize, 14)
+        XCTAssertEqual(config.mergeSize, 3)
+        XCTAssertEqual(config.temporalPatchSize, 4)
+        XCTAssertEqual(config.imageProcessorType, "Qwen2VLImageProcessorFast")
+    }
+
+    func testMoEFallbackUsesInheritedQwen35Configuration() throws {
+        let model = Qwen35MoE(
+            try makeQwen35Configuration(
+                modelType: "qwen3_5_moe", patchSize: 12, mergeSize: 2,
+                temporalPatchSize: 3))
+
+        let fallback = try XCTUnwrap(
+            qwenProcessorFallback(modelType: "qwen3_5_moe", model: model))
+        let config = try JSONDecoder().decode(
+            Qwen3VLProcessorConfiguration.self, from: fallback.0)
+
+        XCTAssertEqual(fallback.1.processorClass, "Qwen3VLProcessor")
+        XCTAssertEqual(config.patchSize, 12)
+        XCTAssertEqual(config.mergeSize, 2)
+        XCTAssertEqual(config.temporalPatchSize, 3)
+    }
+
+    func testFallbackRejectsUnrelatedModelType() throws {
+        let model = Qwen35(try makeQwen35Configuration(modelType: "qwen3_5"))
+
+        XCTAssertNil(try qwenProcessorFallback(modelType: "qwen3_vl", model: model))
+    }
+
+    func testMissingFilesUseFallback() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fallback = try processorConfiguration(named: "FallbackProcessor")
+
+        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+
+        XCTAssertEqual(resolved.0, fallback.0)
+        XCTAssertEqual(resolved.1.processorClass, "FallbackProcessor")
+    }
+
+    func testPreprocessorConfigWinsOverProcessorAndFallback() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preprocessor = try processorConfiguration(named: "Preprocessor")
+        let processor = try processorConfiguration(named: "Processor")
+        let fallback = try processorConfiguration(named: "Fallback")
+        try preprocessor.0.write(
+            to: directory.appending(component: "preprocessor_config.json"))
+        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+
+        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+
+        XCTAssertEqual(resolved.0, preprocessor.0)
+        XCTAssertEqual(resolved.1.processorClass, "Preprocessor")
+    }
+
+    func testProcessorConfigWinsOverFallback() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let processor = try processorConfiguration(named: "Processor")
+        let fallback = try processorConfiguration(named: "Fallback")
+        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+
+        let resolved = try await loadProcessorConfig(from: directory, fallback: fallback)
+
+        XCTAssertEqual(resolved.0, processor.0)
+        XCTAssertEqual(resolved.1.processorClass, "Processor")
+    }
+
+    func testMalformedPreprocessorIsNotMasked() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let processor = try processorConfiguration(named: "Processor")
+        let fallback = try processorConfiguration(named: "Fallback")
+        try Data("{".utf8).write(
+            to: directory.appending(component: "preprocessor_config.json"))
+        try processor.0.write(to: directory.appending(component: "processor_config.json"))
+
+        do {
+            _ = try await loadProcessorConfig(from: directory, fallback: fallback)
+            XCTFail("Expected malformed preprocessor_config.json to throw")
+        } catch let error as ProcessorConfigError {
+            XCTAssertEqual(error.filename, "preprocessor_config.json")
+        }
+    }
+
+    func testMalformedProcessorIsNotMasked() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fallback = try processorConfiguration(named: "Fallback")
+        try Data("{".utf8).write(
+            to: directory.appending(component: "processor_config.json"))
+
+        do {
+            _ = try await loadProcessorConfig(from: directory, fallback: fallback)
+            XCTFail("Expected malformed processor_config.json to throw")
+        } catch let error as ProcessorConfigError {
+            XCTAssertEqual(error.filename, "processor_config.json")
+        }
+    }
+
+    func testMissingFilesWithoutFallbackRetainProcessorFilename() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            _ = try await loadProcessorConfig(from: directory)
+            XCTFail("Expected a missing processor_config.json error")
+        } catch let error as ProcessorConfigError {
+            XCTAssertEqual(error.filename, "processor_config.json")
+        }
+    }
+
+    func testQwen35ConfigurationRequiresCompleteVisionConfig() {
+        let data = Data(
+            """
+            {
+                "model_type": "qwen3_5",
+                "text_config": {},
+                "vision_config": {
+                    "model_type": "qwen3_vl",
+                    "patch_size": 16,
+                    "spatial_merge_size": 2,
+                    "temporal_patch_size": 2
+                }
+            }
+            """.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(Qwen35Configuration.self, from: data))
+    }
+
+    private func makeQwen35Configuration(
+        modelType: String,
+        patchSize: Int = 14,
+        mergeSize: Int = 3,
+        temporalPatchSize: Int = 4
+    ) throws -> Qwen35Configuration {
+        let json = """
+            {
+                "model_type": "\(modelType)",
+                "text_config": {
+                    "model_type": "\(modelType)",
+                    "hidden_size": 8,
+                    "num_hidden_layers": 1,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 1,
+                    "num_key_value_heads": 1,
+                    "linear_num_value_heads": 1,
+                    "linear_num_key_heads": 1,
+                    "linear_key_head_dim": 8,
+                    "linear_value_head_dim": 8,
+                    "linear_conv_kernel_dim": 4,
+                    "vocab_size": 32,
+                    "full_attention_interval": 2,
+                    "num_experts": 0,
+                    "num_experts_per_tok": 0
+                },
+                "vision_config": {
+                    "model_type": "qwen3_vl",
+                    "depth": 1,
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "out_hidden_size": 8,
+                    "num_heads": 1,
+                    "patch_size": \(patchSize),
+                    "spatial_merge_size": \(mergeSize),
+                    "temporal_patch_size": \(temporalPatchSize),
+                    "num_position_embeddings": 9
+                }
+            }
+            """
+        return try JSONDecoder().decode(
+            Qwen35Configuration.self, from: Data(json.utf8))
+    }
+
+    private func processorConfiguration(named processorClass: String) throws -> (
+        Data, BaseProcessorConfiguration
+    ) {
+        let config = BaseProcessorConfiguration(processorClass: processorClass)
+        return (try JSONEncoder().encode(config), config)
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(component: "Qwen35ProcessorFallbackTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return directory
     }
 }

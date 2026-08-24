@@ -530,10 +530,8 @@ public class AfMoEModel: Module, LLMModel, KVCacheDimensionProvider {
         // Remove unused precomputed rotary freqs
         sanitizedWeights = sanitizedWeights.filter { !$0.key.contains("rotary_emb.inv_freq") }
 
-        // Remove lm_head if tied embeddings
-        if configuration.tieWordEmbeddings {
-            sanitizedWeights["lm_head.weight"] = nil
-        }
+        sanitizedWeights = filterLMHeadWeights(
+            from: sanitizedWeights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
 
         // Stack expert weights for SwitchGLU
         for l in 0 ..< configuration.hiddenLayers {

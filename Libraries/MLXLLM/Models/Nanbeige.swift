@@ -226,9 +226,8 @@ public class NanbeigeModel: Module, LLMModel {
             !key.contains("self_attn.rotary_emb.inv_freq")
         }
 
-        if configuration.tieWordEmbeddings {
-            weights["lm_head.weight"] = nil
-        }
+        weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
 
         return weights
     }

@@ -9,56 +9,17 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
     public let startTag: String?
     public let endTag: String?
 
+    /// Python string literals use either quote character, and values may nest
+    /// any bracket kind, so every scan of this dialect shares one configuration.
+    private static let scanner = StructuredTextScanner(quotes: ["'", "\""])
+
     public init(startTag: String? = nil, endTag: String? = nil) {
         self.startTag = startTag
         self.endTag = endTag
     }
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        var text = content
-
-        // Strip tags if present
-        if let start = startTag, let startRange = text.range(of: start) {
-            text = String(text[startRange.upperBound...])
-        }
-        if let end = endTag, let endRange = text.range(of: end) {
-            text = String(text[..<endRange.lowerBound])
-        }
-
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let funcName: String
-        let argsString: String
-
-        // Required brackets pattern (matches Python reference: r"\[(\w+)\((.*?)\)\]")
-        // The required \] forces .*? to backtrack past nested ) inside argument values.
-        let bracketPattern = #"\[(\w+)\((.*?)\)\]"#
-        if let regex = try? NSRegularExpression(
-            pattern: bracketPattern, options: [.dotMatchesLineSeparators]),
-            let match = regex.firstMatch(
-                in: text, options: [], range: NSRange(text.startIndex..., in: text)),
-            let nameRange = Range(match.range(at: 1), in: text),
-            let argsRange = Range(match.range(at: 2), in: text)
-        {
-            funcName = String(text[nameRange])
-            argsString = String(text[argsRange])
-        } else {
-            // Fallback for without-brackets case: use string indices to find the
-            // outermost parentheses, avoiding the greedy/non-greedy regex pitfall.
-            guard let openParen = text.firstIndex(of: "("),
-                let closeParen = text.lastIndex(of: ")")
-            else { return nil }
-
-            let name = text[text.startIndex ..< openParen]
-            guard !name.isEmpty, name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
-            else { return nil }
-
-            funcName = String(name)
-            argsString = String(text[text.index(after: openParen) ..< closeParen])
-        }
-
-        let arguments = parseArguments(argsString, funcName: funcName, tools: tools)
-        return ToolCall(function: .init(name: funcName, arguments: arguments))
+        parseMultiple(content: content, tools: tools).first
     }
 
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
@@ -74,34 +35,74 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
     }
 
     private func parseMultiple(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
-        var text = content
+        callBodies(in: unwrapped(content)).compactMap { parseCall($0, tools: tools) }
+    }
 
-        if let end = endTag, let endRange = text.range(of: end) {
-            text = String(text[..<endRange.lowerBound])
+    /// Strips the protocol tags and surrounding whitespace, leaving the call list.
+    private func unwrapped(_ content: String) -> Substring {
+        var text = content[...]
+
+        if let startTag, let startRange = text.range(of: startTag) {
+            text = text[startRange.upperBound...]
+        }
+        if let endTag, let endRange = text.range(of: endTag) {
+            text = text[..<endRange.lowerBound]
         }
 
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.trimmingWhitespace()
+    }
 
-        let regex = #/(?s)(\w+)\((.*?)\)/#
-        let matches = text.matches(of: regex)
+    /// Splits a call list into one body per call.
+    ///
+    /// The list may be wrapped in `[...]`, which has to balance: a bracket left
+    /// open means the payload is truncated, not that the calls inside it are
+    /// ready to execute. Bodies are separated by top-level commas, so a comma
+    /// inside an argument value never splits one call into two.
+    private func callBodies(in text: Substring) -> [Substring] {
+        var list = text
 
-        var results: [ToolCall] = []
-        for match in matches {
-            let funcName = String(match.1)
-            let argsString = String(match.2)
-            let arguments = parseArguments(argsString, funcName: funcName, tools: tools)
-
-            results.append(ToolCall(function: .init(name: funcName, arguments: arguments)))
+        if list.first == "[" {
+            guard let end = Self.scanner.endOfGroup(in: list, openedAt: list.startIndex)
+            else { return [] }
+            list = list[list.index(after: list.startIndex) ..< end]
         }
 
-        return results
+        return Self.scanner.splitTopLevel(list, separator: ",")
+    }
+
+    /// Parses one `name(arguments)` body.
+    ///
+    /// The argument list ends at the parenthesis balancing the one that opened
+    /// it, so a value containing `)`, `]`, or `)]` survives intact.
+    private func parseCall(_ body: Substring, tools: [[String: any Sendable]]?) -> ToolCall? {
+        let body = body.trimmingWhitespace()
+        guard let open = Self.scanner.firstTopLevelIndex(of: "(", in: body),
+            let close = Self.scanner.endOfGroup(in: body, openedAt: open)
+        else { return nil }
+
+        let name = identifierEnding(at: open, in: body)
+        guard !name.isEmpty else { return nil }
+
+        let funcName = String(name)
+        let arguments = parseArguments(
+            String(body[body.index(after: open) ..< close]), funcName: funcName, tools: tools)
+        return ToolCall(function: .init(name: funcName, arguments: arguments))
+    }
+
+    /// The identifier run ending just before `index`, which skips whatever list
+    /// punctuation or qualifier the model emitted ahead of the call.
+    private func identifierEnding(at index: String.Index, in body: Substring) -> Substring {
+        let prefix = body[..<index]
+        let isIdentifier: (Character) -> Bool = { $0.isLetter || $0.isNumber || $0 == "_" }
+        guard let boundary = prefix.lastIndex(where: { !isIdentifier($0) }) else { return prefix }
+        return prefix[prefix.index(after: boundary)...]
     }
 
     /// Parse Pythonic keyword arguments: arg1='value1', arg2="value2", arg3=123
     ///
-    /// Values may themselves be JSON objects/arrays (e.g.
-    /// `properties={"location": "Tokyo", "unit": "c"}`); splitting is bracket-,
-    /// brace-, and quote-aware so commas inside a value do not truncate it.
+    /// Values may be JSON or Python literals, including single-quoted collections
+    /// and the `True`, `False`, and `None` spellings. Splitting is bracket-, brace-,
+    /// and quote-aware so commas inside a value do not truncate it.
     private func parseArguments(
         _ argsString: String,
         funcName: String,
@@ -109,41 +110,45 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
     ) -> [String: any Sendable] {
         var arguments: [String: any Sendable] = [:]
 
-        for pair in splitTopLevel(argsString, separator: ",") {
-            guard let eq = topLevelIndex(of: "=", in: pair) else { continue }
+        for pair in Self.scanner.splitTopLevel(argsString[...], separator: ",") {
+            guard let eq = Self.scanner.firstTopLevelIndex(of: "=", in: pair) else { continue }
             let key = String(pair[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else { continue }
-            var value = String(pair[pair.index(after: eq)...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Object / array value: parse as JSON so nested commas are preserved.
-            if value.hasPrefix("{") || value.hasPrefix("[") {
-                if let json = tryParseJSON(value) {
-                    arguments[key] = json
-                    continue
-                }
-            }
-
-            // Quoted string: strip surrounding quotes and unescape, then apply
-            // schema-based typing (e.g. a quoted '25' for an integer parameter).
-            if (value.hasPrefix("'") && value.hasSuffix("'"))
-                || (value.hasPrefix("\"") && value.hasSuffix("\""))
-            {
-                value = String(value.dropFirst().dropLast())
-                value = value.replacingOccurrences(of: "\\'", with: "'")
-                value = value.replacingOccurrences(of: "\\\"", with: "\"")
-                value = value.replacingOccurrences(of: "\\\\", with: "\\")
-                arguments[key] = convertParameterValue(
-                    value, paramName: key, funcName: funcName, tools: tools)
-                continue
-            }
-
-            // Unquoted scalar: convert based on schema type if available.
-            arguments[key] = convertParameterValue(
-                value, paramName: key, funcName: funcName, tools: tools)
+            let value = pair[pair.index(after: eq)...].trimmingWhitespace()
+            arguments[key] = parseArgumentValue(
+                value, key: key, funcName: funcName, tools: tools)
         }
 
         return unwrapArgumentWrapper(arguments, funcName: funcName, tools: tools)
+    }
+
+    /// Converts one argument without letting inferred scalar types override a
+    /// declared schema. Collections retain the parser's historical eager
+    /// decoding behavior, now with Python-literal syntax as a fallback.
+    private func parseArgumentValue(
+        _ value: Substring,
+        key: String,
+        funcName: String,
+        tools: [[String: any Sendable]]?
+    ) -> any Sendable {
+        let literal = String(value)
+
+        if value.first == "{" || value.first == "[" {
+            return tryParseJSON(literal) ?? tryParsePythonLiteral(literal) ?? literal
+        }
+
+        if value.first == "'" || value.first == "\"" {
+            let string = (tryParsePythonLiteral(literal) as? String) ?? literal
+            return convertParameterValue(
+                string, paramName: key, funcName: funcName, tools: tools)
+        }
+
+        if getParameterType(funcName: funcName, paramName: key, tools: tools) != nil {
+            return convertParameterValue(
+                literal, paramName: key, funcName: funcName, tools: tools)
+        }
+
+        return tryParsePythonLiteral(literal) ?? literal
     }
 
     /// Some models wrap all arguments in a single object under a schema key —
@@ -171,80 +176,5 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
             return arguments
         }
         return object
-    }
-
-    /// Split `text` on `separator` at the top level only, ignoring separators
-    /// inside quotes or `()` / `[]` / `{}` nesting.
-    private func splitTopLevel(_ text: String, separator: Character) -> [String] {
-        var parts: [String] = []
-        var current = ""
-        var depth = 0
-        var quote: Character?
-        var escaped = false
-
-        for character in text {
-            if let activeQuote = quote {
-                current.append(character)
-                if escaped {
-                    escaped = false
-                } else if character == "\\" {
-                    escaped = true
-                } else if character == activeQuote {
-                    quote = nil
-                }
-                continue
-            }
-            switch character {
-            case "'", "\"":
-                quote = character
-                current.append(character)
-            case "(", "[", "{":
-                depth += 1
-                current.append(character)
-            case ")", "]", "}":
-                depth -= 1
-                current.append(character)
-            case separator where depth == 0:
-                parts.append(current)
-                current = ""
-            default:
-                current.append(character)
-            }
-        }
-        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            parts.append(current)
-        }
-        return parts
-    }
-
-    /// Index of the first top-level `character` (not inside quotes or nesting).
-    private func topLevelIndex(of character: Character, in text: String) -> String.Index? {
-        var depth = 0
-        var quote: Character?
-        var escaped = false
-        var index = text.startIndex
-
-        while index < text.endIndex {
-            let current = text[index]
-            if let activeQuote = quote {
-                if escaped {
-                    escaped = false
-                } else if current == "\\" {
-                    escaped = true
-                } else if current == activeQuote {
-                    quote = nil
-                }
-            } else {
-                switch current {
-                case "'", "\"": quote = current
-                case "(", "[", "{": depth += 1
-                case ")", "]", "}": depth -= 1
-                case character where depth == 0: return index
-                default: break
-                }
-            }
-            index = text.index(after: index)
-        }
-        return nil
     }
 }

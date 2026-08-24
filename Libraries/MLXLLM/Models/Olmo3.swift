@@ -220,7 +220,9 @@ public class Olmo3Model: Module, LLMModel, KVCacheDimensionProvider {
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         // Remove unused precomputed rotary frequencies
-        weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
+        filterLMHeadWeights(
+            from: weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") },
+            tiedWordEmbeddings: args.tieWordEmbeddings)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {

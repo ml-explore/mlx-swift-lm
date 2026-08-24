@@ -68,10 +68,12 @@ func testSanitizeDropsLmHeadWhenTied() {
     let weights: [String: MLXArray] = [
         "model.embed_tokens.weight": MLXArray.zeros([10, 4]),
         "lm_head.weight": MLXArray.zeros([10, 4]),
+        "lm_head.scales": MLXArray.zeros([1]),
+        "lm_head.biases": MLXArray.zeros([1]),
         "pre_projection.weight": MLXArray.zeros([4, 8]),
     ]
     let sanitized = model.sanitize(weights: weights)
-    #expect(sanitized["lm_head.weight"] == nil)
+    #expect(!sanitized.keys.contains { $0.hasPrefix("lm_head.") })
     #expect(sanitized["model.embed_tokens.weight"] != nil)
     #expect(sanitized["pre_projection.weight"] != nil)
 }
@@ -83,9 +85,13 @@ func testSanitizeKeepsLmHeadWhenNotTied() {
     let weights: [String: MLXArray] = [
         "model.embed_tokens.weight": MLXArray.zeros([10, 4]),
         "lm_head.weight": MLXArray.zeros([10, 4]),
+        "lm_head.scales": MLXArray.zeros([1]),
+        "lm_head.biases": MLXArray.zeros([1]),
     ]
     let sanitized = model.sanitize(weights: weights)
     #expect(sanitized["lm_head.weight"] != nil)
+    #expect(sanitized["lm_head.scales"] != nil)
+    #expect(sanitized["lm_head.biases"] != nil)
 }
 
 // MARK: - Synthetic shape test (no checkpoint needed)

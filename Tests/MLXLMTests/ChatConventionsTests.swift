@@ -84,6 +84,33 @@ final class ChatConventionsModelTests: XCTestCase {
         XCTAssertNil(model.toolCallFormat)
     }
 
+    func testQwen35DeclaresDualDialectToolFormat() throws {
+        let json = """
+            {
+                "model_type": "qwen3_5",
+                "hidden_size": 16,
+                "num_hidden_layers": 2,
+                "intermediate_size": 32,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "linear_num_value_heads": 2,
+                "linear_num_key_heads": 1,
+                "linear_key_head_dim": 8,
+                "linear_value_head_dim": 8,
+                "linear_conv_kernel_dim": 4,
+                "vocab_size": 32,
+                "full_attention_interval": 2
+            }
+            """
+        let config = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self, from: Data(json.utf8))
+        let model = Qwen35TextModel(config)
+
+        XCTAssertEqual(model.toolCallFormat, .qwen35)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+    }
+
     // MARK: Registry injection
 
     /// The factories take a `ChatConventionsRegistry` rather than reaching for

@@ -188,9 +188,8 @@ public class MiMoModel: Module, LLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var weights = weights
 
-        if configuration.tieWordEmbeddings {
-            weights.removeValue(forKey: "lm_head.weight")
-        }
+        weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
 
         // Remove unused precomputed rotary freqs and mtp_layers
         return weights.filter { key, _ in

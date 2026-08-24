@@ -259,6 +259,57 @@ struct SpeculativeDecodingTests {
         #expect(iterator.mainCacheStorage.nativeAttentionOffsetsAreAligned)
         #expect(iterator.draftCacheStorage.nativeAttentionOffsetsAreAligned)
     }
+
+    @Test
+    func `SpeculativeTokenIterator scopes class logit processor state via copy`() throws {
+        final class RecordingClassProcessor: LogitProcessor, @unchecked Sendable {
+            var sampledTokens: [Int]
+
+            init(sampledTokens: [Int] = []) {
+                self.sampledTokens = sampledTokens
+            }
+
+            func prompt(_ prompt: MLXArray) {}
+            func process(logits: MLXArray) -> MLXArray { logits }
+
+            func didSample(token: MLXArray) {
+                sampledTokens.append(token.item(Int.self))
+            }
+
+            func copy() -> Self {
+                RecordingClassProcessor(sampledTokens: sampledTokens) as! Self
+            }
+        }
+
+        let recordingProcessor = RecordingClassProcessor()
+        var components = GenerationComponents()
+        components.logitProcessorFactory = { recordingProcessor }
+
+        let vocabularySize = 100
+        // Mismatching draft model so some draft tokens are rejected
+        let mainModel = StableTransitionLanguageModel(vocabularySize: vocabularySize)
+        let draftModel = DivergentTransitionLanguageModel(vocabularySize: vocabularySize)
+
+        var iterator = try SpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([10])),
+            mainModel: mainModel,
+            draftModel: draftModel,
+            parameters: GenerateParameters(maxTokens: 5, temperature: 0.0),
+            numDraftTokens: 3,
+            components: components
+        )
+
+        var emittedTokens: [Int] = []
+        while let token = iterator.next() {
+            emittedTokens.append(token)
+        }
+
+        #expect(emittedTokens.count == 5)
+        #expect(
+            recordingProcessor.sampledTokens == emittedTokens,
+            "Canonical processor didSample must match emitted tokens exactly; draft and verify copies must not pollute canonical state."
+        )
+    }
 }
 
 /// ``StableTransitionLanguageModel`` variant that maintains a real KV cache,
@@ -339,5 +390,38 @@ private final class StableTransitionLanguageModel: Module, LanguageModel, KVCach
 
     private func nextToken(after token: Int) -> Int {
         (token * 31 + 7) % vocabularySize
+    }
+}
+
+/// Deterministic causal model predicting different transitions to induce rejections in speculative decoding.
+private final class DivergentTransitionLanguageModel: Module, LanguageModel,
+    KVCacheDimensionProvider
+{
+    let vocabularySize: Int
+    var kvHeads: [Int] { [] }
+
+    init(vocabularySize: Int) {
+        self.vocabularySize = vocabularySize
+        super.init()
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let tokenIds = inputs.asArray(Int.self)
+        var logits = Array(
+            repeating: Float(-100),
+            count: tokenIds.count * vocabularySize
+        )
+
+        for (position, token) in tokenIds.enumerated() {
+            logits[position * vocabularySize + ((token * 17 + 13) % vocabularySize)] = 100
+        }
+
+        return MLXArray(logits, [1, tokenIds.count, vocabularySize])
     }
 }

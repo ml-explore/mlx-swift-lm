@@ -27,6 +27,7 @@ public struct Parameters: Sendable {
     public var validationBatches: Int = 10   // 0 = full validation set
     public var saveEvery: Int = 100          // Checkpoint frequency
     public var adapterURL: URL?              // Save location
+    public var completedIterations: Int = 0  // Resume progress offset
 
     public init(
         batchSize: Int = 4,
@@ -35,10 +36,27 @@ public struct Parameters: Sendable {
         stepsPerEval: Int = 100,
         validationBatches: Int = 10,
         saveEvery: Int = 100,
-        adapterURL: URL? = nil
+        adapterURL: URL? = nil,
+        completedIterations: Int = 0
     )
 }
 ```
+
+When resuming, apply matching LoRA layers, load the saved weights, and set the number of
+iterations already completed. `iterations` remains the desired total:
+
+```swift
+try LoRATrain.loadLoRAWeights(model: model, url: adapterURL)
+
+let parameters = LoRATrain.Parameters(
+    iterations: 1000,
+    completedIterations: 400
+)
+```
+
+This reloads adapter parameters only. Persist and restore optimizer state separately when exact
+optimizer continuation is required. The saved file must contain only keys present in the model's
+adapter structure.
 
 ## Training Workflow
 

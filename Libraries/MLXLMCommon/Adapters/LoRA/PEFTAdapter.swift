@@ -16,6 +16,7 @@ public struct PEFTAdapterConfiguration: Codable, Sendable {
     public let peftType: String
     public let r: Int
     public let loraAlpha: Float
+    public let loraDropout: Float
     public let targetModules: [String]
     public let useDora: Bool
 
@@ -23,6 +24,7 @@ public struct PEFTAdapterConfiguration: Codable, Sendable {
         case peftType = "peft_type"
         case r = "r"
         case loraAlpha = "lora_alpha"
+        case loraDropout = "lora_dropout"
         case targetModules = "target_modules"
         case useDora = "use_dora"
     }
@@ -32,6 +34,13 @@ public struct PEFTAdapterConfiguration: Codable, Sendable {
         peftType = try c.decodeIfPresent(String.self, forKey: .peftType) ?? "LORA"
         r = try c.decode(Int.self, forKey: .r)
         loraAlpha = try c.decode(Float.self, forKey: .loraAlpha)
+        let loraDropout = try c.decodeIfPresent(Float.self, forKey: .loraDropout) ?? 0.0
+        guard LoRAConfiguration.LoRAParameters.isValidDropout(loraDropout) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .loraDropout, in: c,
+                debugDescription: "PEFT LoRA dropout must be in the range [0, 1)")
+        }
+        self.loraDropout = loraDropout
         targetModules = try c.decode([String].self, forKey: .targetModules)
         useDora = try c.decodeIfPresent(Bool.self, forKey: .useDora) ?? false
     }
@@ -102,7 +111,7 @@ extension LoRAContainer {
             numLayers: numLayers,
             fineTuneType: .lora,
             loraParameters: LoRAConfiguration.LoRAParameters(
-                rank: peft.r, scale: scale, keys: keys))
+                rank: peft.r, scale: scale, dropout: peft.loraDropout, keys: keys))
 
         return LoRAContainer(
             configuration: configuration,

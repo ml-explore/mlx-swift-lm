@@ -7,6 +7,7 @@ import MLX
 import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
+import MLXRerankers
 import MLXVLM
 
 #if canImport(CoreImage)
@@ -440,6 +441,8 @@ public enum ChatSessionTests {
                 responseText += text
             case .toolCall(let toolCall):
                 toolCalls.append(toolCall)
+            case .rejectedToolCall(let rejection):
+                throw RejectedToolCallError(rejection)
             case .info(let completionInfo):
                 info = completionInfo
             }
@@ -520,6 +523,8 @@ public enum ChatSessionTests {
                 followUpText += text
             case .toolCall(let call):
                 followUpCalls.append(call)
+            case .rejectedToolCall(let rejection):
+                throw RejectedToolCallError(rejection)
             case .info(let info):
                 completion = info
             }
@@ -760,6 +765,174 @@ public enum EmbedderTests {
     }
 }
 
+// MARK: - Reranker Tests
+
+/// End-to-end checks against reference checkpoint outputs.
+///
+/// These checks download large model weights and belong in the separate IntegrationTesting
+/// project rather than the package test suite.
+public enum RerankerIntegrationTests {
+    /// Validate BGE v2 M3 logits against the values published in its model card.
+    public static func bgeV2M3(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let modelID = "BAAI/bge-reranker-v2-m3"
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(
+                id: modelID,
+                revision: "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"),
+            progressHandler: logProgress(modelID))
+        let response = try await reranker.scores(
+            query: "what is panda?",
+            documents: [
+                "hi",
+                "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.",
+            ])
+
+        try check(
+            response.scoreKind == .normalizedRelevance,
+            "BGE must return normalized relevance scores")
+        try check(response.results.count == 2, "BGE returned an unexpected score count")
+        let logits = try response.results.map {
+            try inverseSigmoid($0.score, modelID: modelID)
+        }
+        try check(
+            abs(logits[0] - -8.1875) < 0.15,
+            "BGE irrelevant-passage logit diverged: expected -8.1875, received \(logits[0])")
+        try check(
+            abs(logits[1] - 5.261_718_75) < 0.15,
+            "BGE relevant-passage logit diverged: expected 5.26171875, received \(logits[1])")
+    }
+
+    /// Validate Qwen3 reranker logit margins against its published reference values.
+    public static func qwen3(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let modelID = "Qwen/Qwen3-Reranker-0.6B"
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(
+                id: modelID,
+                revision: "e61197ed45024b0ed8a2d74b80b4d909f1255473"),
+            progressHandler: logProgress(modelID))
+        let response = try await reranker.scores(
+            query: "What is the capital of China?",
+            documents: [
+                "The capital of China is Beijing.",
+                "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+            ])
+        let sequentialResponse = try await reranker.scores(
+            query: "What is the capital of China?",
+            documents: [
+                "The capital of China is Beijing.",
+                "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+            ],
+            options: .init(maxBatchSize: 1))
+
+        try check(
+            response.scoreKind == .normalizedRelevance,
+            "Qwen3 must return normalized relevance scores")
+        try check(response.results.count == 2, "Qwen3 returned an unexpected score count")
+        let margins = try response.results.map {
+            try inverseSigmoid($0.score, modelID: modelID)
+        }
+        let sequentialMargins = try sequentialResponse.results.map {
+            try inverseSigmoid($0.score, modelID: modelID)
+        }
+        for index in margins.indices {
+            try check(
+                abs(margins[index] - sequentialMargins[index]) < 0.01,
+                "Qwen3 batched and sequential margins diverged at index \(index): \(margins[index]) versus \(sequentialMargins[index])"
+            )
+        }
+        try check(
+            abs(margins[0] - 7.625) < 0.25,
+            "Qwen3 relevant-passage logit margin diverged: expected 7.625, received \(margins[0])")
+        try check(
+            abs(margins[1] - -11.375) < 1,
+            "Qwen3 irrelevant-passage logit margin diverged: expected -11.375, received \(margins[1])"
+        )
+    }
+
+    /// Validate Jina reranker v3 scores against its published MLX implementation.
+    public static func jinaV3(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        try await jinaV3(
+            modelID: "jinaai/jina-reranker-v3-mlx",
+            revision: "1d19fe38ae4e6658221479747c1152d6136dd6ab",
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    /// Validate the same scores from the upstream checkpoint the MLX repo was converted from.
+    ///
+    /// The two repos package one model two ways: `jinaai/jina-reranker-v3` has no index and keeps
+    /// the projector in its single `model.safetensors` as a numbered `nn.Sequential`, while
+    /// `jinaai/jina-reranker-v3-mlx` carries an index that names neither the projector nor its
+    /// file, and renames those layers. One model class has to read both, so both are covered.
+    public static func jinaV3SourceCheckpoint(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        try await jinaV3(
+            modelID: "jinaai/jina-reranker-v3",
+            revision: "d7d7e73b6ea138ced340b83865931b5dfb6c97aa",
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    private static func jinaV3(
+        modelID: String,
+        revision: String,
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(id: modelID, revision: revision),
+            progressHandler: logProgress(modelID))
+        let response = try await reranker.scores(
+            query: "What is the capital of China?",
+            documents: [
+                "Gravity attracts bodies toward one another.",
+                "Beijing is the capital city of China.",
+            ])
+
+        try check(
+            response.scoreKind == .cosineSimilarity,
+            "\(modelID) must return cosine-similarity scores")
+        try check(response.results.count == 2, "\(modelID) returned an unexpected score count")
+        // Generated by rerank.py from the pinned MLX checkpoint revision above. The upstream
+        // checkpoint holds the same bfloat16 weights, so it has to reproduce them too.
+        let expectedScores = [-0.156_369_954_347_610_47, 0.402_552_098_035_812_4]
+        // Quantized kernels can vary slightly with backend evaluation order.
+        let tolerance = 3e-3
+        for index in expectedScores.indices {
+            let result = response.results[index]
+            try check(
+                result.index == index,
+                "\(modelID) scores did not preserve document order at index \(index)")
+            try check(
+                abs(result.score - expectedScores[index]) < tolerance,
+                "\(modelID) score diverged at index \(index): expected \(expectedScores[index]), received \(result.score)"
+            )
+        }
+        try check(
+            response.results[1].score > response.results[0].score,
+            "\(modelID) did not score the relevant passage above the irrelevant passage")
+    }
+
+    private static func inverseSigmoid(_ score: Double, modelID: String) throws -> Double {
+        try check(
+            score > 0 && score < 1,
+            "\(modelID) returned a normalized score at a non-invertible boundary")
+        return Foundation.log(score / (1 - score))
+    }
+}
+
 // MARK: - Tool Call Tests
 
 public enum ToolCallTests {
@@ -979,8 +1152,8 @@ public enum ToolCallTests {
     public static func qwen35FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(
-            config.toolCallFormat == ToolCallFormat.xmlFunction,
-            "Expected .xmlFunction tool call format, got: \(String(describing: config.toolCallFormat))"
+            config.toolCallFormat == ToolCallFormat.qwen35,
+            "Expected .qwen35 tool call format, got: \(String(describing: config.toolCallFormat))"
         )
     }
 
@@ -1074,6 +1247,8 @@ public enum ToolCallTests {
                     text += chunk
                 case .toolCall(let toolCall):
                     toolCalls.append(toolCall)
+                case .rejectedToolCall(let rejection):
+                    throw RejectedToolCallError(rejection)
                 case .info:
                     break
                 }

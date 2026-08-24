@@ -84,6 +84,12 @@ final class Qwen35ContinuationTests: XCTestCase {
 
     // MARK: - Tests
 
+    func testDeclaresDualDialectToolFormat() throws {
+        let model = try makeTinyModel()
+        XCTAssertEqual(model.toolCallFormat, .qwen35)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+    }
+
     /// A warm continuation (prefix already in the cache, remainder prefilled
     /// on top — the ChatSession cross-turn / tool-restart flow) must produce
     /// the same next-token logits as one cold prefill of the concatenation.

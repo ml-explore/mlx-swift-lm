@@ -479,15 +479,17 @@ public final class VLMModelFactory: GenericModelFactory {
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
 
-        // Chat conventions. Precedence: an explicit value on the configuration
-        // (registry entry or caller) wins; then a registered resolver, which sees
-        // the repo id the model cannot; then the model's own declaration.
+        // Chat conventions. An explicit value on the configuration wins, followed
+        // by a registered resolver that sees the repo id. Checkpoint metadata then
+        // resolves the model declaration against the selected tool template.
         let modelId = configuration.name
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat =
                 conventionsRegistry.toolCallFormat(
                     modelId: modelId, modelType: baseConfig.modelType)
-                ?? model.toolCallFormat
+                ?? ToolCallFormat.resolved(
+                    forTokenizerDirectory: configuration.tokenizerDirectory,
+                    modelFormat: model.toolCallFormat)
         }
         if mutableConfiguration.reasoningConfig == nil {
             mutableConfiguration.reasoningConfig =
@@ -501,13 +503,17 @@ public final class VLMModelFactory: GenericModelFactory {
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
+        let processorFallback = try qwenProcessorFallback(
+            modelType: baseConfig.modelType, model: model)
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
-        async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
+        async let processorConfigTask = loadProcessorConfig(
+            from: modelDirectory, fallback: processorFallback)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            weightFileSelection: configuration.weightFileSelection)
 
         let tokenizer = try await tokenizerTask
         let processorConfigData: Data
@@ -537,9 +543,16 @@ public final class VLMModelFactory: GenericModelFactory {
         let processorType =
             processorTypeOverrides[modelType] ?? baseProcessorConfig.processorClass
 
-        let processor = try await processorRegistry.createModel(
+        let baseProcessor = try await processorRegistry.createModel(
             configuration: processorConfigData,
             processorType: processorType, tokenizer: tokenizer)
+        let processor: any UserInputProcessor
+        if let messageGenerator = mutableConfiguration.messageGenerator {
+            processor = MessageGeneratorUserInputProcessor(
+                processor: baseProcessor, messageGenerator: messageGenerator)
+        } else {
+            processor = baseProcessor
+        }
 
         // Build a ModelConfiguration for the ModelContext
         let tokenizerSource: TokenizerSource? =
@@ -554,7 +567,8 @@ public final class VLMModelFactory: GenericModelFactory {
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
             toolCallFormat: mutableConfiguration.toolCallFormat,
-            reasoningConfig: mutableConfiguration.reasoningConfig)
+            reasoningConfig: mutableConfiguration.reasoningConfig,
+            messageGenerator: mutableConfiguration.messageGenerator)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,
@@ -645,23 +659,56 @@ extension VLMModelFactory {
 }
 
 /// Error wrapper that includes the filename for better error messages.
-private struct ProcessorConfigError: Error {
+struct ProcessorConfigError: Error {
     let filename: String
     let underlying: Error
+}
+
+func qwenProcessorFallback(
+    modelType: String, model: any LanguageModel
+) throws -> (Data, BaseProcessorConfiguration)? {
+    guard modelType == "qwen3_5" || modelType == "qwen3_5_moe",
+        let model = model as? Qwen35
+    else {
+        return nil
+    }
+
+    let configuration = Qwen3VLProcessorConfiguration(
+        qwen35VisionConfiguration: model.config.visionConfiguration)
+    return (
+        try JSONEncoder().encode(configuration),
+        BaseProcessorConfiguration(processorClass: "Qwen3VLProcessor")
+    )
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
 /// Marked async to enable parallel scheduling via async let, though the underlying I/O is synchronous.
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
-private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
+func loadProcessorConfig(
+    from modelDirectory: URL,
+    fallback: (Data, BaseProcessorConfiguration)? = nil
+) async throws -> (
     Data, BaseProcessorConfiguration
 ) {
     let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
-    let url =
-        FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
-        ? preprocessorConfigURL
-        : processorConfigURL
+
+    if FileManager.default.fileExists(atPath: preprocessorConfigURL.path) {
+        return try readProcessorConfig(from: preprocessorConfigURL)
+    }
+    if FileManager.default.fileExists(atPath: processorConfigURL.path) {
+        return try readProcessorConfig(from: processorConfigURL)
+    }
+    if let fallback {
+        return fallback
+    }
+
+    return try readProcessorConfig(from: processorConfigURL)
+}
+
+private func readProcessorConfig(from url: URL) throws -> (
+    Data, BaseProcessorConfiguration
+) {
     do {
         let data = try Data(contentsOf: url)
         let config = try JSONDecoder.json5().decode(BaseProcessorConfiguration.self, from: data)

@@ -745,6 +745,8 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
         MLXArray]
     {
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
         if metadata[Self.scalingMetadataKey] == Self.scalingMetadataValue {
             return weights
         }
@@ -752,6 +754,8 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
         let c1d = weights["model.layers.0.mamba.conv1d.weight"]!
         if c1d.dim(-1) <= c1d.dim(1) {
             return weights

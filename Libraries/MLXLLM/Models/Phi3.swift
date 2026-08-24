@@ -212,6 +212,10 @@ public class Phi3Model: Module, LLMModel, KVCacheDimensionProvider {
                 "Model configuration error: Neither tied embeddings nor lm_head is available")
         }
     }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        filterLMHeadWeights(from: weights, tiedWordEmbeddings: args.tieWordEmbeddings)
+    }
 }
 
 struct RopeScalingWithFactorArrays: Codable {

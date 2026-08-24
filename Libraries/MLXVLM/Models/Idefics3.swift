@@ -764,6 +764,9 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: config.textConfig.tieWordEmbeddings)
+
         // Rename keys to match Python logic
         var renamed = [String: MLXArray]()
         for (k, v) in weights {

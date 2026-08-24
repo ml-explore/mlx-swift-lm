@@ -212,7 +212,8 @@ public class OlmoEModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var sanitized = weights
+        var sanitized = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
         if sanitized["model.layers.0.mlp.experts.0.up_proj.weight"] == nil {
             return sanitized
         }

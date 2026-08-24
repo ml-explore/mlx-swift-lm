@@ -134,11 +134,15 @@ public enum LoRATrain {
         /// save path for the adapter `.safetensors`
         public var adapterURL: URL?
 
+        /// number of iterations already completed when resuming from saved adapter weights
+        public var completedIterations = 0
+
         public init(
             batchSize: Int = 4, iterations: Int = 1000, stepsPerReport: Int = 10,
             stepsPerEval: Int = 100, validationBatches: Int = 10, saveEvery: Int = 100,
-            adapterURL: URL? = nil
+            adapterURL: URL? = nil, completedIterations: Int = 0
         ) {
+            precondition(completedIterations >= 0)
             self.batchSize = batchSize
             self.iterations = iterations
             self.stepsPerReport = stepsPerReport
@@ -146,6 +150,7 @@ public enum LoRATrain {
             self.validationBatches = validationBatches
             self.saveEvery = saveEvery
             self.adapterURL = adapterURL
+            self.completedIterations = completedIterations
         }
     }
 
@@ -180,12 +185,19 @@ public enum LoRATrain {
     ///   - batchCount: number of batch elements to evaluate, 0 for all
     /// - Returns: the loss over the enumerate data
     ///
+    /// The model is temporarily placed in evaluation mode and its previous mode is restored
+    /// before this function returns.
+    ///
     /// ### See Also
     /// - ``loadLoRAData(directory:name:)``
     public static func evaluate(
         model: Module, dataset: [String], loss: LoraLossFunction = loss, tokenizer: Tokenizer,
         batchSize: Int, batchCount: Int
     ) -> Float {
+        let wasTraining = model.training
+        model.train(false)
+        defer { model.train(wasTraining) }
+
         var allLosses = [Float]()
         var tokenCount = 0
 
@@ -213,6 +225,24 @@ public enum LoRATrain {
         let parameters = Dictionary(
             uniqueKeysWithValues: model.trainableParameters().flattened())
         try save(arrays: parameters, url: url)
+    }
+
+    /// Load saved LoRA weights into a model that already has matching adapter layers applied.
+    ///
+    /// Use `LoRAContainer.from(model:configuration:)` to construct and freeze the adapter
+    /// layers before calling this method. Set ``Parameters/completedIterations`` when continuing
+    /// a run whose `iterations` value is the desired total number of iterations. This restores
+    /// adapter parameters only; callers that require exact optimizer continuation must persist and
+    /// restore optimizer state separately. The file must not contain keys that are absent from the
+    /// model's adapter structure.
+    public static func loadLoRAWeights(model: Module, url: URL) throws {
+        let weights = try MLX.loadArrays(url: url)
+        try model.update(
+            parameters: ModuleParameters.unflattened(weights),
+            verify: .noUnusedKeys)
+        // `loadArrays` is lazy. Realize the installed weights before the caller
+        // trains, evaluates, or otherwise reads them.
+        eval(model)
     }
 
     public enum Progress: CustomStringConvertible, Sendable {
@@ -255,12 +285,21 @@ public enum LoRATrain {
     ///   - tokenizer: tokenizer
     ///   - parameters: training parameters
     ///   - progress: progress callback
+    ///
+    /// The model is temporarily placed in training mode and its previous mode is restored before
+    /// this function returns.
     public static func train(
         model: Module, train: [String], validate: [String], optimizer: Optimizer,
         loss: @escaping LoraLossFunction = loss, tokenizer: Tokenizer, parameters: Parameters,
         progress: (Progress) -> ProgressDisposition
     ) throws {
         // def train(model, train_set, val_set, optimizer, loss, tokenizer, args)
+
+        guard parameters.completedIterations < parameters.iterations else { return }
+
+        let wasTraining = model.training
+        model.train()
+        defer { model.train(wasTraining) }
 
         let lossValueGrad = valueAndGrad(model: model) { model, arrays in
             let (ce, ntoks) = loss(model, arrays[0], arrays[1], arrays[2])
@@ -272,9 +311,11 @@ public enum LoRATrain {
 
         var start = Date.timeIntervalSinceReferenceDate
 
-        for (iteration, (inputs, targets, lengths)) in LoRABatchIterator(
+        for (iterationOffset, (inputs, targets, lengths)) in LoRABatchIterator(
             dataset: train, tokenizer: tokenizer, batchSize: parameters.batchSize, train: true
         ).enumerated() {
+            let iteration = parameters.completedIterations + iterationOffset
+
             // forward and backward pass
             let (resultArray, grad) = lossValueGrad(model, [inputs, targets, lengths])
             let lvalue = resultArray[0]
@@ -293,7 +334,7 @@ public enum LoRATrain {
                 let trainingLoss = MLXArray(losses).mean(stream: .cpu).item(Float.self)
                 let now = Date.timeIntervalSinceReferenceDate
 
-                let iterationsPerSecond = Double(parameters.stepsPerReport) / (now - start)
+                let iterationsPerSecond = Double(losses.count) / (now - start)
                 let tokensPerSecond = Double(tokenCount) / (now - start)
 
                 if progress(

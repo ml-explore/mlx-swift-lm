@@ -326,6 +326,25 @@ private enum Language {
 
 // MARK: - Vision
 
+/// Cumulative patch-row boundaries, one per temporal slice, used to build the
+/// block-diagonal vision attention mask.
+///
+/// Each frame contributes `t` blocks of `h * w` rows, so the boundaries must be a
+/// running total across every slice of every frame. Internal rather than nested in
+/// `Vision` so that `t > 1` (video) grids can be covered directly by tests.
+func visionCuSeqlens(_ frames: [THW]) -> [Int] {
+    var cuSeqlens = [0]
+    for frame in frames {
+        let seqLen = frame.h * frame.w
+        var running = cuSeqlens.last!
+        for _ in 0 ..< frame.t {
+            running += seqLen
+            cuSeqlens.append(running)
+        }
+    }
+    return cuSeqlens
+}
+
 private enum Vision {
 
     static fileprivate func applyMultimodalRotaryPositionEmbedding(
@@ -664,15 +683,7 @@ private enum Vision {
 
             // prepare attention masks
             let seqLen = hiddenStates.dim(0)
-            var cuSeqlens = [0]
-            for frame in frames {
-                let seqLen = frame.h * frame.w
-                cuSeqlens.append(
-                    contentsOf: Array(repeating: seqLen, count: frame.t).map {
-                        cuSeqlens.last! + $0
-                    })
-            }
-            let cuSeqlensArray = MLXArray(cuSeqlens)
+            let cuSeqlensArray = MLXArray(visionCuSeqlens(frames))
 
             let fullAttentionMaskBool = attentionMask(
                 sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
@@ -862,7 +873,9 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 var resizedSize: CGSize = .zero
 
                 let imageSequence = try await MediaProcessing.asProcessedSequence(
-                    video, targetFPS: { _ in Double(2) }
+                    video,
+                    processing: input.processing.video,
+                    targetFPS: { _ in Double(2) }
                 ) { frame in
                     // first apply the user requested resizing, etc. if any
                     let resizedImage = MediaProcessing.apply(
@@ -1240,7 +1253,11 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        visionModel.sanitize(
+        let weights = filterLMHeadWeights(
+            from: weights,
+            tiedWordEmbeddings: config.textConfiguration.tieWordEmbeddings)
+
+        return visionModel.sanitize(
             weights:
                 Dictionary(
                     uniqueKeysWithValues: weights.map { key, value in

@@ -1338,9 +1338,9 @@ public class Qwen35: Module, VLMModel {
 
         var weights = weights.filter { !$0.key.contains("mtp.") }
 
-        if config.textConfiguration.tieWordEmbeddings {
-            weights["lm_head.weight"] = nil
-        }
+        weights = filterLMHeadWeights(
+            from: weights,
+            tiedWordEmbeddings: config.textConfiguration.tieWordEmbeddings)
 
         var sanitized: [String: MLXArray] = [:]
         sanitized.reserveCapacity(weights.count)
@@ -1413,6 +1413,6 @@ extension Qwen35 {
 
 // `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
 extension Qwen35 {
-    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var toolCallFormat: ToolCallFormat? { .qwen35 }
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

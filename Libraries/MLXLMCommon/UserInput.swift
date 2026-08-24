@@ -189,6 +189,7 @@ public struct UserInput {
     public struct Processing: Sendable {
         public var resize: CGSize?
 
+        public var video = VideoProcessing()
         public var audio = AudioProcessing()
 
         /// Optional per-call overrides for the image resize budget. When set,
@@ -199,10 +200,78 @@ public struct UserInput {
         public var minPixels: Int?
         public var maxPixels: Int?
 
-        public init(resize: CGSize? = nil, minPixels: Int? = nil, maxPixels: Int? = nil) {
+        public init(
+            resize: CGSize? = nil,
+            video: VideoProcessing = VideoProcessing(),
+            audio: AudioProcessing = AudioProcessing(),
+            minPixels: Int? = nil,
+            maxPixels: Int? = nil
+        ) {
             self.resize = resize
+            self.video = video
+            self.audio = audio
             self.minPixels = minPixels
             self.maxPixels = maxPixels
+        }
+    }
+
+    /// Representation of video processing options.
+    public struct VideoProcessing: Sendable, Equatable {
+        /// Strategy for temporal frame sampling.
+        public enum SamplingMethod: Sendable, Equatable {
+            /// Sample a fixed total count of frames distributed evenly across the video duration.
+            case targetFrames(Int)
+
+            /// Derive a target frame count from frames per second, then distribute those frames
+            /// evenly across the video duration.
+            case framesPerSecond(Double)
+        }
+
+        /// The sampling strategy to use, or `nil` to use model default behavior.
+        public var sampling: SamplingMethod?
+
+        public init(sampling: SamplingMethod? = nil) {
+            self.sampling = sampling
+        }
+
+        /// Convenience initializer to sample a fixed number of frames across the video.
+        public init(targetFrames: Int) {
+            self.sampling = .targetFrames(targetFrames)
+        }
+
+        /// Convenience initializer to target a sampling density in frames per second.
+        public init(targetFramesPerSecond: Double) {
+            self.sampling = .framesPerSecond(targetFramesPerSecond)
+        }
+
+        /// Target number of frames to sample from the video, regardless of duration.
+        public var targetFrames: Int? {
+            get {
+                if case .targetFrames(let count) = sampling { return count }
+                return nil
+            }
+            set {
+                if let newValue {
+                    sampling = .targetFrames(newValue)
+                } else if case .targetFrames = sampling {
+                    sampling = nil
+                }
+            }
+        }
+
+        /// Target frame rate (frames per second) to sample from the video.
+        public var targetFramesPerSecond: Double? {
+            get {
+                if case .framesPerSecond(let fps) = sampling { return fps }
+                return nil
+            }
+            set {
+                if let newValue {
+                    sampling = .framesPerSecond(newValue)
+                } else if case .framesPerSecond = sampling {
+                    sampling = nil
+                }
+            }
         }
     }
 
@@ -449,6 +518,34 @@ public struct UserInput {
 /// See also ``ModelContext``.
 public protocol UserInputProcessor: Sendable {
     func prepare(input: UserInput) async throws -> LMInput
+}
+
+/// Applies a configured message generator before delegating input processing.
+///
+/// This lets a model configuration override a VLM processor's built-in generator without
+/// changing the processor implementation.
+///
+/// - Important: the override fully replaces the model's own generator, including any
+///   image/video placeholder content that generator would emit. A text-only generator on a
+///   VLM configuration therefore loses media conditioning: Qwen-family processors throw on
+///   the placeholder-count mismatch, others silently ignore the attached media.
+public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
+    private let processor: any UserInputProcessor
+    private let messageGenerator: any MessageGenerator
+
+    public init(
+        processor: any UserInputProcessor,
+        messageGenerator: any MessageGenerator
+    ) {
+        self.processor = processor
+        self.messageGenerator = messageGenerator
+    }
+
+    public func prepare(input: UserInput) async throws -> LMInput {
+        var input = input
+        input.prompt = .messages(messageGenerator.generate(from: input))
+        return try await processor.prepare(input: input)
+    }
 }
 
 internal enum UserInputError: LocalizedError {

@@ -1,6 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
+import MLXNN
 
 /// File patterns required to resolve a tokenizer without downloading model weights.
 package let tokenizerDownloadPatterns = ["*.json", "*.jinja"]
@@ -60,7 +61,7 @@ public protocol ModelConfigurationValidating {
     func validateModelConfiguration() throws
 }
 
-/// Context of types that work together to provide a ``LanguageModel``.
+/// Context of types that work together to provide a ``LanguageModel`` for inference.
 ///
 /// A ``ModelContext`` is created by ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This contains the following:
@@ -82,6 +83,10 @@ public struct ModelContext {
         configuration: ModelConfiguration, model: any LanguageModel,
         processor: any UserInputProcessor, tokenizer: any Tokenizer
     ) {
+        // MLX modules default to training mode.  A ModelContext is the inference boundary used by
+        // generation, so normalize the complete module tree to evaluation mode.  Training APIs
+        // explicitly enable training for their duration and restore this state afterwards.
+        model.train(false)
         self.configuration = configuration
         self.model = model
         self.processor = processor

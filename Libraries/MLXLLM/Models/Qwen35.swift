@@ -1212,9 +1212,8 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
 
         var weights = weights.filter { !$0.key.contains("mtp.") }
 
-        if configuration.tieWordEmbeddings {
-            weights["lm_head.weight"] = nil
-        }
+        weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
 
         let normKeys = [
             ".input_layernorm.weight",
@@ -1340,11 +1339,11 @@ extension Qwen35Model: SpeculativeCacheRewindModel {
 
 // `Qwen35MoEModel` subclasses `Qwen35Model` and inherits both declarations.
 extension Qwen35Model {
-    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var toolCallFormat: ToolCallFormat? { .qwen35 }
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }
 
 extension Qwen35TextModel {
-    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var toolCallFormat: ToolCallFormat? { .qwen35 }
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

@@ -3,6 +3,165 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    private func toolSchemas(_ names: String...) -> [[String: any Sendable]] {
+        names.map { name in
+            ["function": ["name": name] as [String: any Sendable]]
+        }
+    }
+
+    @Test("Rejected tool-call preview is bounded and omitted from error descriptions")
+    func rejectedToolCallDiagnosticPrivacy() throws {
+        let rawText = "secret-" + String(repeating: "🧪", count: 20) + "-tail"
+        let toolName = "secret-model-provided-name"
+        let rejection = RejectedToolCall(
+            reason: .malformedSyntax,
+            format: .json,
+            toolName: toolName,
+            rawText: rawText,
+            detail: "Could not parse payload.",
+            previewByteLimit: 24)
+
+        #expect(rejection.rawTextByteCount == rawText.utf8.count)
+        #expect(rejection.isPreviewTruncated)
+        #expect(rejection.rawTextPreview.hasPrefix("secret-"))
+        #expect(rejection.rawTextPreview.hasSuffix("-tail"))
+
+        let message = try #require(RejectedToolCallError(rejection).errorDescription)
+        #expect(!message.contains("secret"))
+        #expect(!message.contains(toolName))
+        #expect(message.contains(RejectedToolCall.Reason.malformedSyntax.rawValue))
+    }
+
+    @Test("Lampo Qwen hybrid protocol is rejected at every chunk boundary")
+    func lampoHybridProtocolRejectedAtEveryChunkBoundary() throws {
+        let payload = """
+            <tool_call>
+            <|im_start|>mcp_filo_7bb95d18__read_file>
+            <parameter=path>
+            /Users/alessiopollero/dev/Lampo/Lampo/Lampo.docc/Lampo.md
+            </parameter>
+            </mcp:parameter>
+            </mcp:tool>
+            </mcp:thought>
+            """
+
+        for splitOffset in 0 ... payload.count {
+            let split = payload.index(payload.startIndex, offsetBy: splitOffset)
+            let processor = ToolCallProcessor(
+                format: .xmlFunction,
+                tools: toolSchemas("mcp_filo_7bb95d18__read_file"))
+            var outputs = processor.processChunkOutputs(String(payload[..<split]))
+            outputs += processor.processChunkOutputs(String(payload[split...]))
+            outputs += processor.processEOSOutputs()
+
+            let rejections = outputs.compactMap { output -> RejectedToolCall? in
+                guard case .rejectedToolCall(let rejection) = output else { return nil }
+                return rejection
+            }
+            #expect(rejections.count == 1)
+            let rejection = try #require(rejections.first)
+            #expect(rejection.reason == .incompleteOutput)
+            #expect(rejection.format == .xmlFunction)
+            #expect(!outputs.contains { if case .response = $0 { true } else { false } })
+            #expect(processor.rejectedToolCallCount == 1)
+        }
+    }
+
+    @Test("Rejected and accepted calls retain source order")
+    func rejectedAndAcceptedCallsRetainSourceOrder() throws {
+        let processor = ToolCallProcessor(format: .json, tools: toolSchemas("allowed"))
+        let outputs = processor.processChunkOutputs(
+            #"before<tool_call>{"name":"unknown","arguments":{}}</tool_call>between<tool_call>{"name":"allowed","arguments":{}}</tool_call>after"#
+        )
+
+        #expect(outputs.count == 5)
+        #expect(outputs[0] == .response("before"))
+        guard case .rejectedToolCall(let rejection) = outputs[1] else {
+            Issue.record("Expected an undeclared-tool rejection")
+            return
+        }
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "unknown")
+        #expect(outputs[2] == .response("between"))
+        guard case .toolCall(let call) = outputs[3] else {
+            Issue.record("Expected the declared call")
+            return
+        }
+        #expect(call.function.name == "allowed")
+        #expect(outputs[4] == .response("after"))
+    }
+
+    @Test("LFM2 EOS orders response before an unfinished second call")
+    func lfm2EOSOrdersIncompleteSecondCall() {
+        let processor = ToolCallProcessor(format: .lfm2, tools: toolSchemas("get_weather"))
+        #expect(
+            processor.processChunkOutputs(
+                "<|tool_call_start|>[get_weather()]between <|tool_call_start|>[get_weather("
+            ).isEmpty)
+
+        let outputs = processor.processEOSOutputs()
+        #expect(outputs.count == 3)
+        guard outputs.count == 3 else { return }
+        guard case .toolCall = outputs[0] else {
+            Issue.record("Expected the completed first call")
+            return
+        }
+        #expect(outputs[1] == .response("between "))
+        guard case .rejectedToolCall(let rejection) = outputs[2] else {
+            Issue.record("Expected an incomplete second call")
+            return
+        }
+        #expect(rejection.reason == .incompleteOutput)
+    }
+
+    @Test("LFM2 EOS preserves events around a malformed inter-call marker")
+    func lfm2EOSOrdersMalformedInterCallMarker() {
+        let processor = ToolCallProcessor(format: .lfm2, tools: toolSchemas("get_weather"))
+        #expect(
+            processor.processChunkOutputs(
+                "<|tool_call_start|>[get_weather()]before <|tool_call_startX> after <|tool_call_start|>[get_weather()]"
+            ).isEmpty)
+
+        let outputs = processor.processEOSOutputs()
+        #expect(outputs.count == 5)
+        guard outputs.count == 5 else { return }
+        guard case .toolCall = outputs[0] else {
+            Issue.record("Expected the completed first call")
+            return
+        }
+        #expect(outputs[1] == .response("before "))
+        guard case .rejectedToolCall(let rejection) = outputs[2] else {
+            Issue.record("Expected a malformed marker rejection")
+            return
+        }
+        #expect(rejection.reason == .malformedSyntax)
+        #expect(outputs[3] == .response(" after "))
+        guard case .toolCall = outputs[4] else {
+            Issue.record("Expected the completed second call")
+            return
+        }
+    }
+
+    @Test("Tagged JSON rejection reasons distinguish name and argument failures")
+    func taggedJSONRejectionReasonsAreSpecific() throws {
+        let cases: [(String, RejectedToolCall.Reason)] = [
+            (#"<tool_call>{"arguments":{}}</tool_call>"#, .missingToolName),
+            (#"<tool_call>{"name":"allowed","arguments":[]}</tool_call>"#, .invalidArguments),
+            (#"<tool_call>{"name":}</tool_call>"#, .malformedSyntax),
+        ]
+
+        for (payload, expectedReason) in cases {
+            let processor = ToolCallProcessor(format: .json, tools: toolSchemas("allowed"))
+            let outputs = processor.processChunkOutputs(payload)
+            #expect(outputs.count == 1)
+            guard case .rejectedToolCall(let rejection)? = outputs.first else {
+                Issue.record("Expected a rejection for \(payload)")
+                continue
+            }
+            #expect(rejection.reason == expectedReason)
+        }
+    }
+
     @Test("ChatConventionsProviding defaults to nil for both properties")
     func chatConventionsOptInDefaults() {
         struct Bare: ChatConventionsProviding {}
@@ -291,8 +450,8 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Osaka"))
     }
 
-    @Test("Test JSON Format via ToolCallProcessor - Invalid Bare JSON Flushes At EOS")
-    func testJSONFormatProcessorInvalidBareJSONFlushesAtEOS() {
+    @Test("Test JSON Format via ToolCallProcessor - Incomplete Bare Tool Rejects At EOS")
+    func testJSONFormatProcessorIncompleteBareToolRejectsAtEOS() throws {
         let processor = ToolCallProcessor(format: .json)
         let chunk = "{\"name\": \"get_weather\", \"arguments\": "
 
@@ -300,8 +459,12 @@ struct ToolTests {
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
         #expect(output == nil)
-        #expect(eosOutput == chunk)
+        #expect(eosOutput == nil)
         #expect(processor.toolCalls.isEmpty)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .incompleteOutput)
     }
 
     @Test("Test JSON Format via ToolCallProcessor - Non Tool JSON Stays Text")
@@ -364,10 +527,8 @@ struct ToolTests {
         #expect(processor.toolCalls.isEmpty)
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tool Name Stays Text When Tools Are Provided"
-    )
-    func testJSONFormatProcessorUnknownToolNameStaysTextWithTools() {
+    @Test("Test JSON Format via ToolCallProcessor - Unknown Tool Name Is Rejected")
+    func testJSONFormatProcessorUnknownToolNameIsRejected() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -385,9 +546,14 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(output == chunk)
+        #expect(output == nil)
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.isEmpty)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "not_declared")
     }
 
     @Test("Test JSON Format via ToolCallProcessor - Recovers Tagged Tool Call After Brace Text")
@@ -415,10 +581,8 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Paris"))
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool Preserved And Continues Parsing"
-    )
-    func testJSONFormatProcessorUnknownTaggedToolPreservedAndContinuesParsing() throws {
+    @Test("Test JSON Processor - Unknown Tagged Tool Rejected And Continues Parsing")
+    func testJSONFormatProcessorUnknownTaggedToolRejectedAndContinuesParsing() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -437,18 +601,20 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(output == "<tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(output == nil)
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.count == 1)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
 
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "get_weather")
     }
 
-    @Test(
-        "Test JSON Format via ToolCallProcessor - Unknown Tagged Tool With Leading Text Preserved"
-    )
-    func testJSONFormatProcessorUnknownTaggedToolWithLeadingTextPreserved() throws {
+    @Test("Test JSON Processor - Unknown Tagged Tool Preserves Only Leading Text")
+    func testJSONFormatProcessorUnknownTaggedToolPreservesOnlyLeadingText() throws {
         struct EmptyInput: Codable {}
         struct EmptyOutput: Codable { let ok: Bool }
 
@@ -467,10 +633,13 @@ struct ToolTests {
         let output = processor.processChunk(chunk)
         let eosOutput = processor.processEOS(returnBufferedText: true)
 
-        #expect(
-            output == "Preface <tool_call>{\"name\":\"not_declared\",\"arguments\":{}}</tool_call>")
+        #expect(output == "Preface ")
         #expect(eosOutput == nil)
         #expect(processor.toolCalls.count == 1)
+        let rejections = processor.drainRejectedToolCalls()
+        #expect(rejections.count == 1)
+        let rejection = try #require(rejections.first)
+        #expect(rejection.reason == .undeclaredTool)
 
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "get_weather")
@@ -661,6 +830,150 @@ struct ToolTests {
         #expect(toolCalls2[1].function.arguments["timezone"] == .string("UTC"))
     }
 
+    @Test("Pythonic argument values may contain the closing delimiters")
+    func testPythonicParserDelimitersInsideValue() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+
+        // `)]` closes the call for a scanner that is not quote aware, which
+        // truncated the value and left the stray quote behind.
+        let quoted = "<|tool_call_start|>[notify(note='a)]b')]<|tool_call_end|>"
+        let quotedCall = try #require(parser.parse(content: quoted, tools: nil))
+        #expect(quotedCall.function.name == "notify")
+        #expect(quotedCall.function.arguments["note"] == .string("a)]b"))
+
+        let object = #"<|tool_call_start|>[notify(filters={"x": "a)]b"})]<|tool_call_end|>"#
+        let objectCall = try #require(parser.parse(content: object, tools: nil))
+        #expect(objectCall.function.arguments["filters"] == .object(["x": .string("a)]b")]))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Array Value With Inner Commas")
+    func testPythonicParserArrayValue() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            #"<|tool_call_start|>[search_many(queries=["swift", "mlx"], limit=2)]<|tool_call_end|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search_many")
+        #expect(
+            toolCall.function.arguments["queries"] == .array([.string("swift"), .string("mlx")]))
+        #expect(toolCall.function.arguments["limit"] == .int(2))
+    }
+
+    @Test("Pythonic collections accept Python literal syntax")
+    func testPythonicParserPythonLiteralCollections() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content = #"""
+            <|tool_call_start|>[configure(settings={'location': 'Tokyo', 'enabled': True, 'fallback': None, 'thresholds': [0, 1.5]})]<|tool_call_end|>
+            """#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(
+            toolCall.function.arguments["settings"]
+                == .object([
+                    "location": .string("Tokyo"),
+                    "enabled": .bool(true),
+                    "fallback": .null,
+                    "thresholds": .array([.int(0), .double(1.5)]),
+                ]))
+    }
+
+    @Test("Pythonic scalars are inferred without a schema")
+    func testPythonicParserUnschematizedScalars() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content = #"""
+            <|tool_call_start|>[configure(count=5, ratio=1.5, enabled=True, disabled=False, fallback=None, mode=fast)]<|tool_call_end|>
+            """#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["count"] == .int(5))
+        #expect(toolCall.function.arguments["ratio"] == .double(1.5))
+        #expect(toolCall.function.arguments["enabled"] == .bool(true))
+        #expect(toolCall.function.arguments["disabled"] == .bool(false))
+        #expect(toolCall.function.arguments["fallback"] == .null)
+        #expect(toolCall.function.arguments["mode"] == .string("fast"))
+    }
+
+    @Test("Pythonic scalar inference does not override a declared string schema")
+    func testPythonicParserDeclaredStringsRemainStrings() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let stringProperties: [String: any Sendable] = [
+            "count": ["type": "string"] as [String: any Sendable],
+            "enabled": ["type": "string"] as [String: any Sendable],
+            "fallback": ["type": "string"] as [String: any Sendable],
+        ]
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "configure",
+                    "parameters": ["properties": stringProperties]
+                        as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+        let content = #"""
+            <|tool_call_start|>[configure(count=5, enabled=True, fallback=None)]<|tool_call_end|>
+            """#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments["count"] == .string("5"))
+        #expect(toolCall.function.arguments["enabled"] == .string("True"))
+        #expect(toolCall.function.arguments["fallback"] == .string("None"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Object Value Is Not Unwrapped Alongside Another")
+    func testPythonicParserWrapperGuardWithSecondArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // A wrapper name is only a wrapper when it is the *sole* argument.
+        let content =
+            #"<|tool_call_start|>[get_weather(properties={"location": "Paris"}, units='c')]<|tool_call_end|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(
+            toolCall.function.arguments["properties"] == .object(["location": .string("Paris")]))
+        #expect(toolCall.function.arguments["units"] == .string("c"))
+        #expect(toolCall.function.arguments["location"] == nil)
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Wrapper Object via parseEOS")
+    func testPythonicParserWrapperObjectViaEOS() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            #"<|tool_call_start|>[get_weather(properties={"location": "Paris"}), current_time(properties={"timezone": "UTC"})]<|tool_call_end|>"#
+
+        let toolCalls = parser.parseEOS(content, tools: nil)
+
+        #expect(toolCalls.count == 2)
+        #expect(toolCalls.first?.function.name == "get_weather")
+        #expect(toolCalls.first?.function.arguments["location"] == .string("Paris"))
+        #expect(toolCalls.last?.function.name == "current_time")
+        #expect(toolCalls.last?.function.arguments["timezone"] == .string("UTC"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Unbalanced Bracket Is Not A Call")
+    func testPythonicParserUnbalancedBracket() {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+
+        // A truncated list is incomplete output, not a call that is ready to run.
+        #expect(
+            parser.parse(
+                content: "<|tool_call_start|>[notify(note='hi')<|tool_call_end|>", tools: nil)
+                == nil)
+    }
+
     @Test("Test Pythonic Tool Call Parser - Type Conversion")
     func testPythonicParserTypeConversion() throws {
         let parser = PythonicToolCallParser(
@@ -781,7 +1094,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 XML Function Parser - With tool_call Tags")
     func testQwen35Parser() throws {
-        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         let content = """
             <tool_call>
             <function=get_weather>
@@ -804,7 +1117,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 Format via ToolCallProcessor")
     func testQwen35FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .xmlFunction)
+        let processor = ToolCallProcessor(format: .qwen35)
         let chunks: [String] = [
             "<tool", "_call>", "\n<function=get_weather>\n",
             "<parameter=location>\nTokyo\n</parameter>",
@@ -823,7 +1136,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 Format - No Arguments")
     func testQwen35FormatNoArgs() throws {
-        let processor = ToolCallProcessor(format: .xmlFunction)
+        let processor = ToolCallProcessor(format: .qwen35)
         let content = "<tool_call>\n<function=get_current_datetime>\n</function>\n</tool_call>"
 
         _ = processor.processChunk(content)
@@ -833,6 +1146,99 @@ struct ToolTests {
         #expect(toolCall.function.name == "get_current_datetime")
         #expect(toolCall.function.arguments.isEmpty)
     }
+
+    @Test("Qwen3.5 accepts framed Qwen/Hermes JSON fallback")
+    func testQwen35JSONFallback() throws {
+        let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"action":"start","instructions":"Initialize interactive coding session","title":"filo server start","worker":"default"}}</tool_call>"#
+
+        #expect(processor.processChunk(content) == nil)
+        let call = try #require(processor.toolCalls.first)
+        #expect(processor.toolCalls.count == 1)
+        #expect(call.function.name == "lampo_mcp_call_tool")
+        #expect(call.function.arguments["action"] == .string("start"))
+        #expect(call.function.arguments["worker"] == .string("default"))
+    }
+
+    @Test("Qwen3.5 JSON fallback is streaming-boundary invariant")
+    func testQwen35JSONFallbackEverySplitBoundary() throws {
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"message":"a } brace, a quote: \"ok\", and <function=fake>"}}</tool_call>"#
+        let characters = Array(content)
+
+        for split in 1 ..< characters.count {
+            let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+            let first = String(characters[..<split])
+            let second = String(characters[split...])
+
+            #expect(processor.processChunk(first) == nil, "split at \(split)")
+            #expect(processor.processChunk(second) == nil, "split at \(split)")
+            #expect(processor.toolCalls.count == 1, "split at \(split)")
+            #expect(
+                processor.toolCalls.first?.function.name == "lampo_mcp_call_tool",
+                "split at \(split)")
+        }
+    }
+
+    @Test("Qwen3.5 commits a complete JSON body at EOS without a closing frame")
+    func testQwen35JSONFallbackAtEOS() throws {
+        let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"action":"start"}}"#
+
+        #expect(processor.processChunk(content) == nil)
+        #expect(processor.toolCalls.isEmpty)
+        processor.processEOS()
+
+        let call = try #require(processor.toolCalls.first)
+        #expect(processor.toolCalls.count == 1)
+        #expect(call.function.name == "lampo_mcp_call_tool")
+        #expect(call.function.arguments["action"] == .string("start"))
+    }
+
+    @Test("Qwen3.5 applies the declared-tool boundary to canonical XML too")
+    func testQwen35XMLRejectsUndeclaredTool() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            "<tool_call><function=erase_everything></function></tool_call>"
+
+        #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+    }
+
+    @Test("Qwen3.5 fallback never authorizes undeclared JSON tools")
+    func testQwen35JSONFallbackRejectsUndeclaredTool() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content = #"<tool_call>{"name":"erase_everything","arguments":{}}</tool_call>"#
+
+        #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+    }
+
+    @Test("Qwen3.5 fallback rejects malformed and mixed-dialect payloads")
+    func testQwen35JSONFallbackRejectsMalformedPayloads() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let malformed = [
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{}</tool_call>"#,
+            #"<tool_call>prefix {"name":"lampo_mcp_call_tool","arguments":{}}</tool_call>"#,
+            #"<tool_call><function=lampo_mcp_call_tool>{"arguments":{}}</function></tool_call>"#,
+            "<tool_call><function=lampo_mcp_call_tool><parameter=action>start</parameter>garbage</function></tool_call>",
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{}}</tool_call>trailing"#,
+        ]
+
+        for content in malformed {
+            #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+        }
+    }
+
+    private static let qwen35Tools: [[String: any Sendable]] = [
+        [
+            "type": "function",
+            "function": [
+                "name": "lampo_mcp_call_tool",
+                "parameters": ["type": "object"],
+            ] as [String: any Sendable],
+        ]
+    ]
 
     // MARK: - GLM4 Format Tests
 
@@ -923,6 +1329,136 @@ struct ToolTests {
         #expect(toolCall.function.arguments["mailbox"] == .string("INBOX"))
         #expect(toolCall.function.arguments["id"] == .int(158_348))
         #expect(toolCall.function.arguments["id"] != .string("158348"))
+    }
+
+    @Test("Gemma keeps a nested object value whole")
+    func testGemmaNestedObjectValue() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:search{filters:{"city":"Paris","limit":1}}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        // The comma inside the object must not split the value, and the tail of
+        // a split value must not become an argument of its own.
+        #expect(toolCall.function.arguments.count == 1)
+        #expect(
+            toolCall.function.arguments["filters"]
+                == .object(["city": .string("Paris"), "limit": .int(1)]))
+    }
+
+    @Test("Gemma keeps an array value whole")
+    func testGemmaArrayValue() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:notify{ids:[1,2,3],urgent:true}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments.count == 2)
+        // The array survives its inner commas, and `1` stays an integer rather
+        // than being rewritten as a boolean on the way into `JSONValue`.
+        #expect(toolCall.function.arguments["ids"] == .array([.int(1), .int(2), .int(3)]))
+        // Bare scalars are typed from the tool schema; without one they stay literal.
+        #expect(toolCall.function.arguments["urgent"] == .string("true"))
+    }
+
+    @Test("Gemma reads a nested object whose keys are unquoted")
+    func testGemmaBareKeyObjectValue() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:search{filters:{city: "Paris", limit: 1}}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // The dialect writes nested objects without quoting their keys, which strict JSON refuses.
+        #expect(
+            toolCall.function.arguments["filters"]
+                == .object(["city": .string("Paris"), "limit": .int(1)]))
+    }
+
+    @Test("Gemma reads a bare-key object into a parameter the schema declares an object")
+    func testGemmaBareKeyObjectValueWithSchema() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "search",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "filters": ["type": "object"] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+        let content = #"<|tool_call>call:search{filters:{city: "Paris"}}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        // Without the brace-form read the schema-typed conversion hands back the raw text, and the
+        // tool receives a string where it declared an object.
+        #expect(toolCall.function.arguments["filters"] == .object(["city": .string("Paris")]))
+    }
+
+    @Test("Gemma refuses to quote bare object values")
+    func testGemmaBareValueStaysLiteral() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:search{filters:{city: Paris}}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // Quoting a bare value would invent meaning, so the literal text is kept instead.
+        #expect(toolCall.function.arguments["filters"] == .string("{city: Paris}"))
+    }
+
+    @Test("Gemma keeps an escaped value that resembles an object as a string")
+    func testGemmaEscapedObjectShapedValueStaysString() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:notify{note:<|"|>{city: "Paris"}<|"|>}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["note"] == .string(#"{city: "Paris"}"#))
+    }
+
+    @Test("Gemma escaped values may contain protocol punctuation")
+    func testGemmaEscapedValuePunctuation() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content =
+            #"<|tool_call>call:notify{note:<|"|>a, b} and {c<|"|>,seen:false}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["note"] == .string("a, b} and {c"))
+        #expect(toolCall.function.arguments["seen"] == .string("false"))
+    }
+
+    @Test("Test Gemma 4 Format via ToolCallProcessor")
+    func testGemma4FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .gemma4)
+        let content = #"<|tool_call>call:get_weather{city:<|"|>Tokyo<|"|>}<tool_call|>"#
+
+        // Delivered one character at a time: the streaming path has to reassemble
+        // the asymmetric Gemma 4 tags before the parser ever sees them.
+        var visible = ""
+        for character in content {
+            if let text = processor.processChunk(String(character)) { visible += text }
+        }
+        processor.processEOS()
+
+        #expect(visible.isEmpty)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["city"] == .string("Tokyo"))
     }
 
     @Test("Test Gemma Format via ToolCallProcessor")
@@ -1033,7 +1569,7 @@ struct ToolTests {
         let toolCall4 = try #require(parser.parse(content: content4, tools: nil))
         #expect(toolCall4.function.name == "calculate")
         #expect(toolCall4.function.arguments["expression"] == .string("2 + 2"))
-        #expect(toolCall4.function.arguments["precision"] == .string("4"))
+        #expect(toolCall4.function.arguments["precision"] == .int(4))
 
         // Multiple JSON list format via parseEOS
         let content5 = """
@@ -1069,6 +1605,7 @@ struct ToolTests {
         #expect(ToolCallFormat.json.rawValue == "json")
         #expect(ToolCallFormat.lfm2.rawValue == "lfm2")
         #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
+        #expect(ToolCallFormat.qwen35.rawValue == "qwen3_5")
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")

@@ -447,4 +447,67 @@ public class UserInputTests: XCTestCase {
         XCTAssertNil(messages[0]["tool_calls"])
     }
 
+    // MARK: - VideoProcessing Tests
+
+    public func testVideoProcessingDefaultInit() {
+        let vp = UserInput.VideoProcessing()
+        XCTAssertNil(vp.sampling)
+        XCTAssertNil(vp.targetFrames)
+        XCTAssertNil(vp.targetFramesPerSecond)
+    }
+
+    public func testVideoProcessingTargetFrames() {
+        var vp = UserInput.VideoProcessing(targetFrames: 16)
+        XCTAssertEqual(vp.sampling, .targetFrames(16))
+        XCTAssertEqual(vp.targetFrames, 16)
+        XCTAssertNil(vp.targetFramesPerSecond)
+
+        vp.targetFrames = 32
+        XCTAssertEqual(vp.sampling, .targetFrames(32))
+        XCTAssertEqual(vp.targetFrames, 32)
+
+        vp.targetFrames = nil
+        XCTAssertNil(vp.sampling)
+        XCTAssertNil(vp.targetFrames)
+    }
+
+    public func testVideoProcessingFramesPerSecond() {
+        var vp = UserInput.VideoProcessing(targetFramesPerSecond: 2.5)
+        XCTAssertEqual(vp.sampling, .framesPerSecond(2.5))
+        XCTAssertEqual(vp.targetFramesPerSecond, 2.5)
+        XCTAssertNil(vp.targetFrames)
+
+        vp.targetFramesPerSecond = 5.0
+        XCTAssertEqual(vp.sampling, .framesPerSecond(5.0))
+        XCTAssertEqual(vp.targetFramesPerSecond, 5.0)
+
+        vp.targetFramesPerSecond = nil
+        XCTAssertNil(vp.sampling)
+        XCTAssertNil(vp.targetFramesPerSecond)
+    }
+
+    public func testVideoProcessingSamplingEnum() {
+        let vp1 = UserInput.VideoProcessing(sampling: .targetFrames(8))
+        XCTAssertEqual(vp1.targetFrames, 8)
+        XCTAssertNil(vp1.targetFramesPerSecond)
+
+        let vp2 = UserInput.VideoProcessing(sampling: .framesPerSecond(1.0))
+        XCTAssertEqual(vp2.targetFramesPerSecond, 1.0)
+        XCTAssertNil(vp2.targetFrames)
+    }
+
+    public func testUserInputProcessingWithVideo() {
+        let processing = UserInput.Processing(
+            video: .init(targetFrames: 24),
+            minPixels: 100,
+            maxPixels: 500
+        )
+        XCTAssertEqual(processing.video.targetFrames, 24)
+        XCTAssertEqual(processing.minPixels, 100)
+        XCTAssertEqual(processing.maxPixels, 500)
+
+        let input = UserInput(chat: [.user("hello")], processing: processing)
+        XCTAssertEqual(input.processing.video.targetFrames, 24)
+    }
+
 }

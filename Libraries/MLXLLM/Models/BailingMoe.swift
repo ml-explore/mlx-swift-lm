@@ -356,6 +356,11 @@ public class BailingMoeModel: Module, LLMModel, KVCacheDimensionProvider {
             return model.embedTokens.asLinear(out)
         }
     }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
+    }
 }
 
 extension BailingMoeModel: LoRAModel {

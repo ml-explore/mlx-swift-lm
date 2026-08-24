@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import XCTest
 
 @testable import MLXLMCommon
@@ -453,6 +454,266 @@ final class ModelConversionTests: XCTestCase {
         FileManager.default.fileExists(
             atPath: directory.appendingPathComponent(filename).path)
     }
+
+    // MARK: - q4Zero calibration
+
+    /// Unpacks MLX's 4-bit affine layout: 8 codes per uint32, low nibble first.
+    private func unpackCodes(_ packed: MLXArray) -> [Int] {
+        let words = packed.asArray(UInt32.self)
+        var codes = [Int]()
+        codes.reserveCapacity(words.count * 8)
+        for word in words {
+            for nibble in 0 ..< 8 {
+                codes.append(Int((word >> UInt32(nibble * 4)) & 0xF))
+            }
+        }
+        return codes
+    }
+
+    /// One 32-element group whose extremum is NEGATIVE, with hand-computable codes.
+    ///
+    /// extremum = -4, so d = -4 / -8 = 0.5 and code = floor(w / 0.5 + 8.5).
+    private func negativeExtremumGroup() -> (weights: [Float], expectedCodes: [Int]) {
+        var weights = [Float](repeating: 0, count: 32)
+        weights[0] = -4.0  // the signed extremum
+        weights[1] = 0.0
+        weights[2] = 0.5
+        weights[3] = -0.5
+        weights[4] = 3.5
+        var expected = [Int](repeating: 8, count: 32)  // w == 0 -> floor(8.5) == 8
+        expected[0] = 0  // floor(-8 + 8.5)
+        expected[1] = 8
+        expected[2] = 9  // floor(1 + 8.5)
+        expected[3] = 7  // floor(-1 + 8.5)
+        expected[4] = 15  // floor(7 + 8.5)
+        return (weights, expected)
+    }
+
+    func testQ4ZeroCalibrationDefaultsToStandard() {
+        XCTAssertEqual(ModelConversionQuantization().calibration, .standard)
+        XCTAssertEqual(ModelConversionOptions().calibration, .standard)
+    }
+
+    func testQ4ZeroProducesHandComputableCodesScalesAndBiases() {
+        let (weights, expected) = negativeExtremumGroup()
+        let weight = MLXArray(weights, [1, 32])
+
+        let (packed, scales, biases) = q4ZeroQuantized(weight)
+
+        XCTAssertEqual(unpackCodes(packed), expected)
+        XCTAssertEqual(scales.asArray(Float.self), [0.5])
+        XCTAssertEqual(biases.asArray(Float.self), [-4.0])
+        // First word packs codes 0,8,9,7,15,8,8,8 low-nibble-first.
+        XCTAssertEqual(packed.asArray(UInt32.self)[0], 0x888F_7980)
+    }
+
+    /// The regression that matters: `-max(abs(w))/8` flips the scale's sign on every group
+    /// whose extremum is negative, silently producing a different grid rather than an error.
+    func testQ4ZeroUsesSignedExtremumNotAbsMax() {
+        let (weights, _) = negativeExtremumGroup()
+        let weight = MLXArray(weights, [1, 32])
+
+        let (packed, scales, _) = q4ZeroQuantized(weight)
+
+        // Signed extremum is -4 -> d = +0.5 and the extremum encodes to code 0.
+        XCTAssertEqual(scales.asArray(Float.self), [0.5])
+        XCTAssertEqual(unpackCodes(packed)[0], 0)
+
+        // -absMax/8 would give d = -0.5, sending the same element to code 15.
+        let absMaxScale = -weights.map { abs($0) }.max()! / 8
+        XCTAssertEqual(absMaxScale, -0.5)
+        let wrongCode = min(15, max(0, Int((weights[0] / absMaxScale + 8.5).rounded(.down))))
+        XCTAssertEqual(wrongCode, 15)
+    }
+
+    func testQ4ZeroHandlesPositiveExtremumAndClipsAtBothEnds() {
+        // extremum = +4 -> d = -0.5. code = floor(w / -0.5 + 8.5).
+        var weights = [Float](repeating: 0, count: 32)
+        weights[0] = 4.0
+        weights[1] = -3.5
+        let weight = MLXArray(weights, [1, 32])
+
+        let (packed, scales, biases) = q4ZeroQuantized(weight)
+        let codes = unpackCodes(packed)
+
+        XCTAssertEqual(scales.asArray(Float.self), [-0.5])
+        XCTAssertEqual(biases.asArray(Float.self), [4.0])
+        XCTAssertEqual(codes[0], 0)  // floor(-8 + 8.5)
+        XCTAssertEqual(codes[1], 15)  // floor(7 + 8.5)
+        XCTAssertTrue(codes.allSatisfy { $0 >= 0 && $0 <= 15 })
+    }
+
+    func testQ4ZeroAllZeroGroupDoesNotDivideByZero() {
+        let weight = MLXArray([Float](repeating: 0, count: 32), [1, 32])
+
+        let (packed, scales, biases) = q4ZeroQuantized(weight)
+
+        XCTAssertEqual(scales.asArray(Float.self), [0])
+        XCTAssertEqual(biases.asArray(Float.self), [0])
+        // inverse is forced to 0, so every code is floor(0 + 8.5) == 8.
+        XCTAssertEqual(unpackCodes(packed), [Int](repeating: 8, count: 32))
+    }
+
+    func testQ4ZeroScalesPerGroupAcrossMultipleGroupsAndRows() {
+        // Two rows, two groups each: distinct extrema prove grouping follows the input axis
+        // rather than collapsing across rows or groups.
+        var values = [Float](repeating: 0, count: 2 * 64)
+        values[0] = -4.0  // row 0, group 0 -> d = 0.5
+        values[32] = 2.0  // row 0, group 1 -> d = -0.25
+        values[64] = 8.0  // row 1, group 0 -> d = -1.0
+        values[96] = -1.0  // row 1, group 1 -> d = 0.125
+        let weight = MLXArray(values, [2, 64])
+
+        let (_, scales, biases) = q4ZeroQuantized(weight)
+
+        XCTAssertEqual(scales.shape, [2, 2])
+        XCTAssertEqual(scales.asArray(Float.self), [0.5, -0.25, -1.0, 0.125])
+        XCTAssertEqual(biases.asArray(Float.self), [-4.0, 2.0, 8.0, -1.0])
+    }
+
+    func testQ4ZeroDequantizesOntoTheIntendedLattice() {
+        let (weights, expected) = negativeExtremumGroup()
+        let weight = MLXArray(weights, [1, 32])
+
+        let (packed, scales, biases) = q4ZeroQuantized(weight)
+        let restored = dequantized(
+            packed, scales: scales, biases: biases, groupSize: 32, bits: 4, mode: .affine)
+
+        let scale = scales.asArray(Float.self)[0]
+        let expectedValues = expected.map { (Float($0) - 8) * scale }
+        let actual = restored.asArray(Float.self)
+        XCTAssertEqual(actual.count, expectedValues.count)
+        for (lhs, rhs) in zip(actual, expectedValues) {
+            XCTAssertEqual(lhs, rhs, accuracy: 1e-6)
+        }
+    }
+
+    func testQ4ZeroCalibrationRejectsIncompatibleSettings() {
+        for quantization in [
+            ModelConversionQuantization(bits: 8, calibration: .q4Zero),
+            ModelConversionQuantization(groupSize: 64, calibration: .q4Zero),
+        ] {
+            XCTAssertThrowsError(try validateModelConversionCalibration(quantization)) { error in
+                guard case ModelConversionError.incompatibleCalibration = error else {
+                    return XCTFail("expected incompatibleCalibration, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testQ4ZeroCalibrationAcceptsResolvedAndOmittedSettings() {
+        XCTAssertNoThrow(
+            try validateModelConversionCalibration(
+                ModelConversionQuantization(calibration: .q4Zero)))
+        XCTAssertNoThrow(
+            try validateModelConversionCalibration(
+                ModelConversionQuantization(bits: 4, groupSize: 32, calibration: .q4Zero)))
+    }
+
+    func testStandardCalibrationImposesNoConstraints() {
+        XCTAssertNoThrow(
+            try validateModelConversionCalibration(
+                ModelConversionQuantization(bits: 8, groupSize: 64)))
+    }
+
+    // MARK: - q4Zero wiring
+
+    /// Minimal model exposing one Linear and one Embedding for conversion-path tests.
+    private final class StubConversionModel: Module, BaseLanguageModel {
+        let linear: Linear
+        let embedding: Embedding
+
+        init(inputWidth: Int) {
+            self.linear = Linear(inputWidth, 8, bias: true)
+            self.embedding = Embedding(embeddingCount: 4, dimensions: inputWidth)
+        }
+
+        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] { weights }
+    }
+
+    /// Regression: q4Zero must resolve its own geometry. Falling through to the affine mode
+    /// defaults yields group size 64, which then skips every linear whose input width is a
+    /// multiple of 32 but not 64.
+    func testQ4ZeroResolvesToFourBitsGroupThirtyTwo() {
+        let resolved = effectiveModelConversionQuantization(
+            ModelConversionQuantization(calibration: .q4Zero))
+
+        XCTAssertEqual(resolved.bits, 4)
+        XCTAssertEqual(resolved.groupSize, 32)
+        XCTAssertEqual(resolved.mode, .affine)
+
+        // Standard calibration keeps the mode-derived defaults.
+        let standard = effectiveModelConversionQuantization(ModelConversionQuantization())
+        XCTAssertEqual(standard.groupSize, 64)
+    }
+
+    /// Regression: an invalid per-layer override must throw, not be silently dropped.
+    func testInvalidPerLayerOverrideThrowsBeforeConversion() {
+        let model = StubConversionModel(inputWidth: 32)
+        let options = ModelConversionOptions(quantizationPredicate: { _, _ in
+            .quantize(ModelConversionQuantization(bits: 8, calibration: .q4Zero))
+        })
+
+        XCTAssertThrowsError(
+            try modelConversionQuantizationDecisions(model: model, options: options)
+        ) { error in
+            guard case ModelConversionError.incompatibleCalibration = error else {
+                return XCTFail("expected incompatibleCalibration, got \(error)")
+            }
+        }
+    }
+
+    func testValidPerLayerOverridesResolveForEveryLeaf() throws {
+        let model = StubConversionModel(inputWidth: 32)
+        let options = ModelConversionOptions(quantizationPredicate: { _, _ in
+            .quantize(ModelConversionQuantization(calibration: .q4Zero))
+        })
+
+        let decisions = try modelConversionQuantizationDecisions(model: model, options: options)
+
+        XCTAssertFalse(decisions.isEmpty)
+        XCTAssertTrue(
+            decisions.allSatisfy {
+                if case .quantize(let override) = $0.2 { return override?.calibration == .q4Zero }
+                return false
+            })
+    }
+
+    /// Regression: the predicate must be consulted exactly once per leaf. Resolving twice
+    /// would let a stateful predicate pass preflight and then fail after the output
+    /// directory has already been created and populated.
+    func testQuantizationPredicateIsInvokedOncePerLeaf() throws {
+        let model = StubConversionModel(inputWidth: 32)
+        let counts = LockedCounts()
+        let options = ModelConversionOptions(quantizationPredicate: { path, _ in
+            counts.increment(path)
+            return .quantize()
+        })
+
+        let decisions = try modelConversionQuantizationDecisions(model: model, options: options)
+
+        XCTAssertFalse(decisions.isEmpty)
+        XCTAssertEqual(counts.snapshot().count, decisions.count)
+        XCTAssertTrue(counts.snapshot().values.allSatisfy { $0 == 1 })
+    }
+
+    private final class LockedCounts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage = [String: Int]()
+
+        func increment(_ key: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage[key, default: 0] += 1
+        }
+
+        func snapshot() -> [String: Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+    }
+
 }
 
 private struct ConversionMockDownloader: Downloader {

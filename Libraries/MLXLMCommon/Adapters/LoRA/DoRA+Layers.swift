@@ -11,16 +11,16 @@ import MLXNN
 
 /// Performs the forward pass for a DoRA linear layer.
 private func forward(
-    x: MLXArray, y: MLXArray,
+    x: MLXArray, loraInput: MLXArray, y: MLXArray,
     weight: MLXArray, bias: MLXArray?,
     loraA: MLXArray, loraB: MLXArray,
     scale: Float, magnitude: MLXArray
 ) -> MLXArray {
-    let z = matmul(matmul(x, loraA), loraB)
+    let z = matmul(matmul(loraInput, loraA), loraB)
     var out = y + (scale * z).asType(x.dtype)
 
     let adapted = weight + matmul(scale * loraB.T, loraA.T)
-    let denom = norm(adapted, axis: 1)
+    let denom = stopGradient(norm(adapted, axis: 1))
     out *= (magnitude / denom).asType(x.dtype)
 
     return if let bias {
@@ -64,17 +64,23 @@ private func filterFreezeKeys(from module: Module, keys: [String]?) -> [String] 
 public class DoRALinear: Linear, LoRALayer {
 
     let scale: Float
+    let dropout: Dropout
     public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
     @ParameterInfo(key: "m") var magnitude: MLXArray
 
-    required public init(linear: Linear, rank: Int = 8, scale: Float = 20.0) {
+    required public convenience init(linear: Linear, rank: Int = 8, scale: Float = 20.0) {
+        self.init(linear: linear, rank: rank, scale: scale, dropout: 0.0)
+    }
+
+    public init(linear: Linear, rank: Int = 8, scale: Float = 20.0, dropout: Float) {
         let (outputDimensions, inputDimensions) = linear.shape
         let loraScale = 1 / sqrt(Float(inputDimensions))
 
         self.scale = scale
+        self.dropout = Dropout(p: dropout)
         self._loraA.wrappedValue = MLXRandom.uniform(
             low: -loraScale, high: loraScale, [inputDimensions, rank])
         self._loraB.wrappedValue = MLXArray.zeros([rank, outputDimensions])
@@ -85,12 +91,17 @@ public class DoRALinear: Linear, LoRALayer {
         freeze()
     }
 
-    public static func from(linear: Linear, rank: Int = 8, scale: Float = 20.0) -> LoRALayer {
+    public static func from(
+        linear: Linear, rank: Int = 8, scale: Float = 20.0, dropout: Float = 0.0
+    ) -> LoRALayer {
+        let result: LoRALayer
         if let linear = linear as? QuantizedLinear {
-            QDoRALinear(linear: linear, rank: rank, scale: scale)
+            result = QDoRALinear(linear: linear, rank: rank, scale: scale, dropout: dropout)
         } else {
-            DoRALinear(linear: linear, rank: rank, scale: scale)
+            result = DoRALinear(linear: linear, rank: rank, scale: scale, dropout: dropout)
         }
+        result.train(linear.training)
+        return result
     }
 
     public override func freeze(recursive: Bool = true, keys: [String]? = nil, strict: Bool = false)
@@ -114,7 +125,7 @@ public class DoRALinear: Linear, LoRALayer {
         }
         let y = matmul(x, weight.T)
         return forward(
-            x: x, y: y,
+            x: x, loraInput: dropout(x), y: y,
             weight: weight, bias: bias,
             loraA: loraA, loraB: loraB,
             scale: scale, magnitude: magnitude
@@ -131,17 +142,27 @@ public class DoRALinear: Linear, LoRALayer {
 public class QDoRALinear: QuantizedLinear, LoRALayer {
 
     let scale: Float
+    let dropout: Dropout
     public var loraEnabled: Bool = true
 
     @ParameterInfo(key: "lora_a") var loraA: MLXArray
     @ParameterInfo(key: "lora_b") var loraB: MLXArray
     @ParameterInfo(key: "m") var magnitude: MLXArray
 
-    required public init(linear: QuantizedLinear, rank: Int = 8, scale: Float = 20.0) {
+    required public convenience init(
+        linear: QuantizedLinear, rank: Int = 8, scale: Float = 20.0
+    ) {
+        self.init(linear: linear, rank: rank, scale: scale, dropout: 0.0)
+    }
+
+    public init(
+        linear: QuantizedLinear, rank: Int = 8, scale: Float = 20.0, dropout: Float
+    ) {
         let (outputDimensions, inputDimensions) = linear.shape
         let loraScale = 1 / sqrt(Float(inputDimensions))
 
         self.scale = scale
+        self.dropout = Dropout(p: dropout)
         self._loraA.wrappedValue = MLXRandom.uniform(
             low: -loraScale, high: loraScale, [inputDimensions, rank])
         self._loraB.wrappedValue = MLXArray.zeros([rank, outputDimensions])
@@ -169,7 +190,7 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
             weight: fuse(
                 weight: dequantizedWeight, loraA: loraA, loraB: loraB, scale: scale,
                 magnitude: magnitude),
-            bias: bias, groupSize: groupSize, bits: bits
+            bias: bias, groupSize: groupSize, bits: bits, mode: mode
         )
     }
 
@@ -181,7 +202,7 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
             x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
             mode: mode)
         return forward(
-            x: x, y: y,
+            x: x, loraInput: dropout(x), y: y,
             weight: dequantizedWeight, bias: bias,
             loraA: loraA, loraB: loraB,
             scale: scale, magnitude: magnitude

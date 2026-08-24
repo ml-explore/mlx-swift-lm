@@ -544,13 +544,14 @@ private class MuseGlimmerLanguageModel: Module, KVCacheDimensionProvider {
         super.init()
     }
 
-    /// Sliding layers get a rotating cache bounded by the window; full layers
-    /// get an unbounded one.
-    func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        config.layerTypes.map { layerType in
-            layerType == "sliding_attention"
-                ? RotatingKVCache(maxSize: config.slidingWindow, keep: 0)
-                : StandardKVCache()
+    /// Sliding layers get a rotating cache bounded by the architecture window;
+    /// full layers honor the requested capacity and are otherwise unbounded.
+    func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try config.layerTypes.map { layerType in
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: config.slidingWindow,
+                usesSlidingWindow: layerType == "sliding_attention")
         }
     }
 
@@ -1074,8 +1075,8 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
         super.init()
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 
     private func encodeImage(_ pixelValues: MLXArray, grid: [THW]) -> MLXArray {

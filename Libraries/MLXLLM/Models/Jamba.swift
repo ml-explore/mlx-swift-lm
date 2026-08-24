@@ -530,9 +530,8 @@ public class JambaModel: Module, LLMModel, KVCacheDimensionProvider {
         }
 
         // Handle tied embeddings
-        if config.tieWordEmbeddings {
-            sanitizedWeights["lm_head.weight"] = nil
-        }
+        sanitizedWeights = filterLMHeadWeights(
+            from: sanitizedWeights, tiedWordEmbeddings: config.tieWordEmbeddings)
 
         // Handle MoE expert weights
         if sanitizedWeights["model.layers.0.block_sparse_moe.experts.0.w1.weight"] == nil {

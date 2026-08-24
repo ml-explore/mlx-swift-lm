@@ -757,7 +757,9 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = [String: MLXArray]()
 
-        for (key, value) in weights {
+        for (key, value) in filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
+        {
             var finalValue = value
 
             // Handle conv1d weight axis swap

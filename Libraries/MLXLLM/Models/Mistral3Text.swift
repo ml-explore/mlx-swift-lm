@@ -323,9 +323,8 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
         }
 
         // Handle tied embeddings
-        if args.tieWordEmbeddings {
-            sanitizedWeights["lm_head.weight"] = nil
-        }
+        sanitizedWeights = filterLMHeadWeights(
+            from: sanitizedWeights, tiedWordEmbeddings: args.tieWordEmbeddings)
 
         // Handle weight_scale_inv for quantized weights
         var newWeights: [String: MLXArray] = [:]

@@ -168,6 +168,7 @@ public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
 
     public let model: Olmo2ModelInner
+    private let tieWordEmbeddings: Bool
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
@@ -175,6 +176,7 @@ public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
         self.vocabularySize = args.vocabularySize
         self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
         self.model = Olmo2ModelInner(args)
+        self.tieWordEmbeddings = args.tieWordEmbeddings
         if !args.tieWordEmbeddings {
             self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
         }
@@ -191,7 +193,9 @@ public class Olmo2Model: Module, LLMModel, KVCacheDimensionProvider {
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         // Remove unused precomputed rotary frequencies
-        weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") }
+        filterLMHeadWeights(
+            from: weights.filter { !$0.key.contains("self_attn.rotary_emb.inv_freq") },
+            tiedWordEmbeddings: tieWordEmbeddings)
     }
 }
 

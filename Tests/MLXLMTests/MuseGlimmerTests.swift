@@ -833,7 +833,7 @@ struct MuseGlimmerForwardTests {
         let input = LMInput(text: .init(tokens: tokens, mask: ones(like: tokens).asType(.int8)))
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil,
+            input, cache: try model.newCache(parameters: nil), state: nil,
             prefill: PrefillParameters(stepSize: 4))
         guard case .logits(let output) = result else {
             Issue.record("expected logits")
@@ -859,7 +859,7 @@ struct MuseGlimmerForwardTests {
             image: .init(pixels: pixels, frames: frames))
 
         let result = try model.prepare(
-            input, cache: model.newCache(parameters: nil), state: nil,
+            input, cache: try model.newCache(parameters: nil), state: nil,
             prefill: PrefillParameters())
         guard case .logits(let output) = result else {
             Issue.record("expected logits")
@@ -877,7 +877,7 @@ struct MuseGlimmerForwardTests {
                     text: .init(
                         tokens: noPlaceholder, mask: ones(like: noPlaceholder).asType(.int8)),
                     image: .init(pixels: pixels, frames: frames)),
-                cache: model.newCache(parameters: nil), state: nil,
+                cache: try model.newCache(parameters: nil), state: nil,
                 prefill: PrefillParameters())
         }
     }
@@ -885,7 +885,7 @@ struct MuseGlimmerForwardTests {
     @Test("cache mix follows layer types: rotating for sliding, standard for full")
     func cacheMix() throws {
         let model = try Self.model()
-        let caches = model.newCache(parameters: nil)
+        let caches = try model.newCache(parameters: nil)
         // 5 layers, full attention every 4th counting back from the last: 0 and 4.
         #expect(caches.count == 5)
         #expect(caches[0] is StandardKVCache)
@@ -893,6 +893,61 @@ struct MuseGlimmerForwardTests {
         #expect(caches[2] is RotatingKVCache)
         #expect(caches[3] is RotatingKVCache)
         #expect(caches[4] is StandardKVCache)
+    }
+
+    /// `newCache` once dropped `parameters`, so the unbounded full-attention
+    /// caches it returned could not realize a requested capacity and every
+    /// generation entry point rejected the model with `incompatibleCapacity`.
+    @Test("a requested capacity is realized by the full-attention layers")
+    func requestedCapacityIsRealized() throws {
+        let model = try Self.model()
+        let caches = try model.newCache(parameters: GenerateParameters(maxKVSize: 64))
+
+        // Sliding layers keep the architecture window; full layers take the request.
+        #expect(caches.map(\.maxSize) == [64, 8, 8, 8, 64])
+        #expect(throws: Never.self) {
+            try validateKVCacheCompatibility(
+                caches,
+                configuration: KVCacheConfiguration(capacity: try .init(maxTokens: 64)))
+        }
+    }
+
+    /// A capacity below the architecture window must still bound every layer.
+    @Test("a capacity smaller than the sliding window caps the sliding layers too")
+    func capacityBelowSlidingWindow() throws {
+        let model = try Self.model()
+        let caches = try model.newCache(parameters: GenerateParameters(maxKVSize: 4))
+
+        #expect(caches.map(\.maxSize) == [4, 4, 4, 4, 4])
+    }
+
+    /// End-to-end proof that the bounded caches decode correctly: prefill past
+    /// the window, then step tokens through the rotating caches.
+    @Test("generation past the capacity keeps producing finite logits")
+    func decodesPastCapacity() throws {
+        let model = try Self.model()
+        let cache = try model.newCache(parameters: GenerateParameters(maxKVSize: 16))
+        let prompt = MLXArray((0 ..< 24).map { Int32($0 % 60) }).expandedDimensions(axis: 0)
+
+        let prepared = try model.prepare(
+            LMInput(text: .init(tokens: prompt, mask: ones(like: prompt).asType(.int8))),
+            cache: cache, state: nil, prefill: PrefillParameters(stepSize: 8))
+        guard case .logits(let output) = prepared else {
+            Issue.record("expected logits")
+            return
+        }
+
+        var logits = output.logits
+        for step in 0 ..< 12 {
+            let next = MLXArray([Int32(step % 60)]).expandedDimensions(axis: 0)
+            logits = model(next, cache: cache)
+        }
+
+        #expect(logits.dim(-1) == 64)
+        #expect(logits.asType(.float32).sum().item(Float.self).isFinite)
+        // Every attention cache advanced together and none exceeded the bound.
+        #expect(cache.allSatisfy { $0.offset == 36 })
+        #expect(cache.allSatisfy { ($0.maxSize ?? .max) <= 16 })
     }
 }
 

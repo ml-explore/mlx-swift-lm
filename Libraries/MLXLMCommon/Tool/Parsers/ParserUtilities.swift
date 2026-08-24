@@ -132,7 +132,33 @@ func extractTypesFromSchema(_ schema: [String: any Sendable]?) -> [String] {
     return types.isEmpty ? ["string"] : Array(types)
 }
 
+// MARK: - Slicing
+
+extension Substring {
+    /// The slice without leading or trailing whitespace, avoiding the copy that
+    /// `trimmingCharacters(in:)` makes when the caller only needs a view.
+    func trimmingWhitespace() -> Substring {
+        var slice = drop(while: \.isWhitespace)
+        while let last = slice.last, last.isWhitespace {
+            slice = slice.dropLast()
+        }
+        return slice
+    }
+}
+
 // MARK: - Type Conversion
+
+/// Whether a generated function name belongs to the caller-provided tool set.
+/// An absent or empty schema list preserves parser-only use cases.
+func isDeclaredTool(
+    _ functionName: String, tools: [[String: any Sendable]]?
+) -> Bool {
+    guard let tools, !tools.isEmpty else { return true }
+    return tools.contains { tool in
+        let function = tool["function"] as? [String: any Sendable]
+        return function?["name"] as? String == functionName
+    }
+}
 
 /// Convert parameter value based on multiple possible types.
 /// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/minimax_m2.py

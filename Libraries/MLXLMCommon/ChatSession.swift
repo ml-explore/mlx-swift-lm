@@ -215,11 +215,13 @@ public final class ChatSession {
     private struct AssistantGeneration {
         var content = ""
         var toolCalls: [ToolCall] = []
+        var rejectedToolCalls: [RejectedToolCall] = []
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
         var shouldRecord: Bool {
             (!content.isEmpty || !toolCalls.isEmpty)
+                && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
         }
@@ -230,6 +232,9 @@ public final class ChatSession {
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
+            }
+            if let rejection = item.rejectedToolCall {
+                rejectedToolCalls.append(rejection)
             }
             if let info = item.info {
                 stopReason = info.stopReason
@@ -773,6 +778,8 @@ public final class ChatSession {
     ///   - videos: list of videos (for use with VLMs)
     ///   - audios: list of audios (for use with VLMs)
     /// - Returns: a stream of string chunks from the model
+    /// - Throws: ``RejectedToolCallError`` if the model emits a rejected tool
+    ///   call, or an error produced during generation.
     public func streamResponse(
         to prompt: String,
         role: Chat.Message.Role = .user,
@@ -780,9 +787,10 @@ public final class ChatSession {
         videos: consuming [UserInput.Video] = [],
         audios: consuming [UserInput.Audio] = []
     ) -> AsyncThrowingStream<String, Error> {
-        streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
-            $0.chunk
-        }
+        streamMap(
+            to: prompt, role: role, images: images, videos: videos, audios: audios,
+            failOnRejectedToolCall: true
+        ) { $0.chunk }
     }
 
     /// Produces a streaming response after appending a batch of structured chat messages.
@@ -792,12 +800,12 @@ public final class ChatSession {
     ///
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: a stream of string chunks from the model
+    /// - Throws: ``RejectedToolCallError`` if the model emits a rejected tool
+    ///   call, or an error produced during generation.
     public func streamResponse(
         to messages: consuming [Chat.Message]
     ) -> AsyncThrowingStream<String, Error> {
-        streamMap(messages: messages) {
-            $0.chunk
-        }
+        streamMap(messages: messages, failOnRejectedToolCall: true) { $0.chunk }
     }
 
     /// Produces a streaming response to a prompt as `Generation`.
@@ -809,6 +817,10 @@ public final class ChatSession {
     ///   - videos: list of videos (for use with VLMs)
     ///   - audios: list of audios (for use with VLMs)
     /// - Returns: a stream of `Generation` from the model
+    ///
+    /// Rejected calls are emitted as ``Generation/rejectedToolCall(_:)``. When
+    /// automatic tool dispatch is configured, the stream instead throws
+    /// ``RejectedToolCallError`` before dispatching any call from that turn.
     public func streamDetails(
         to prompt: String,
         role: Chat.Message.Role = .user,
@@ -828,6 +840,10 @@ public final class ChatSession {
     ///
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: a stream of `Generation` from the model
+    ///
+    /// Rejected calls are emitted as ``Generation/rejectedToolCall(_:)``. When
+    /// automatic tool dispatch is configured, the stream instead throws
+    /// ``RejectedToolCallError`` before dispatching any call from that turn.
     public func streamDetails(
         to messages: consuming [Chat.Message]
     ) -> AsyncThrowingStream<Generation, Error> {
@@ -851,18 +867,21 @@ public final class ChatSession {
         images: consuming [UserInput.Image] = [],
         videos: consuming [UserInput.Video] = [],
         audios: consuming [UserInput.Audio] = [],
+        failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         streamMap(
             messages: [
                 .init(role: role, content: prompt, images: images, videos: videos, audios: audios)
             ],
+            failOnRejectedToolCall: failOnRejectedToolCall,
             transform: transform
         )
     }
 
     private func streamMap<R: Sendable>(
         messages: consuming [Chat.Message],
+        failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
@@ -1034,6 +1053,9 @@ public final class ChatSession {
 
                         var reusedMainCacheWithoutDraft = false
                         var requiresMainOnlyContinuation = false
+                        // Prompt tokens this turn does not prefill because the cache
+                        // already represents them. Reported to the caller on `.info`.
+                        var cachedPromptTokenCount = 0
                         // Read off the prepared input, not `input`: the latter may be narrowed to
                         // a token-only suffix below, which would hide media the model still sees.
                         let carriesPreparedMedia =
@@ -1113,10 +1135,12 @@ public final class ChatSession {
                             case .appendSuffix(let suffixStart, _):
                                 input = LMInput(
                                     tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+                                cachedPromptTokenCount = suffixStart
 
                             case .appendSuffixToMain(let suffixStart, _):
                                 input = LMInput(
                                     tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+                                cachedPromptTokenCount = suffixStart
                                 // The draft does not represent the same private
                                 // Harmony path. Preserve the authoritative main
                                 // cache and use it alone for this continuation.
@@ -1127,6 +1151,7 @@ public final class ChatSession {
                                 input = LMInput(
                                     tokens: MLXArray(
                                         Array(promptTokenIds.dropFirst(commonPrefixLength))))
+                                cachedPromptTokenCount = commonPrefixLength
 
                             case .rebuild:
                                 kvCache = KVCacheStorage(
@@ -1260,6 +1285,7 @@ public final class ChatSession {
                                         draftKVCache = nil
                                         lmState = nil
                                         input = preparedInput
+                                        cachedPromptTokenCount = 0
                                     }
 
                                     // Allocate the draft KV cache once and reuse it across turns,
@@ -1310,6 +1336,7 @@ public final class ChatSession {
                         var assistant = AssistantGeneration()
 
                         for await item in generation.stream {
+                            let item = item.attributingCachedPromptTokens(cachedPromptTokenCount)
                             assistant.consume(item)
 
                             // collect tool calls for dispatch; if no
@@ -1360,6 +1387,21 @@ public final class ChatSession {
                                     conversationMessageCountBeforePending...)
                             }
                             conversation = currentConversation
+                        }
+
+                        if let rejection = assistant.rejectedToolCalls.first,
+                            failOnRejectedToolCall || toolDispatch != nil
+                        {
+                            // The failed turn was rolled back above. Persist the
+                            // invalidated token ledger before surfacing the error
+                            // so the next request cannot reuse rejected output.
+                            cache = .kvcache(
+                                .init(
+                                    main: kvCache,
+                                    draft: draftKVCache,
+                                    state: lmState,
+                                    conversation: conversation))
+                            throw RejectedToolCallError(rejection)
                         }
 
                         // dispatch all tool calls from this generation pass

@@ -199,12 +199,14 @@ public class Ernie45Model: Module, LLMModel, KVCacheDimensionProvider {
     public let kvHeads: [Int]
 
     public let model: Ernie45ModelInner
+    private let tieWordEmbeddings: Bool
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: Ernie45Configuration) {
         self.vocabularySize = args.vocabularySize
         self.kvHeads = Array(repeating: args.numKeyValueHeads, count: args.numHiddenLayers)
         self.model = Ernie45ModelInner(args)
+        self.tieWordEmbeddings = args.tieWordEmbeddings
 
         if !args.tieWordEmbeddings {
             self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
@@ -219,6 +221,10 @@ public class Ernie45Model: Module, LLMModel, KVCacheDimensionProvider {
         } else {
             return model.embedTokens.asLinear(out)
         }
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        filterLMHeadWeights(from: weights, tiedWordEmbeddings: tieWordEmbeddings)
     }
 }
 

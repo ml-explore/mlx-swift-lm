@@ -281,7 +281,9 @@ public class Mamba2Model: Module, LLMModel {
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = [String: MLXArray]()
-        for (key, value) in weights {
+        for (key, value) in filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: config.tieWordEmbeddings)
+        {
             if key.contains("conv1d.weight"), value.dim(-1) != 1 {
                 sanitized[key] = value.swappedAxes(1, 2)
             } else {

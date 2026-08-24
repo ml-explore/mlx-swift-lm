@@ -108,3 +108,126 @@ jobs:
             /Users/runner/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
+
+  # Compile the IntegrationTesting project against the macOS 27 SDK.
+  #
+  # Two gaps this closes. First, mac_build_and_test above only builds
+  # `-scheme mlx-swift-lm-Package`, so the IntegrationTesting Xcode project is
+  # never built on the PR path at all and a change that breaks it merges green
+  # (see #512, which left seven exhaustive switches over `Generation` unhandled
+  # in MTPIteratorEndToEndDiagnosticTests.swift). Second, the nightly
+  # integration_tests.yml pins Xcode 26, where everything behind
+  # `canImport(FoundationModels, _version: 2)` -- the whole
+  # MLXFoundationModelsIntegration/ tree and the MLXFoundationModels adapter --
+  # compiles out and therefore cannot break the build. This job builds both.
+  #
+  # This is a COMPILE check, and cannot be anything more on this image. The
+  # hosted `xcode-27` image carries the macOS 27 SDK on a macOS 26 host, and a
+  # test bundle built against the 27 SDK cannot run *any* test there: XCTest
+  # calls objc_copyClassList at startup, which realizes every class including
+  # the @available(macOS 27, *) `TestResponseStream`, whose metadata instantiates
+  # AsyncThrowingStream<MLXLanguageModel.Executor.GenerationEvent, Error> and so
+  # calls through weak-null FoundationModels metadata. The runner segfaults
+  # during test-suite construction, before any test body or #available guard
+  # runs, so no `-only-testing:` selection can dodge it. FM runtime coverage
+  # needs a macOS 27 host, which no hosted image offers yet (see #499).
+  integration_build_xcode27:
+    needs: lint
+    if: github.repository == 'ml-explore/mlx-swift-lm'
+    # Public preview label, see actions/runner-images#14404.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Report toolchain and host
+        shell: bash
+        run: |
+          xcodebuild -version
+          swift --version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          sw_vers
+          # DeviceTier classifies on the *runtime* OS version rather than the
+          # SDK, so printing it here records why this job builds but does not
+          # test: on an OS 26 host the FM surface is unavailable at runtime.
+          case "$(sw_vers -productVersion)" in
+            27.*|2[89].*|3*) echo "Host DeviceTier would be: full (OS >= 27)" ;;
+            26.*)             echo "Host DeviceTier would be: partial (OS 26): the FM surface is @available(macOS 27, *)" ;;
+            *)                echo "Host DeviceTier would be: absent (OS < 26)" ;;
+          esac
+
+      - name: Assert Xcode 27 and the macOS 27 SDK
+        shell: bash
+        run: |
+          # `xcode-27` is a preview label and its default toolchain has moved
+          # before. On a 26 SDK the entire `_version: 2` tree compiles out and
+          # this job goes green while proving nothing, so fail loudly instead.
+          case "$(xcodebuild -version | head -1)" in
+            "Xcode 27"*) ;;
+            *)
+              echo "::error::Expected Xcode 27, got '$(xcodebuild -version | head -1)' (DEVELOPER_DIR=${DEVELOPER_DIR:-default})."
+              exit 1
+              ;;
+          esac
+          case "$(xcrun --sdk macosx --show-sdk-version)" in
+            27.*) ;;
+            *)
+              echo "::error::Expected the macOS 27 SDK, got $(xcrun --sdk macosx --show-sdk-version). The MLXFoundationModels sources are gated on canImport(FoundationModels, _version: 2) and would compile out."
+              exit 1
+              ;;
+          esac
+
+      - name: Install MetalToolchain
+        shell: bash
+        run: |
+          # The self-hosted mac is provisioned with this already, so the jobs
+          # above only assert it. The hosted image ships WITHOUT it, and
+          # mlx-swift compiles .metal sources during the build (mlx-swift_Cmlx).
+          #
+          # Parse `Status:` rather than trusting the exit code: -showComponent
+          # exits 0 and prints "Status: uninstalled" when the component is
+          # absent, so an exit-code guard silently succeeds and the build then
+          # dies much later on the first CompileMetalFile with
+          # "cannot execute tool 'metal'".
+          component_status() {
+            xcodebuild -showComponent MetalToolchain 2>&1 \
+              | awk -F': *' '/^Status:/ { print tolower($2); exit }'
+          }
+          if [ "$(component_status)" = "installed" ]; then
+            echo "MetalToolchain installed."
+          else
+            echo "MetalToolchain reports '$(component_status)'; downloading (839 MB)."
+            xcodebuild -downloadComponent MetalToolchain
+            if [ "$(component_status)" != "installed" ]; then
+              echo "::error::MetalToolchain still reports '$(component_status)' after -downloadComponent."
+              exit 1
+            fi
+            echo "MetalToolchain installed."
+          fi
+
+      - name: Build IntegrationTesting for testing (Xcode, macOS)
+        shell: bash
+        run: |
+          # `build-for-testing` rather than `test`: this compiles both the
+          # ungated suites and the `_version: 2` tree, which is the coverage this
+          # job exists for. Running them is not an option here (see the crash
+          # described above), and a cold-cache `xcodebuild test` would also spend
+          # 2-3 hours downloading Hugging Face models.
+          xcodebuild build-for-testing \
+            -project IntegrationTesting/IntegrationTesting.xcodeproj \
+            -scheme IntegrationTesting \
+            -destination 'platform=macOS' \
+            -skipPackagePluginValidation \
+            -resultBundlePath IntegrationTesting-build.xcresult
+
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-build-xcode27-results
+          path: |
+            IntegrationTesting-build.xcresult
+            ~/Library/Logs/DiagnosticReports/*
+          retention-days: 7

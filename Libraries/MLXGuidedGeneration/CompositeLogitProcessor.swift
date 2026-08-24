@@ -19,6 +19,10 @@ public struct CompositeLogitProcessor: LogitProcessor {
         self.processors = processors
     }
 
+    public func copy() -> Self {
+        CompositeLogitProcessor(processors.map { $0.copy() })
+    }
+
     public mutating func prompt(_ prompt: MLXArray) {
         for i in processors.indices {
             processors[i].prompt(prompt)

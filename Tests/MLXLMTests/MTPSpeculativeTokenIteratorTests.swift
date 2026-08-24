@@ -562,6 +562,12 @@ private final class EmissionLog: LogitProcessor {
     func didSample(token: MLXArray) {
         recordedTokens.append(token.item(Int.self))
     }
+
+    func copy() -> Self {
+        let copy = EmissionLog()
+        copy.recordedTokens = recordedTokens
+        return copy as! Self
+    }
 }
 
 /// The canonical processor advances only for emitted tokens. In particular,

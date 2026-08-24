@@ -1157,6 +1157,10 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let weights = filterLMHeadWeights(
+            from: weights,
+            tiedWordEmbeddings: config.textConfiguration.tieWordEmbeddings)
+
         // Step 1: Transform keys from HuggingFace format to internal format
         var transformed = [String: MLXArray]()
         for (key, value) in weights {

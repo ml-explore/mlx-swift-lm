@@ -31,3 +31,14 @@ MLX_RUN_DEEPSEEK_OCR_INTEGRATION=1 xcodebuild test \
 ```
 
 These tests do not run in CI.
+
+The reranker integration tests download BGE v2 M3, Qwen3 Reranker 0.6B, and Jina
+Reranker v3 checkpoints. To run only those reference checks:
+
+```bash
+xcodebuild test \
+  -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting \
+  -destination 'platform=macOS' \
+  -only-testing:IntegrationTestingTests/RerankerModelIntegrationTests
+```

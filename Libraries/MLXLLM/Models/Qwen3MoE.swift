@@ -254,11 +254,8 @@ public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights = weights
 
-        if configuration.tieWordEmbeddings {
-            sanitizedWeights = sanitizedWeights.filter { key, _ in
-                !key.hasPrefix("lm_head.")
-            }
-        }
+        sanitizedWeights = filterLMHeadWeights(
+            from: sanitizedWeights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
 
         if sanitizedWeights["model.layers.0.mlp.experts.0.up_proj.weight"] == nil {
             return sanitizedWeights

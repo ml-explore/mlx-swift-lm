@@ -198,6 +198,11 @@ public class GraniteModel: Module, LLMModel, KVCacheDimensionProvider {
 
         return out / logitsScaling
     }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
+    }
 }
 
 public struct GraniteConfiguration: Codable, Sendable {

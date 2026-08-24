@@ -180,8 +180,9 @@ public final class Lille130mModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        let w = weights.filter { key, _ in !key.contains("rotary_emb") }
-        return w
+        filterLMHeadWeights(
+            from: weights.filter { key, _ in !key.contains("rotary_emb") },
+            tiedWordEmbeddings: configuration.tieWordEmbeddings)
     }
 }
 

@@ -177,7 +177,7 @@ final class StopStringTests: XCTestCase {
             case .toolCall(let toolCall):
                 toolCalls.append(toolCall)
                 return true
-            case .protocolError:
+            case .protocolError, .rejectedToolCall:
                 return true
             case .stop:
                 stopped = true
