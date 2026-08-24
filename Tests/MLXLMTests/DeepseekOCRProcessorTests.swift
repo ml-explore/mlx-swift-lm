@@ -16,17 +16,29 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             prompt: "Describe this page.",
             images: [.ciImage(makeSolidImage(width: 800, height: 400, color: .red))])
 
-        let prepared = try await processor.prepareForTesting(input: input)
+        let prepared = try await processor.internalPrepare(input: input)
 
         XCTAssertEqual(prepared.mode, .gundam)
         XCTAssertEqual(prepared.pixelValues.shape, [1, 3, 1024, 1024])
         XCTAssertEqual(prepared.localCrops.shape, [2, 3, 640, 640])
         XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [2, 1])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 483)
-        // BOS + image lattice + raw user text (matches Python tokenize_with_images).
+        // Chat-template tokens with its image placeholder expanded to the lattice.
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
         XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
         XCTAssertEqual(prepared.imagesSeqMask[0, 0].item(Bool.self), false)
+        let firstImageTokenIndex = try XCTUnwrap(
+            (0 ..< prepared.inputIds.shape[1]).first {
+                prepared.imagesSeqMask[0, $0].item(Bool.self)
+            })
+        XCTAssertEqual(prepared.inputIds[0, firstImageTokenIndex].item(Int.self), 999)
+        XCTAssertEqual(firstImageTokenIndex, 1)
+        let lastImageTokenIndex = try XCTUnwrap(
+            (0 ..< prepared.inputIds.shape[1]).last {
+                prepared.imagesSeqMask[0, $0].item(Bool.self)
+            })
+        XCTAssertEqual(prepared.inputIds[0, lastImageTokenIndex + 1].item(Int.self), 20)
+        XCTAssertEqual(prepared.imagesSeqMask[0, lastImageTokenIndex + 1].item(Bool.self), false)
         XCTAssertGreaterThanOrEqual(prepared.inputIds.shape[1], 484)
 
         let globalPixels = prepared.pixelValues.asType(.float32)
@@ -42,7 +54,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             images: [.ciImage(makeSolidImage(width: 800, height: 400, color: .red))],
             additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
-        let prepared = try await processor.prepareForTesting(input: input)
+        let prepared = try await processor.internalPrepare(input: input)
 
         XCTAssertEqual(prepared.mode, .base)
         XCTAssertEqual(prepared.pixelValues.shape, [1, 3, 640, 640])
@@ -115,7 +127,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             ],
             additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
-        let prepared = try await processor.prepareForTesting(input: input)
+        let prepared = try await processor.internalPrepare(input: input)
 
         XCTAssertEqual(prepared.mode, .base)
         // Unlimited multipage base = 1024² (273 image tokens / page), not single-page 640.
@@ -144,7 +156,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
         do {
-            _ = try await processor.prepareForTesting(input: input)
+            _ = try await processor.internalPrepare(input: input)
             XCTFail("expected VLMError.singleImageAllowed for mismatched <image> count")
         } catch VLMError.singleImageAllowed {
             // expected
@@ -200,7 +212,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
             images: [.ciImage(makeSolidImage(width: 200, height: 200, color: .blue))],
             additionalContext: DeepseekOCRProcessor.modeContext(.base))
 
-        let prepared = try await processor.prepareForTesting(input: input)
+        let prepared = try await processor.internalPrepare(input: input)
         let ids = prepared.inputIds.asArray(Int32.self).map(Int.init)
         // DeterministicTokenizer encodes known special tokens as single IDs.
         XCTAssertTrue(
@@ -313,6 +325,25 @@ private struct DeterministicTokenizer: Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        [0, 20, 21]
+        var ids = [0]
+        for message in messages {
+            if let content = message["content"] as? [[String: any Sendable]] {
+                for part in content {
+                    switch part["type"] as? String {
+                    case "image":
+                        ids.append(999)
+                    case "text":
+                        if let text = part["text"] as? String {
+                            ids.append(contentsOf: encode(text: text, addSpecialTokens: false))
+                        }
+                    default:
+                        break
+                    }
+                }
+            } else if let content = message["content"] as? String {
+                ids.append(contentsOf: encode(text: content, addSpecialTokens: false))
+            }
+        }
+        return ids
     }
 }

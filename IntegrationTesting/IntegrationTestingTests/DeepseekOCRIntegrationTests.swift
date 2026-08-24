@@ -36,21 +36,25 @@ struct DeepseekOCRIntegrationTests {
     @Test
     func loadsDeepseekOCRAndRunsOCR() async throws {
         // Keep Hub `_orig_model_type` from diverting loads to UnlimitedOCR.
-        // A per-call argument rather than process-global state, so this suite
-        // cannot perturb a load running beside it.
+        // The policy is immutable per factory, so this suite cannot perturb a
+        // load running beside it.
         let tokenizerLoader = #huggingFaceTokenizerLoader()
+        let deepseekFactory = VLMModelFactory(
+            typeRegistry: VLMTypeRegistry.shared,
+            processorRegistry: VLMProcessorTypeRegistry.shared,
+            modelRegistry: VLMRegistry.shared,
+            honorOrigModelType: false)
         let container: ModelContainer
         if let dir = hfSnapshotDir(modelId: deepseekOCRModelId),
             ProcessInfo.processInfo.environment["MLX_RUN_DEEPSEEK_OCR_INTEGRATION"] != "1"
         {
-            container = try await VLMModelFactory.shared.loadContainer(
-                from: dir, using: tokenizerLoader, honorOrigModelType: false)
+            container = try await deepseekFactory.loadContainer(
+                from: dir, using: tokenizerLoader)
         } else {
-            container = try await VLMModelFactory.shared.loadContainer(
+            container = try await deepseekFactory.loadContainer(
                 from: #hubDownloader(),
                 using: tokenizerLoader,
-                configuration: VLMRegistry.deepseekOCR5bit,
-                honorOrigModelType: false)
+                configuration: VLMRegistry.deepseekOCR5bit)
         }
 
         let isDeepseek = await container.perform { $0.model is DeepseekOCR }

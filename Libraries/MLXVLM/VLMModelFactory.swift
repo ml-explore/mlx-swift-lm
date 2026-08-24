@@ -361,12 +361,16 @@ public final class VLMModelFactory: GenericModelFactory {
     public init(
         typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
         modelRegistry: AbstractModelRegistry,
-        conventionsRegistry: ChatConventionsRegistry = .shared
+        conventionsRegistry: ChatConventionsRegistry = .shared,
+        processorLoadingRegistry: VLMProcessorLoadingRegistry = .shared,
+        honorOrigModelType: Bool = VLMModelFactory.defaultHonorOrigModelType
     ) {
         self.typeRegistry = typeRegistry
         self.processorRegistry = processorRegistry
         self.modelRegistry = modelRegistry
         self.conventionsRegistry = conventionsRegistry
+        self.processorLoadingRegistry = processorLoadingRegistry
+        self.honorOrigModelType = honorOrigModelType
     }
 
     /// Shared instance with default behavior.
@@ -396,41 +400,19 @@ public final class VLMModelFactory: GenericModelFactory {
     /// through the plain DeepSeek-OCR path.
     public static let defaultHonorOrigModelType = true
 
-    /// ``GenericModelFactory`` conformance — loads with the default remap
-    /// policy (``defaultHonorOrigModelType``).
+    /// resolvers for processor metadata that is absent or incorrect in a checkpoint
+    public let processorLoadingRegistry: VLMProcessorLoadingRegistry
+
+    /// Whether loads honor a checkpoint's `_orig_model_type` remap.
     ///
-    /// Callers that need to pin the policy explicitly should use
-    /// ``_load(configuration:tokenizerLoader:honorOrigModelType:)`` or one of
-    /// the `load`/`loadContainer` overloads that take `honorOrigModelType`.
+    /// The value is immutable per factory, so callers that need the plain
+    /// DeepSeek path can create a separate factory with `false` without mutable
+    /// process-global state.
+    public let honorOrigModelType: Bool
+
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
-    ) async throws -> sending ModelContext {
-        try await _load(
-            configuration: configuration,
-            tokenizerLoader: tokenizerLoader,
-            honorOrigModelType: Self.defaultHonorOrigModelType)
-    }
-
-    /// Loads a VLM from already-resolved local URLs, with an explicit
-    /// `_orig_model_type` remap policy.
-    ///
-    /// - Parameters:
-    ///   - configuration: resolved model + tokenizer directories.
-    ///   - tokenizerLoader: tokenizer loader for the tokenizer directory.
-    ///   - honorOrigModelType: when `true`, a pack advertising
-    ///     `_orig_model_type: unlimited-ocr` resolves to the `unlimited-ocr`
-    ///     registry entry (``UnlimitedOCR``, R-SWA cache) even though its
-    ///     `model_type` is the DeepSeek shim. When `false`, the pack's own
-    ///     `model_type` is used (``DeepseekOCR``, plain KV cache).
-    ///
-    /// > Note: This is a per-call argument rather than process-global state on
-    /// > purpose: a caller loading two families concurrently would otherwise
-    /// > have to serialize the set-then-load pair itself.
-    public func _load(
-        configuration: ResolvedModelConfiguration,
-        tokenizerLoader: any TokenizerLoader,
-        honorOrigModelType: Bool
     ) async throws -> sending ModelContext {
         let modelDirectory = configuration.modelDirectory
 
@@ -503,12 +485,16 @@ public final class VLMModelFactory: GenericModelFactory {
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
-        let processorFallback = try qwenProcessorFallback(
-            modelType: baseConfig.modelType, model: model)
+        let processorLoadingContext = VLMProcessorLoadingContext(
+            modelId: configuration.name,
+            modelType: modelType,
+            configurationData: configData)
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
-        async let processorConfigTask = loadProcessorConfig(
-            from: modelDirectory, fallback: processorFallback)
+        async let processorConfigTask = resolveProcessorConfiguration(
+            from: modelDirectory,
+            context: processorLoadingContext,
+            registry: processorLoadingRegistry)
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
@@ -516,10 +502,9 @@ public final class VLMModelFactory: GenericModelFactory {
             weightFileSelection: configuration.weightFileSelection)
 
         let tokenizer = try await tokenizerTask
-        let processorConfigData: Data
-        let baseProcessorConfig: BaseProcessorConfiguration
+        let processorConfiguration: VLMProcessorConfiguration
         do {
-            (processorConfigData, baseProcessorConfig) = try await processorConfigTask
+            processorConfiguration = try await processorConfigTask
         } catch let error as ProcessorConfigError {
             if let decodingError = error.underlying as? DecodingError {
                 throw ModelFactoryError.configurationDecodingError(
@@ -527,25 +512,14 @@ public final class VLMModelFactory: GenericModelFactory {
             }
             throw ModelFactoryError.configurationFileError(
                 error.filename, configuration.name, error.underlying)
+        } catch let error as DecodingError {
+            throw ModelFactoryError.configurationDecodingError(
+                configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // Override processor type based on model type for models that need special handling
-        // Mistral3 models ship with "PixtralProcessor" in their config but need Mistral3Processor
-        // to handle spatial merging correctly
-        let processorTypeOverrides: [String: String] = [
-            "mistral3": "Mistral3Processor",
-            "gemma4_unified": "Gemma4UnifiedProcessor",
-            // Hub packs often ship DeepseekVLV2Processor; native unlimited-ocr
-            // routing prefers UnlimitedOCRProcessor (same tokenize path).
-            "unlimited-ocr": "UnlimitedOCRProcessor",
-            "unlimited_ocr": "UnlimitedOCRProcessor",
-        ]
-        let processorType =
-            processorTypeOverrides[modelType] ?? baseProcessorConfig.processorClass
-
         let baseProcessor = try await processorRegistry.createModel(
-            configuration: processorConfigData,
-            processorType: processorType, tokenizer: tokenizer)
+            configuration: processorConfiguration.data,
+            processorType: processorConfiguration.processorType, tokenizer: tokenizer)
         let processor: any UserInputProcessor
         if let messageGenerator = mutableConfiguration.messageGenerator {
             processor = MessageGeneratorUserInputProcessor(
@@ -577,108 +551,37 @@ public final class VLMModelFactory: GenericModelFactory {
 
 }
 
-// MARK: - Explicit `_orig_model_type` remap policy
-
-/// Loading entry points that take the `_orig_model_type` remap policy as an
-/// argument.
-///
-/// These mirror ``GenericModelFactory``'s `load` / `loadContainer` helpers. The
-/// protocol's own overloads (no `honorOrigModelType:` label) keep
-/// ``VLMModelFactory/defaultHonorOrigModelType``.
-extension VLMModelFactory {
-
-    /// Loads a model from a local directory with an explicit remap policy.
-    ///
-    /// - Parameters:
-    ///   - directory: local MLX weights directory.
-    ///   - tokenizerLoader: tokenizer loader.
-    ///   - honorOrigModelType: see
-    ///     `_load(configuration:tokenizerLoader:honorOrigModelType:)`.
-    public func load(
-        from directory: URL,
-        using tokenizerLoader: any TokenizerLoader,
-        honorOrigModelType: Bool
-    ) async throws -> sending ModelContext {
-        try await _load(
-            configuration: .init(directory: directory),
-            tokenizerLoader: tokenizerLoader,
-            honorOrigModelType: honorOrigModelType)
-    }
-
-    /// Loads a model from a local directory into a `ModelContainer` with an
-    /// explicit remap policy.
-    public func loadContainer(
-        from directory: URL,
-        using tokenizerLoader: any TokenizerLoader,
-        honorOrigModelType: Bool
-    ) async throws -> ModelContainer {
-        let context = try await _load(
-            configuration: .init(directory: directory),
-            tokenizerLoader: tokenizerLoader,
-            honorOrigModelType: honorOrigModelType)
-        return _wrap(context)
-    }
-
-    /// Loads a model via a `Downloader` with an explicit remap policy.
-    public func load(
-        from downloader: any Downloader,
-        using tokenizerLoader: any TokenizerLoader,
-        configuration: ModelConfiguration,
-        useLatest: Bool = false,
-        honorOrigModelType: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
-    ) async throws -> sending ModelContext {
-        let resolved = try await resolve(
-            configuration: configuration, from: downloader,
-            useLatest: useLatest, progressHandler: progressHandler)
-        return try await _load(
-            configuration: resolved,
-            tokenizerLoader: tokenizerLoader,
-            honorOrigModelType: honorOrigModelType)
-    }
-
-    /// Loads a model via a `Downloader` into a `ModelContainer` with an
-    /// explicit remap policy.
-    public func loadContainer(
-        from downloader: any Downloader,
-        using tokenizerLoader: any TokenizerLoader,
-        configuration: ModelConfiguration,
-        useLatest: Bool = false,
-        honorOrigModelType: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
-    ) async throws -> ModelContainer {
-        let resolved = try await resolve(
-            configuration: configuration, from: downloader,
-            useLatest: useLatest, progressHandler: progressHandler)
-        let context = try await _load(
-            configuration: resolved,
-            tokenizerLoader: tokenizerLoader,
-            honorOrigModelType: honorOrigModelType)
-        return _wrap(context)
-    }
-}
-
 /// Error wrapper that includes the filename for better error messages.
 struct ProcessorConfigError: Error {
     let filename: String
     let underlying: Error
 }
 
-func qwenProcessorFallback(
-    modelType: String, model: any LanguageModel
-) throws -> (Data, BaseProcessorConfiguration)? {
-    guard modelType == "qwen3_5" || modelType == "qwen3_5_moe",
-        let model = model as? Qwen35
-    else {
-        return nil
+/// Selects checkpoint processor metadata, then resolves the processor type.
+func resolveProcessorConfiguration(
+    from modelDirectory: URL,
+    context: VLMProcessorLoadingContext,
+    registry: VLMProcessorLoadingRegistry
+) async throws -> VLMProcessorConfiguration {
+    let configuration = try await loadProcessorConfig(from: modelDirectory) {
+        try registry.fallbackProcessorConfiguration(for: context)
     }
+    let processorType =
+        try registry.processorType(
+            for: context, declaredProcessorType: configuration.processorType)
+        ?? configuration.processorType
+    guard let processorType else {
+        throw missingProcessorTypeError(filename: configuration.filename)
+    }
+    return VLMProcessorConfiguration(data: configuration.data, processorType: processorType)
+}
 
-    let configuration = Qwen3VLProcessorConfiguration(
-        qwen35VisionConfiguration: model.config.visionConfiguration)
-    return (
-        try JSONEncoder().encode(configuration),
-        BaseProcessorConfiguration(processorClass: "Qwen3VLProcessor")
-    )
+/// Processor configuration selected from a checkpoint file or a generated fallback.
+/// The type remains optional until loading resolvers have had a chance to supply one.
+struct LoadedVLMProcessorConfiguration {
+    let data: Data
+    let processorType: String?
+    let filename: String
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
@@ -686,10 +589,8 @@ func qwenProcessorFallback(
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
 func loadProcessorConfig(
     from modelDirectory: URL,
-    fallback: (Data, BaseProcessorConfiguration)? = nil
-) async throws -> (
-    Data, BaseProcessorConfiguration
-) {
+    fallback: () throws -> VLMProcessorConfiguration? = { nil }
+) async throws -> LoadedVLMProcessorConfiguration {
     let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
 
@@ -699,20 +600,48 @@ func loadProcessorConfig(
     if FileManager.default.fileExists(atPath: processorConfigURL.path) {
         return try readProcessorConfig(from: processorConfigURL)
     }
-    if let fallback {
-        return fallback
+    if let fallback = try fallback() {
+        return LoadedVLMProcessorConfiguration(
+            data: fallback.data,
+            processorType: fallback.processorType,
+            filename: "config.json")
     }
 
     return try readProcessorConfig(from: processorConfigURL)
 }
 
-private func readProcessorConfig(from url: URL) throws -> (
-    Data, BaseProcessorConfiguration
-) {
+private struct DeclaredProcessorConfiguration: Decodable {
+    let processorClass: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case processorClass = "processor_class"
+    }
+}
+
+private enum ProcessorConfigurationCodingKey: String, CodingKey {
+    case processorClass = "processor_class"
+}
+
+private func missingProcessorTypeError(filename: String) -> ProcessorConfigError {
+    ProcessorConfigError(
+        filename: filename,
+        underlying: DecodingError.keyNotFound(
+            ProcessorConfigurationCodingKey.processorClass,
+            DecodingError.Context(
+                codingPath: [],
+                debugDescription:
+                    "No processor_class was declared and no processor loading resolver supplied one."
+            )))
+}
+
+private func readProcessorConfig(from url: URL) throws -> LoadedVLMProcessorConfiguration {
     do {
         let data = try Data(contentsOf: url)
-        let config = try JSONDecoder.json5().decode(BaseProcessorConfiguration.self, from: data)
-        return (data, config)
+        let config = try JSONDecoder.json5().decode(DeclaredProcessorConfiguration.self, from: data)
+        return LoadedVLMProcessorConfiguration(
+            data: data,
+            processorType: config.processorClass,
+            filename: url.lastPathComponent)
     } catch {
         throw ProcessorConfigError(filename: url.lastPathComponent, underlying: error)
     }

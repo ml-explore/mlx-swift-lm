@@ -20,7 +20,7 @@ final class DeepseekOCRLayerParityTests: XCTestCase {
             prompt: "Describe this page.",
             images: [.ciImage(image)])
 
-        let prepared = try await processor.prepareForTesting(input: input)
+        let prepared = try await processor.internalPrepare(input: input)
 
         let processorGolden = golden.processor
         XCTAssertEqual(Array(prepared.pixelValues.shape), processorGolden.globalPixels.shape)
@@ -200,6 +200,6 @@ private struct LayerParityTokenizer: Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        [0, 20, 21]
+        [0, 20, 999]
     }
 }

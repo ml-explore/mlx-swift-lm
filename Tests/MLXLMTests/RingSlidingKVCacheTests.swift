@@ -129,6 +129,23 @@ final class RingSlidingKVCacheTests: XCTestCase {
         }
     }
 
+    func testEmptySerializationRoundTripDoesNotAssignEmptyState() throws {
+        let cache = RingSlidingKVCache(windowSize: 4)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(url: url, cache: [cache], metadata: [:])
+        let (loaded, _) = try loadPromptCache(url: url)
+        let restored = try XCTUnwrap(loaded[0] as? RingSlidingKVCache)
+
+        XCTAssertTrue(restored.state.isEmpty)
+        XCTAssertEqual(restored.windowSize, 4)
+        XCTAssertEqual(restored.offset, 0)
+        XCTAssertNil(restored.prefillLength)
+    }
+
     private func tokenBatch(values seqValues: [Float], heads: Int = 2, dim: Int = 4) -> (
         MLXArray, MLXArray
     ) {
@@ -262,6 +279,21 @@ final class RingSlidingKVCacheTests: XCTestCase {
         XCTAssertEqual(k.dim(2), 9)
         XCTAssertEqual(cache.offset, 9)
         XCTAssertNil(cache.prefillLength)
+    }
+
+    func testIsTrimmablePredictsWhetherAppendWouldFillRing() {
+        let cache = RingSlidingKVCache(windowSize: 4)
+        let (pk, pv) = prefill(length: 3)
+        _ = cache.update(keys: pk, values: pv)
+
+        XCTAssertTrue(cache.isTrimmable(after: 100), "unmarked prefill remains rewindable")
+
+        let (dk, dv) = token(value: 10)
+        _ = cache.update(keys: dk, values: dv)
+        XCTAssertEqual(cache.prefillLength, 3)
+        XCTAssertTrue(cache.isTrimmable)
+        XCTAssertTrue(cache.isTrimmable(after: 2))
+        XCTAssertFalse(cache.isTrimmable(after: 3))
     }
 
     /// The mask for a multi-token ring step must match the wide temporal

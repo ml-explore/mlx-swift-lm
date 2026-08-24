@@ -741,6 +741,111 @@ struct TurboFlashAttentionTests {
         }
     }
 
+    @Test func shortDecodeNR0PolicyIsBitExact() {
+        struct Shape {
+            let dim: Int
+            let keyBits: Int
+            let valueBits: Int
+            let queryHeads: Int
+            let keyValueHeads: Int
+            let tokenCount: Int
+        }
+
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 129, totalQueries: 16, dim: 64) == 1)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 256, totalQueries: 32, dim: 128) == 1)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 128, totalQueries: 32, dim: 128) == 2)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 257, totalQueries: 32, dim: 128) == 2)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 256, totalQueries: 33, dim: 128) == 2)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 256, totalQueries: 15, dim: 128) == 2)
+        #expect(
+            TurboQuantKernelOps.automaticFlashDecodeNR0(
+                tokenCount: 256, totalQueries: 32, dim: 96) == 2)
+
+        let shapes = [
+            Shape(
+                dim: 64, keyBits: 2, valueBits: 2,
+                queryHeads: 16, keyValueHeads: 4, tokenCount: 129),
+            Shape(
+                dim: 64, keyBits: 4, valueBits: 4,
+                queryHeads: 32, keyValueHeads: 8, tokenCount: 256),
+            Shape(
+                dim: 128, keyBits: 3, valueBits: 3,
+                queryHeads: 24, keyValueHeads: 4, tokenCount: 256),
+            Shape(
+                dim: 128, keyBits: 4, valueBits: 2,
+                queryHeads: 32, keyValueHeads: 8, tokenCount: 129),
+        ]
+
+        for (shapeIndex, shape) in shapes.enumerated() {
+            let repeatCount = shape.queryHeads / shape.keyValueHeads
+            let keyCodec = MSECodec(
+                dim: shape.dim, bits: shape.keyBits, seed: UInt64(200 + shapeIndex))
+            let valueCodec = MSECodec(
+                dim: shape.dim, bits: shape.valueBits, seed: UInt64(300 + shapeIndex))
+            let rawKeys = MLXRandom.normal([
+                shape.keyValueHeads * shape.tokenCount, shape.dim,
+            ])
+            let rawValues = MLXRandom.normal([
+                shape.keyValueHeads * shape.tokenCount, shape.dim,
+            ])
+            let (keyPacked, keyNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+                input: rawKeys, whtSigns: keyCodec.whtSigns!,
+                boundaries: keyCodec.boundaries, codebook: keyCodec.codebook,
+                bits: shape.keyBits, dim: shape.dim)
+            let (valuePacked, valueNorms) = TurboQuantKernelOps.fusedEncodeWHT(
+                input: rawValues, whtSigns: valueCodec.whtSigns!,
+                boundaries: valueCodec.boundaries, codebook: valueCodec.codebook,
+                bits: shape.valueBits, dim: shape.dim)
+            let keyWidth = TurboQuantPacking.packedWidth(
+                count: shape.dim, bits: shape.keyBits)
+            let valueWidth = TurboQuantPacking.packedWidth(
+                count: shape.dim, bits: shape.valueBits)
+            let keys = keyPacked.reshaped(
+                shape.keyValueHeads, shape.tokenCount, keyWidth)
+            let values = valuePacked.reshaped(
+                shape.keyValueHeads, shape.tokenCount, valueWidth)
+            let keyNormsByHead = keyNorms.reshaped(
+                shape.keyValueHeads, shape.tokenCount)
+            let valueNormsByHead = valueNorms.reshaped(
+                shape.keyValueHeads, shape.tokenCount)
+            let queries =
+                MLXRandom.normal([shape.queryHeads, shape.dim])
+                / sqrt(Float(shape.dim))
+
+            func run(_ nr0: Int) -> MLXArray {
+                TurboQuantKernelOps.turboFlashAttention(
+                    rotatedQueries: queries,
+                    keyPacked: keys, keyNorms: keyNormsByHead,
+                    keyCodebook: keyCodec.codebook,
+                    valPacked: values, valNorms: valueNormsByHead,
+                    valCodebook: valueCodec.codebook,
+                    tokenCount: shape.tokenCount, repeatCount: repeatCount,
+                    keyBits: shape.keyBits, valueBits: shape.valueBits, dim: shape.dim,
+                    valRotation: valueCodec.rotation,
+                    singleDispatch: false, nr0: nr0)
+            }
+
+            let oneRow = run(1)
+            let twoRows = run(2)
+            eval(oneRow, twoRows)
+            #expect(
+                oneRow.asArray(Float.self) == twoRows.asArray(Float.self),
+                "NR0 scheduling changed output for shape \(shape)")
+        }
+    }
+
     /// Microbenchmark: fused vs separated at various token counts
     @Test func microbenchFlashVsSeparated() {
         let dim = 128

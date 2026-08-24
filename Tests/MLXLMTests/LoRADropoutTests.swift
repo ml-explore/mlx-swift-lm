@@ -182,6 +182,37 @@ final class LoRADropoutTests: XCTestCase {
         try assertDropoutMode(on: layer)
     }
 
+    /// Adapter files are commonly fp16 even when the base model is bf16. The
+    /// wrapper must retain the base projection's dtype: allowing MLX to promote
+    /// bf16 + fp16 to fp32 changes every downstream kernel specialization and,
+    /// for Qwen3.5 linear attention, sends the recurrent Metal kernel down its
+    /// much heavier fp32 path.
+    func testLoRALinearPreservesBaseOutputDTypeWithFP16Adapter() throws {
+        let base = Linear(weight: MLXArray.eye(32).asType(.bfloat16))
+        let layer = try XCTUnwrap(
+            LoRALinear.from(linear: base, rank: 4, scale: 1.0) as? LoRALinear)
+        try installFP16Adapter(on: layer)
+
+        let output = layer(MLXArray.ones([1, 32], dtype: .bfloat16))
+
+        XCTAssertEqual(output.dtype, .bfloat16)
+        eval(output)
+    }
+
+    func testQLoRALinearPreservesBaseOutputDTypeWithFP16Adapter() throws {
+        let base = Linear(weight: MLXArray.eye(32).asType(.bfloat16))
+        let quantized = try XCTUnwrap(
+            base.toQuantized(groupSize: 32, bits: 4, mode: .affine) as? QuantizedLinear)
+        let layer = try XCTUnwrap(
+            LoRALinear.from(linear: quantized, rank: 4, scale: 1.0) as? QLoRALinear)
+        try installFP16Adapter(on: layer)
+
+        let output = layer(MLXArray.ones([1, 32], dtype: .bfloat16))
+
+        XCTAssertEqual(output.dtype, .bfloat16)
+        eval(output)
+    }
+
     func testDoRALinearAppliesDropoutOnlyDuringTraining() throws {
         let base = Linear(weight: MLXArray.eye(32))
         let layer = try XCTUnwrap(
@@ -376,6 +407,15 @@ final class LoRADropoutTests: XCTestCase {
                 .item(Bool.self))
         XCTAssertFalse(
             allClose(firstEvaluationOutput, trainingOutput, rtol: 0, atol: 0).item(Bool.self))
+    }
+
+    private func installFP16Adapter(on layer: Linear) throws {
+        try layer.update(
+            parameters: ModuleParameters.unflattened([
+                "lora_a": MLXArray.ones([32, 4], dtype: .float16),
+                "lora_b": MLXArray.ones([4, 32], dtype: .float16),
+            ]),
+            verify: [])
     }
 }
 

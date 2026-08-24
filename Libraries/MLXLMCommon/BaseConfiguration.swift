@@ -222,8 +222,8 @@ public struct BaseConfiguration: Codable, Sendable {
     /// to that type even if `model_type` is a DeepSeek shim. Pass `false` to
     /// force the Hub `model_type` (DeepSeek-only verification).
     ///
-    /// Callers select the policy per load — see
-    /// `VLMModelFactory.loadContainer(from:using:honorOrigModelType:)`.
+    /// Callers select the immutable policy per factory — see
+    /// `VLMModelFactory.init(…honorOrigModelType:)`.
     public func resolvedModelType(honorOrigModelType: Bool = true) -> String {
         guard honorOrigModelType,
             let orig = origModelType?

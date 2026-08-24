@@ -658,12 +658,8 @@ enum Qwen35Language {
             var gates = gate(x)
             gates = MLX.softmax(gates, axis: -1, precise: true)
 
-            let kth = gates.dim(-1) - topK
-            let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, kth...]
-            var scores = MLX.takeAlong(gates, inds, axis: -1)
-            if normTopkProb {
-                scores = scores / scores.sum(axis: -1, keepDims: true)
-            }
+            let (inds, scores) = moeRouterTopK(
+                gates, k: topK, normalize: normTopkProb)
 
             let y = switchMLP(x, inds)
             let combined = weightedExpertSum(y, scores)

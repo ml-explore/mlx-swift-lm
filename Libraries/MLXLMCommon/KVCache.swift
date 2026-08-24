@@ -1186,8 +1186,13 @@ public class RingSlidingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 
     public override var isTrimmable: Bool {
+        isTrimmable(after: 0)
+    }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
         // Once the ring is active, trimming would desync ring slots.
-        prefillLength == nil || offset < (prefillLength! + windowSize)
+        guard let prefillLength else { return true }
+        return offset + positions < prefillLength + windowSize
     }
 
     @discardableResult
@@ -2412,7 +2417,9 @@ private func restoreCacheFromMetaState(
                 message: "Invalid RingSlidingKVCache metaState - expected 4 values")
         }
         let cache = RingSlidingKVCache(windowSize: max(windowSize, 1))
-        cache.state = state
+        if !state.isEmpty {
+            cache.state = state
+        }
         cache.metaState = metaState
         return cache
 

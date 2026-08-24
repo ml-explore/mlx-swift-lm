@@ -737,29 +737,6 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         return (processed, tilesWide, tilesHigh)
     }
 
-    private func userPromptText(from input: UserInput) -> String {
-        switch input.prompt {
-        case .text(let text):
-            return text
-        case .chat(let messages):
-            return messages.last(where: { $0.role == .user })?.content
-                ?? messages.last?.content
-                ?? ""
-        case .messages(let messages):
-            for message in messages.reversed() {
-                if let role = message["role"] as? String, role != "user" { continue }
-                if let content = message["content"] as? String {
-                    return content
-                }
-                if let parts = message["content"] as? [[String: any Sendable]] {
-                    let text = parts.compactMap { $0["text"] as? String }.joined()
-                    if !text.isEmpty { return text }
-                }
-            }
-            return ""
-        }
-    }
-
     private func emptyLocalCrops() -> MLXArray {
         zeros([1, 3, config.baseSize, config.baseSize], type: Float.self).asType(.bfloat16)
     }
@@ -792,10 +769,14 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     @_spi(Testing)
-    public func prepareForTesting(input: UserInput) async throws -> PreparedImageInputs {
+    public func internalPrepare(input: UserInput) async throws -> PreparedImageInputs {
+        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages,
+            tools: input.tools,
+            additionalContext: input.additionalContext)
+
         guard !input.images.isEmpty else {
-            let promptTokens = tokenizer.encode(
-                text: userPromptText(from: input), addSpecialTokens: true)
             return .init(
                 inputIds: MLXArray(promptTokens.map(Int32.init)).reshaped(1, promptTokens.count),
                 pixelValues: zeros([1, 3, config.baseSize, config.baseSize], type: Float.self),
@@ -814,46 +795,19 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             (mode == .base && input.images.count > 1)
             ? config.baseSize
             : config.localImageSize
-        let rawPrompt = userPromptText(from: input)
-        let imageToken = config.imageToken
-        let imageTokenCount = rawPrompt.components(separatedBy: imageToken).count - 1
-        // Fused multipage: 0 or 1 `<image>` with N pages (Python multi_image_single_token).
-        // One-to-one: N `<image>` tokens with N images.
-        guard imageTokenCount == 0 || imageTokenCount == 1 || imageTokenCount == input.images.count
-        else {
+        let imageToken = imageTokenId()
+        let imagePlaceholderCount = promptTokens.count(where: { $0 == imageToken })
+        let usesFusedPlaceholder = imagePlaceholderCount == 1 && input.images.count > 1
+        guard imagePlaceholderCount == input.images.count || usesFusedPlaceholder else {
             throw VLMError.singleImageAllowed
         }
-        let multiImageSingleToken =
-            (imageTokenCount == 0 || imageTokenCount == 1) && input.images.count > 1
-        let textSplits = rawPrompt.components(separatedBy: imageToken)
 
         var pixelList = [MLXArray]()
         var localCropList = [MLXArray]()
         var spatialPairs = [Int32]()
-        var tokenized = [Int]()
-        var sequenceMask = [Bool]()
+        var imagePromptTokens = [[Int]]()
 
-        let bosId =
-            tokenizer.bosToken.flatMap { tokenizer.convertTokenToId($0) } ?? 0
-        tokenized.append(bosId)
-        sequenceMask.append(false)
-
-        for (imageIdx, media) in input.images.enumerated() {
-            let textSep: String
-            if multiImageSingleToken {
-                textSep = imageIdx == 0 ? (imageTokenCount == 0 ? "" : textSplits[0]) : ""
-            } else if imageTokenCount == input.images.count {
-                textSep = textSplits[imageIdx]
-            } else {
-                // Single image, no/one placeholder — text goes after the lattice.
-                textSep = ""
-            }
-            if !textSep.isEmpty {
-                let sepTokens = tokenizer.encode(text: textSep, addSpecialTokens: false)
-                tokenized.append(contentsOf: sepTokens)
-                sequenceMask.append(contentsOf: Array(repeating: false, count: sepTokens.count))
-            }
-
+        for media in input.images {
             let image = MediaProcessing.apply(try media.asCIImage(), processing: input.processing)
             let encoded = try encodePage(
                 image: image, mode: mode, maxNumTiles: maxNumTiles, basePadSide: basePadSide)
@@ -861,32 +815,38 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             localCropList.append(contentsOf: encoded.localCrops)
             spatialPairs.append(contentsOf: [Int32(encoded.cropWidth), Int32(encoded.cropHeight)])
 
-            let imagePromptTokens = makeImagePromptTokens(
-                mode: mode,
-                cropWidth: encoded.cropWidth,
-                cropHeight: encoded.cropHeight,
-                baseSide: mode == .base ? basePadSide : nil)
-            tokenized.append(contentsOf: imagePromptTokens)
-            sequenceMask.append(contentsOf: Array(repeating: true, count: imagePromptTokens.count))
+            imagePromptTokens.append(
+                makeImagePromptTokens(
+                    mode: mode,
+                    cropWidth: encoded.cropWidth,
+                    cropHeight: encoded.cropHeight,
+                    baseSide: mode == .base ? basePadSide : nil))
         }
 
-        let trailingText: String
-        if multiImageSingleToken {
-            trailingText =
-                imageTokenCount == 0
-                ? rawPrompt
-                : (textSplits.count > 1 ? textSplits[textSplits.count - 1] : "")
-        } else if imageTokenCount == input.images.count {
-            trailingText = textSplits.last ?? ""
-        } else {
-            // Single-page ChatSession path: full prompt after lattice (no `<image>` strip).
-            trailingText = rawPrompt
+        // Keep the complete chat-template output and replace only its image
+        // placeholders with the model's variable-size image-token lattices.
+        // A single placeholder may represent all pages in Unlimited-OCR's fused
+        // multipage form; otherwise placeholders map to pages one-to-one.
+        var tokenized = [Int]()
+        var sequenceMask = [Bool]()
+        var imageIndex = 0
+        for token in promptTokens {
+            guard token == imageToken else {
+                tokenized.append(token)
+                sequenceMask.append(false)
+                continue
+            }
+
+            let pageRange =
+                usesFusedPlaceholder ? imagePromptTokens.indices : imageIndex ..< imageIndex + 1
+            for page in pageRange {
+                tokenized.append(contentsOf: imagePromptTokens[page])
+                sequenceMask.append(
+                    contentsOf: Array(repeating: true, count: imagePromptTokens[page].count))
+            }
+            imageIndex += pageRange.count
         }
-        if !trailingText.isEmpty {
-            let textTokens = tokenizer.encode(text: trailingText, addSpecialTokens: false)
-            tokenized.append(contentsOf: textTokens)
-            sequenceMask.append(contentsOf: Array(repeating: false, count: textTokens.count))
-        }
+        guard imageIndex == input.images.count else { throw VLMError.singleImageAllowed }
 
         let localCrops =
             localCropList.isEmpty
@@ -908,7 +868,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let prepared = try await prepareForTesting(input: input)
+        let prepared = try await internalPrepare(input: input)
         let mask = ones(like: prepared.inputIds).asType(.int8)
         let spatial = prepared.imagesSpatialCrop
         var hasLocalCrops = false
@@ -945,20 +905,6 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                             spatial[0, 1].item(Int.self))
                     ])
                 : nil)
-    }
-}
-
-public struct DeepseekOCRMessageGenerator: MessageGenerator {
-    public init() {}
-
-    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        var dictionary: MLXLMCommon.Message = [
-            "role": message.role.rawValue,
-            "content": [["type": "text", "text": message.content]]
-                + message.images.map { _ in ["type": "image"] },
-        ]
-        addToolMetadata(to: &dictionary, for: message)
-        return dictionary
     }
 }
 
