@@ -2687,15 +2687,7 @@ public struct Gemma4MessageGenerator: MessageGenerator {
         } else {
             dictionary = [
                 "role": message.role.rawValue,
-                "content": message.images.map { _ in
-                    ["type": "image"]
-                }
-                    + message.videos.map { _ in
-                        ["type": "video"]
-                    }
-                    + [
-                        ["type": "text", "text": message.content]
-                    ],
+                "content": contentParts(for: message, layout: .imagesThenVideosThenText),
             ]
         }
         addToolMetadata(to: &dictionary, for: message)
