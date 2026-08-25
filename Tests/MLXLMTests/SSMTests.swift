@@ -4,6 +4,36 @@ import MLX
 import MLXLLM
 import Testing
 
+@Test func testSSMAttnSupportsGradientTransformsAcrossChunks() {
+    let x = MLXArray.ones([1, 5, 2, 2])
+    let aLog = MLXArray.zeros([2])
+    let inputMixing = MLXArray.ones([1, 5, 1, 3])
+    let outputMixing = MLXArray.ones([1, 5, 1, 3])
+    let residualScale = MLXArray.ones([2])
+    let dt = MLXArray.ones([1, 5, 2])
+    let dtBias = MLXArray.zeros([2])
+
+    let gradient = grad { input in
+        let (output, state) = ssmAttn(
+            x: input,
+            ALog: aLog,
+            B: inputMixing,
+            C: outputMixing,
+            D: residualScale,
+            dt: dt,
+            dtBias: dtBias,
+            step: 2
+        )
+        return output.sum() + state.sum()
+    }(x)
+    eval(gradient)
+
+    let magnitude = gradient.abs().sum().item(Float.self)
+    #expect(gradient.shape == x.shape)
+    #expect(magnitude.isFinite)
+    #expect(magnitude > 0)
+}
+
 @Test func testSSMAttnPreservesRecurrentStateDTypeAcrossChunks() throws {
     MLXRandom.seed(7)
 
