@@ -100,8 +100,8 @@ public class GatedDeltaTests: XCTestCase {
         )
 
         // Perturb only the trailing dims the truncating kernel would drop.
-        var qP = inputs.q
-        var kP = inputs.k
+        let qP = inputs.q
+        let kP = inputs.k
         qP[0..., 0..., 0..., 32...] = qP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
         kP[0..., 0..., 0..., 32...] = kP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
 

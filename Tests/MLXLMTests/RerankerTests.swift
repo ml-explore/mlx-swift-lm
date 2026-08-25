@@ -555,7 +555,7 @@ struct RerankerTests {
         // neither `model*.safetensors` nor its own index selects, so the head is skipped unless
         // the model asks for the file by name (#560). Check the conformance, since that is what
         // `loadWeights` looks for.
-        let provider = try #require(model as? any AdditionalWeightFilesProviding)
+        let provider = model as any AdditionalWeightFilesProviding
         #expect(provider.additionalWeightFiles == ["projector.safetensors"])
     }
 

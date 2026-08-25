@@ -62,8 +62,8 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
             eval(logits)
         }
 
-        weak var gdn = model!.modules().compactMap { $0 as? Qwen35GatedDeltaNet }.first
-        weak var moe = model!.modules().compactMap { $0 as? Qwen35SparseMoeBlock }.first
+        weak let gdn = model!.modules().compactMap { $0 as? Qwen35GatedDeltaNet }.first
+        weak let moe = model!.modules().compactMap { $0 as? Qwen35SparseMoeBlock }.first
         XCTAssertNotNil(gdn, "expected a GDN layer in the config", file: file, line: line)
         XCTAssertNotNil(moe, "expected a MoE mlp in the config", file: file, line: line)
 

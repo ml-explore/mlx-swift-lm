@@ -371,7 +371,7 @@ struct KVCacheConfigurationTests {
 
     @Test func modelCacheOwnsHybridProgressAcrossPrefillAndDecode() throws {
         let model = HybridProgressModel()
-        let storage = KVCacheStorage(try model.newCache(parameters: nil), plan: .disabled)
+        let storage = KVCacheStorage(model.newCache(parameters: nil), plan: .disabled)
         var iterator = try TokenIterator(
             input: LMInput(tokens: MLXArray([1, 2, 3])),
             model: model,

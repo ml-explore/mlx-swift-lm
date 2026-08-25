@@ -183,14 +183,14 @@ public class ParoQuantTests: XCTestCase {
     /// isolation in between. Mixes batch=1 and batch=4 so both tile sizes
     /// race into the kernel cache on the first iteration.
     func testRotateQuantizedLinearConcurrentSafe() throws {
-        let layer = try makeTestLayer(hasBias: true)
+        let layer = SharedLayerRef(try makeTestLayer(hasBias: true))
         let numTasks = 8
         let buffer = SynchronizedShapeBuffer()
 
         DispatchQueue.concurrentPerform(iterations: numTasks) { i in
             let batch = i % 2 == 0 ? 1 : 4
             let x = MLXRandom.normal([batch, 128]).asType(.float16)
-            let y = layer(x)
+            let y = layer.layer(x)
             eval(y)
             buffer.append(y.shape)
         }
@@ -202,6 +202,18 @@ public class ParoQuantTests: XCTestCase {
                 shape == [1, 64] || shape == [4, 64],
                 "Unexpected output shape under concurrent load: \(shape)")
         }
+    }
+}
+
+/// Reference used to carry one layer into the `@Sendable` closure of
+/// `DispatchQueue.concurrentPerform`. `@unchecked Sendable` because the point of
+/// `testRotateQuantizedLinearConcurrentSafe` is deliberately unsynchronized
+/// concurrent access to the shared layer.
+private final class SharedLayerRef: @unchecked Sendable {
+    let layer: RotateQuantizedLinear
+
+    init(_ layer: RotateQuantizedLinear) {
+        self.layer = layer
     }
 }
 
