@@ -1183,11 +1183,7 @@ public struct FastVLMMessageGenerator: MessageGenerator {
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content": []
-                + message.images.map { _ in
-                    ["type": "image"]
-                }
-                + [["type": "text", "text": message.content]],
+            "content": contentParts(for: message, layout: .imagesThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary

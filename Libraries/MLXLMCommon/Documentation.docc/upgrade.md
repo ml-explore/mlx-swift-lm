@@ -272,3 +272,11 @@ The `defaultHubApi` global has been removed. Hugging Face Hub access is now prov
 - `ModelFactory._load(hub:configuration:progressHandler:)` → `_load(configuration: ResolvedModelConfiguration)`
 - `ModelFactory._loadContainer`: removed (base `loadContainer` now builds the container from `_load`)
 
+### `UserInput.Image`
+
+`UserInput.Image` was an enum with `ciImage`, `url` and `array` cases. It is now a struct holding a `source` of that enum, plus an optional `label` that a vision message generator writes into the prompt as `[label]` immediately before that image.
+
+Construction is unchanged, because the three cases are now static functions with a defaulted label: `UserInput.Image.url(someURL)` still compiles. One form changes:
+
+- A pattern match moves to the source. `case .ciImage(let image) = input` becomes `case .ciImage(let image) = input.source`.
+

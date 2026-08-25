@@ -104,17 +104,70 @@ public struct UserInput {
         #endif
     }
 
-    /// Representation of an image resource.
-    public enum Image {
+    /// An image resource, and an optional name for it. A message generator writes
+    /// the name into the prompt as `[label]`, immediately before this image.
+    public struct Image {
+
+        /// Where this image's pixels come from.
+        public enum Source {
+            #if canImport(CoreImage)
+            case ciImage(CIImage)
+            #endif
+            case url(URL)
+            case array(MLXArray)
+        }
+
+        /// Where this image's pixels come from.
+        public var source: Source
+
+        /// Optional name for this image, rendered into the prompt as `[label]`.
+        ///
+        /// A model reads this as text, so a smaller vision model may shorten it or ignore
+        /// it. Do not rely on a name coming back unchanged: a short single word comes back
+        /// more often than `IMG_4021`. Avoid a name whose bracketed form is a token the
+        /// tokenizer knows, such as `IMG` on Mistral, which becomes an image placeholder.
+        public var label: String?
+
+        public init(source: Source, label: String? = nil) {
+            self.source = source
+            self.label = label
+        }
+
         #if canImport(CoreImage)
-        case ciImage(CIImage)
+        /// An image from a `CIImage`, with an optional label.
+        public static func ciImage(_ image: CIImage, label: String? = nil) -> Self {
+            Self(source: .ciImage(image), label: label)
+        }
+
+        /// An image from a `CIImage`, usable where a one-argument function is expected.
+        public static func ciImage(_ image: CIImage) -> Self {
+            Self(source: .ciImage(image))
+        }
         #endif
-        case url(URL)
-        case array(MLXArray)
+
+        /// An image from a file or remote URL, with an optional label.
+        public static func url(_ url: URL, label: String? = nil) -> Self {
+            Self(source: .url(url), label: label)
+        }
+
+        /// An image from a URL, usable where a one-argument function is expected.
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        /// An image from an `MLXArray`, with an optional label.
+        public static func array(_ array: MLXArray, label: String? = nil) -> Self {
+            Self(source: .array(array), label: label)
+        }
+
+        /// An image from an `MLXArray`, usable where a one-argument function is expected.
+        public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array))
+        }
 
         #if canImport(CoreImage)
         public func asCIImage() throws -> CIImage {
-            switch self {
+            switch source {
             case .ciImage(let image):
                 return image
 

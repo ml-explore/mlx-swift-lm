@@ -249,7 +249,7 @@ struct MultiTurnToolCallingTests {
         let transcript = try continuationTranscript()
 
         let decoded = try await container.perform { context in
-            let messages = TranscriptConverter.mlxMessages(for: transcript)
+            let messages = try TranscriptConverter.mlxMessages(for: transcript)
             let raw = DefaultMessageGenerator().generate(messages: messages)
             let tokens = try context.tokenizer.applyChatTemplate(messages: raw)
             return context.tokenizer.decode(tokenIds: tokens)
@@ -272,7 +272,7 @@ struct MultiTurnToolCallingTests {
         let transcript = try structuredContinuationTranscript()
 
         let decoded = try await container.perform { context in
-            let messages = TranscriptConverter.mlxMessages(for: transcript)
+            let messages = try TranscriptConverter.mlxMessages(for: transcript)
             let raw = DefaultMessageGenerator().generate(messages: messages)
             let tokens = try context.tokenizer.applyChatTemplate(messages: raw)
             return context.tokenizer.decode(tokenIds: tokens)

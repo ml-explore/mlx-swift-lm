@@ -906,9 +906,7 @@ public struct Mistral3MessageGenerator: MessageGenerator {
         // For Mistral3 VLM, images come before text in the content
         var dictionary: Message = [
             "role": message.role.rawValue,
-            "content": message.images.map { _ in
-                ["type": "image"]
-            } + [["type": "text", "text": message.content]],
+            "content": contentParts(for: message, layout: .imagesThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
