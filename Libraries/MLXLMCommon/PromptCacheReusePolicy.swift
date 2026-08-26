@@ -95,6 +95,35 @@ struct PromptCacheTurn: Sendable {
     var usesSpeculativeDecoding: Bool = false
 }
 
+/// What speculative-cache reuse can safely accompany the authoritative main cache.
+enum SpeculativeCacheReuseCapability: Sendable {
+    /// Aligned speculative state can follow both suffix appends and target rewinds.
+    case reusable
+
+    /// Aligned speculative state can follow suffix appends, but a rewind must
+    /// discard it and continue with the main cache only.
+    case appendOnly
+
+    /// Missing ordinary draft-model state can be reconstructed from the full prompt.
+    case rebuildableFromPrompt
+
+    /// Speculative state cannot be used, but the valid main cache may continue alone.
+    case mainOnlyFallback
+
+    /// Speculative state can neither be reused nor reconstructed for this prompt.
+    case unavailable
+
+    /// Whether an existing speculative continuation can be used without rebuilding it.
+    var canContinueWithoutRebuild: Bool {
+        switch self {
+        case .reusable, .appendOnly:
+            true
+        case .rebuildableFromPrompt, .mainOnlyFallback, .unavailable:
+            false
+        }
+    }
+}
+
 /// What the caches currently hold.
 struct PromptCacheState: Sendable {
     /// Exact tokens the main cache represents, per the session's ledger. Empty
@@ -108,29 +137,8 @@ struct PromptCacheState: Sendable {
     /// The main cache's timeline agrees with the ledger length.
     var mainCacheIsAligned: Bool = false
 
-    /// Live auxiliary state is available for speculative continuation. This
-    /// means a draft KV cache for ordinary speculation, an aligned continuation
-    /// for stateful MTP, or the stateless MTP capability itself.
-    var hasSpeculativeState: Bool = false
-
-    /// The draft cache's timeline agrees with the ledger length. This remains
-    /// `true` when the auxiliary state agrees with the target timeline.
-    var speculativeStateIsAligned: Bool = true
-
-    /// Whether auxiliary state can follow a target rewind. Stateful MTP
-    /// continuations are append-only in the first implementation.
-    var speculativeStateIsRewindable: Bool = true
-
-    /// The current full prompt can rebuild missing ordinary draft-model state
-    /// if speculation is ultimately admitted. This preserves suffix-only
-    /// target generation when a later memory-policy check falls back, while
-    /// still allowing both caches to be rebuilt before active speculation.
-    var canRebuildSpeculativeStateFromPrompt: Bool = false
-
-    /// Whether a missing or unusable speculative continuation should preserve
-    /// the valid target cache and continue target-only. Enabled for MTP; the
-    /// ordinary draft-model path retains its existing rebuild behavior.
-    var allowsMainOnlyFallback: Bool = false
+    /// The valid operations available for the auxiliary speculative state.
+    var speculativeReuseCapability: SpeculativeCacheReuseCapability = .unavailable
 
     /// Every cache supports rewinding.
     var isTrimmable: Bool = false
@@ -195,22 +203,18 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
         }
 
         if turn.usesSpeculativeDecoding {
-            if cache.hasSpeculativeState && cache.speculativeStateIsAligned {
+            switch cache.speculativeReuseCapability {
+            case .reusable, .appendOnly, .rebuildableFromPrompt:
                 return .appendSuffix(
                     suffixStart: cache.cachedTokens.count,
                     representedTokens: turn.promptTokens)
-            }
-            if cache.canRebuildSpeculativeStateFromPrompt {
-                return .appendSuffix(
-                    suffixStart: cache.cachedTokens.count,
-                    representedTokens: turn.promptTokens)
-            }
-            if cache.allowsMainOnlyFallback {
+            case .mainOnlyFallback:
                 return .appendSuffixToMain(
                     suffixStart: cache.cachedTokens.count,
                     representedTokens: turn.promptTokens)
+            case .unavailable:
+                return nil
             }
-            return nil
         }
 
         return .appendSuffix(
@@ -254,22 +258,16 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
         }
 
         if turn.usesSpeculativeDecoding {
-            if cache.hasSpeculativeState,
-                cache.speculativeStateIsAligned,
-                cache.speculativeStateIsRewindable
-            {
+            switch cache.speculativeReuseCapability {
+            case .reusable, .rebuildableFromPrompt:
                 return .trimToCommonPrefix(
                     commonPrefixLength: commonPrefixLength, trimCount: trimCount)
-            }
-            if cache.canRebuildSpeculativeStateFromPrompt {
-                return .trimToCommonPrefix(
-                    commonPrefixLength: commonPrefixLength, trimCount: trimCount)
-            }
-            if cache.allowsMainOnlyFallback {
+            case .appendOnly, .mainOnlyFallback:
                 return .trimToCommonPrefixMainOnly(
                     commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+            case .unavailable:
+                return .rebuild
             }
-            return .rebuild
         }
 
         return .trimToCommonPrefix(commonPrefixLength: commonPrefixLength, trimCount: trimCount)
