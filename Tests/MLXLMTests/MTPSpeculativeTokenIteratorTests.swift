@@ -917,6 +917,7 @@ func testMTPCarriesMainStateThroughPrimeAndVerify() throws {
     ]
     let main = MockMainModel(nextLogitTokens: mainLogitTokens)
     main.prepareLogitsStateValue = 42
+    main.emittedPositionDelta = 9
     let drafter = MockDrafter(draftedTokenValue: 5)
     let cache = CountingKVCache()
     let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
@@ -935,6 +936,14 @@ func testMTPCarriesMainStateThroughPrimeAndVerify() throws {
     _ = iter.next()
 
     #expect(main.incomingPreservedStateValues == [42, 42])
+    let exportedState = try #require(iter.state)
+    #expect(exportedState[preservedStateKey] == 42)
+    #expect(exportedState[mtpEmitFlagKey] == nil)
+    #expect(exportedState[mtpLastHiddenStatesKey] == nil)
+    #expect(exportedState[mtpSharedKVStatesKey] == nil)
+    #expect(exportedState[mtpSharedKVSourceIndicesKey] == nil)
+    #expect(exportedState[mtpSharedKVOffsetsKey] == nil)
+    #expect(exportedState[mtpPositionDeltasKey] == nil)
 }
 
 @Test

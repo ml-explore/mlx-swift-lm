@@ -73,7 +73,7 @@ struct HarmonyToolRestartRule: PromptCacheReuseRule {
         let representedTokens = cache.cachedTokens + turn.promptTokens[suffixStart...]
         let canContinueWithDraft =
             !turn.usesSpeculativeDecoding
-            || (cache.hasDraftCache && cache.draftCacheIsAligned)
+            || (cache.hasSpeculativeState && cache.speculativeStateIsAligned)
         if canContinueWithDraft {
             return .appendSuffix(
                 suffixStart: suffixStart,
