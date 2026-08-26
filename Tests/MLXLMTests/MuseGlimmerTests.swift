@@ -1433,7 +1433,7 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
+            speculativeStateIsAligned: true,
             isTrimmable: true)
 
         let decision = try #require(rule.reuse(turn: turn, cache: cache))
@@ -1466,7 +1466,7 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
+            speculativeStateIsAligned: true,
             isTrimmable: true)
 
         let decision = try #require(rule.reuse(turn: turn, cache: cache))
@@ -1499,7 +1499,7 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
+            speculativeStateIsAligned: true,
             isTrimmable: true)
 
         #expect(rule.reuse(turn: turn, cache: cache) == nil)

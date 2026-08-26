@@ -2197,7 +2197,14 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 }
 
 /// Internal variant used by `ChatSession` to keep its token-prefix record in
-/// lockstep with the KV cache.
+/// lockstep with the KV cache and receive the iterator's finalized
+/// continuation state.
+struct RecordedGenerationResult {
+    let generatedTokens: [Int]
+    let state: LMOutput.State?
+    let mtpDrafterContinuation: MTPDrafterContinuation?
+}
+
 func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
@@ -2206,7 +2213,7 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
     toolCallPolicy: ToolCallPolicy = .init()
-) -> (AsyncStream<Generation>, Task<[Int], Never>) {
+) -> (AsyncStream<Generation>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -2550,12 +2557,12 @@ private protocol GeneratedTokenCollector: Sendable {
     associatedtype Result: Sendable
 
     mutating func record(_ token: Int)
-    consuming func result() -> Result
+    consuming func result(iterator: any TokenIteratorProtocol) -> Result
 }
 
 private struct IgnoringGeneratedTokens: GeneratedTokenCollector {
     mutating func record(_ token: Int) {}
-    consuming func result() {}
+    consuming func result(iterator _: any TokenIteratorProtocol) {}
 }
 
 private struct RecordingGeneratedTokens: GeneratedTokenCollector {
@@ -2565,8 +2572,17 @@ private struct RecordingGeneratedTokens: GeneratedTokenCollector {
         tokens.append(token)
     }
 
-    consuming func result() -> [Int] {
-        tokens
+    consuming func result(
+        iterator: any TokenIteratorProtocol
+    ) -> SendableBox<RecordedGenerationResult> {
+        let mtpContinuation =
+            (iterator as? any MTPDrafterContinuationProviding)?
+            .mtpDrafterContinuation
+        return SendableBox(
+            RecordedGenerationResult(
+                generatedTokens: tokens,
+                state: iterator.state,
+                mtpDrafterContinuation: mtpContinuation))
     }
 }
 
@@ -2767,10 +2783,12 @@ private func generateLoopTask<
             // Synchronize with the stream to ensure tasks are completed
             Stream.defaultStream.synchronize()
 
+            let result = tokenCollector.result(iterator: iterator)
+
             // Finalize the stream
             continuation.finish()
 
-            return tokenCollector.result()
+            return result
         }
 
         if let ticket = wiredMemoryTicket {
@@ -2864,10 +2882,10 @@ public struct GenerateCompletionInfo: Sendable {
     /// are non-nil and proposed > 0.
     public let acceptedDraftTokens: Int?
 
-    /// Non-nil when the MTP iterator transitioned into sticky-passthrough
-    /// mode for the remainder of the stream; carries the reason string
-    /// captured at the moment of engagement. Nil if the iterator stayed
-    /// speculative for the full stream or for non-MTP streams.
+    /// Non-nil when the MTP iterator transitioned into sticky passthrough or
+    /// could not export a resumable stateful boundary. Carries the first
+    /// failure reason. Nil when speculation completed with a resumable
+    /// boundary, or for non-MTP streams.
     public let passthroughReason: String?
 
     /// Speculative decoding telemetry, when generation used speculative decoding.
