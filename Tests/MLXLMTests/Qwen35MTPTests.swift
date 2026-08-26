@@ -26,28 +26,86 @@ func testQwen35VLMTextConfigurationDecodesMTPFields() throws {
     #expect(cfg.mtpUseDedicatedEmbeddings == false)
 }
 
-@Test
-func testQwen35MTPDraftersValidateTargetFamily() throws {
-    let textConfig = try JSONDecoder().decode(
-        MLXLLM.Qwen35TextConfiguration.self,
-        from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
-    let textTarget = MLXLLM.Qwen35TextModel(textConfig)
-    let textDrafter = MLXLLM.Qwen35MTPDraftModel(textConfig)
+@Suite
+struct Qwen35MTPCompatibilityTests {
+    @Test
+    func validatesTargetFamily() throws {
+        let textConfig = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let textTarget = MLXLLM.Qwen35TextModel(textConfig)
+        let textDrafter = MLXLLM.Qwen35MTPDraftModel(textConfig)
+        let wrappedTextConfig = try JSONDecoder().decode(
+            MLXLLM.Qwen35Configuration.self,
+            from: Data(qwen35WrappedTextConfigJSON(modelType: "qwen3_5").utf8))
 
-    let vlmConfig = try JSONDecoder().decode(
-        MLXVLM.Qwen35Configuration.self,
-        from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
-    let vlmTarget = MLXVLM.Qwen35(vlmConfig)
-    let vlmDrafter = MLXVLM.Qwen35VLMNextNDraftModel(vlmConfig)
+        let vlmConfig = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let vlmTarget = MLXVLM.Qwen35(vlmConfig)
+        let vlmDrafter = MLXVLM.Qwen35VLMNextNDraftModel(vlmConfig)
 
-    try textDrafter.validateCompatibility(with: textTarget)
-    try vlmDrafter.validateCompatibility(with: vlmTarget)
+        try textDrafter.validateCompatibility(with: textTarget)
+        try textDrafter.validateCompatibility(with: MLXLLM.Qwen35Model(wrappedTextConfig))
+        try vlmDrafter.validateCompatibility(with: vlmTarget)
 
-    #expect(throws: MTPDrafterCompatibilityError.self) {
-        try textDrafter.validateCompatibility(with: vlmTarget)
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try textDrafter.validateCompatibility(with: vlmTarget)
+        }
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try vlmDrafter.validateCompatibility(with: textTarget)
+        }
     }
-    #expect(throws: MTPDrafterCompatibilityError.self) {
-        try vlmDrafter.validateCompatibility(with: textTarget)
+
+    @Test
+    func textDrafterRejectsSameFamilyDimensionMismatches() throws {
+        let drafterConfig = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let drafter = MLXLLM.Qwen35MTPDraftModel(drafterConfig)
+
+        let hiddenSizeMismatch = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1, hiddenSize: 32).utf8))
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try drafter.validateCompatibility(
+                with: MLXLLM.Qwen35TextModel(hiddenSizeMismatch))
+        }
+
+        let vocabularySizeMismatch = try JSONDecoder().decode(
+            MLXLLM.Qwen35Configuration.self,
+            from: Data(
+                qwen35WrappedTextConfigJSON(
+                    modelType: "qwen3_5", vocabularySize: 17
+                ).utf8))
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try drafter.validateCompatibility(
+                with: MLXLLM.Qwen35Model(vocabularySizeMismatch))
+        }
+    }
+
+    @Test
+    func vlmDrafterRejectsSameFamilyDimensionMismatches() throws {
+        let drafterConfig = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(drafterConfig)
+
+        let hiddenSizeMismatch = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1, hiddenSize: 32).utf8))
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try drafter.validateCompatibility(
+                with: MLXVLM.Qwen35(hiddenSizeMismatch))
+        }
+
+        let vocabularySizeMismatch = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1, vocabularySize: 17).utf8))
+        #expect(throws: MTPDrafterCompatibilityError.self) {
+            try drafter.validateCompatibility(
+                with: MLXVLM.Qwen35(vocabularySizeMismatch))
+        }
     }
 }
 
@@ -743,12 +801,14 @@ struct Qwen35MTPRegistrationTests {
 private func qwen35TextConfigJSON(
     mtpLayers: Int,
     mtpUseDedicatedEmbeddings: Bool = false,
-    numExperts: Int = 0
+    numExperts: Int = 0,
+    hiddenSize: Int = 16,
+    vocabularySize: Int = 16
 ) -> String {
     """
     {
       "model_type": "qwen3_5_text",
-      "hidden_size": 16,
+      "hidden_size": \(hiddenSize),
       "num_hidden_layers": 1,
       "intermediate_size": 32,
       "num_attention_heads": 2,
@@ -760,7 +820,7 @@ private func qwen35TextConfigJSON(
       "linear_value_head_dim": 8,
       "linear_conv_kernel_dim": 2,
       "rms_norm_eps": 1e-6,
-      "vocab_size": 16,
+      "vocab_size": \(vocabularySize),
       "rope_theta": 100000.0,
       "partial_rotary_factor": 0.25,
       "max_position_embeddings": 64,
@@ -782,11 +842,18 @@ private func qwen35TextConfigJSON(
     """
 }
 
-private func qwen35VLMConfigJSON(mtpLayers: Int) -> String {
+private func qwen35VLMConfigJSON(
+    mtpLayers: Int,
+    hiddenSize: Int = 16,
+    vocabularySize: Int = 16
+) -> String {
     """
     {
       "model_type": "qwen3_5",
-      "text_config": \(qwen35TextConfigJSON(mtpLayers: mtpLayers)),
+      "text_config": \(qwen35TextConfigJSON(
+          mtpLayers: mtpLayers,
+          hiddenSize: hiddenSize,
+          vocabularySize: vocabularySize)),
       "vision_config": {
         "model_type": "qwen3_5_vit",
         "depth": 1,
@@ -803,11 +870,18 @@ private func qwen35VLMConfigJSON(mtpLayers: Int) -> String {
     """
 }
 
-private func qwen35WrappedTextConfigJSON(modelType: String) -> String {
+private func qwen35WrappedTextConfigJSON(
+    modelType: String,
+    hiddenSize: Int = 16,
+    vocabularySize: Int = 16
+) -> String {
     """
     {
       "model_type": "\(modelType)",
-      "text_config": \(qwen35TextConfigJSON(mtpLayers: 1))
+      "text_config": \(qwen35TextConfigJSON(
+          mtpLayers: 1,
+          hiddenSize: hiddenSize,
+          vocabularySize: vocabularySize))
     }
     """
 }
