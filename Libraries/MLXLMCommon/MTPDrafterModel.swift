@@ -248,6 +248,32 @@ public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
     ) -> Bool
 }
 
+/// Normalize a shifted drafter cache at a resumable target boundary.
+///
+/// Shifted MTP drafters pair each input token with the target hidden state from
+/// the preceding position. At a generation boundary their private cache must
+/// therefore end one position before the target cache so the saved boundary
+/// hidden state can bridge the next prompt suffix.
+package func finalizeShiftedMTPDrafterState(
+    targetProcessedTokenCount: Int,
+    discardedTargetTokens: Int,
+    state: inout MTPDrafterState
+) -> Bool {
+    let trim = discardedTargetTokens + 1
+    guard state.proposalAppended == 0,
+        targetProcessedTokenCount > 0,
+        state.nextPosition == targetProcessedTokenCount + discardedTargetTokens,
+        state.nextPosition >= trim,
+        trimPromptCache(state.cache, numTokens: trim) == trim
+    else { return false }
+
+    state.nextPosition -= trim
+    state.seedToken = nil
+    state.seedHidden = nil
+    return state.nextPosition == targetProcessedTokenCount - 1
+        && state.cache.allSatisfy { $0.offset == state.nextPosition }
+}
+
 /// Iterator-owned MTP continuation carried atomically with a ChatSession's
 /// target cache, target model state, and transcript.
 ///
