@@ -133,7 +133,9 @@ jobs:
   # needs a macOS 27 host, which no hosted image offers yet (see #499).
   integration_build_xcode27:
     needs: lint
-    if: github.repository == 'ml-explore/mlx-swift-lm'
+    # Temporarily disabled. To restore, put back:
+    #   if: github.repository == 'ml-explore/mlx-swift-lm'
+    if: false
     # Public preview label, see actions/runner-images#14404.
     runs-on: xcode-27
     timeout-minutes: 60
