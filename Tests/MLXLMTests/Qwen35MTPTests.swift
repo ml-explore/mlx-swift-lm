@@ -501,6 +501,51 @@ struct Qwen35MTPMetalTests {
     }
 
     @Test
+    func testQwen35VLMChatSessionResumesActualDrafterState() async throws {
+        let cfg = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXVLM.Qwen35(cfg)
+        let tokenizer = ReversibleQwenMTPTokenizer()
+        let processor = ReversibleQwenMTPInputProcessor(tokenizer: tokenizer)
+        let context = ModelContext(
+            configuration: processor.configuration,
+            model: target,
+            processor: processor,
+            tokenizer: tokenizer)
+        let drafterContainer = MTPDrafterContainer(
+            context: MTPDrafterContext(
+                configuration: processor.configuration,
+                model: MLXVLM.Qwen35VLMNextNDraftModel(cfg)))
+        let speculative = ChatSession(
+            context,
+            speculativeDecoding: try SpeculativeDecodingConfig(
+                mtpDrafter: drafterContainer, blockSize: 2),
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+        let targetOnly = ChatSession(
+            context,
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+
+        let firstPrompt = tokenizer.text(for: 1)
+        let secondPrompt = tokenizer.text(for: 2)
+        let speculativeFirst = try await collectQwenChatDetails(
+            speculative.streamDetails(to: firstPrompt))
+        let targetFirst = try await collectQwenChatDetails(
+            targetOnly.streamDetails(to: firstPrompt))
+        let speculativeSecond = try await collectQwenChatDetails(
+            speculative.streamDetails(to: secondPrompt))
+        let targetSecond = try await collectQwenChatDetails(
+            targetOnly.streamDetails(to: secondPrompt))
+
+        #expect(speculativeFirst.text == targetFirst.text)
+        #expect(speculativeSecond.text == targetSecond.text)
+        #expect(speculativeSecond.info.promptTokenCount == 2)
+        #expect(speculativeSecond.info.cachedPromptTokenCount > 0)
+        #expect((speculativeSecond.info.proposedDraftTokens ?? 0) > 0)
+        #expect(speculativeSecond.info.passthroughReason == nil)
+    }
+
+    @Test
     func testQwen35GDNCheckpointMatchesPrefixWithoutReplayingProjections() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
