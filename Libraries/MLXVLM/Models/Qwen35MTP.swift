@@ -158,19 +158,10 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
         positionDeltas _: MLXArray?,
         state: inout MTPDrafterState
     ) -> Bool {
-        let trim = discardedTargetTokens + 1
-        guard state.proposalAppended == 0,
-            targetProcessedTokenCount > 0,
-            state.nextPosition == targetProcessedTokenCount + discardedTargetTokens,
-            state.nextPosition >= trim,
-            trimPromptCache(state.cache, numTokens: trim) == trim
-        else { return false }
-
-        state.nextPosition -= trim
-        state.seedToken = nil
-        state.seedHidden = nil
-        return state.nextPosition == targetProcessedTokenCount - 1
-            && state.cache.allSatisfy { $0.offset == state.nextPosition }
+        finalizeShiftedMTPDrafterState(
+            targetProcessedTokenCount: targetProcessedTokenCount,
+            discardedTargetTokens: discardedTargetTokens,
+            state: &state)
     }
 
     public func resumeDrafterState(
