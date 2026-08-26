@@ -1193,13 +1193,23 @@ public final class ChatSession {
                                 ordinaryDraftCacheIsAligned = true
                             }
 
-                            let hasSpeculativeState =
-                                usesMTP ? mtpSpeculativeStateIsReady : draftKVCache != nil
-                            let speculativeStateIsAligned =
-                                usesMTP
-                                ? mtpSpeculativeStateIsReady : ordinaryDraftCacheIsAligned
-                            let speculativeStateIsRewindable =
-                                usesMTP ? !mtpIsStateful : ordinaryDraftCacheIsAligned
+                            let speculativeReuseCapability: SpeculativeCacheReuseCapability
+                            if usesMTP {
+                                if !mtpSpeculativeStateIsReady {
+                                    speculativeReuseCapability = .mainOnlyFallback
+                                } else if mtpIsStateful {
+                                    speculativeReuseCapability = .appendOnly
+                                } else {
+                                    speculativeReuseCapability = .reusable
+                                }
+                            } else if draftKVCache != nil {
+                                speculativeReuseCapability =
+                                    ordinaryDraftCacheIsAligned ? .reusable : .unavailable
+                            } else if speculativeDecoding != nil {
+                                speculativeReuseCapability = .rebuildableFromPrompt
+                            } else {
+                                speculativeReuseCapability = .unavailable
+                            }
 
                             let turn = PromptCacheTurn(
                                 promptTokens: promptTokenIds,
@@ -1217,12 +1227,7 @@ public final class ChatSession {
                                 cachedTokens: cachedTokenIds,
                                 processedTokenCount: kvCache.processedTokenCount,
                                 mainCacheIsAligned: mainCacheIsAligned,
-                                hasSpeculativeState: hasSpeculativeState,
-                                speculativeStateIsAligned: speculativeStateIsAligned,
-                                speculativeStateIsRewindable: speculativeStateIsRewindable,
-                                canRebuildSpeculativeStateFromPrompt:
-                                    !usesMTP && draftKVCache == nil,
-                                allowsMainOnlyFallback: usesMTP,
+                                speculativeReuseCapability: speculativeReuseCapability,
                                 isTrimmable: canTrimPromptCache(kvCache.cache)
                                     && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
 
