@@ -48,8 +48,8 @@ struct HarmonyToolRestartRuleTests {
             cachedTokens: cached,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            hasDraftCache: hasDraft,
-            draftCacheIsAligned: draftAligned,
+            hasSpeculativeState: hasDraft,
+            speculativeStateIsAligned: draftAligned,
             isTrimmable: true)
     }
 

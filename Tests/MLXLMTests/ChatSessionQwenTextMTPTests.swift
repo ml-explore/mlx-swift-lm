@@ -60,8 +60,50 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.passthroughReason == nil)
     }
 
-    @Test("second text turn rebuilds MTP from the full rendered transcript")
-    func secondTextTurnUsesFullTranscriptColdRebuild() async throws {
+    @Test("a target-only sampling turn drops the warm MTP continuation")
+    func samplingChangeDropsMTPContinuationWithoutDroppingTargetCache() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        session.generateParameters.temperature = 0.6
+        let targetOnly = try await collect(session.streamDetails(to: "b"))
+        session.generateParameters.temperature = 0
+        let afterDrop = try await collect(session.streamDetails(to: "c"))
+
+        #expect(targetOnly.info.promptTokenCount == 2)
+        #expect(targetOnly.info.cachedPromptTokenCount > 0)
+        #expect(targetOnly.info.proposedDraftTokens == nil)
+        // A target-only pass commits its final token directly, so the next
+        // append has only the new user token left to prefill.
+        #expect(afterDrop.info.promptTokenCount == 1)
+        #expect(afterDrop.info.cachedPromptTokenCount > 0)
+        #expect(afterDrop.info.proposedDraftTokens == nil)
+    }
+
+    @Test("a cache-plan change rebuilds target and MTP state together")
+    func cachePlanChangeRebuildsMTPContinuation() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        session.generateParameters.maxKVSize = 64
+        let rebuilt = try await collect(session.streamDetails(to: "b"))
+
+        #expect(rebuilt.info.cachedPromptTokenCount == 0)
+        #expect(rebuilt.info.promptTokenCount > 2)
+        #expect((rebuilt.info.proposedDraftTokens ?? 0) > 0)
+        #expect(rebuilt.info.passthroughReason == nil)
+    }
+
+    @Test("second text turn resumes MTP from the warm prompt cache")
+    func secondTextTurnResumesWarmMTP() async throws {
         let session = ChatSession(
             makeModelContext(),
             speculativeDecoding: try makeMTPConfiguration(),
@@ -72,9 +114,10 @@ struct ChatSessionQwenTextMTPTests {
         let second = try await collect(session.streamDetails(to: "b"))
 
         #expect(first.text == "xxxx")
-        // Three rendered messages (user/assistant/user) plus the final
-        // generation marker: 3 + 6 + 3 + 1 tokens.
-        #expect(second.info.promptTokenCount == 13)
+        // The fixture's transcript render is append-only: the fourth generated
+        // token and the new user token are the only uncached suffix.
+        #expect(second.info.promptTokenCount == 2)
+        #expect(second.info.cachedPromptTokenCount > 0)
         #expect((second.info.proposedDraftTokens ?? 0) > 0)
         #expect(second.info.passthroughReason == nil)
     }
@@ -95,6 +138,26 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.passthroughReason == nil)
     }
 
+    @Test("non-resumable stateful MTP preserves target cache and falls back target-only")
+    func nonResumableStatefulMTPFallsBackWithoutRebuildingTarget() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(
+                model: NonResumableMTPDrafter()),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        let first = try await collect(session.streamDetails(to: "a"))
+        let second = try await collect(session.streamDetails(to: "b"))
+
+        #expect((first.info.proposedDraftTokens ?? 0) > 0)
+        #expect(second.info.promptTokenCount == 2)
+        #expect(second.info.cachedPromptTokenCount > 0)
+        #expect(second.info.proposedDraftTokens == nil)
+        #expect(second.info.acceptedDraftTokens == nil)
+        #expect(second.info.speculativeDecodingTelemetry == nil)
+    }
+
     @Test("raw prompt cache keeps its prefix and falls back to target-only generation")
     func rawPromptCacheFallsBackWithoutDiscardingPrefix() async throws {
         let rawCache = KVCacheSimple()
@@ -112,12 +175,12 @@ struct ChatSessionQwenTextMTPTests {
         let result = try await collect(session.streamDetails(to: "a"))
         let status = try await session.cacheStatus()
 
-        #expect(result.info.promptTokenCount == 4)
+        #expect(result.info.promptTokenCount == 1)
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
         #expect(result.info.speculativeDecodingTelemetry == nil)
-        // Existing raw prefix (3) + rendered fragment (4) + generated tokens (4).
-        #expect(status.processedTokenCount == 11)
+        // Existing raw prefix (3) + rendered fragment (1) + generated tokens (4).
+        #expect(status.processedTokenCount == 8)
     }
 
     @Test("prepared media falls back to target-only and retains the main cache")
@@ -139,11 +202,37 @@ struct ChatSessionQwenTextMTPTests {
         let result = try await collect(session.streamDetails(to: "a"))
         let status = try await session.cacheStatus()
 
-        #expect(result.info.promptTokenCount == 4)
+        #expect(result.info.promptTokenCount == 1)
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
         #expect(result.info.speculativeDecodingTelemetry == nil)
-        #expect(status.processedTokenCount == 8)
+        #expect(status.processedTokenCount == 5)
+    }
+
+    @Test("prepared media discards an existing MTP continuation target-only")
+    func preparedMediaDropsWarmMTPContinuation() async throws {
+        let tokenizer = DeterministicMTPTokenizer()
+        let processor = SecondTurnMediaMTPInputProcessor(tokenizer: tokenizer)
+        let context = ModelContext(
+            configuration: processor.configuration,
+            model: MTPStateEmittingTarget(),
+            processor: processor,
+            tokenizer: tokenizer
+        )
+        let session = ChatSession(
+            context,
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        let first = try await collect(session.streamDetails(to: "a"))
+        let second = try await collect(session.streamDetails(to: "b"))
+
+        #expect((first.info.proposedDraftTokens ?? 0) > 0)
+        #expect(second.info.promptTokenCount == 2)
+        #expect(second.info.cachedPromptTokenCount > 0)
+        #expect(second.info.proposedDraftTokens == nil)
+        #expect(second.info.speculativeDecodingTelemetry == nil)
     }
 
     @Test("consumer cancellation finalizes MTP before a clean next turn")
@@ -168,7 +257,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.text == "xxxx")
         // The cancelled assistant turn is not retained; the new user turn is
         // rendered from a clean transcript and cold-prefilled with MTP.
-        #expect(result.info.promptTokenCount == 4)
+        #expect(result.info.promptTokenCount == 1)
         #expect((result.info.proposedDraftTokens ?? 0) > 0)
         #expect(result.info.passthroughReason == nil)
         #expect(
@@ -176,8 +265,8 @@ struct ChatSessionQwenTextMTPTests {
                 == result.info.promptTokenCount + result.info.generationTokenCount - 1)
     }
 
-    @Test("automatic tool restart cold-prefills the full transcript with MTP")
-    func automaticToolRestartUsesFullTranscriptColdPrefill() async throws {
+    @Test("automatic tool restart resumes MTP from the warm prompt cache")
+    func automaticToolRestartResumesWarmMTP() async throws {
         let probe = ToolRestartProbe()
         let tokenizer = ToolRestartMTPTokenizer(probe: probe)
         let processor = ToolRestartMTPInputProcessor(tokenizer: tokenizer)
@@ -235,7 +324,9 @@ struct ChatSessionQwenTextMTPTests {
         let firstInfo = try #require(result.infos.first)
         let restartInfo = try #require(result.infos.last)
         #expect(firstInfo.promptTokenCount == 10)
-        #expect(restartInfo.promptTokenCount == 37)
+        #expect(
+            restartInfo.cachedPromptTokenCount
+                == firstInfo.promptTokenCount + firstInfo.generationTokenCount - 1)
         for info in result.infos {
             #expect(info.speculativeDecodingTelemetry != nil)
             #expect((info.proposedDraftTokens ?? 0) > 0)
@@ -245,7 +336,8 @@ struct ChatSessionQwenTextMTPTests {
         // MTP round, so it deliberately has no K/V row yet.
         #expect(
             status.processedTokenCount
-                == restartInfo.promptTokenCount + restartInfo.generationTokenCount - 1)
+                == restartInfo.cachedPromptTokenCount + restartInfo.promptTokenCount
+                + restartInfo.generationTokenCount - 1)
     }
 
     private func makeModelContext() -> ModelContext {
@@ -262,10 +354,20 @@ struct ChatSessionQwenTextMTPTests {
     private func makeMTPConfiguration(
         requiresPromptPrefill: Bool = true
     ) throws -> SpeculativeDecodingConfig {
+        let model: any MTPDrafterModel =
+            requiresPromptPrefill
+            ? QwenStyleMTPDrafter()
+            : StatelessMTPDrafter()
+        return try makeMTPConfiguration(model: model)
+    }
+
+    private func makeMTPConfiguration(
+        model: any MTPDrafterModel
+    ) throws -> SpeculativeDecodingConfig {
         let container = MTPDrafterContainer(
             context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "qwen-mtp-test"),
-                model: QwenStyleMTPDrafter(requiresPromptPrefill: requiresPromptPrefill)
+                model: model
             )
         )
         return try SpeculativeDecodingConfig(mtpDrafter: container, blockSize: 2)
@@ -310,7 +412,7 @@ private struct DeterministicMTPTokenizer: Tokenizer {
     var unknownToken: String? { nil }
 
     func encode(text: String, addSpecialTokens _: Bool) -> [Int] {
-        Array(repeating: 7, count: text.unicodeScalars.count)
+        text.unicodeScalars.map { $0 == "x" ? 4 : 7 }
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens _: Bool) -> String {
@@ -330,26 +432,11 @@ private struct DeterministicMTPTokenizer: Tokenizer {
         tools _: [[String: any Sendable]]?,
         additionalContext _: [String: any Sendable]?
     ) throws -> [Int] {
-        var tokens: [Int] = []
-        for message in messages {
-            switch message["role"] as? String {
-            case "user":
-                tokens.append(1)
-            case "assistant":
-                tokens.append(2)
-            case "system":
-                tokens.append(3)
-            case "tool":
-                tokens.append(5)
-            default:
-                tokens.append(6)
-            }
-            let content = message["content"] as? String ?? ""
-            tokens.append(contentsOf: encode(text: content, addSpecialTokens: false))
-            tokens.append(8)
+        messages.flatMap { message in
+            encode(
+                text: message["content"] as? String ?? "",
+                addSpecialTokens: false)
         }
-        tokens.append(9)
-        return tokens
     }
 }
 
@@ -375,6 +462,34 @@ private struct PreparedMediaMTPInputProcessor: UserInputProcessor {
     func prepare(input: UserInput) async throws -> LMInput {
         let base = DeterministicMTPInputProcessor(tokenizer: tokenizer)
         let prepared = try await base.prepare(input: input)
+        return LMInput(
+            text: prepared.text,
+            image: .init(pixels: MLXArray.zeros([1, 1, 1, 1]))
+        )
+    }
+}
+
+private final class SecondTurnMediaMTPInputProcessor: UserInputProcessor, @unchecked Sendable {
+    let tokenizer: DeterministicMTPTokenizer
+    let configuration = ModelConfiguration(id: "qwen-mtp-media-switch-test")
+
+    private let lock = NSLock()
+    private var prepareCount = 0
+
+    init(tokenizer: DeterministicMTPTokenizer) {
+        self.tokenizer = tokenizer
+    }
+
+    func prepare(input: UserInput) async throws -> LMInput {
+        let base = DeterministicMTPInputProcessor(tokenizer: tokenizer)
+        let prepared = try await base.prepare(input: input)
+
+        let includesMedia = lock.withLock {
+            prepareCount += 1
+            return prepareCount > 1
+        }
+
+        guard includesMedia else { return prepared }
         return LMInput(
             text: prepared.text,
             image: .init(pixels: MLXArray.zeros([1, 1, 1, 1]))
@@ -486,7 +601,9 @@ private final class ToolRestartMTPTokenizer: Tokenizer, @unchecked Sendable {
             case "user":
                 tokens.append(1)
             case "assistant":
-                tokens.append(2)
+                // Match the generation marker below so a rendered assistant
+                // tool call extends the exact live generation trajectory.
+                tokens.append(9)
             case "tool":
                 tokens.append(5)
             default:
@@ -495,7 +612,9 @@ private final class ToolRestartMTPTokenizer: Tokenizer, @unchecked Sendable {
             let content = message["content"] as? String ?? ""
             tokens.append(contentsOf: encode(text: content, addSpecialTokens: false))
             if let toolCalls = message["tool_calls"] as? [[String: any Sendable]] {
-                tokens.append(contentsOf: Array(repeating: 6, count: toolCalls.count * 3))
+                // The scripted first pass emits 24 token-4 values. Re-render
+                // those exact tool-call tokens so the restart is append-only.
+                tokens.append(contentsOf: Array(repeating: 4, count: toolCalls.count * 24))
             }
             tokens.append(8)
         }
@@ -581,21 +700,44 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
 
 /// Qwen-like contract: private per-stream state, prompt prefill, greedy-only,
 /// no dependency on target-shared K/V, and one drafted token per round.
-private final class QwenStyleMTPDrafter: Module, StatefulMTPDrafterModel {
+private final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
     var maximumBlockSize: Int? { 2 }
-    var requiresSharedTargetKV: Bool { !requiresPromptPrefill }
-    let requiresPromptPrefill: Bool
+    var requiresSharedTargetKV: Bool { false }
+    let requiresPromptPrefill = true
     var requiresGreedySampling: Bool { true }
-
-    init(requiresPromptPrefill: Bool = true) {
-        self.requiresPromptPrefill = requiresPromptPrefill
-        super.init()
-    }
 
     func validateCompatibility(with _: any LanguageModel) throws {}
 
     func makeState(parameters _: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])
+    }
+
+    func finalizeDrafterState(
+        target _: any LanguageModel,
+        targetBoundaryHidden _: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens _: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool {
+        state.nextPosition = targetProcessedTokenCount
+        state.seedToken = nil
+        state.seedHidden = nil
+        state.proposalAppended = 0
+        return true
+    }
+
+    func resumeDrafterState(
+        target _: any LanguageModel,
+        suffixTokens _: MLXArray,
+        suffixTargetHidden _: MLXArray,
+        targetBoundaryHidden _: MLXArray,
+        firstBonus _: MLXArray,
+        positionDeltas _: MLXArray?,
+        state _: inout MTPDrafterState,
+        sampler _: any LogitSampler
+    ) -> Bool {
+        true
     }
 
     func draftBlock(
@@ -630,5 +772,60 @@ private final class QwenStyleMTPDrafter: Module, StatefulMTPDrafterModel {
             Array(repeating: Int32(4), count: batchSize * (blockSize - 1)),
             [batchSize, blockSize - 1]
         )
+    }
+}
+
+/// Gemma-style MTP fixture: all conditioning state comes from the target, so
+/// no iterator-owned continuation is needed between turns.
+private class StatelessMTPDrafter: Module, MTPDrafterModel {
+    var maximumBlockSize: Int? { 2 }
+    var requiresSharedTargetKV: Bool { true }
+    var requiresPromptPrefill: Bool { false }
+
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
+    func draftBlock(
+        target _: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden _: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)],
+        positionDeltas _: MLXArray?,
+        queryOffset _: Int,
+        blockSize: Int,
+        sampler _: any LogitSampler
+    ) -> MLXArray {
+        MLXArray(
+            Array(repeating: Int32(4), count: lastToken.dim(0) * (blockSize - 1)),
+            [lastToken.dim(0), blockSize - 1])
+    }
+}
+
+/// Stateful but deliberately lacking `ResumableMTPDrafterModel`. It proves
+/// that the capability is additive and absence degrades only speculation.
+private final class NonResumableMTPDrafter: StatelessMTPDrafter,
+    StatefulMTPDrafterModel
+{
+    override var requiresSharedTargetKV: Bool { false }
+    override var requiresPromptPrefill: Bool { true }
+
+    func makeState(parameters _: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state _: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        draftBlock(
+            target: target, lastToken: lastToken, lastHidden: lastHidden,
+            sharedKV: sharedKV, positionDeltas: positionDeltas,
+            queryOffset: queryOffset, blockSize: blockSize, sampler: sampler)
     }
 }

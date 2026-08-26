@@ -204,6 +204,71 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     )
 }
 
+/// Optional capability for stateful MTP drafters whose private state can be
+/// normalized at a generation boundary and resumed from a later prompt suffix.
+///
+/// `ChatSession` deliberately does not know how a drafter's cache is shifted,
+/// which seed values are speculative, or how target hidden states must be
+/// paired with suffix tokens. The MTP iterator owns that lifecycle and calls
+/// this interface at the model seam. Stateful drafters that do not conform are
+/// still usable for cold generations; a warm target cache continues without
+/// speculation rather than combining it with a fresh drafter state.
+public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
+    /// Convert `state` to a canonical boundary after the target cache has
+    /// discarded any verified-but-unemitted lookahead.
+    ///
+    /// Return `false` when the private state cannot be proven to represent the
+    /// supplied target position. The caller then keeps the target cache and
+    /// drops only the MTP continuation.
+    func finalizeDrafterState(
+        target: any LanguageModel,
+        targetBoundaryHidden: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool
+
+    /// Extend a canonical boundary over a prompt suffix and prime the next
+    /// speculative round.
+    ///
+    /// `targetBoundaryHidden` is the hidden state of the final token already
+    /// represented by the warm target cache. `suffixTargetHidden` contains one
+    /// row per newly evaluated suffix token, and `firstBonus` is the token
+    /// sampled after that suffix.
+    func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+}
+
+/// Iterator-owned MTP continuation carried atomically with a ChatSession's
+/// target cache, target model state, and transcript.
+///
+/// `targetProcessedTokenCount` is only an alignment witness. The authoritative
+/// position remains `KVCacheStorage.processedTokenCount`.
+package struct MTPDrafterContinuation {
+    package var state: MTPDrafterState
+    package let targetBoundaryHidden: MLXArray
+    package let targetProcessedTokenCount: Int
+
+    package init(
+        state: consuming MTPDrafterState,
+        targetBoundaryHidden: MLXArray,
+        targetProcessedTokenCount: Int
+    ) {
+        self.state = consume state
+        self.targetBoundaryHidden = targetBoundaryHidden
+        self.targetProcessedTokenCount = targetProcessedTokenCount
+    }
+}
+
 extension StatefulMTPDrafterModel {
     public func prepareDrafterState(
         target _: any LanguageModel,
@@ -360,8 +425,8 @@ public protocol MTPStatsCollecting {
     /// Total tokens accepted by the target across all speculation rounds.
     var acceptedDraftTokens: Int { get }
 
-    /// nil if the iterator stayed in speculative mode for the full stream;
-    /// non-nil if sticky-passthrough engaged, with the reason string captured
-    /// at the moment of engagement.
+    /// Nil when speculation completed with a resumable boundary. Non-nil if
+    /// sticky passthrough engaged or a stateful continuation had to be
+    /// discarded, with the first failure reason captured by the iterator.
     var passthroughReason: String? { get }
 }

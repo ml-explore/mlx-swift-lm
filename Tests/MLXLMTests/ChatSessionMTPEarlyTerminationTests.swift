@@ -27,26 +27,27 @@ struct ChatSessionMTPEarlyTerminationTests {
 
         let stoppedStatus = try await session.cacheStatus()
         #expect(stoppedStatus.phase == .realized)
-        // Four prompt tokens plus the emitted bonus and terminating EOS are
+        // One prompt token plus the emitted bonus and terminating EOS are
         // represented. The other accepted EOS draft was lookahead and must
         // have been removed by generation finalization.
-        #expect(stoppedStatus.processedTokenCount == 6)
+        #expect(stoppedStatus.processedTokenCount == 3)
 
         let second = try await collect(session.streamDetails(to: "b"))
 
         #expect(second.text == "xxxx")
-        // user("a"), assistant("x"), user("b") each render to three
-        // tokens; the generation marker contributes the tenth token.
-        #expect(second.info.promptTokenCount == 10)
+        // The cached transcript includes the committed EOS boundary; only
+        // the new user token is prefilled on the resumed pass.
+        #expect(second.info.promptTokenCount == 1)
+        #expect(second.info.cachedPromptTokenCount == 3)
         #expect(second.info.stopReason == .length)
         #expect(second.info.proposedDraftTokens == 2)
         #expect(second.info.acceptedDraftTokens == 2)
 
         let continuedStatus = try await session.cacheStatus()
         #expect(continuedStatus.phase == .realized)
-        // The ten-token transcript plus three generated tokens represented
-        // in K/V; the final sampled token remains the next decode input.
-        #expect(continuedStatus.processedTokenCount == 13)
+        // Three cached tokens, one suffix token, and three generated tokens
+        // represented in K/V; the final sample remains the next decode input.
+        #expect(continuedStatus.processedTokenCount == 7)
     }
 
     private func makeModelContext() -> ModelContext {
@@ -93,7 +94,7 @@ private struct EarlyTerminationMTPTokenizer: Tokenizer {
     var unknownToken: String? { nil }
 
     func encode(text: String, addSpecialTokens _: Bool) -> [Int] {
-        Array(repeating: 7, count: text.unicodeScalars.count)
+        text.unicodeScalars.map { $0 == "x" ? 4 : 7 }
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens _: Bool) -> String {
@@ -113,26 +114,14 @@ private struct EarlyTerminationMTPTokenizer: Tokenizer {
         tools _: [[String: any Sendable]]?,
         additionalContext _: [String: any Sendable]?
     ) throws -> [Int] {
-        var tokens: [Int] = []
-        for message in messages {
-            switch message["role"] as? String {
-            case "user":
-                tokens.append(1)
-            case "assistant":
-                tokens.append(2)
-            case "system":
-                tokens.append(3)
-            case "tool":
-                tokens.append(5)
-            default:
-                tokens.append(6)
-            }
+        messages.flatMap { message in
             let content = message["content"] as? String ?? ""
-            tokens.append(contentsOf: encode(text: content, addSpecialTokens: false))
-            tokens.append(8)
+            var rendered = encode(text: content, addSpecialTokens: false)
+            if message["role"] as? String == "assistant" {
+                rendered.append(15)
+            }
+            return rendered
         }
-        tokens.append(9)
-        return tokens
     }
 }
 
@@ -214,7 +203,7 @@ private final class EarlyTerminationMTPTarget: Module, LanguageModel, KVCacheDim
 /// The first four-token prompt proposes EOS for every available draft position;
 /// later full-transcript prompts propose ordinary token 4. Query offset makes
 /// this behavior per-stream and deterministic without mutable model state.
-private final class EarlyTerminationMTPDrafter: Module, StatefulMTPDrafterModel {
+private final class EarlyTerminationMTPDrafter: Module, ResumableMTPDrafterModel {
     var maximumBlockSize: Int? { 4 }
     var requiresSharedTargetKV: Bool { false }
     var requiresPromptPrefill: Bool { true }
@@ -224,6 +213,34 @@ private final class EarlyTerminationMTPDrafter: Module, StatefulMTPDrafterModel 
 
     func makeState(parameters _: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [])
+    }
+
+    func finalizeDrafterState(
+        target _: any LanguageModel,
+        targetBoundaryHidden _: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens _: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool {
+        state.nextPosition = targetProcessedTokenCount
+        state.seedToken = nil
+        state.seedHidden = nil
+        state.proposalAppended = 0
+        return true
+    }
+
+    func resumeDrafterState(
+        target _: any LanguageModel,
+        suffixTokens _: MLXArray,
+        suffixTargetHidden _: MLXArray,
+        targetBoundaryHidden _: MLXArray,
+        firstBonus _: MLXArray,
+        positionDeltas _: MLXArray?,
+        state _: inout MTPDrafterState,
+        sampler _: any LogitSampler
+    ) -> Bool {
+        true
     }
 
     func draftBlock(
@@ -260,7 +277,7 @@ private final class EarlyTerminationMTPDrafter: Module, StatefulMTPDrafterModel 
         queryOffset: Int,
         blockSize: Int
     ) -> MLXArray {
-        let token = queryOffset == 4 ? Int32(15) : Int32(4)
+        let token = queryOffset == 1 ? Int32(15) : Int32(4)
         return MLXArray(
             Array(repeating: token, count: batchSize * (blockSize - 1)),
             [batchSize, blockSize - 1]

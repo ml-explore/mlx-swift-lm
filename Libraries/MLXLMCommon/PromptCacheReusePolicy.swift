@@ -21,14 +21,18 @@ enum PromptCacheReuseDecision: Equatable {
     /// reproduce, in which case the ledger diverges from the render by design.
     case appendSuffix(suffixStart: Int, representedTokens: [Int])
 
-    /// Feed a suffix into the main cache while discarding an unusable draft
-    /// cache. The current generation must use the main model only; a later
-    /// turn may rebuild a draft cache from a reproducible prompt.
+    /// Feed a suffix into the main cache while discarding unusable speculative
+    /// state (an ordinary draft cache or an MTP continuation). The current
+    /// generation must use the main model only.
     case appendSuffixToMain(suffixStart: Int, representedTokens: [Int])
 
     /// Rewind every cache by `trimCount` (down to `commonPrefixLength`), then
     /// feed `promptTokens[commonPrefixLength...]`.
     case trimToCommonPrefix(commonPrefixLength: Int, trimCount: Int)
+
+    /// Rewind only the target cache, discard speculative state, and continue
+    /// target-only from the common prefix.
+    case trimToCommonPrefixMainOnly(commonPrefixLength: Int, trimCount: Int)
 
     /// The cache cannot be reconciled with this prompt. Discard it, drop any
     /// carried model state, and feed the whole prompt.
@@ -37,7 +41,8 @@ enum PromptCacheReuseDecision: Equatable {
     /// `true` when a non-empty cached prefix is carried into this turn.
     var reusesCachedPrefix: Bool {
         switch self {
-        case .appendSuffix, .appendSuffixToMain, .trimToCommonPrefix:
+        case .appendSuffix, .appendSuffixToMain, .trimToCommonPrefix,
+            .trimToCommonPrefixMainOnly:
             return true
         case .prefillAll, .rebuild:
             return false
@@ -103,14 +108,29 @@ struct PromptCacheState: Sendable {
     /// The main cache's timeline agrees with the ledger length.
     var mainCacheIsAligned: Bool = false
 
-    /// A live draft cache is available for the next generation.
-    var hasDraftCache: Bool = false
+    /// Live auxiliary state is available for speculative continuation. This
+    /// means a draft KV cache for ordinary speculation, an aligned continuation
+    /// for stateful MTP, or the stateless MTP capability itself.
+    var hasSpeculativeState: Bool = false
 
     /// The draft cache's timeline agrees with the ledger length. This remains
-    /// `true` when no draft exists so generic main-only cache decisions keep
-    /// their existing behavior; protocol rules can inspect `hasDraftCache`
-    /// when absence matters.
-    var draftCacheIsAligned: Bool = true
+    /// `true` when the auxiliary state agrees with the target timeline.
+    var speculativeStateIsAligned: Bool = true
+
+    /// Whether auxiliary state can follow a target rewind. Stateful MTP
+    /// continuations are append-only in the first implementation.
+    var speculativeStateIsRewindable: Bool = true
+
+    /// The current full prompt can rebuild missing ordinary draft-model state
+    /// if speculation is ultimately admitted. This preserves suffix-only
+    /// target generation when a later memory-policy check falls back, while
+    /// still allowing both caches to be rebuilt before active speculation.
+    var canRebuildSpeculativeStateFromPrompt: Bool = false
+
+    /// Whether a missing or unusable speculative continuation should preserve
+    /// the valid target cache and continue target-only. Enabled for MTP; the
+    /// ordinary draft-model path retains its existing rebuild behavior.
+    var allowsMainOnlyFallback: Bool = false
 
     /// Every cache supports rewinding.
     var isTrimmable: Bool = false
@@ -166,12 +186,30 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
         guard !cache.cachedTokens.isEmpty,
             cache.mainCacheIsAligned,
-            cache.draftCacheIsAligned,
             !turn.carriesNewMedia,
             !turn.carriesAttentionMask,
             turn.promptTokens.count > cache.cachedTokens.count,
             turn.promptTokens.starts(with: cache.cachedTokens)
         else {
+            return nil
+        }
+
+        if turn.usesSpeculativeDecoding {
+            if cache.hasSpeculativeState && cache.speculativeStateIsAligned {
+                return .appendSuffix(
+                    suffixStart: cache.cachedTokens.count,
+                    representedTokens: turn.promptTokens)
+            }
+            if cache.canRebuildSpeculativeStateFromPrompt {
+                return .appendSuffix(
+                    suffixStart: cache.cachedTokens.count,
+                    representedTokens: turn.promptTokens)
+            }
+            if cache.allowsMainOnlyFallback {
+                return .appendSuffixToMain(
+                    suffixStart: cache.cachedTokens.count,
+                    representedTokens: turn.promptTokens)
+            }
             return nil
         }
 
@@ -201,7 +239,6 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && commonPrefixLength < turn.promptTokens.count
             && trimCount > 0
             && cache.mainCacheIsAligned
-            && cache.draftCacheIsAligned
             && cache.isTrimmable
             && !turn.carriesNewMedia
             && !turn.carriesPreparedMedia
@@ -213,6 +250,25 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             // or this input carries state/media that cannot be rewound safely.
             // Rebuild rather than combining a mismatched prompt with stale
             // model state.
+            return .rebuild
+        }
+
+        if turn.usesSpeculativeDecoding {
+            if cache.hasSpeculativeState,
+                cache.speculativeStateIsAligned,
+                cache.speculativeStateIsRewindable
+            {
+                return .trimToCommonPrefix(
+                    commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+            }
+            if cache.canRebuildSpeculativeStateFromPrompt {
+                return .trimToCommonPrefix(
+                    commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+            }
+            if cache.allowsMainOnlyFallback {
+                return .trimToCommonPrefixMainOnly(
+                    commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+            }
             return .rebuild
         }
 

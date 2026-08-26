@@ -319,6 +319,188 @@ struct Qwen35MTPMetalTests {
     }
 
     @Test
+    func testQwen35TextDrafterFinalizesAndResumesCanonicalBoundary() throws {
+        let cfg = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXLLM.Qwen35TextModel(cfg)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
+
+        var targetState = LMOutput.State()
+        targetState[mtpEmitFlagKey] = true
+        let targetOutput = target(LMInput.Text(tokens: prompt), cache: nil, state: targetState)
+        let promptHidden = try #require(targetOutput.state?[mtpLastHiddenStatesKey])
+
+        var state = drafter.makeState(parameters: nil)
+        var bonus = MLXArray([Int32(4)])
+        drafter.prepareDrafterState(
+            target: target, promptTokens: prompt, targetHidden: promptHidden,
+            firstBonus: bonus, positionDeltas: nil, state: &state, sampler: sampler)
+        let proposal = drafter.draftBlock(
+            target: target, lastToken: bonus,
+            lastHidden: promptHidden[0..., (-1)..., 0...], sharedKV: [:],
+            positionDeltas: nil, queryOffset: 3, blockSize: 2,
+            state: &state, sampler: sampler)
+        let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        bonus = MLXArray([Int32(5)])
+        drafter.commitDrafterState(
+            target: target, targetHidden: verifyHidden, draftTokens: proposal,
+            acceptedCount: 1, finalToken: bonus, positionDeltas: nil,
+            state: &state, sampler: sampler)
+        eval(state.seedToken!, state.seedHidden!)
+        #expect(state.nextPosition == 5)
+        #expect(state.cache.allSatisfy { $0.offset == 5 })
+
+        let boundaryHidden = verifyHidden[0..., 1 ..< 2, 0...]
+        #expect(
+            drafter.finalizeDrafterState(
+                target: target, targetBoundaryHidden: boundaryHidden,
+                targetProcessedTokenCount: 5, discardedTargetTokens: 0,
+                positionDeltas: nil, state: &state))
+        #expect(state.nextPosition == 4)
+        #expect(state.cache.allSatisfy { $0.offset == 4 })
+        #expect(state.seedToken == nil)
+        #expect(state.seedHidden == nil)
+
+        let suffix = MLXArray([Int32(6), 7]).reshaped([1, 2])
+        let suffixHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        #expect(
+            drafter.resumeDrafterState(
+                target: target, suffixTokens: suffix,
+                suffixTargetHidden: suffixHidden,
+                targetBoundaryHidden: boundaryHidden,
+                firstBonus: MLXArray([Int32(8)]), positionDeltas: nil,
+                state: &state, sampler: sampler))
+        eval(state.seedToken!, state.seedHidden!)
+        #expect(state.nextPosition == 7)
+        #expect(state.cache.allSatisfy { $0.offset == 7 })
+    }
+
+    @Test
+    func testQwen35TextDrafterFinalizationAlsoDiscardsTargetLookahead() throws {
+        let cfg = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXLLM.Qwen35TextModel(cfg)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
+        let hidden = MLXArray.zeros([1, 3, cfg.hiddenSize])
+        var state = drafter.makeState(parameters: nil)
+        drafter.prepareDrafterState(
+            target: target, promptTokens: prompt, targetHidden: hidden,
+            firstBonus: MLXArray([Int32(4)]), positionDeltas: nil,
+            state: &state, sampler: sampler)
+        let proposal = drafter.draftBlock(
+            target: target, lastToken: MLXArray([Int32(4)]),
+            lastHidden: hidden[0..., (-1)..., 0...], sharedKV: [:],
+            positionDeltas: nil, queryOffset: 3, blockSize: 2,
+            state: &state, sampler: sampler)
+        let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        drafter.commitDrafterState(
+            target: target, targetHidden: verifyHidden, draftTokens: proposal,
+            acceptedCount: 1, finalToken: MLXArray([Int32(5)]),
+            positionDeltas: nil, state: &state, sampler: sampler)
+
+        #expect(state.nextPosition == 5)
+        #expect(
+            drafter.finalizeDrafterState(
+                target: target,
+                targetBoundaryHidden: verifyHidden[0..., ..<1, 0...],
+                targetProcessedTokenCount: 4, discardedTargetTokens: 1,
+                positionDeltas: nil, state: &state))
+        #expect(state.nextPosition == 3)
+        #expect(state.cache.allSatisfy { $0.offset == 3 })
+    }
+
+    @Test
+    func testQwen35VLMDrafterResumeKeepsPositionDeltaAlignment() throws {
+        let cfg = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXVLM.Qwen35(cfg)
+        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
+        let hidden = MLXArray.zeros([1, 3, cfg.textConfiguration.hiddenSize])
+        let positionDeltas = MLXArray([Int32(2)])
+        var state = drafter.makeState(parameters: nil)
+
+        drafter.prepareDrafterState(
+            target: target, promptTokens: prompt, targetHidden: hidden,
+            firstBonus: MLXArray([Int32(4)]), positionDeltas: positionDeltas,
+            state: &state, sampler: sampler)
+        #expect(state.nextPosition == 3)
+        #expect(
+            drafter.finalizeDrafterState(
+                target: target,
+                targetBoundaryHidden: hidden[0..., (-1)..., 0...],
+                targetProcessedTokenCount: 3, discardedTargetTokens: 0,
+                positionDeltas: positionDeltas, state: &state))
+        #expect(state.nextPosition == 2)
+
+        #expect(
+            drafter.resumeDrafterState(
+                target: target,
+                suffixTokens: MLXArray([Int32(5), 6]).reshaped([1, 2]),
+                suffixTargetHidden: MLXArray.zeros(
+                    [1, 2, cfg.textConfiguration.hiddenSize]),
+                targetBoundaryHidden: hidden[0..., (-1)..., 0...],
+                firstBonus: MLXArray([Int32(7)]),
+                positionDeltas: positionDeltas, state: &state, sampler: sampler))
+        eval(state.seedToken!, state.seedHidden!)
+        #expect(state.nextPosition == 5)
+        #expect(state.cache.allSatisfy { $0.offset == 5 })
+    }
+
+    @Test
+    func testQwen35TextChatSessionResumesActualDrafterState() async throws {
+        let cfg = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXLLM.Qwen35TextModel(cfg)
+        let tokenizer = ReversibleQwenMTPTokenizer()
+        let processor = ReversibleQwenMTPInputProcessor(tokenizer: tokenizer)
+        let context = ModelContext(
+            configuration: processor.configuration,
+            model: target,
+            processor: processor,
+            tokenizer: tokenizer)
+        let drafterContainer = MTPDrafterContainer(
+            context: MTPDrafterContext(
+                configuration: processor.configuration,
+                model: MLXLLM.Qwen35MTPDraftModel(cfg)))
+        let speculative = ChatSession(
+            context,
+            speculativeDecoding: try SpeculativeDecodingConfig(
+                mtpDrafter: drafterContainer, blockSize: 2),
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+        let targetOnly = ChatSession(
+            context,
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+
+        let firstPrompt = tokenizer.text(for: 1)
+        let secondPrompt = tokenizer.text(for: 2)
+        let speculativeFirst = try await collectQwenChatDetails(
+            speculative.streamDetails(to: firstPrompt))
+        let targetFirst = try await collectQwenChatDetails(
+            targetOnly.streamDetails(to: firstPrompt))
+        let speculativeSecond = try await collectQwenChatDetails(
+            speculative.streamDetails(to: secondPrompt))
+        let targetSecond = try await collectQwenChatDetails(
+            targetOnly.streamDetails(to: secondPrompt))
+
+        #expect(speculativeFirst.text == targetFirst.text)
+        #expect(speculativeSecond.text == targetSecond.text)
+        #expect(speculativeSecond.info.promptTokenCount == 2)
+        #expect(speculativeSecond.info.cachedPromptTokenCount > 0)
+        #expect((speculativeSecond.info.proposedDraftTokens ?? 0) > 0)
+        #expect(speculativeSecond.info.passthroughReason == nil)
+    }
+
+    @Test
     func testQwen35GDNCheckpointMatchesPrefixWithoutReplayingProjections() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
@@ -396,6 +578,71 @@ struct Qwen35MTPMetalTests {
         #expect(allClose(restored[0], checkpointConv, rtol: 0, atol: 0).item(Bool.self))
         #expect(allClose(restored[1], checkpointState, rtol: 0, atol: 0).item(Bool.self))
     }
+}
+
+private struct ReversibleQwenMTPTokenizer: Tokenizer {
+    private let scalarBase = 0xE000
+
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    func text(for token: Int) -> String {
+        String(UnicodeScalar(scalarBase + token)!)
+    }
+
+    func encode(text: String, addSpecialTokens _: Bool) -> [Int] {
+        text.unicodeScalars.map { scalar in
+            let value = Int(scalar.value) - scalarBase
+            return (0 ..< 16).contains(value) ? value : 1
+        }
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens _: Bool) -> String {
+        tokenIds.map(text(for:)).joined()
+    }
+
+    func convertTokenToId(_: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { text(for: id) }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools _: [[String: any Sendable]]?,
+        additionalContext _: [String: any Sendable]?
+    ) throws -> [Int] {
+        messages.flatMap { message in
+            encode(
+                text: message["content"] as? String ?? "",
+                addSpecialTokens: false)
+        }
+    }
+}
+
+private struct ReversibleQwenMTPInputProcessor: UserInputProcessor {
+    let tokenizer: ReversibleQwenMTPTokenizer
+    let configuration = ModelConfiguration(id: "tiny-qwen-mtp-chat-session")
+
+    func prepare(input: UserInput) async throws -> LMInput {
+        let messages = DefaultMessageGenerator().generate(from: input)
+        return LMInput(
+            tokens: MLXArray(
+                try tokenizer.applyChatTemplate(
+                    messages: messages,
+                    tools: input.tools,
+                    additionalContext: input.additionalContext)))
+    }
+}
+
+private func collectQwenChatDetails(
+    _ stream: AsyncThrowingStream<Generation, Error>
+) async throws -> (text: String, info: GenerateCompletionInfo) {
+    var text = ""
+    var info: GenerateCompletionInfo?
+    for try await event in stream {
+        text += event.chunk ?? ""
+        if let completion = event.info { info = completion }
+    }
+    return (text, try #require(info))
 }
 
 @Suite(.serialized)

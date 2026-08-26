@@ -19,7 +19,8 @@ struct PromptCacheReusePolicyTests {
         preparedMedia: Bool = false,
         attentionMask: Bool = false,
         modelState: Bool = false,
-        toolResultContinuation: Bool = false
+        toolResultContinuation: Bool = false,
+        speculative: Bool = false
     ) -> PromptCacheTurn {
         PromptCacheTurn(
             promptTokens: prompt,
@@ -27,7 +28,8 @@ struct PromptCacheReusePolicyTests {
             carriesPreparedMedia: preparedMedia,
             carriesAttentionMask: attentionMask,
             carriesModelState: modelState,
-            isToolResultContinuation: toolResultContinuation)
+            isToolResultContinuation: toolResultContinuation,
+            usesSpeculativeDecoding: speculative)
     }
 
     /// A cache whose model-wide timeline agrees with `cached`, unless
@@ -35,7 +37,11 @@ struct PromptCacheReusePolicyTests {
     private func alignedCache(
         _ cached: [Int],
         processed: Int? = nil,
+        hasSpeculativeState: Bool = false,
         draftAligned: Bool = true,
+        speculativeStateIsRewindable: Bool = true,
+        canRebuildSpeculativeStateFromPrompt: Bool = false,
+        allowsMainOnlyFallback: Bool = false,
         trimmable: Bool = true
     ) -> PromptCacheState {
         let processedTokenCount = processed ?? cached.count
@@ -43,7 +49,11 @@ struct PromptCacheReusePolicyTests {
             cachedTokens: cached,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            draftCacheIsAligned: draftAligned,
+            hasSpeculativeState: hasSpeculativeState,
+            speculativeStateIsAligned: draftAligned,
+            speculativeStateIsRewindable: speculativeStateIsRewindable,
+            canRebuildSpeculativeStateFromPrompt: canRebuildSpeculativeStateFromPrompt,
+            allowsMainOnlyFallback: allowsMainOnlyFallback,
             isTrimmable: trimmable)
     }
 
@@ -91,10 +101,20 @@ struct PromptCacheReusePolicyTests {
 
     @Test func `a misaligned draft cache blocks suffix reuse`() {
         let decision = PromptCacheReusePolicy().decide(
-            turn: turn(prompt: [1, 2, 3, 4]),
-            cache: alignedCache([1, 2, 3], draftAligned: false))
+            turn: turn(prompt: [1, 2, 3, 4], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3], hasSpeculativeState: true, draftAligned: false))
 
         #expect(decision == .rebuild)
+    }
+
+    @Test func `a missing ordinary draft remains tentatively rebuildable`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 3, 4], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3], canRebuildSpeculativeStateFromPrompt: true))
+
+        #expect(decision == .appendSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
     }
 
     @Test func `new media invalidates the cached text prefix`() {
@@ -111,6 +131,31 @@ struct PromptCacheReusePolicyTests {
         #expect(decision == .rebuild)
     }
 
+    @Test func `aligned resumable MTP state appends only the suffix`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 3, 4], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3], hasSpeculativeState: true,
+                speculativeStateIsRewindable: false,
+                allowsMainOnlyFallback: true))
+
+        #expect(decision == .appendSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+    }
+
+    @Test func `missing MTP continuation preserves the target prefix target-only`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 3, 4], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3], hasSpeculativeState: false, draftAligned: false,
+                speculativeStateIsRewindable: false,
+                allowsMainOnlyFallback: true))
+
+        #expect(
+            decision
+                == .appendSuffixToMain(
+                    suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+    }
+
     // MARK: - Rewind to the common prefix
 
     @Test func `a divergent prompt rewinds to the common prefix`() {
@@ -125,6 +170,31 @@ struct PromptCacheReusePolicyTests {
         #expect(
             PromptCacheReusePolicy().decide(
                 turn: turn(prompt: [9, 9, 9]), cache: alignedCache([1, 2, 3])) == .rebuild)
+    }
+
+    @Test func `stateful MTP rewind keeps only the authoritative target cache`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3, 4, 5], hasSpeculativeState: true,
+                speculativeStateIsRewindable: false,
+                allowsMainOnlyFallback: true))
+
+        #expect(
+            decision
+                == .trimToCommonPrefixMainOnly(
+                    commonPrefixLength: 2, trimCount: 3))
+    }
+
+    @Test func `stateless MTP can follow a target rewind`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3, 4, 5], hasSpeculativeState: true,
+                speculativeStateIsRewindable: true,
+                allowsMainOnlyFallback: true))
+
+        #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
     }
 
     @Test(arguments: [
