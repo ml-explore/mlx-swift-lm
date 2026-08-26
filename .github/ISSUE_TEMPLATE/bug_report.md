@@ -7,6 +7,9 @@ assignees: ''
 
 ---
 
+- [ ] I have read this issue in full and approve it as my own, however it was
+      drafted.
+
 **Describe the bug**
 A clear and concise description of what the bug is.
 
