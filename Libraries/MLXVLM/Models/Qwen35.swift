@@ -1247,7 +1247,7 @@ public class Qwen35: Module, VLMModel {
         {
             return try prepareContinuation(
                 input, inputIds: inputIds2D, cache: cache, cacheOffset: cacheOffset,
-                positionOffset: positionOffset, prefill: prefill)
+                positionOffset: positionOffset, state: state, prefill: prefill)
         }
 
         let (pixelValues, imageFrames, videoFrames, inputEmbeddings) =
@@ -1297,13 +1297,17 @@ public class Qwen35: Module, VLMModel {
     /// image-free prefix). The returned state carries the rope delta the
     /// post-image text tail resumes with (`getRopeIndex` delta − `P`), so a
     /// caller threading state end-to-end continues that tail with the ordinary
-    /// flat-continuation branch. Decode stays caller-owned.
+    /// flat-continuation branch. When the caller requests MTP state, each
+    /// chunk's target hidden rows are retained and joined while the final
+    /// chunk supplies the cache metadata, so a warm drafter can resume over
+    /// the complete remainder. Decode stays caller-owned.
     private func prepareContinuation(
         _ input: LMInput,
         inputIds: MLXArray,
         cache: [any KVCache],
         cacheOffset: Int,
         positionOffset: Int,
+        state: LMOutput.State?,
         prefill: PrefillParameters
     ) throws -> PrepareResult {
         let remainderLength = inputIds.dim(-1)
@@ -1338,14 +1342,16 @@ public class Qwen35: Module, VLMModel {
         // un-evaluated graph while letting the GPU run window i as the CPU
         // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
+        let emitDrafterState = state?[mtpEmitFlagKey] ?? false
+        var emittedHiddenStates: [MLXArray] = []
 
         /// One forward over `range`, slicing positions and embeddings in lockstep.
         func forward(_ range: Range<Int>) -> LMOutput {
-            languageModel(
+            let output = languageModel(
                 inputIds[0..., range],
                 inputsEmbeds: inputEmbeddings.map { $0[0..., range, 0...] },
                 cache: typedCache,
-                state: nil,
+                state: state,
                 mask: nil,
                 positionIds: positionIds[0..., 0..., range],
                 // Never the pixels: a non-nil value here clears the carried
@@ -1354,6 +1360,10 @@ public class Qwen35: Module, VLMModel {
                 imageGridTHW: nil,
                 videoGridTHW: nil
             )
+            if emitDrafterState, let hidden = output.state?[mtpLastHiddenStatesKey] {
+                emittedHiddenStates.append(hidden)
+            }
+            return output
         }
 
         let processed = try prefill.forEachChunk(total: remainderLength) { range in
@@ -1366,7 +1376,7 @@ public class Qwen35: Module, VLMModel {
             eval(typedCache)
         }
 
-        let lastLogits = forward(processed ..< remainderLength).logits
+        let lastOutput = forward(processed ..< remainderLength)
         prefill.progress?(remainderLength, remainderLength)
 
         // Seed the post-image text tail's anchor. The vendor's flat-continuation
@@ -1374,11 +1384,19 @@ public class Qwen35: Module, VLMModel {
         // after this remainder `tailCacheOffset = P + remainderLength`, so the
         // delta the tail needs is the offset-frame `getRopeIndex` delta minus
         // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
-        return .logits(
-            LMOutput(
-                logits: lastLogits,
-                state: QwenVL.continuationResumeState(
-                    ropeDeltas: ropeDeltas, cacheOffset: cacheOffset, key: ropeDeltasKey)))
+        let resumeDelta = ropeDeltas - MLXArray(Int32(cacheOffset))
+        var resumeState = lastOutput.state ?? state ?? LMOutput.State()
+        resumeState[precomputedPositionIdsKey] = nil
+        resumeState[ropeDeltasKey] = resumeDelta
+        if emitDrafterState, !emittedHiddenStates.isEmpty {
+            resumeState[mtpLastHiddenStatesKey] =
+                emittedHiddenStates.count == 1
+                ? emittedHiddenStates[0]
+                : concatenated(emittedHiddenStates, axis: 1)
+            resumeState[mtpPositionDeltasKey] = resumeDelta
+        }
+
+        return .logits(LMOutput(logits: lastOutput.logits, state: resumeState))
     }
 
     public func callAsFunction(
