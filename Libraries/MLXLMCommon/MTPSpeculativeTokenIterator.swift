@@ -45,6 +45,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var mainCache: [KVCache] { mainCacheStorage.cache }
     var kvCachePlan: KVCachePlan { mainCacheStorage.plan }
     var drafterState: MTPDrafterState?
+    private var continuationToResume: MTPDrafterContinuation?
+    private var finalizedContinuation: MTPDrafterContinuation?
+
+    /// Hidden state of the final token currently represented by the target
+    /// cache. This is the architecture-neutral seam a resumable drafter uses
+    /// to bridge a later prompt suffix.
+    private var targetBoundaryHidden: MLXArray?
+    private var lastVerifyHidden: MLXArray?
+    private var lastVerifyStart = 0
+    private var lastVerifyAccepted = 0
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
@@ -85,6 +95,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     private var telemetry = SpeculativeDecodingTelemetry()
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
         telemetry.roundCount > 0 ? telemetry : nil
+    }
+
+    /// Target-owned continuation state with transient MTP exchange values
+    /// removed. Model-owned anchors such as VLM M-RoPE deltas remain intact.
+    public var state: LMOutput.State? {
+        persistentTargetState(from: mainState)
     }
 
     public mutating func discardGeneratedToken() {
@@ -131,6 +147,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mainModel: any LanguageModel,
         drafter: any MTPDrafterModel,
         mainCacheStorage: KVCacheStorage,
+        mainState: LMOutput.State? = nil,
+        mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
         blockSize: Int,
         components: GenerationComponents = .init()
@@ -152,7 +170,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.drafter = drafter
 
         self.mainCacheStorage = mainCacheStorage
-        self.drafterState = (drafter as? any StatefulMTPDrafterModel)?
+        self.mainState = mainState
+        self.continuationToResume = mtpContinuation
+        self.drafterState =
+            mtpContinuation?.state
+            ?? (drafter as? any StatefulMTPDrafterModel)?
             .makeState(parameters: parameters)
 
         self.sampler = parameters.sampler()
@@ -195,9 +217,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         var mtpPrefill = parameters.prefill
-        if drafter.requiresPromptPrefill {
+        if drafter.requiresPromptPrefill || continuationToResume != nil {
             // The target must expose one hidden row per prompt token so a
-            // private Qwen MTP cache can be filled with the shifted prompt.
+            // private MTP cache can be filled or resumed over the suffix.
             // Until model-specific chunk aggregation is available, use the
             // reference single-forward computation for this architecture.
             mtpPrefill.stepSize = Int.max
@@ -241,16 +263,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         let inputLength = input.text.cacheSequenceLength
+        let cachePositionBeforePrefill = mainCacheStorage.processedTokenCount
+        let needsFullPromptHidden = drafter.requiresPromptPrefill || continuationToResume != nil
 
-        var prefillState = LMOutput.State()
+        let persistentState = persistentTargetState(from: mainState)
+        var prefillState = persistentState ?? LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
-        // Note: the drafter is primed via an explicit follow-up forward call
-        // after prefill (one position, the bonus token) rather than by
-        // passing `prefillState` into `prepare` — the emit flag is meant for
-        // exactly one position, not the whole prompt.
+        // Stateful drafters and warm continuations need one hidden row per
+        // prompt token, so their `prepare` call receives the emit flag. Other
+        // drafters are primed by the explicit one-token follow-up below.
 
         let incomingPrefillState: LMOutput.State? =
-            drafter.requiresPromptPrefill ? prefillState : nil
+            needsFullPromptHidden ? prefillState : persistentState
         switch try mainModel.prepare(
             input, cache: mainCache, state: incomingPrefillState, prefill: prefill)
         {
@@ -317,10 +341,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // is one extra token's forward pass; acceptable. Skipped once the
             // snapshot has been refused: it exists only to obtain drafter
             // state, and this stream has stopped having a use for any.
-            if placeable,
+            let missingRequiredDrafterState =
                 mainState?[mtpLastHiddenStatesKey] == nil
-                    || mainState?[mtpSharedKVStatesKey] == nil
-            {
+                || (drafter.requiresSharedTargetKV
+                    && mainState?[mtpSharedKVStatesKey] == nil)
+            if placeable, missingRequiredDrafterState {
                 var primeState = mainState ?? prefillState
                 primeState[mtpEmitFlagKey] = true
                 let primed = mainModel(y[text: .newAxis], cache: mainCache, state: primeState)
@@ -356,16 +381,53 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
         }
 
-        if drafter.requiresPromptPrefill,
-            let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
-            var currentDrafterState = drafterState,
-            let targetHidden = mainState?[mtpLastHiddenStatesKey]
-        {
-            let promptLength = input.text.tokens.dim(-1)
-            guard targetHidden.dim(1) >= promptLength else {
+        let promptLength = input.text.tokens.dim(-1)
+        if let targetHidden = mainState?[mtpLastHiddenStatesKey], targetHidden.dim(1) > 0 {
+            targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
+        }
+
+        if let continuation = continuationToResume {
+            defer { continuationToResume = nil }
+            guard continuation.targetProcessedTokenCount == cachePositionBeforePrefill,
+                let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
+                var currentDrafterState = drafterState,
+                let suffixTargetHidden = mainState?[mtpLastHiddenStatesKey],
+                suffixTargetHidden.dim(1) >= promptLength
+            else {
                 switchToPassthrough(
                     reason:
-                        "target did not emit full prompt hidden states for Qwen MTP prefill"
+                        "MTP continuation is missing target suffix state or is not aligned; continuing without speculation"
+                )
+                return
+            }
+
+            let resumed = resumableDrafter.resumeDrafterState(
+                target: mainModel,
+                suffixTokens: input.text.tokens,
+                suffixTargetHidden: suffixTargetHidden[0..., ..<promptLength, 0...],
+                targetBoundaryHidden: continuation.targetBoundaryHidden,
+                firstBonus: y.tokens,
+                positionDeltas: mainState?[mtpPositionDeltasKey],
+                state: &currentDrafterState,
+                sampler: sampler)
+            guard resumed else {
+                switchToPassthrough(
+                    reason:
+                        "MTP drafter refused the warm continuation; continuing without speculation"
+                )
+                return
+            }
+            drafterState = currentDrafterState
+        } else if drafter.requiresPromptPrefill {
+            guard cachePositionBeforePrefill == 0,
+                let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+                var currentDrafterState = drafterState,
+                let targetHidden = mainState?[mtpLastHiddenStatesKey],
+                targetHidden.dim(1) >= promptLength
+            else {
+                switchToPassthrough(
+                    reason:
+                        "stateful MTP drafter cannot initialize from a warm target suffix; continuing without speculation"
                 )
                 return
             }
@@ -378,9 +440,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 state: &currentDrafterState,
                 sampler: sampler)
             drafterState = currentDrafterState
-        } else if drafter.requiresPromptPrefill {
+        } else if cachePositionBeforePrefill > 0,
+            drafter is any StatefulMTPDrafterModel
+        {
             switchToPassthrough(
-                reason: "target did not emit drafter state for Qwen MTP prompt prefill")
+                reason:
+                    "stateful MTP drafter has no warm continuation; continuing without speculation"
+            )
         }
 
         try kvCachePlan.applyAndValidate(to: mainCacheStorage)
@@ -404,7 +470,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
             let draftBudget = Swift.min(remaining - 1, blockSize - 1)
             guard draftBudget > 0 else {
-                if let token = passthroughStep() {
+                if let token = passthroughStep(maintainingDrafterState: true) {
                     pendingTokens.append(token)
                 }
                 return
@@ -563,6 +629,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         proposedCount += numDraft
         acceptedCount += accepted
         lastRoundAccepted = accepted
+        if let verifyHidden = mainResult.state?[mtpLastHiddenStatesKey] {
+            lastVerifyHidden = verifyHidden
+            lastVerifyStart = verifyStart
+            lastVerifyAccepted = accepted
+            targetBoundaryHidden =
+                verifyHidden[0..., (verifyStart + accepted) ..< (verifyStart + accepted + 1), 0...]
+        }
         telemetry.recordRound(
             drafted: numDraft,
             accepted: accepted,
@@ -650,12 +723,22 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mainState?[mtpPositionDeltasKey] = nil
     }
 
-    /// One single-token forward step against the main model, used in
-    /// passthrough mode. The drafter is not invoked.
-    private mutating func passthroughStep() -> Int? {
+    /// One single-token forward step against the main model.
+    ///
+    /// Sticky passthrough leaves the drafter alone. A one-token generation
+    /// tail can instead advance stateful drafter state as an empty proposal,
+    /// preserving an exact continuation at the final target boundary.
+    private mutating func passthroughStep(
+        maintainingDrafterState: Bool = false
+    ) -> Int? {
         if let maxTokens, tokenCount >= maxTokens { return nil }
 
-        let result = mainModel(y[text: .newAxis], cache: mainCache, state: mainState)
+        var stepState = mainState
+        if maintainingDrafterState {
+            stepState = stepState ?? LMOutput.State()
+            stepState?[mtpEmitFlagKey] = true
+        }
+        let result = mainModel(y[text: .newAxis], cache: mainCache, state: stepState)
         mainState = result.state
         mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
         var logits = result.logits[0..., -1, 0...]
@@ -664,6 +747,33 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.didSample(token: token)
         eval(token)
         let tokenInt = token.item(Int.self)
+
+        if maintainingDrafterState,
+            let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+            var currentDrafterState = drafterState,
+            let targetHidden = result.state?[mtpLastHiddenStatesKey],
+            targetHidden.dim(1) > 0
+        {
+            statefulDrafter.commitDrafterState(
+                target: mainModel,
+                targetHidden: targetHidden,
+                draftTokens: MLXArray.zeros([0], dtype: token.dtype),
+                acceptedCount: 0,
+                finalToken: token,
+                positionDeltas: result.state?[mtpPositionDeltasKey],
+                state: &currentDrafterState,
+                sampler: sampler)
+            drafterState = currentDrafterState
+            targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
+        } else if maintainingDrafterState,
+            drafter is any StatefulMTPDrafterModel
+        {
+            switchToPassthrough(
+                reason:
+                    "MTP drafter could not follow the final target-only token; continuation discarded"
+            )
+        }
+
         y = .init(tokens: token)
         kvCachePlan.apply(to: mainCacheStorage)
         return tokenInt
@@ -726,7 +836,11 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         // A fully consumed all-accepted round can still retain the recurrent
         // checkpoint used for early-finalization rollback. Release it even
         // when no committed lookahead remains.
-        defer { discardSpeculativePromptCacheCheckpoints(mainCache) }
+        var discardedTargetTokens = 0
+        defer {
+            discardSpeculativePromptCacheCheckpoints(mainCache)
+            finalizeDrafterContinuation(discardedTargetTokens: discardedTargetTokens)
+        }
         let consumed = Swift.min(pendingIndex, committedPendingTokenCount)
         let lookahead = committedPendingTokenCount - consumed
         guard lookahead > 0 else { return }
@@ -744,11 +858,76 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
             // A staged round keeps what a wrapped ring needs to undo committed lookahead exactly.
             rewound = mainCacheStorage.rewindLastRound(lookahead)
         }
+        discardedTargetTokens = rewound
+        if rewound == lookahead, let lastVerifyHidden {
+            let retainedAccepted = lastVerifyAccepted - lookahead
+            targetBoundaryHidden =
+                lastVerifyHidden[
+                    0...,
+                    (lastVerifyStart + retainedAccepted)
+                        ..< (lastVerifyStart + retainedAccepted + 1),
+                    0...
+                ]
+        } else if rewound != lookahead {
+            // The target cache itself remains authoritative, but there is no
+            // exact hidden-state witness from which a drafter may resume.
+            targetBoundaryHidden = nil
+        }
         // The only site that ignores the result, and the only one that can: the stream is over,
         // so nothing reads the snapshot after this. Everywhere else a refusal stops speculation.
         reconcileSharedKVState(
             &mainState, discarding: rewound,
             lengths: mainCacheStorage.emittedLength(forLeaf:))
+    }
+
+    private mutating func finalizeDrafterContinuation(discardedTargetTokens: Int) {
+        finalizedContinuation = nil
+        guard !passthrough else { return }
+        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel else { return }
+        guard mainCacheStorage.processedTokenCount > 0 else { return }
+        guard var currentDrafterState = drafterState, let targetBoundaryHidden else {
+            passthroughReason =
+                "MTP continuation boundary could not be normalized; continuation discarded"
+            return
+        }
+
+        guard
+            resumableDrafter.finalizeDrafterState(
+                target: mainModel,
+                targetBoundaryHidden: targetBoundaryHidden,
+                targetProcessedTokenCount: mainCacheStorage.processedTokenCount,
+                discardedTargetTokens: discardedTargetTokens,
+                positionDeltas: mainState?[mtpPositionDeltasKey],
+                state: &currentDrafterState)
+        else {
+            passthroughReason =
+                "MTP drafter state could not be normalized; continuation discarded"
+            return
+        }
+
+        // The continuation crosses back from the generation task only after
+        // all of its lazy MLX values have been settled.
+        var arrays = [targetBoundaryHidden]
+        arrays.append(contentsOf: currentDrafterState.cache.flatMap(\.state))
+        if let seedToken = currentDrafterState.seedToken { arrays.append(seedToken) }
+        if let seedHidden = currentDrafterState.seedHidden { arrays.append(seedHidden) }
+        eval(arrays)
+
+        drafterState = currentDrafterState
+        finalizedContinuation = MTPDrafterContinuation(
+            state: currentDrafterState,
+            targetBoundaryHidden: targetBoundaryHidden,
+            targetProcessedTokenCount: mainCacheStorage.processedTokenCount)
+    }
+}
+
+package protocol MTPDrafterContinuationProviding {
+    var mtpDrafterContinuation: MTPDrafterContinuation? { get }
+}
+
+extension MTPSpeculativeTokenIterator: MTPDrafterContinuationProviding {
+    package var mtpDrafterContinuation: MTPDrafterContinuation? {
+        finalizedContinuation
     }
 }
 
@@ -776,6 +955,20 @@ extension MTPSpeculativeTokenIterator {
     @_spi(Testing) public var _processorForTesting: LogitProcessor? {
         processor
     }
+}
+
+/// Remove MTP's transient target↔drafter exchange values while retaining
+/// model-owned continuation state such as Qwen VLM M-RoPE anchors.
+private func persistentTargetState(from state: LMOutput.State?) -> LMOutput.State? {
+    guard var state else { return nil }
+    state[mtpEmitFlagKey] = nil
+    state[mtpCacheCheckpointIndexKey] = nil
+    state[mtpLastHiddenStatesKey] = nil
+    state[mtpSharedKVStatesKey] = nil
+    state[mtpSharedKVSourceIndicesKey] = nil
+    state[mtpSharedKVOffsetsKey] = nil
+    state[mtpPositionDeltasKey] = nil
+    return state.isEmpty ? nil : state
 }
 
 /// Bring the emitted MTP shared-K/V snapshot into line with what the cache actually kept.
