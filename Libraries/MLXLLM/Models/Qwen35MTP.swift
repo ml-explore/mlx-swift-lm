@@ -93,11 +93,30 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel {
     }
 
     public func validateCompatibility(with target: any LanguageModel) throws {
-        guard target is Qwen35Model || target is Qwen35TextModel else {
+        let targetConfiguration: Qwen35TextConfiguration
+        switch target {
+        case let target as Qwen35Model:
+            targetConfiguration = target.languageModel.configuration
+        case let target as Qwen35TextModel:
+            targetConfiguration = target.configuration
+        default:
             throw MTPDrafterCompatibilityError.incompatibleTarget(
                 drafter: "Qwen35MTPDraftModel",
                 expected: "a Qwen3.5 text target",
                 actual: String(describing: type(of: target))
+            )
+        }
+
+        guard
+            targetConfiguration.hiddenSize == configuration.hiddenSize,
+            targetConfiguration.vocabularySize == configuration.vocabularySize
+        else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35MTPDraftModel",
+                expected: "a Qwen3.5 text target with hidden size \(configuration.hiddenSize) "
+                    + "and vocabulary size \(configuration.vocabularySize)",
+                actual: "\(type(of: target)) with hidden size \(targetConfiguration.hiddenSize) "
+                    + "and vocabulary size \(targetConfiguration.vocabularySize)"
             )
         }
     }
