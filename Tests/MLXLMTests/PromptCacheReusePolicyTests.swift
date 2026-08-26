@@ -39,11 +39,7 @@ struct PromptCacheReusePolicyTests {
     private func alignedCache(
         _ cached: [Int],
         processed: Int? = nil,
-        hasSpeculativeState: Bool = false,
-        draftAligned: Bool = true,
-        speculativeStateIsRewindable: Bool = true,
-        canRebuildSpeculativeStateFromPrompt: Bool = false,
-        allowsMainOnlyFallback: Bool = false,
+        speculativeReuseCapability: SpeculativeCacheReuseCapability = .unavailable,
         trimmable: Bool = true
     ) -> PromptCacheState {
         let processedTokenCount = processed ?? cached.count
@@ -51,11 +47,7 @@ struct PromptCacheReusePolicyTests {
             cachedTokens: cached,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            hasSpeculativeState: hasSpeculativeState,
-            speculativeStateIsAligned: draftAligned,
-            speculativeStateIsRewindable: speculativeStateIsRewindable,
-            canRebuildSpeculativeStateFromPrompt: canRebuildSpeculativeStateFromPrompt,
-            allowsMainOnlyFallback: allowsMainOnlyFallback,
+            speculativeReuseCapability: speculativeReuseCapability,
             isTrimmable: trimmable)
     }
 
@@ -104,8 +96,7 @@ struct PromptCacheReusePolicyTests {
     @Test func `a misaligned draft cache blocks suffix reuse`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 3, 4], speculative: true),
-            cache: alignedCache(
-                [1, 2, 3], hasSpeculativeState: true, draftAligned: false))
+            cache: alignedCache([1, 2, 3], speculativeReuseCapability: .unavailable))
 
         #expect(decision == .rebuild)
     }
@@ -114,7 +105,7 @@ struct PromptCacheReusePolicyTests {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 3, 4], speculative: true),
             cache: alignedCache(
-                [1, 2, 3], canRebuildSpeculativeStateFromPrompt: true))
+                [1, 2, 3], speculativeReuseCapability: .rebuildableFromPrompt))
 
         #expect(decision == .appendSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
     }
@@ -194,10 +185,7 @@ struct PromptCacheReusePolicyTests {
     @Test func `aligned resumable MTP state appends only the suffix`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 3, 4], speculative: true),
-            cache: alignedCache(
-                [1, 2, 3], hasSpeculativeState: true,
-                speculativeStateIsRewindable: false,
-                allowsMainOnlyFallback: true))
+            cache: alignedCache([1, 2, 3], speculativeReuseCapability: .appendOnly))
 
         #expect(decision == .appendSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
     }
@@ -205,10 +193,7 @@ struct PromptCacheReusePolicyTests {
     @Test func `missing MTP continuation preserves the target prefix target-only`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 3, 4], speculative: true),
-            cache: alignedCache(
-                [1, 2, 3], hasSpeculativeState: false, draftAligned: false,
-                speculativeStateIsRewindable: false,
-                allowsMainOnlyFallback: true))
+            cache: alignedCache([1, 2, 3], speculativeReuseCapability: .mainOnlyFallback))
 
         #expect(
             decision
@@ -236,9 +221,7 @@ struct PromptCacheReusePolicyTests {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 9, 9], speculative: true),
             cache: alignedCache(
-                [1, 2, 3, 4, 5], hasSpeculativeState: true,
-                speculativeStateIsRewindable: false,
-                allowsMainOnlyFallback: true))
+                [1, 2, 3, 4, 5], speculativeReuseCapability: .appendOnly))
 
         #expect(
             decision
@@ -249,10 +232,7 @@ struct PromptCacheReusePolicyTests {
     @Test func `stateless MTP can follow a target rewind`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 9, 9], speculative: true),
-            cache: alignedCache(
-                [1, 2, 3, 4, 5], hasSpeculativeState: true,
-                speculativeStateIsRewindable: true,
-                allowsMainOnlyFallback: true))
+            cache: alignedCache([1, 2, 3, 4, 5], speculativeReuseCapability: .reusable))
 
         #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
     }
