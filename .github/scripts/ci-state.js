@@ -41,4 +41,42 @@ function onStart(labels) {
   return { add: missing(labels, [RUNNING]), remove: present(labels, PREVIOUS_OUTCOME) };
 }
 
-module.exports = { STATE_LABELS, RUNNING, onStart };
+// A step whose name starts with this prefix reports the runner image, not the
+// contribution. Only a re-run can clear it, so it must never ask the author
+// for a change.
+const INFRA_PREFIX = "Infra: ";
+
+// The three orderings below carry the whole correctness of this function.
+// The no-failed-step test comes first, so a timeout or a lost runner reads as
+// "run it again" rather than as a fault. The infrastructure test comes before
+// the lint test, so a MetalToolchain failure never reads as bad formatting.
+// needs-lint claims formatting is the only thing to fix, so it requires lint to
+// be the only failed job. Any other failure alongside it means more work than
+// that label admits.
+function classify({ conclusion, jobs, labels }) {
+  const failedJobs = jobs.filter((job) => job.conclusion === "failure");
+
+  if (failedJobs.length === 0) {
+    if (conclusion !== "success") return "needs-ci";
+    const approved = labels.includes("approved") || labels.includes("ready-to-merge");
+    return approved ? "ready-to-merge" : "needs-review";
+  }
+
+  const failedSteps = failedJobs.flatMap((job) =>
+    (job.steps ?? [])
+      .filter((step) => step.conclusion === "failure")
+      .map((step) => step.name));
+
+  if (failedSteps.length === 0) return "needs-ci";
+  if (failedSteps.every((name) => name.startsWith(INFRA_PREFIX))) return "needs-ci";
+  if (failedJobs.length === 1 && failedJobs[0].name === "lint") return "needs-lint";
+  return "needs-changes";
+}
+
+function onComplete({ conclusion, jobs, labels }) {
+  const chosen = classify({ conclusion, jobs, labels });
+  const candidates = [RUNNING, ...STATE_LABELS.filter((name) => name !== chosen)];
+  return { add: missing(labels, [chosen]), remove: present(labels, candidates) };
+}
+
+module.exports = { STATE_LABELS, RUNNING, INFRA_PREFIX, onStart, onComplete };

@@ -48,3 +48,127 @@ test("onStart never removes a label outside its list", () => {
 test("onStart does not re-add ci-running when it is already held", () => {
   assert.deepEqual(onStart(["ci-running", "cat-model"]), { add: [], remove: [] });
 });
+
+const { onComplete } = require("./ci-state.js");
+
+function step(name, conclusion) {
+  return { name, conclusion };
+}
+
+function job(name, conclusion, steps = []) {
+  return { name, conclusion, steps };
+}
+
+const GREEN = [
+  job("lint", "success", [step("Run style checks", "success")]),
+  job("mac_build_and_test", "success", [step("Build (Xcode, macOS)", "success")]),
+];
+
+test("everything green with no approval gives needs-review", () => {
+  const result = onComplete({ conclusion: "success", jobs: GREEN, labels: ["ci-running"] });
+  assert.deepEqual(result.add, ["needs-review"]);
+  assert.deepEqual(result.remove, ["ci-running"]);
+});
+
+test("green on an approved pull request gives ready-to-merge", () => {
+  const result = onComplete({
+    conclusion: "success",
+    jobs: GREEN,
+    labels: ["ci-running", "approved", "cat-model"],
+  });
+  assert.deepEqual(result.add, ["ready-to-merge"]);
+  assert.deepEqual(result.remove, ["ci-running", "approved"]);
+});
+
+test("green on a pull request already ready-to-merge writes nothing new", () => {
+  const result = onComplete({
+    conclusion: "success",
+    jobs: GREEN,
+    labels: ["ci-running", "ready-to-merge"],
+  });
+  assert.deepEqual(result.add, []);
+  assert.deepEqual(result.remove, ["ci-running"]);
+});
+
+test("a skipped job is not a failure", () => {
+  const jobs = [...GREEN, job("integration_build_xcode27", "skipped")];
+  const result = onComplete({ conclusion: "success", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-review"]);
+});
+
+test("no failed job and a conclusion other than success asks for another run", () => {
+  const result = onComplete({ conclusion: "cancelled", jobs: GREEN, labels: ["ci-running"] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("a failed job with no failed step asks for another run", () => {
+  const jobs = [job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "success")])];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("an infrastructure step failing alone asks for another run", () => {
+  const jobs = [
+    job("lint", "success"),
+    job("mac_build_and_test", "failure", [step("Infra: verify MetalToolchain installed", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("an infrastructure step alongside a real failure blames the author", () => {
+  const jobs = [
+    job("mac_build_and_test", "failure", [
+      step("Infra: verify MetalToolchain installed", "failure"),
+      step("Build (Xcode, macOS)", "failure"),
+    ]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
+});
+
+test("the lint job failing alone gives needs-lint", () => {
+  const jobs = [
+    job("lint", "failure", [step("Run style checks", "failure")]),
+    job("mac_build_and_test", "skipped"),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-lint"]);
+});
+
+test("lint and a substantive job failing together gives needs-changes", () => {
+  const jobs = [
+    job("lint", "failure", [step("Run style checks", "failure")]),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
+});
+
+test("the documentation check failing gives needs-changes", () => {
+  const jobs = [
+    job("lint", "success"),
+    job("mac_build_and_test", "failure", [step("Verify documentation", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
+});
+
+test("the classifier's own test job failing gives needs-changes", () => {
+  const jobs = [
+    job("lint", "success"),
+    job("ci_state_script", "failure", [step("Test the CI state classifier", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
+});
+
+test("onComplete leaves exactly one managed label and clears the rest", () => {
+  const result = onComplete({
+    conclusion: "failure",
+    jobs: [job("lint", "failure", [step("Run style checks", "failure")])],
+    labels: ["ci-running", "needs-ci", "needs-review", "approved", "cat-tools", "unread"],
+  });
+  assert.deepEqual(result.add, ["needs-lint"]);
+  assert.deepEqual(result.remove, ["ci-running", "needs-ci", "needs-review", "approved"]);
+});
