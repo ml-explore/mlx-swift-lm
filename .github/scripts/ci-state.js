@@ -110,7 +110,8 @@ async function findPullRequest(github, { owner, repo, headSha }) {
   const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
     owner, repo, commit_sha: headSha,
   });
-  const open = associated.data.find((pull) => pull.state === "open");
+  const open = associated.data.find((pull) => pull.state === "open" && pull.head.sha === headSha)
+    ?? associated.data.find((pull) => pull.state === "open");
   if (open) return open;
 
   const pulls = await github.paginate(github.rest.pulls.list, {

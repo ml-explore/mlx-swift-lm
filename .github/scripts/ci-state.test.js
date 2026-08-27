@@ -217,18 +217,23 @@ const { jobSummaries, findPullRequest, applyLabels } = require("./ci-state.js");
 // given, which is how the real client distinguishes one endpoint from another.
 function makeGithub(options = {}) {
   const calls = [];
+  const requests = [];
   const jobsRoute = () => {};
   jobsRoute.__pages = options.jobs ?? [];
   const pullsRoute = () => {};
   pullsRoute.__pages = options.openPulls ?? [];
   return {
     calls,
-    paginate: async (route) => route.__pages ?? [],
+    requests,
+    paginate: async (route, params) => { requests.push(params); return route.__pages ?? []; },
     rest: {
       actions: { listJobsForWorkflowRun: jobsRoute },
       pulls: { list: pullsRoute },
       repos: {
-        listPullRequestsAssociatedWithCommit: async () => ({ data: options.associated ?? [] }),
+        listPullRequestsAssociatedWithCommit: async (params) => {
+          requests.push(params);
+          return { data: options.associated ?? [] };
+        },
       },
       issues: {
         addLabels: async (params) => {
@@ -259,6 +264,7 @@ test("jobSummaries keeps only the fields the rules read", async () => {
     conclusion: "failure",
     steps: [{ name: "Run style checks", conclusion: "failure" }],
   }]);
+  assert.deepEqual(github.requests, [{ owner: "o", repo: "r", run_id: 9, per_page: 100 }]);
 });
 
 test("jobSummaries copes with a job that reports no steps", async () => {
@@ -288,6 +294,21 @@ test("findPullRequest falls back to matching the head commit of an open pull req
   });
   const pull = await findPullRequest(github, { owner: "o", repo: "r", headSha: "aaa" });
   assert.equal(pull.number, 21);
+  assert.deepEqual(github.requests, [
+    { owner: "o", repo: "r", commit_sha: "aaa" },
+    { owner: "o", repo: "r", state: "open", per_page: 100 },
+  ]);
+});
+
+test("findPullRequest prefers the association whose head is the tested commit", async () => {
+  const github = makeGithub({
+    associated: [
+      { number: 30, state: "open", head: { sha: "ccc" }, labels: [] },
+      { number: 31, state: "open", head: { sha: "aaa" }, labels: [] },
+    ],
+  });
+  const pull = await findPullRequest(github, { owner: "o", repo: "r", headSha: "aaa" });
+  assert.equal(pull.number, 31);
 });
 
 test("findPullRequest returns null when no open pull request matches", async () => {
