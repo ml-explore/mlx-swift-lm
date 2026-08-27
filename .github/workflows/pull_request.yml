@@ -69,6 +69,27 @@ jobs:
         run: |
           pre-commit run --all || (echo "Style checks failed, please install pre-commit and run pre-commit run --all and push the change"; echo ""; git --no-pager diff; exit 1)
 
+  # Tests .github/scripts/ci-state.js, which decides the CI state labels for
+  # every pull request. Node is preinstalled on this image and `node --test` is
+  # built into Node, so this job needs no package.json and no install step.
+  #
+  # This runs the pull request's own copy of the tests, so a contributor could
+  # weaken them. That cannot change what gets written: ci-state.yml always
+  # loads the default branch's copy of both the script and the tests. This job
+  # exists so a reviewer sees a change to either one go red.
+  ci_state_script:
+    if: github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test the CI state classifier
+        shell: bash
+        run: |
+          node --version
+          node --test .github/scripts/ci-state.test.js
+
   mac_build_and_test:
     needs: lint
     if: github.repository == 'ml-explore/mlx-swift-lm'
@@ -78,7 +99,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify MetalToolchain installed
+      - name: "Infra: verify MetalToolchain installed"
         shell: bash
         run: xcodebuild -showComponent MetalToolchain
 
@@ -160,7 +181,7 @@ jobs:
             *)                echo "Host DeviceTier would be: absent (OS < 26)" ;;
           esac
 
-      - name: Assert Xcode 27 and the macOS 27 SDK
+      - name: "Infra: assert Xcode 27 and the macOS 27 SDK"
         shell: bash
         run: |
           # `xcode-27` is a preview label and its default toolchain has moved
@@ -181,7 +202,7 @@ jobs:
               ;;
           esac
 
-      - name: Install MetalToolchain
+      - name: "Infra: install MetalToolchain"
         shell: bash
         run: |
           # The self-hosted mac is provisioned with this already, so the jobs
