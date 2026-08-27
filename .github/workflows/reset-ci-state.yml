@@ -1,0 +1,54 @@
+name: Reset CI state
+
+# A new commit on an open pull request makes every CI result and every approval
+# stale, so this puts the pull request back in the queue.
+#
+# pull_request_target, not pull_request: in a public repository a pull_request
+# workflow holds a read-only token on a fork's pull request and could not write
+# a label. GitHub's warning about pull_request_target is about checking out and
+# running the pull request's code. The checkout below is pinned to the base
+# commit and never touches the contributor's branch.
+
+on:
+  pull_request_target:
+    types:
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Two pushes in quick succession must not interleave their label writes.
+concurrency:
+  group: reset-ci-state-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  requeue:
+    name: Requeue for CI
+    if: github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base commit, never the pull request's head. This checkout exists
+          # only to load the classifier, and this job holds a write token, so it
+          # must not bring in contributor code.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const pull = context.payload.pull_request;
+
+            const change = state.onSynchronize(pull.labels.map((label) => label.name));
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });
