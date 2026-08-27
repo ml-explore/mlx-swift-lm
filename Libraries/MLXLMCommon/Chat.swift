@@ -1,5 +1,10 @@
 // Copyright © 2025 Apple Inc.
 
+import os
+
+private let messageContentLogger = Logger(
+    subsystem: "mlx-swift-lm", category: "MessageContent")
+
 /// Where a message's text goes relative to its images, and whether video parts
 /// are emitted. Each generator keeps the arrangement it already had.
 public enum MessageContentLayout: Sendable {
@@ -203,7 +208,12 @@ extension MessageGenerator {
 
         func appendImages() {
             for image in message.images {
-                if let label = image.label {
+                if let marker = image.labelMarkerCharacter {
+                    // Emitting it would add a placeholder the model counts against pixels.
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt: it holds `\(marker, privacy: .public)`, which vision models build their image placeholders from"
+                    )
+                } else if let label = image.label {
                     appendText("[\(label)]")
                 }
                 parts.append(["type": "image"])

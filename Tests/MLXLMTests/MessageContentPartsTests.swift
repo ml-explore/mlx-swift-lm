@@ -24,6 +24,35 @@ struct MessageContentPartsTests {
                 == [["type": "text", "text": "hello"]])
     }
 
+    @Test("A name holding a marker character is left out, and its image stays")
+    func markerNameIsLeftOut() {
+        let message = Chat.Message.user("hello", images: [image("<|image|>"), image("B")])
+        #expect(
+            generator.contentParts(for: message, layout: .imagesThenText)
+                == [
+                    ["type": "image"],
+                    ["type": "text", "text": "[B]"],
+                    ["type": "image"],
+                    ["type": "text", "text": "hello"],
+                ])
+    }
+
+    @Test("Every marker character costs the name, on any layout")
+    func everyMarkerCharacterIsRefused() {
+        for label in ["<a", "a>", "a|b", "[a", "a]"] {
+            let message = Chat.Message.user("hello", images: [image(label)])
+            for layout: MessageContentLayout in [
+                .imagesThenVideosThenText, .imagesThenText, .textThenImages,
+            ] {
+                let parts = generator.contentParts(for: message, layout: layout)
+                #expect(
+                    !parts.contains(["type": "text", "text": "[\(label)]"]),
+                    "\(label) reached the parts on \(layout)")
+                #expect(parts.contains(["type": "image"]), "\(label) lost its image")
+            }
+        }
+    }
+
     @Test("Unlabeled images give the array generators produced before labels")
     func unlabeledImagesAreUnchanged() {
         let message = Chat.Message.user("hello", images: [image(nil), image(nil)])

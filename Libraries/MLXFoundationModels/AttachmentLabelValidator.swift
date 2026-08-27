@@ -17,9 +17,6 @@ struct AttachmentLabelValidator {
     /// The validator used by ``MLXLanguageModel``.
     static let `default` = AttachmentLabelValidator()
 
-    /// The characters vision models build their image placeholders from.
-    private static let markerCharacters: Set<Character> = ["<", ">", "|", "[", "]"]
-
     /// Refuses each label that would reach the model as a picture marker.
     ///
     /// - Parameters:
@@ -50,7 +47,9 @@ struct AttachmentLabelValidator {
                 )
             }
 
-            if let character = attachment.label.first(where: Self.markerCharacters.contains) {
+            if let character = attachment.label.first(
+                where: UserInput.Image.markerCharacters.contains)
+            {
                 throw Self.rejection(
                     attachment,
                     because:
