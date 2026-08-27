@@ -6,8 +6,8 @@ name: Reset CI state
 # pull_request_target, not pull_request: in a public repository a pull_request
 # workflow holds a read-only token on a fork's pull request and could not write
 # a label. GitHub's warning about pull_request_target is about checking out and
-# running the pull request's code. The checkout below is pinned to the base
-# commit and never touches the contributor's branch.
+# running the pull request's code. The checkout below takes the default branch
+# and never touches the contributor's branch.
 
 on:
   pull_request_target:
