@@ -1174,12 +1174,13 @@ public final class ChatSession {
                                 draftKVCache = nil
                                 requiresMainOnlyContinuation = true
 
-                            case .appendMediaSuffix:
+                            case .appendMediaSuffix(let suffixStart, _):
                                 // A declined split was downgraded to `.rebuild`
                                 // above, so this is always populated here.
                                 if let mediaSuffixInput {
                                     input = mediaSuffixInput
                                 }
+                                cachedPromptTokenCount = suffixStart
 
                             case .trimToCommonPrefix(let commonPrefixLength, _):
                                 input = LMInput(

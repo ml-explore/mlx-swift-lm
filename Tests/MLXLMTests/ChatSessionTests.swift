@@ -1317,6 +1317,14 @@ public class ChatSessionTests: XCTestCase {
             newMediaInfo?.promptTokenCount,
             thirdRenderedLength - secondRenderedLength - 3,
             "an append-only media turn should prefill only the uncached suffix")
+        // The split boundary is what the turn did not prefill, so it is also what
+        // the completion info must attribute to the cache: the previous prompt
+        // plus the tokens it generated.
+        XCTAssertEqual(
+            newMediaInfo?.cachedPromptTokenCount,
+            secondRenderedLength + 3,
+            "the reused prefix should be attributed to the cache, not dropped")
+        XCTAssertEqual(newMediaInfo?.totalPromptTokenCount, thirdRenderedLength)
     }
 
     /// A model that declines the split keeps the pre-existing behavior, which is
