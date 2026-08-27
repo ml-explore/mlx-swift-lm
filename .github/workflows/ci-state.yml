@@ -1,0 +1,140 @@
+name: CI state
+
+# Writes the CI state labels for one pull request.
+#
+# This cannot live in pull_request.yml. In a public repository GITHUB_TOKEN is
+# read-only for a workflow triggered by a fork's pull request, whatever the
+# permissions block says, so such a job cannot label a community contribution.
+# A workflow_run workflow always runs the default branch's copy of this file
+# and does hold a write token.
+#
+# in_progress, not requested: a run held for maintainer approval has been
+# requested and has not started, and stamping ci-running on it would lie.
+#
+# No job here checks out the pull request. The checkout is the default branch,
+# which is where the classifier lives.
+
+on:
+  workflow_run:
+    workflows: [Build and Test]
+    types:
+      - in_progress
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+# The start and the finish of one commit's run must not interleave. Keyed on the
+# commit rather than the run, so a re-run of the same commit also serializes.
+# Never cancel: a discarded completed event leaves ci-running behind forever.
+concurrency:
+  group: ci-state-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  mark_running:
+    name: Mark CI running
+    if: >-
+      github.event.action == 'in_progress'
+      && github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            // A relative require inside github-script resolves against the
+            // action, not the workspace, so name the workspace explicitly.
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const headSha = process.env.HEAD_SHA;
+
+            const pull = await state.findPullRequest(github, { owner, repo, headSha });
+            if (!pull) {
+              core.info(`No open pull request for ${headSha}. Nothing to label.`);
+              return;
+            }
+
+            // Diagnostic only, and the length alone. The payload carries
+            // contributor-controlled text, which does not belong in a log.
+            const carried = context.payload.workflow_run.pull_requests ?? [];
+            core.info(`workflow_run.pull_requests carried ${carried.length} entries.`);
+
+            // The same guard record_outcome uses. A delayed in_progress event
+            // must not claim a run for a commit the pull request has left:
+            // reset-ci-state.yml has already queued the newer commit, and
+            // removing needs-ci here would strand it.
+            if (pull.head.sha !== headSha) {
+              core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
+              core.info("Not marking this run as running.");
+              return;
+            }
+
+            const change = state.onStart(pull.labels.map((label) => label.name));
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });
+
+  record_outcome:
+    name: Record the CI outcome
+    if: >-
+      github.event.action == 'completed'
+      && github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        with:
+          script: |
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const headSha = process.env.HEAD_SHA;
+
+            const pull = await state.findPullRequest(github, { owner, repo, headSha });
+            if (!pull) {
+              core.info(`No open pull request for ${headSha}. Nothing to label.`);
+              return;
+            }
+
+            // These results describe the commit the run tested. If the head has
+            // moved, they describe code that no longer exists, and
+            // reset-ci-state.yml has already queued the new commit.
+            if (pull.head.sha !== headSha) {
+              core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
+              core.info("Discarding this run's result.");
+              return;
+            }
+
+            const jobs = await state.jobSummaries(github, {
+              owner, repo, runId: Number(process.env.RUN_ID),
+            });
+            const change = state.onComplete({
+              conclusion: process.env.CONCLUSION,
+              jobs,
+              labels: pull.labels.map((label) => label.name),
+            });
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });
