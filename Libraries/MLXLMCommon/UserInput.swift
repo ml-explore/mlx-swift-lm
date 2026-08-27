@@ -129,9 +129,16 @@ public struct UserInput {
         ///
         /// Keep `<`, `>`, `|`, `[` and `]` out of a name. Vision models build their image
         /// placeholders from those characters, so such a name can reach the prompt as a
-        /// placeholder. `MLXFoundationModels` refuses such a name with an error. A caller
-        /// that uses `MLXLMCommon` directly gets no check.
+        /// placeholder. `MLXFoundationModels` refuses such a name with an error. Elsewhere
+        /// the name is left out of the prompt and logged.
         public var label: String?
+
+        /// The characters vision models build their image placeholders from.
+        package static let markerCharacters: Set<Character> = ["<", ">", "|", "[", "]"]
+
+        package var labelMarkerCharacter: Character? {
+            label?.first(where: Self.markerCharacters.contains)
+        }
 
         public init(source: Source, label: String? = nil) {
             self.source = source
