@@ -126,6 +126,11 @@ public struct UserInput {
         /// it. Do not rely on a name coming back unchanged: a short single word comes back
         /// more often than `IMG_4021`. Avoid a name whose bracketed form is a token the
         /// tokenizer knows, such as `IMG` on Mistral, which becomes an image placeholder.
+        ///
+        /// Keep `<`, `>`, `|`, `[` and `]` out of a name. Vision models build their image
+        /// placeholders from those characters, so such a name can reach the prompt as a
+        /// placeholder. `MLXFoundationModels` refuses such a name with an error. A caller
+        /// that uses `MLXLMCommon` directly gets no check.
         public var label: String?
 
         public init(source: Source, label: String? = nil) {

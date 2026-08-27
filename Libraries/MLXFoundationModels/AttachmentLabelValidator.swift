@@ -7,55 +7,72 @@ import Foundation
 import FoundationModels
 import MLXLMCommon
 
-/// Rejects an attachment label that a tokenizer would read as a special token.
+/// Refuses an attachment label that a model would read as a picture marker.
 ///
-/// The check runs on the rendered form, `[label]`, because that is what reaches the
-/// tokenizer: a label of `IMG` renders as `[IMG]`, a real image token on
-/// Mistral-family models. It catches tokenizer special tokens only, so a label
-/// holding a string a processor treats as magic, such as FastVLM's `<image>`, still
-/// passes.
+/// A label that holds a marker character is always refused. A label whose rendered
+/// `[label]` form encodes to a special token is refused on the models where it does.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct AttachmentLabelValidator {
 
     /// The validator used by ``MLXLanguageModel``.
     static let `default` = AttachmentLabelValidator()
 
-    /// Throws if any label, as rendered into the prompt, contains a token
-    /// `tokenizer` treats as special.
+    /// The characters vision models build their image placeholders from.
+    private static let markerCharacters: Set<Character> = ["<", ">", "|", "[", "]"]
+
+    /// Refuses each label that would reach the model as a picture marker.
     ///
     /// - Parameters:
-    ///   - attachments: The distinct labels to check, each with the entry it
-    ///     came from so a rejection can point at the offending prompt.
-    ///   - tokenizer: The tokenizer that will encode the prompt. The answer is
-    ///     per-model: `<|image_pad|>` is special for Qwen and ordinary text for
-    ///     Gemma 4, and the reverse holds for `<|image|>`.
-    /// - Throws: `LanguageModelError.unsupportedTranscriptContent`, naming the
-    ///   label and the token.
+    ///   - attachments: The labels to check. Each one carries the entry it came from.
+    ///   - tokenizer: The tokenizer that encodes the prompt.
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent`.
     func validate(
         _ attachments: [TranscriptConverter.LabeledAttachment],
         with tokenizer: any MLXLMCommon.Tokenizer
     ) throws {
         for attachment in attachments {
-            // The rendered form, matching what a message generator emits.
+            // Check the tokenizer first. It names the token, which is a better error.
+            // A message generator writes the label into the prompt inside brackets.
             let rendered = "[\(attachment.label)]"
             let ids = tokenizer.encode(text: rendered, addSpecialTokens: false)
-            guard containsSpecialToken(ids, tokenizer) else { continue }
+            if containsSpecialToken(ids, tokenizer) {
+                let names = specialTokenNames(in: ids, tokenizer)
+                let named =
+                    names.isEmpty
+                    ? "a tokenizer special token"
+                    : names.map { "`\($0)`" }.joined(separator: ", ")
+                throw Self.rejection(
+                    attachment,
+                    because:
+                        "holds \(named). This model's tokenizer turns that into a special "
+                        + "token instead of text, which corrupts the prompt's image "
+                        + "placeholders."
+                )
+            }
 
-            let names = specialTokenNames(in: ids, tokenizer)
-            let named =
-                names.isEmpty
-                ? "a tokenizer special token"
-                : names.map { "`\($0)`" }.joined(separator: ", ")
-            throw LanguageModelError.unsupportedTranscriptContent(
-                LanguageModelError.UnsupportedTranscriptContent(
-                    unsupportedContent: [attachment.entry],
-                    debugDescription:
-                        "The image attachment label \"\(attachment.label)\" contains \(named), "
-                        + "which this model's tokenizer turns into a special token rather than "
-                        + "text. Special tokens in a label corrupt the prompt's image "
-                        + "placeholders. Use a label made of ordinary text."
-                ))
+            if let character = attachment.label.first(where: Self.markerCharacters.contains) {
+                throw Self.rejection(
+                    attachment,
+                    because:
+                        "holds `\(character)`. Vision models build their image placeholders "
+                        + "from `<`, `>`, `|`, `[` and `]`. A label that holds one of them can "
+                        + "reach the prompt as a placeholder, and then the model counts more "
+                        + "images than you gave it."
+                )
+            }
         }
+    }
+
+    private static func rejection(
+        _ attachment: TranscriptConverter.LabeledAttachment, because reason: String
+    ) -> LanguageModelError {
+        LanguageModelError.unsupportedTranscriptContent(
+            LanguageModelError.UnsupportedTranscriptContent(
+                unsupportedContent: [attachment.entry],
+                debugDescription:
+                    "The image attachment label \"\(attachment.label)\" \(reason) "
+                    + "Use a label made of ordinary text."
+            ))
     }
 
     /// Whether `ids` contains any token the tokenizer treats as special.
@@ -64,6 +81,10 @@ struct AttachmentLabelValidator {
     /// decodes the same ids with and without `skipSpecialTokens` and compares: the
     /// two differ only when a special id is present. The call site passes
     /// `addSpecialTokens: false`, or the tokenizer's own BOS rejects every label.
+    ///
+    /// This sees only the tokens a tokenizer flags special. An added token without
+    /// that flag stays invisible here, which is why ``validate(_:with:)`` also
+    /// refuses the marker characters.
     private func containsSpecialToken(_ ids: [Int], _ tokenizer: any MLXLMCommon.Tokenizer)
         -> Bool
     {

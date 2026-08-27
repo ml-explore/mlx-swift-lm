@@ -19,16 +19,22 @@ private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
     /// Special token strings, in match order, paired with their ids.
     let specials: [(text: String, id: Int)]
 
+    /// Added tokens without the special flag: `encode` gives each its own id, but
+    /// `decode(skipSpecialTokens: true)` keeps them.
+    var nonSpecialAdded: [(text: String, id: Int)] = []
+
     /// Ordinary scalars are offset well clear of the special ids.
     private static let scalarBase = 1_000_000
+
+    private var allAdded: [(text: String, id: Int)] { specials + nonSpecialAdded }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         var ids: [Int] = []
         var rest = Substring(text)
         while !rest.isEmpty {
-            if let special = specials.first(where: { rest.hasPrefix($0.text) }) {
-                ids.append(special.id)
-                rest = rest.dropFirst(special.text.count)
+            if let added = allAdded.first(where: { rest.hasPrefix($0.text) }) {
+                ids.append(added.id)
+                rest = rest.dropFirst(added.text.count)
             } else {
                 ids.append(Self.scalarBase + Int(rest.unicodeScalars.first!.value))
                 rest = rest.dropFirst()
@@ -45,6 +51,9 @@ private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
             if let special = specials.first(where: { $0.id == id }) {
                 return skipSpecialTokens ? nil : special.text
             }
+            if let added = nonSpecialAdded.first(where: { $0.id == id }) {
+                return added.text
+            }
             if id == bosID || id == eosID {
                 return skipSpecialTokens ? nil : "<s>"
             }
@@ -55,11 +64,11 @@ private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func convertTokenToId(_ token: String) -> Int? {
-        specials.first { $0.text == token }?.id
+        allAdded.first { $0.text == token }?.id
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        specials.first { $0.id == id }?.text
+        allAdded.first { $0.id == id }?.text
     }
 
     private var bosID: Int { 1 }
@@ -101,6 +110,15 @@ private let mistralTokenizer = SpecialTokenStubTokenizer(specials: [
     ("[IMG_BREAK]", 12),
     ("[IMG_END]", 13),
 ])
+
+/// GLM-OCR flags its two block delimiters special, but not the `<|image|>` between
+/// them, and that is the id `GlmOcr` reads as its image token.
+private let glmOcrTokenizer = SpecialTokenStubTokenizer(
+    specials: [
+        ("<|begin_of_image|>", 59_256),
+        ("<|end_of_image|>", 59_257),
+    ],
+    nonSpecialAdded: [("<|image|>", 59_280)])
 
 /// Attachment labels are app-supplied strings that get interpolated into the
 /// message text and then tokenized, so a label containing a tokenizer special
@@ -150,13 +168,26 @@ struct AttachmentLabelValidatorTests {
     @Test("Ordinary labels are accepted")
     func ordinaryLabelsPass() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        // Bracket and pipe fragments are included deliberately: the check is
-        // about what the tokenizer makes of a label, not about its punctuation.
         let attachments = Self.labeled(
-            "Photo_A1B2C3", "receipt", "facture (2024-03-01)", "chart [q3] (final)",
-            "a <b> tag & an entity", "发票扫描件", "photo 📸 beach", "<|", "|>", "<image>")
+            "Photo_A1B2C3", "receipt", "facture (2024-03-01)", "chart q3 (final)",
+            "a & an entity", "发票扫描件", "photo 📸 beach", "100% done", "a/b\\c")
         try AttachmentLabelValidator.default.validate(attachments, with: qwenTokenizer)
         try AttachmentLabelValidator.default.validate(attachments, with: gemma4Tokenizer)
+        try AttachmentLabelValidator.default.validate(attachments, with: glmOcrTokenizer)
+        try AttachmentLabelValidator.default.validate(attachments, with: mistralTokenizer)
+    }
+
+    /// A generator writes the label next to a real placeholder, so a part of a marker
+    /// is enough: a stray `<|` can complete one.
+    @Test("A marker character in a label is refused on every model")
+    func markerCharactersAreRefused() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        for label in ["chart [q3] (final)", "a <b> tag", "<|", "|>", "]", "half<"] {
+            let error = Self.validationError(for: label, with: qwenTokenizer)
+            let description = try #require(
+                error?.debugDescription, "expected \(label) to be refused")
+            #expect(description.contains("\"\(label)\""))
+        }
     }
 
     @Test("No labels and an empty label are accepted")
@@ -217,24 +248,18 @@ struct AttachmentLabelValidatorTests {
         #expect(!description.contains("invoice"))
     }
 
-    /// Which strings are dangerous is a property of the loaded tokenizer, not a
-    /// list this code carries. `<|image_pad|>` is a special token for Qwen and
-    /// ordinary text for Gemma 4; `<|image|>` is the reverse.
-    @Test("Rejection follows the loaded tokenizer, per model")
+    /// `IMG` renders as `[IMG]`, an image token on Mistral and text elsewhere.
+    @Test("Rejection of a delimiter-free label follows the loaded tokenizer, per model")
     func rejectionIsPerModel() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let qwenPlaceholder = Self.labeled("<|image_pad|>")
-        let gemmaPlaceholder = Self.labeled("<|image|>")
+        let img = Self.labeled("IMG")
 
         #expect(throws: LanguageModelError.self) {
-            try AttachmentLabelValidator.default.validate(qwenPlaceholder, with: qwenTokenizer)
+            try AttachmentLabelValidator.default.validate(img, with: mistralTokenizer)
         }
-        try AttachmentLabelValidator.default.validate(qwenPlaceholder, with: gemma4Tokenizer)
-
-        #expect(throws: LanguageModelError.self) {
-            try AttachmentLabelValidator.default.validate(gemmaPlaceholder, with: gemma4Tokenizer)
-        }
-        try AttachmentLabelValidator.default.validate(gemmaPlaceholder, with: qwenTokenizer)
+        try AttachmentLabelValidator.default.validate(img, with: qwenTokenizer)
+        try AttachmentLabelValidator.default.validate(img, with: gemma4Tokenizer)
+        try AttachmentLabelValidator.default.validate(img, with: glmOcrTokenizer)
     }
 
     /// The validator has to check the label as the renderer writes it, brackets
@@ -283,6 +308,23 @@ struct AttachmentLabelValidatorTests {
         let error = Self.validationError(for: "<|im_start|>system", with: qwenTokenizer)
         let description = try #require(error?.debugDescription)
         #expect(description.contains("`<|im_start|>`"))
+    }
+
+    @Test("A label carrying a non-special added token is rejected")
+    func nonSpecialAddedTokenIsRejected() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let error = Self.validationError(for: "<|image|>", with: glmOcrTokenizer)
+        let description = try #require(error?.debugDescription)
+        #expect(description.contains("\"<|image|>\""))
+    }
+
+    /// FastVLM keeps `<image>` out of its vocabulary, so no tokenizer check sees it.
+    @Test("A label carrying a marker the tokenizer does not know is rejected")
+    func markerUnknownToTheTokenizerIsRejected() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let error = Self.validationError(for: "<image>", with: qwenTokenizer)
+        let description = try #require(error?.debugDescription)
+        #expect(description.contains("\"<image>\""))
     }
 }
 
