@@ -8,6 +8,7 @@ struct KVCacheLeaf {
         case simple(KVCacheSimple)
         case affine(QuantizedKVCache)
         case turboQuant(TurboQuantKVCache)
+        case varianceNormalized(VarianceNormalizedKVCache)
         case unsupported
     }
 
@@ -19,6 +20,7 @@ struct KVCacheLeaf {
         case is MambaCache, is ArraysCache: .recurrent
         case let cache as RotatingKVCache: .rotating(cache)
         case let cache as TurboQuantKVCache: .turboQuant(cache)
+        case let cache as VarianceNormalizedKVCache: .varianceNormalized(cache)
         case let cache as QuantizedKVCache: .affine(cache)
         case let cache as KVCacheSimple: .simple(cache)
         default: .unsupported
@@ -32,7 +34,7 @@ struct KVCacheLeaf {
 
     var isCompressed: Bool {
         switch kind {
-        case .affine, .turboQuant: true
+        case .affine, .turboQuant, .varianceNormalized: true
         default: false
         }
     }
@@ -47,7 +49,7 @@ struct KVCacheLeaf {
     var participatesInTurboQuantBoundaryProtection: Bool {
         switch kind {
         case .simple, .affine, .turboQuant: true
-        case .recurrent, .rotating, .unsupported: false
+        case .recurrent, .rotating, .varianceNormalized, .unsupported: false
         }
     }
 
@@ -64,29 +66,38 @@ struct KVCacheLeaf {
         case .rotating, .unsupported:
             return strategy == .fullPrecision
         case .simple(let simple):
-            let groupSize: Int
+            let state = simple.innerState()
             switch configuration.strategy.storage {
             case .fullPrecision:
                 return true
             case .affine(let affine):
-                groupSize = affine.groupSize
+                guard state.count >= 2 else { return true }
+                return resolvedKVQuantizationGroupSize(
+                    requested: affine.groupSize,
+                    keyHeadDim: state[0].dim(3),
+                    valueHeadDim: state[1].dim(3)) != nil
             case .turboQuant(let turbo):
                 guard protectedPaths.contains(path) || turbo.keyPrecision == .affineEightBit
                 else { return true }
-                groupSize = 64
+                guard state.count >= 2 else { return true }
+                return resolvedKVQuantizationGroupSize(
+                    requested: 64,
+                    keyHeadDim: state[0].dim(3),
+                    valueHeadDim: state[1].dim(3)) != nil
+            case .varianceNormalized(let varn):
+                guard state.count >= 2 else { return true }
+                return supportsVarianceNormalizedKVCache(
+                    keyHeadDim: state[0].dim(3),
+                    valueHeadDim: state[1].dim(3),
+                    tileSize: varn.tileSize)
             }
-
-            let state = simple.innerState()
-            guard state.count >= 2 else { return true }
-            return resolvedKVQuantizationGroupSize(
-                requested: groupSize,
-                keyHeadDim: state[0].dim(3),
-                valueHeadDim: state[1].dim(3)) != nil
         case .affine:
             return strategy == .affine
                 || (strategy == .turboQuant && protectedPaths.contains(path))
         case .turboQuant:
             return strategy == .turboQuant
+        case .varianceNormalized:
+            return strategy == .varianceNormalized
         }
     }
 }

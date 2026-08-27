@@ -65,6 +65,7 @@ public struct KVCacheConfiguration: Sendable, Hashable {
             case fullPrecision
             case affine(AffineKVCacheConfiguration)
             case turboQuant(TurboQuantKVCacheConfiguration)
+            case varianceNormalized(VarianceNormalizedKVCacheConfiguration)
         }
 
         package let storage: Storage
@@ -85,12 +86,19 @@ public struct KVCacheConfiguration: Sendable, Hashable {
             Strategy(storage: .turboQuant(configuration))
         }
 
+        public static func varianceNormalized(
+            _ configuration: VarianceNormalizedKVCacheConfiguration
+        ) -> Strategy {
+            Strategy(storage: .varianceNormalized(configuration))
+        }
+
         /// Stable algorithm identity for diagnostics and persistence adapters.
         public var identifier: KVCacheStrategyIdentifier {
             switch storage {
             case .fullPrecision: .fullPrecision
             case .affine: .affine
             case .turboQuant: .turboQuant
+            case .varianceNormalized: .varianceNormalized
             }
         }
 
@@ -99,6 +107,7 @@ public struct KVCacheConfiguration: Sendable, Hashable {
             case .fullPrecision: 0
             case .affine(let configuration): configuration.compressionStart
             case .turboQuant(let configuration): configuration.compressionStart
+            case .varianceNormalized(let configuration): configuration.compressionStart
             }
         }
     }
@@ -115,6 +124,7 @@ public struct KVCacheStrategyIdentifier: Sendable, Hashable, CustomStringConvert
     public static let fullPrecision = KVCacheStrategyIdentifier("full-precision")
     public static let affine = KVCacheStrategyIdentifier("affine")
     public static let turboQuant = KVCacheStrategyIdentifier("turbo-quant")
+    public static let varianceNormalized = KVCacheStrategyIdentifier("variance-normalized")
 
     public var description: String { rawValue }
 }
@@ -252,6 +262,80 @@ public struct TurboQuantKVCacheConfiguration: Sendable, Hashable {
         compressionStart: 0)
 }
 
+/// Variance-normalized (KVarN-inspired) cache compression settings.
+///
+/// Completed tiles are rotated, dual-axis variance-normalized, and quantized
+/// asymmetrically (keys and values may use different bit widths). The intended
+/// use case is memory-constrained long-context decoding rather than latency-
+/// sensitive generation.
+///
+/// - Warning: This strategy is experimental. Models must route attention through
+///   `attentionWithCacheUpdate`; direct `KVCache.update` call sites use a full-cache
+///   materialization fallback that is not suitable for long-context decode.
+public struct VarianceNormalizedKVCacheConfiguration: Sendable, Hashable {
+    private static let supportedBitWidths: Set<Int> = [2, 3, 4, 5, 6, 8]
+    private static let supportedTileSizes: Set<Int> = [32, 64, 128]
+
+    public let keyBits: Int
+    public let valueBits: Int
+    public let tileSize: Int
+    public let sinkhornIterations: Int
+    public let compressionStart: Int
+
+    public init(
+        keyBits: Int = 4,
+        valueBits: Int = 2,
+        tileSize: Int = 128,
+        sinkhornIterations: Int = 8,
+        compressionStart: Int = 0
+    ) throws {
+        guard Self.supportedBitWidths.contains(keyBits) else {
+            throw KVCacheConfigurationError.invalidAffineBits(keyBits)
+        }
+        guard Self.supportedBitWidths.contains(valueBits) else {
+            throw KVCacheConfigurationError.invalidAffineBits(valueBits)
+        }
+        guard Self.supportedTileSizes.contains(tileSize) else {
+            throw KVCacheConfigurationError.invalidTileSize(tileSize)
+        }
+        guard sinkhornIterations > 0 else {
+            throw KVCacheConfigurationError.invalidSinkhornIterations(sinkhornIterations)
+        }
+        guard compressionStart >= 0 else {
+            throw KVCacheConfigurationError.invalidCompressionStart(compressionStart)
+        }
+        self.keyBits = keyBits
+        self.valueBits = valueBits
+        self.tileSize = tileSize
+        self.sinkhornIterations = sinkhornIterations
+        self.compressionStart = compressionStart
+    }
+
+    package init(
+        uncheckedKeyBits keyBits: Int,
+        valueBits: Int,
+        tileSize: Int,
+        sinkhornIterations: Int,
+        compressionStart: Int
+    ) {
+        self.keyBits = keyBits
+        self.valueBits = valueBits
+        self.tileSize = tileSize
+        self.sinkhornIterations = sinkhornIterations
+        self.compressionStart = compressionStart
+    }
+
+    /// 4-bit keys and 2-bit values with 128-token tiles; the paper-inspired default.
+    public static let memoryFirst = VarianceNormalizedKVCacheConfiguration(
+        uncheckedKeyBits: 4, valueBits: 2, tileSize: 128, sinkhornIterations: 8,
+        compressionStart: 0)
+
+    /// 4-bit keys and values for higher fidelity at still-reduced memory.
+    public static let balanced = VarianceNormalizedKVCacheConfiguration(
+        uncheckedKeyBits: 4, valueBits: 4, tileSize: 128, sinkhornIterations: 8,
+        compressionStart: 0)
+}
+
 /// Validation failures for typed or legacy KV-cache configuration.
 public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedError {
     case conflictingLegacyConfiguration
@@ -260,6 +344,8 @@ public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedErro
     case invalidPreservedPrefix(Int, capacity: Int)
     case invalidAffineBits(Int)
     case invalidGroupSize(Int)
+    case invalidTileSize(Int)
+    case invalidSinkhornIterations(Int)
     case invalidCompressionStart(Int)
     case unsupportedLegacyScheme(String)
     case incompatibleCapacity(expected: Int, count: Int)
@@ -280,6 +366,10 @@ public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedErro
             "Affine KV-cache bit width must be one of 2, 3, 4, 5, 6, or 8; received \(value)."
         case .invalidGroupSize(let value):
             "KV-cache group size must be positive; received \(value)."
+        case .invalidTileSize(let value):
+            "Variance-normalized KV-cache tile size must be 32, 64, or 128; received \(value)."
+        case .invalidSinkhornIterations(let value):
+            "Variance-normalized Sinkhorn iterations must be positive; received \(value)."
         case .invalidCompressionStart(let value):
             "KV-cache compression start must be non-negative; received \(value)."
         case .unsupportedLegacyScheme(let value):

@@ -138,6 +138,12 @@ public struct GenerateParameters: Sendable {
     ///   maximum compression; K sensitivity varies by model family, so
     ///   validate on your model (asym is the recommended starting point).
     ///
+    /// Variance-normalized (KVarN-inspired) schemes for memory-bound long context:
+    /// - "varn" / "varn4v2"  4-bit K + 2-bit V, 128-token tiles
+    /// - "varn4" / "varn4v4"  4-bit K/V
+    /// - "varn2" / "varn2v2"  2-bit K/V
+    /// - "varn4v2t32" / "varn4v2t64"  explicit tile size variants
+    ///
     /// Unrecognized schemes are rejected when generation starts. Prefer
     /// ``kvCache`` for compile-time-safe configuration.
     public var kvScheme: String?

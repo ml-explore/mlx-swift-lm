@@ -113,11 +113,19 @@ class OlmoeSparseMoeBlock: Module, UnaryLayer {
         let routingWeights = MLX.softmax(routerLogits, axis: -1, precise: true)
 
         let k = topK
-        let inds = MLX.argPartition(-routingWeights, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        var scores = MLX.takeAlong(routingWeights, inds, axis: -1)
-
-        if normTopkProb {
-            scores = scores / MLX.sum(scores, axis: -1, keepDims: true)
+        let inds: MLXArray
+        let scores: MLXArray
+        if supportsFusedRouterTopK(routingWeights, k: k) {
+            (inds, scores) = fusedRouterTopK(
+                selection: routingWeights, values: routingWeights, k: k,
+                normalize: normTopkProb, order: .descending)
+        } else {
+            inds = MLX.argPartition(-routingWeights, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            var selected = MLX.takeAlong(routingWeights, inds, axis: -1)
+            if normTopkProb {
+                selected = selected / MLX.sum(selected, axis: -1, keepDims: true)
+            }
+            scores = selected
         }
 
         let y = switchMLP(x, inds)

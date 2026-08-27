@@ -59,7 +59,9 @@ final class GlmOcrContinuationTests: XCTestCase {
             """
         let config = try JSONDecoder().decode(
             GlmOcrConfiguration.self, from: Data(json.utf8))
-        return GlmOcr(config)
+        // Pin the initializer weights. Task-local rather than MLXRandom.seed:
+        // parallel tests must not share (or perturb) the global random stream.
+        return withRandomState(MLXRandom.RandomState(seed: 1)) { GlmOcr(config) }
     }
 
     /// The shared continuation equivalences, configured for GLM-OCR: image token 500, and no
@@ -113,157 +115,165 @@ final class GlmOcrContinuationTests: XCTestCase {
     /// (silently wrong positions) or reaching getRopeIndex's batchSize precondition (a trap).
     /// This is independent of the missing-state guard: here the anchor is present and valid.
     func testWarmBatchedContinuationThrows() throws {
-        MLXRandom.seed(23)
-        let model = try makeTinyModel()
+        try withRandomState(MLXRandom.RandomState(seed: 23)) {
+            let model = try makeTinyModel()
 
-        let cache = try model.newCache(parameters: nil)
-        let (_, warmState) = try lastLogits(
-            try model.prepare(
-                LMInput(text: .init(tokens: textTokens(6))), cache: cache, state: nil,
-                prefill: .init()))
-        XCTAssertNotNil(warmState?[LMOutput.Key<MLXArray>("glmocr.ropeDeltas")])
+            let cache = try model.newCache(parameters: nil)
+            let (_, warmState) = try lastLogits(
+                try model.prepare(
+                    LMInput(text: .init(tokens: textTokens(6))), cache: cache, state: nil,
+                    prefill: .init()))
+            XCTAssertNotNil(warmState?[LMOutput.Key<MLXArray>("glmocr.ropeDeltas")])
 
-        let batched = concatenated(
-            [textTokens(4, seed: 1), textTokens(4, seed: 2)], axis: 0)
-        XCTAssertEqual(batched.dim(0), 2)
+            let batched = concatenated(
+                [textTokens(4, seed: 1), textTokens(4, seed: 2)], axis: 0)
+            XCTAssertEqual(batched.dim(0), 2)
 
-        XCTAssertThrowsError(
-            try model.prepare(
-                LMInput(text: .init(tokens: batched)), cache: cache, state: warmState,
-                prefill: .init())
-        ) { error in
-            guard
-                case ContinuationStateError.unsupportedBatchContinuation(let name)? =
-                    error as? ContinuationStateError
-            else {
-                return XCTFail(
-                    "expected ContinuationStateError.unsupportedBatchContinuation, got \(error)")
+            XCTAssertThrowsError(
+                try model.prepare(
+                    LMInput(text: .init(tokens: batched)), cache: cache, state: warmState,
+                    prefill: .init())
+            ) { error in
+                guard
+                    case ContinuationStateError.unsupportedBatchContinuation(let name)? =
+                        error as? ContinuationStateError
+                else {
+                    return XCTFail(
+                        "expected ContinuationStateError.unsupportedBatchContinuation, got \(error)"
+                    )
+                }
+                XCTAssertEqual(name, "GlmOcr")
             }
-            XCTAssertEqual(name, "GlmOcr")
         }
     }
 
     func testWarmContinuationWithoutStateThrows() throws {
-        MLXRandom.seed(19)
-        let model = try makeTinyModel()
+        try withRandomState(MLXRandom.RandomState(seed: 19)) {
+            let model = try makeTinyModel()
 
-        let cache = try model.newCache(parameters: nil)
-        XCTAssertNoThrow(
-            try model.prepare(
-                LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
-                prefill: .init(stepSize: 8)),
-            "a long cold prefill carries no anchor and must not throw")
+            let cache = try model.newCache(parameters: nil)
+            XCTAssertNoThrow(
+                try model.prepare(
+                    LMInput(text: .init(tokens: textTokens(40))), cache: cache, state: nil,
+                    prefill: .init(stepSize: 8)),
+                "a long cold prefill carries no anchor and must not throw")
 
-        XCTAssertThrowsError(
-            try model.prepare(
-                LMInput(text: .init(tokens: textTokens(6, seed: 2))), cache: cache, state: nil,
-                prefill: .init())
-        ) { error in
-            guard
-                case ContinuationStateError.missingState(_, let key)? =
-                    error as? ContinuationStateError
-            else {
-                return XCTFail("expected ContinuationStateError.missingState, got \(error)")
+            XCTAssertThrowsError(
+                try model.prepare(
+                    LMInput(text: .init(tokens: textTokens(6, seed: 2))), cache: cache,
+                    state: nil,
+                    prefill: .init())
+            ) { error in
+                guard
+                    case ContinuationStateError.missingState(_, let key)? =
+                        error as? ContinuationStateError
+                else {
+                    return XCTFail("expected ContinuationStateError.missingState, got \(error)")
+                }
+                XCTAssertEqual(key, "glmocr.ropeDeltas")
             }
-            XCTAssertEqual(key, "glmocr.ropeDeltas")
         }
     }
 
     /// A cold prefill must always hand back an anchor — zero for a text-only
     /// prompt — so an ordinary text conversation never trips the guard.
     func testColdTextOnlyPrefillCarriesAnchor() throws {
-        MLXRandom.seed(23)
-        let model = try makeTinyModel()
+        try withRandomState(MLXRandom.RandomState(seed: 23)) {
+            let model = try makeTinyModel()
 
-        let cache = try model.newCache(parameters: nil)
-        let (_, state) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
-                prefill: .init()))
+            let cache = try model.newCache(parameters: nil)
+            let (_, state) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: textTokens(10))), cache: cache, state: nil,
+                    prefill: .init()))
 
-        guard let anchor = state?[ropeDeltasKey] else {
-            return XCTFail("cold text-only prefill returned no rope delta")
+            guard let anchor = state?[ropeDeltasKey] else {
+                return XCTFail("cold text-only prefill returned no rope delta")
+            }
+            XCTAssertEqual(anchor.asType(.int32).item(Int.self), 0)
         }
-        XCTAssertEqual(anchor.asType(.int32).item(Int.self), 0)
     }
 
     /// Decode after a warm image-bearing continuation: the resume state carries
     /// only the anchor, so the decode path has to reach its rope-delta branch
     /// without the precomputed position ids a cold prefill would have left.
     func testDecodeAfterWarmContinuationUsesAnchor() throws {
-        MLXRandom.seed(31)
-        let model = try makeTinyModel()
-        let image = makeImage()
+        try withRandomState(MLXRandom.RandomState(seed: 31)) {
+            let model = try makeTinyModel()
+            let image = makeImage()
 
-        let t1 = concatenated([textTokens(6), imageRun(), textTokens(4, seed: 2)], axis: 1)
-        let t2 = textTokens(6, seed: 4)
-        let next = textTokens(1, seed: 8)
+            let t1 = concatenated([textTokens(6), imageRun(), textTokens(4, seed: 2)], axis: 1)
+            let t2 = textTokens(6, seed: 4)
+            let next = textTokens(1, seed: 8)
 
-        // Reference: one cold prefill of everything, then one decode step.
-        let cacheF = try model.newCache(parameters: nil)
-        let (_, stateF) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
-                cache: cacheF, state: nil, prefill: .init()))
-        let decodeF = model(LMInput.Text(tokens: next), cache: cacheF, state: stateF)
+            // Reference: one cold prefill of everything, then one decode step.
+            let cacheF = try model.newCache(parameters: nil)
+            let (_, stateF) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: concatenated([t1, t2], axis: 1)), image: image),
+                    cache: cacheF, state: nil, prefill: .init()))
+            let decodeF = model(LMInput.Text(tokens: next), cache: cacheF, state: stateF)
 
-        // Warm: prefill t1, continue with t2, then decode the same token.
-        let cacheW = try model.newCache(parameters: nil)
-        let (_, s1) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
-                prefill: .init()))
-        let (_, s2) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
-        XCTAssertNotNil(s2?[ropeDeltasKey], "continuation must hand back an anchor")
-        let decodeW = model(LMInput.Text(tokens: next), cache: cacheW, state: s2)
+            // Warm: prefill t1, continue with t2, then decode the same token.
+            let cacheW = try model.newCache(parameters: nil)
+            let (_, s1) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: t1), image: image), cache: cacheW, state: nil,
+                    prefill: .init()))
+            let (_, s2) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: t2)), cache: cacheW, state: s1, prefill: .init()))
+            XCTAssertNotNil(s2?[ropeDeltasKey], "continuation must hand back an anchor")
+            let decodeW = model(LMInput.Text(tokens: next), cache: cacheW, state: s2)
 
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(decodeW.logits[0..., -1, 0...], decodeF.logits[0..., -1, 0...]), 1e-3,
-            "decode after a warm continuation ignored the carried anchor")
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(decodeW.logits[0..., -1, 0...], decodeF.logits[0..., -1, 0...]), 1e-3,
+                "decode after a warm continuation ignored the carried anchor")
+        }
     }
 
     // MARK: - Prompt cache round trip
 
     func testImageStateSurvivesPromptCacheRoundTrip() throws {
-        MLXRandom.seed(29)
-        let model = try makeTinyModel()
-        let image = makeImage()
+        try withRandomState(MLXRandom.RandomState(seed: 29)) {
+            let model = try makeTinyModel()
+            let image = makeImage()
 
-        let t1 = concatenated([textTokens(6), imageRun(), textTokens(6, seed: 2)], axis: 1)
-        let t2 = textTokens(8, seed: 4)
+            let t1 = concatenated([textTokens(6), imageRun(), textTokens(6, seed: 2)], axis: 1)
+            let t2 = textTokens(8, seed: 4)
 
-        let warmCache = try model.newCache(parameters: nil)
-        let (_, savedState) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
-                prefill: .init()))
-        XCTAssertNotNil(savedState)
+            let warmCache = try model.newCache(parameters: nil)
+            let (_, savedState) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: t1), image: image), cache: warmCache, state: nil,
+                    prefill: .init()))
+            XCTAssertNotNil(savedState)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
-        defer { try? FileManager.default.removeItem(at: url) }
-        try savePromptCache(url: url, cache: warmCache, state: savedState)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("safetensors")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try savePromptCache(url: url, cache: warmCache, state: savedState)
 
-        let snapshot = try loadPromptCacheSnapshot(url: url)
-        let (warmLogits, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: warmCache, state: savedState,
-                prefill: .init()))
-        let (restoredLogits, _) = try lastLogits(
-            model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: snapshot.cache, state: snapshot.state,
-                prefill: .init()))
+            let snapshot = try loadPromptCacheSnapshot(url: url)
+            let (warmLogits, _) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: t2)), cache: warmCache, state: savedState,
+                    prefill: .init()))
+            let (restoredLogits, _) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: t2)), cache: snapshot.cache, state: snapshot.state,
+                    prefill: .init()))
 
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(restoredLogits, warmLogits), 1e-6,
-            "disk-restored state diverged from the live warm continuation")
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(restoredLogits, warmLogits), 1e-6,
+                "disk-restored state diverged from the live warm continuation")
 
-        let keptCache = try loadPromptCacheSnapshot(url: url).cache
-        XCTAssertThrowsError(
-            try model.prepare(
-                LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil, prefill: .init()))
+            let keptCache = try loadPromptCacheSnapshot(url: url).cache
+            XCTAssertThrowsError(
+                try model.prepare(
+                    LMInput(text: .init(tokens: t2)), cache: keptCache, state: nil,
+                    prefill: .init()))
+        }
     }
 }

@@ -61,23 +61,24 @@ final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
     func testDecodeConvMatchesConvolutionKernelBitwise() throws {
         let config = try tinyGDNConfiguration()
         for dtype in [DType.float16, DType.bfloat16] {
-            MLXRandom.seed(11)
-            let gdn = Qwen35GatedDeltaNet(config)
-            gdn.conv1d.update(
-                parameters: gdn.conv1d.parameters().mapValues { $0.asType(dtype) })
+            withRandomState(MLXRandom.RandomState(seed: 11)) {
+                let gdn = Qwen35GatedDeltaNet(config)
+                gdn.conv1d.update(
+                    parameters: gdn.conv1d.parameters().mapValues { $0.asType(dtype) })
 
-            let qkv = MLXRandom.normal([1, 1, gdn.convDim]).asType(dtype)
-            let convState = MLXRandom.normal(
-                [1, gdn.convKernelSize - 1, gdn.convDim]
-            ).asType(dtype)
-            eval(qkv, convState)
+                let qkv = MLXRandom.normal([1, 1, gdn.convDim]).asType(dtype)
+                let convState = MLXRandom.normal(
+                    [1, gdn.convKernelSize - 1, gdn.convDim]
+                ).asType(dtype)
+                eval(qkv, convState)
 
-            let (conv, state) = gdn.decodeConv(convState: convState, qkv: qkv)
-            let (refConv, refState) = gdn.generalConv(convState: convState, qkv: qkv)
-            eval(conv, state, refConv, refState)
+                let (conv, state) = gdn.decodeConv(convState: convState, qkv: qkv)
+                let (refConv, refState) = gdn.generalConv(convState: convState, qkv: qkv)
+                eval(conv, state, refConv, refState)
 
-            assertBitIdentical(conv, refConv, "conv output (\(dtype))")
-            assertBitIdentical(state, refState, "conv state (\(dtype))")
+                assertBitIdentical(conv, refConv, "conv output (\(dtype))")
+                assertBitIdentical(state, refState, "conv state (\(dtype))")
+            }
         }
     }
 }

@@ -3,6 +3,26 @@
 We want to make contributing to this project as easy and transparent as
 possible.
 
+## AI Usage Policy
+
+AI-generated code is allowed. What is not allowed is submitting code you do not
+understand. You are 100% responsible for every line, however it was produced, and
+must explicitly disclose the manner in which AI was employed. You must be able to
+explain the code you submit.
+
+AI-drafted prose is allowed too — commit messages, pull request descriptions,
+issues, discussions, and replies to reviewers. The condition is that you read
+every word before it is submitted and confirm it says what you mean. By
+contributing you agree that you have done so, and the pull request template asks
+you to confirm it for the description. Please don't ask a reviewer to read prose
+you did not read yourself.
+
+Violations of the above may result in the closure of PRs and a ban from
+contributing to the project.
+
+Agents working in this repo should follow [AGENTS.md](AGENTS.md), which encodes
+these rules.
+
 ## Pull Requests
 
 1. Fork and submit pull requests to the repo. 

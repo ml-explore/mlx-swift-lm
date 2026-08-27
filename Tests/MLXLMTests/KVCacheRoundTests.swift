@@ -128,6 +128,39 @@ private struct RingSnapshot {
     #expect(live.offset == 6, "rollback did not clamp the append-only layer back")
 }
 
+@Test func testVarianceNormalizedRoundCommitsExactlyBelowTileBoundary() throws {
+    let live = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let initial = positionedKV(0 ..< 20, headDim: 32)
+    _ = live.update(keys: initial.0, values: initial.1)
+
+    let staged = try #require(StagedRound([live], width: 4))
+    let provisional = positionedKV(20 ..< 24, headDim: 32)
+    _ = staged.caches[0].update(keys: provisional.0, values: provisional.1)
+    staged.commit(accepted: 2)
+
+    let empty = MLXArray.zeros([1, 1, 0, 32])
+    let materialized = live.update(keys: empty, values: empty)
+    let expected = positionedKV(0 ..< 22, headDim: 32)
+    eval(materialized.0, materialized.1)
+
+    #expect(live.offset == 22)
+    #expect(allClose(materialized.0, expected.0, rtol: 0, atol: 1e-5).item(Bool.self))
+    #expect(allClose(materialized.1, expected.1, rtol: 0, atol: 1e-5).item(Bool.self))
+}
+
+@Test func testVarianceNormalizedRoundRefusesCompressionBoundary() {
+    let live = VarianceNormalizedKVCache(
+        tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+    let initial = positionedKV(0 ..< 30, headDim: 32)
+    _ = live.update(keys: initial.0, values: initial.1)
+
+    #expect(live.isTrimmable(after: 1))
+    #expect(!live.isTrimmable(after: 2))
+    #expect(StagedRound([live], width: 2) == nil)
+    #expect(live.offset == 30, "refusing the round must leave the live cache untouched")
+}
+
 // MARK: - Invariant 2: the presentation is the live write path's, exactly
 
 /// The overlay's whole correctness argument: what the adapter returns is what the live cache
@@ -187,47 +220,47 @@ private struct RingSnapshot {
 
 /// Attention through the overlay, past a wrap, against a reference that never rotated.
 @Test func testOverlayAttentionPastWrapMatchesLogicalOrderReference() throws {
-    MLXRandom.seed(0)
+    try withRandomState(MLXRandom.RandomState(seed: 0)) {
+        let window = 8
+        let history = 20
+        let queries = 4
+        let heads = 2
+        let headDim = 4
+        let scale = 1.0 / Float(headDim).squareRoot()
 
-    let window = 8
-    let history = 20
-    let queries = 4
-    let heads = 2
-    let headDim = 4
-    let scale = 1.0 / Float(headDim).squareRoot()
+        let allKeys = MLXRandom.normal([1, heads, history + queries, headDim])
+        let allValues = MLXRandom.normal([1, heads, history + queries, headDim])
+        let q = MLXRandom.normal([1, heads, queries, headDim])
 
-    let allKeys = MLXRandom.normal([1, heads, history + queries, headDim])
-    let allValues = MLXRandom.normal([1, heads, history + queries, headDim])
-    let q = MLXRandom.normal([1, heads, queries, headDim])
+        let live = RotatingKVCache(maxSize: window, keep: 0)
+        for p in 0 ..< history {
+            _ = live.update(
+                keys: allKeys[0..., 0..., p ..< (p + 1), 0...],
+                values: allValues[0..., 0..., p ..< (p + 1), 0...])
+        }
 
-    let live = RotatingKVCache(maxSize: window, keep: 0)
-    for p in 0 ..< history {
-        _ = live.update(
-            keys: allKeys[0..., 0..., p ..< (p + 1), 0...],
-            values: allValues[0..., 0..., p ..< (p + 1), 0...])
+        let overlay = try #require(StagedRound([live]))
+        let adapter = try #require(overlay.caches.first as? RotatingStagedKVCache)
+
+        let mask = adapter.makeMask(n: queries, windowSize: window, returnArray: false)
+        let (keys, values) = adapter.update(
+            keys: allKeys[0..., 0..., history ..< (history + queries), 0...],
+            values: allValues[0..., 0..., history ..< (history + queries), 0...])
+        let out = MLXFast.scaledDotProductAttention(
+            queries: q, keys: keys, values: values, scale: scale, mask: mask)
+
+        let queryPositions = MLXArray(Int32(history) ..< Int32(history + queries))[0..., .newAxis]
+        let keyPositions = MLXArray(Int32(0) ..< Int32(history + queries))[.newAxis]
+        let referenceMask =
+            (queryPositions .>= keyPositions) & (queryPositions .< keyPositions + Int32(window))
+        let expected = MLXFast.scaledDotProductAttention(
+            queries: q, keys: allKeys, values: allValues, scale: scale, mask: .array(referenceMask))
+
+        #expect(out.shape == expected.shape)
+        #expect(
+            allClose(out, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self),
+            "overlay attention diverged from the logical-order reference")
     }
-
-    let overlay = try #require(StagedRound([live]))
-    let adapter = try #require(overlay.caches.first as? RotatingStagedKVCache)
-
-    let mask = adapter.makeMask(n: queries, windowSize: window, returnArray: false)
-    let (keys, values) = adapter.update(
-        keys: allKeys[0..., 0..., history ..< (history + queries), 0...],
-        values: allValues[0..., 0..., history ..< (history + queries), 0...])
-    let out = MLXFast.scaledDotProductAttention(
-        queries: q, keys: keys, values: values, scale: scale, mask: mask)
-
-    let queryPositions = MLXArray(Int32(history) ..< Int32(history + queries))[0..., .newAxis]
-    let keyPositions = MLXArray(Int32(0) ..< Int32(history + queries))[.newAxis]
-    let referenceMask =
-        (queryPositions .>= keyPositions) & (queryPositions .< keyPositions + Int32(window))
-    let expected = MLXFast.scaledDotProductAttention(
-        queries: q, keys: allKeys, values: allValues, scale: scale, mask: .array(referenceMask))
-
-    #expect(out.shape == expected.shape)
-    #expect(
-        allClose(out, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self),
-        "overlay attention diverged from the logical-order reference")
 }
 
 // MARK: - Invariant 3: commit equivalence

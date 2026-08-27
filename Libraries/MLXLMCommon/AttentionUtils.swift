@@ -1,6 +1,14 @@
 import Foundation
 import MLX
 
+/// Whether attention can be split around a plain `KVCache.update` call.
+///
+/// Quantized and TurboQuant caches own their complete attention operation, so
+/// compiled model segments must leave those cache routes on the general path.
+package func usesPlainAttentionCacheRoute(_ cache: KVCache) -> Bool {
+    !(cache is QuantizedKVCacheProtocol) && !(cache is TurboQuantKVCache)
+}
+
 /// Attention utilities that match Python mlx-lm's interface
 ///
 /// This provides a single function that automatically routes to quantized or regular
@@ -10,6 +18,7 @@ import MLX
 ///
 /// This function matches Python's `scaled_dot_product_attention` in base.py:
 /// - Detects if cache is `QuantizedKVCache` using `isinstance` pattern
+/// - Detects cache-native attention implementations
 /// - Routes to `quantizedScaledDotProductAttention` or `MLXFast.scaledDotProductAttention`
 /// - Handles cache updating automatically
 /// - Transparent to models - they just call this function
@@ -69,6 +78,13 @@ public func attentionWithCacheUpdate(
             queries: queries, keys: keys, values: values,
             scale: scale, mask: mask
         )
+    } else if let attentionCache = cache as? KVCacheAttentionProtocol {
+        return attentionCache.updateAndAttend(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: mask)
     } else if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)

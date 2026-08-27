@@ -7,7 +7,7 @@
 import MLX
 import XCTest
 
-@testable import MLXLLM
+@testable import MLXLMCommon
 
 final class Qwen35RouterTopKBitwiseTests: XCTestCase {
 
@@ -57,43 +57,75 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
         for (e, k) in [(256, 8), (128, 8)] {
             for dtype in [DType.float16, DType.bfloat16, DType.float32] {
                 for normalize in [true, false] {
-                    MLXRandom.seed(UInt64(e + k + (normalize ? 1 : 0)))
-                    let tag = "E=\(e) K=\(k) \(dtype) norm=\(normalize)"
+                    withRandomState(
+                        MLXRandom.RandomState(seed: UInt64(e + k + (normalize ? 1 : 0)))
+                    ) {
+                        let tag = "E=\(e) K=\(k) \(dtype) norm=\(normalize)"
 
-                    // The production distribution: softmax outputs.
-                    let soft = MLX.softmax(
-                        MLXRandom.normal([rows, e]), axis: -1, precise: true
-                    ).asType(dtype)
-                    assertRouterMatchesChain(soft, k: k, normalize: normalize, "softmax \(tag)")
+                        // The production distribution: softmax outputs.
+                        let soft = MLX.softmax(
+                            MLXRandom.normal([rows, e]), axis: -1, precise: true
+                        ).asType(dtype)
+                        assertRouterMatchesChain(soft, k: k, normalize: normalize, "softmax \(tag)")
 
-                    // Heavy ties — the stable tie-break is the hard part.
-                    let ties = (MLX.round(MLXRandom.normal([rows, e]) * 2) / 2).asType(dtype)
-                    assertRouterMatchesChain(ties, k: k, normalize: normalize, "ties \(tag)")
+                        // Heavy ties — the stable tie-break is the hard part.
+                        let ties = (MLX.round(MLXRandom.normal([rows, e]) * 2) / 2).asType(dtype)
+                        assertRouterMatchesChain(ties, k: k, normalize: normalize, "ties \(tag)")
 
-                    // All-equal rows: pure index-order selection.
-                    let equal = MLX.full([rows, e], values: MLXArray(Float(0.25))).asType(dtype)
-                    assertRouterMatchesChain(equal, k: k, normalize: normalize, "all-equal \(tag)")
+                        // All-equal rows: pure index-order selection.
+                        let equal = MLX.full([rows, e], values: MLXArray(Float(0.25))).asType(dtype)
+                        assertRouterMatchesChain(
+                            equal, k: k, normalize: normalize, "all-equal \(tag)")
 
-                    // Signed zeros: compare equal, differ bitwise.
-                    let signs = MLX.where(
-                        MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.5,
-                        MLXArray(Float(-0.0)), MLXArray(Float(0.0)))
-                    let zeros = MLX.where(
-                        MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.5,
-                        signs, MLXRandom.normal([rows, e])
-                    ).asType(dtype)
-                    assertRouterMatchesChain(zeros, k: k, normalize: normalize, "±0 \(tag)")
+                        // Signed zeros: compare equal, differ bitwise.
+                        let signs = MLX.where(
+                            MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.5,
+                            MLXArray(Float(-0.0)), MLXArray(Float(0.0)))
+                        let zeros = MLX.where(
+                            MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.5,
+                            signs, MLXRandom.normal([rows, e])
+                        ).asType(dtype)
+                        assertRouterMatchesChain(zeros, k: k, normalize: normalize, "±0 \(tag)")
 
-                    // NaN above everything, all NaNs tie; indices only.
-                    var nans = MLX.where(
-                        MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.05,
-                        MLXArray(Float.nan), MLXRandom.normal([rows, e])
-                    ).asType(dtype)
-                    nans[0] = MLX.full([e], values: MLXArray(Float.nan)).asType(dtype)
-                    assertRouterMatchesChain(
-                        nans, k: k, normalize: normalize, "NaN \(tag)", indicesOnly: true)
+                        // NaN above everything, all NaNs tie; indices only.
+                        var nans = MLX.where(
+                            MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.05,
+                            MLXArray(Float.nan), MLXRandom.normal([rows, e])
+                        ).asType(dtype)
+                        nans[0] = MLX.full([e], values: MLXArray(Float.nan)).asType(dtype)
+                        assertRouterMatchesChain(
+                            nans, k: k, normalize: normalize, "NaN \(tag)", indicesOnly: true)
+                    }
                 }
             }
+        }
+    }
+
+    func testMoERouterTopKMatchesChainAcrossDispatchPaths() {
+        let cases = [
+            (shape: [1, 256], k: 8, label: "single-row fused"),
+            (shape: [4, 256], k: 8, label: "multi-row chain"),
+            (shape: [1, 1025], k: 8, label: "expert-limit chain"),
+        ]
+
+        for testCase in cases {
+            let gates = MLX.softmax(
+                MLXRandom.normal(testCase.shape), axis: -1, precise: true
+            ).asType(.float16)
+            let (wantInds, wantScores) = chainRouterTopK(
+                gates, k: testCase.k, normalize: true)
+            let (gotInds, gotScores) = moeRouterTopK(
+                gates, k: testCase.k, normalize: true)
+            eval(wantInds, wantScores, gotInds, gotScores)
+
+            XCTAssertEqual(
+                gotInds.reshaped(-1).asArray(UInt32.self),
+                wantInds.reshaped(-1).asArray(UInt32.self),
+                "\(testCase.label): expert selection order")
+            assertBitIdentical(
+                gotScores.reshaped(-1, testCase.k),
+                wantScores.reshaped(-1, testCase.k),
+                "\(testCase.label): scores")
         }
     }
 }

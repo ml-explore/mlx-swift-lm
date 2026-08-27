@@ -10,6 +10,151 @@ import XCTest
 
 public class EvalTests: XCTestCase {
 
+    private enum TestKVCacheMode: String {
+        case fp16
+        case affine4
+        case varianceNormalized4Value2
+
+        var parameters: GenerateParameters {
+            switch self {
+            case .fp16:
+                GenerateParameters(temperature: 0)
+            case .affine4:
+                GenerateParameters(
+                    kvBits: 4,
+                    kvGroupSize: 32,
+                    quantizedKVStart: 0,
+                    temperature: 0)
+            case .varianceNormalized4Value2:
+                // Prefer typed configuration once rebased on main's cache plan API.
+                GenerateParameters(
+                    kvCache: .init(
+                        strategy: .varianceNormalized(
+                            try! .init(
+                                keyBits: 4, valueBits: 2, tileSize: 32, sinkhornIterations: 4)),
+                        compatibility: .allowPartial),
+                    temperature: 0)
+            }
+        }
+    }
+
+    private struct DecodeResult {
+        var tokens: [Int]
+        var cacheBytes: Int
+        var elapsed: TimeInterval
+
+        var tokensPerSecond: Double {
+            Double(tokens.count) / elapsed
+        }
+    }
+
+    private func makeQualityGateLlamaModel(seed: UInt64 = 11) -> LlamaModel {
+        withRandomState(MLXRandom.RandomState(seed: seed)) {
+            let config = LlamaConfiguration(
+                hiddenSize: 64, hiddenLayers: 2, intermediateSize: 128, attentionHeads: 2,
+                rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 1)
+            let model = LlamaModel(config)
+            eval(model)
+            return model
+        }
+    }
+
+    private func applyDynamicKVQuantization(cache: inout [KVCache], mode: TestKVCacheMode) throws {
+        if let configuration = mode.parameters.kvCache {
+            _ = try applyKVCacheConfiguration(cache: &cache, configuration: configuration)
+            return
+        }
+        maybeQuantizeKVCache(
+            cache: &cache,
+            kvBits: mode.parameters.kvBits,
+            kvGroupSize: mode.parameters.kvGroupSize,
+            quantizedKVStart: mode.parameters.quantizedKVStart,
+            kvScheme: mode.parameters.kvScheme)
+    }
+
+    private func cacheBytes(_ cache: [KVCache]) -> Int {
+        let arrays = cache.flatMap { $0.state }
+        if !arrays.isEmpty {
+            eval(arrays)
+        }
+        return arrays.reduce(0) { $0 + $1.nbytes }
+    }
+
+    private func nextToken(
+        model: LlamaModel,
+        token: Int,
+        cache: [KVCache]
+    ) -> Int {
+        let input = MLXArray([token])[.newAxis, .ellipsis]
+        let logits = model.callAsFunction(input, cache: cache)
+        let next = argMax(logits[0..., -1, 0...], axis: -1)
+        eval(next)
+        return next.item(Int.self)
+    }
+
+    private func generateTokens(
+        model: LlamaModel,
+        prompt: [Int],
+        maxTokens: Int,
+        mode: TestKVCacheMode
+    ) throws -> DecodeResult {
+        var cache = try model.newCache(parameters: nil)
+        let start = Date.timeIntervalSinceReferenceDate
+        let promptLogits = model.callAsFunction(MLXArray(prompt)[.newAxis, .ellipsis], cache: cache)
+        eval(promptLogits)
+        try applyDynamicKVQuantization(cache: &cache, mode: mode)
+
+        var previous = argMax(promptLogits[0..., -1, 0...], axis: -1).item(Int.self)
+        var generated: [Int] = []
+        generated.reserveCapacity(maxTokens)
+
+        for _ in 0 ..< maxTokens {
+            generated.append(previous)
+            previous = nextToken(model: model, token: previous, cache: cache)
+            try applyDynamicKVQuantization(cache: &cache, mode: mode)
+        }
+
+        return DecodeResult(
+            tokens: generated,
+            cacheBytes: cacheBytes(cache),
+            elapsed: Date.timeIntervalSinceReferenceDate - start)
+    }
+
+    private func autoregressiveCrossEntropy(
+        model: LlamaModel,
+        sequence: [Int],
+        mode: TestKVCacheMode
+    ) throws -> Float {
+        precondition(sequence.count > 1)
+        var cache = try model.newCache(parameters: nil)
+        var loss: Float = 0
+
+        for i in 0 ..< sequence.count - 1 {
+            let input = MLXArray([sequence[i]])[.newAxis, .ellipsis]
+            let target = MLXArray([sequence[i + 1]])[.newAxis, .ellipsis]
+            let logits = model.callAsFunction(input, cache: cache)
+            let tokenLoss = mean(crossEntropy(logits: logits, targets: target))
+            eval(tokenLoss)
+            loss += tokenLoss.item(Float.self)
+            try applyDynamicKVQuantization(cache: &cache, mode: mode)
+        }
+
+        return loss / Float(sequence.count - 1)
+    }
+
+    private func tokenAgreement(_ lhs: [Int], _ rhs: [Int]) -> Float {
+        precondition(lhs.count == rhs.count)
+        let matches = zip(lhs, rhs).filter { $0 == $1 }.count
+        return Float(matches) / Float(lhs.count)
+    }
+
+    private func firstTokenMismatch(_ lhs: [Int], _ rhs: [Int]) -> String {
+        for (index, pair) in zip(lhs, rhs).enumerated() where pair.0 != pair.1 {
+            return "index \(index): \(pair.0) != \(pair.1)"
+        }
+        return "none"
+    }
+
     func testLlamaEval() throws {
         let config = LlamaConfiguration(
             hiddenSize: 64, hiddenLayers: 16, intermediateSize: 512, attentionHeads: 32,
@@ -21,6 +166,171 @@ public class EvalTests: XCTestCase {
         let output = model.callAsFunction(input, cache: nil)
 
         XCTAssertEqual(output.shape, [1, 5, 100])
+    }
+
+    func testLlamaVarianceNormalizedKVCacheGenerationPath() throws {
+        let config = LlamaConfiguration(
+            hiddenSize: 64, hiddenLayers: 2, intermediateSize: 128, attentionHeads: 2,
+            rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 1)
+        let model = LlamaModel(config)
+        let parameters = GenerateParameters(
+            kvCache: .init(
+                strategy: .varianceNormalized(
+                    try .init(keyBits: 4, valueBits: 4, tileSize: 32, sinkhornIterations: 4)),
+                compatibility: .allowPartial),
+            temperature: 0)
+
+        var cache = try model.newCache(parameters: parameters)
+        XCTAssertTrue(cache.allSatisfy { $0 is KVCacheSimple })
+
+        let prompt = MLXArray([1, 2, 3, 4])[.newAxis, .ellipsis]
+        let output = model.callAsFunction(prompt, cache: cache)
+        eval(output)
+        XCTAssertEqual(output.shape, [1, 4, 100])
+
+        let configuration = try XCTUnwrap(parameters.kvCache)
+        _ = try applyKVCacheConfiguration(cache: &cache, configuration: configuration)
+        XCTAssertTrue(cache.allSatisfy { $0 is VarianceNormalizedKVCache })
+
+        let next = MLXArray([5])[.newAxis, .ellipsis]
+        let nextOutput = model.callAsFunction(next, cache: cache)
+        eval(nextOutput)
+        XCTAssertEqual(nextOutput.shape, [1, 1, 100])
+    }
+
+    func testLlamaVarianceNormalizedKVCacheAutoregressivePerplexityTracksBaselines() throws {
+        let model = makeQualityGateLlamaModel()
+        let sequence = (0 ..< 128).map { (($0 * 37 + 11) % 99) + 1 }
+
+        let fp16Loss = try autoregressiveCrossEntropy(model: model, sequence: sequence, mode: .fp16)
+        let affineLoss = try autoregressiveCrossEntropy(
+            model: model, sequence: sequence, mode: .affine4)
+        let varianceNormalizedLoss = try autoregressiveCrossEntropy(
+            model: model, sequence: sequence, mode: .varianceNormalized4Value2)
+
+        let affineDrift = abs(affineLoss - fp16Loss)
+        let varianceNormalizedDrift = abs(varianceNormalizedLoss - fp16Loss)
+        print(
+            "KV perplexity gate: fp16=\(fp16Loss), affine4=\(affineLoss), "
+                + "varianceNormalized4/value2=\(varianceNormalizedLoss)"
+        )
+
+        XCTAssertLessThan(affineDrift, 0.20)
+        XCTAssertLessThan(varianceNormalizedDrift, 0.20)
+    }
+
+    func testLlamaVarianceNormalizedKVCacheGreedyDecodeTracksFP16ForOneHundredTokens() throws {
+        let model = makeQualityGateLlamaModel()
+        let prompt = [1, 7, 13, 29, 31, 43, 59, 61]
+        let fp16 = try generateTokens(model: model, prompt: prompt, maxTokens: 100, mode: .fp16)
+        let affine = try generateTokens(
+            model: model, prompt: prompt, maxTokens: 100, mode: .affine4)
+        let varianceNormalized = try generateTokens(
+            model: model, prompt: prompt, maxTokens: 100, mode: .varianceNormalized4Value2)
+
+        let affineAgreement = tokenAgreement(affine.tokens, fp16.tokens)
+        let varianceNormalizedAgreement = tokenAgreement(varianceNormalized.tokens, fp16.tokens)
+        print(
+            "KV token agreement: affine4=\(affineAgreement) "
+                + "(first mismatch: \(firstTokenMismatch(affine.tokens, fp16.tokens))), "
+                + "varianceNormalized4/value2=\(varianceNormalizedAgreement) "
+                + "(first mismatch: \(firstTokenMismatch(varianceNormalized.tokens, fp16.tokens)))"
+        )
+
+        XCTAssertGreaterThanOrEqual(affineAgreement, 0.95)
+        XCTAssertGreaterThanOrEqual(varianceNormalizedAgreement, 0.95)
+    }
+
+    func testLlamaVarianceNormalizedKVCacheAppleSiliconDecodePerformanceSmoke() throws {
+        #if os(macOS) && arch(arm64)
+        let model = makeQualityGateLlamaModel()
+        let prompt = [3, 5, 8, 13, 21, 34, 55, 89]
+
+        _ = try generateTokens(model: model, prompt: prompt, maxTokens: 16, mode: .fp16)
+        _ = try generateTokens(model: model, prompt: prompt, maxTokens: 16, mode: .affine4)
+        _ = try generateTokens(
+            model: model, prompt: prompt, maxTokens: 16, mode: .varianceNormalized4Value2)
+
+        let fp16 = try generateTokens(model: model, prompt: prompt, maxTokens: 96, mode: .fp16)
+        let affine = try generateTokens(model: model, prompt: prompt, maxTokens: 96, mode: .affine4)
+        let varianceNormalized = try generateTokens(
+            model: model, prompt: prompt, maxTokens: 96, mode: .varianceNormalized4Value2)
+
+        print(
+            "KV decode smoke: fp16=\(fp16.tokensPerSecond) tok/s "
+                + "(\(fp16.cacheBytes) bytes), affine4=\(affine.tokensPerSecond) tok/s "
+                + "(\(affine.cacheBytes) bytes), varianceNormalized4/value2="
+                + "\(varianceNormalized.tokensPerSecond) tok/s "
+                + "(\(varianceNormalized.cacheBytes) bytes)"
+        )
+
+        XCTAssertGreaterThan(fp16.tokensPerSecond, 0)
+        XCTAssertGreaterThan(affine.tokensPerSecond, 0)
+        XCTAssertGreaterThan(varianceNormalized.tokensPerSecond, 0)
+        XCTAssertLessThan(affine.cacheBytes, fp16.cacheBytes)
+        XCTAssertLessThan(varianceNormalized.cacheBytes, fp16.cacheBytes)
+
+        // This is a smoke threshold for Apple Silicon CI variance, not a benchmark claim.
+        XCTAssertLessThan(varianceNormalized.elapsed, fp16.elapsed * 10)
+        XCTAssertLessThan(varianceNormalized.elapsed, affine.elapsed * 10)
+        #else
+        throw XCTSkip("Apple Silicon decode performance smoke test requires arm64 macOS.")
+        #endif
+    }
+
+    func testVarianceNormalizedKVCache32KIngestAndDecodePeakMetalMemorySmoke() throws {
+        #if os(macOS) && arch(arm64)
+        let tokenCount = 32_768
+        let cache = VarianceNormalizedKVCache(
+            tileSize: 128, keyBits: 4, valueBits: 2, sinkhornIterations: 8)
+        // Qwen3-4B-like grouped-query attention exercises the bounded four-KV-head
+        // normalization batches instead of measuring only the unsplit four-head path.
+        let queries = MLXRandom.normal([1, 32, 1, 128]).asType(.float16)
+        let keys = MLXRandom.normal([1, 8, tokenCount, 128]).asType(.float16)
+        let values = MLXRandom.normal([1, 8, tokenCount, 128]).asType(.float16)
+        eval(queries, keys, values)
+        Memory.clearCache()
+        let baselineActiveMemory = Memory.activeMemory
+        Memory.peakMemory = 0
+
+        let start = Date.timeIntervalSinceReferenceDate
+        let output = cache.updateAndAttend(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: 1 / sqrt(Float(128)))
+        eval(output)
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
+        let peakWorkspaceBytes = max(0, Memory.peakMemory - baselineActiveMemory)
+        let rawKVBytes = keys.nbytes + values.nbytes
+        let compactBytes = cache.state.reduce(0) { $0 + $1.nbytes }
+
+        let decodeQuery = MLXRandom.normal([1, 32, 1, 128]).asType(.float16)
+        let decodeKey = MLXRandom.normal([1, 8, 1, 128]).asType(.float16)
+        let decodeValue = MLXRandom.normal([1, 8, 1, 128]).asType(.float16)
+        let decodeStart = Date.timeIntervalSinceReferenceDate
+        let decodeOutput = cache.updateAndAttend(
+            queries: decodeQuery,
+            keys: decodeKey,
+            values: decodeValue,
+            scale: 1 / sqrt(Float(128)))
+        eval(decodeOutput)
+        let decodeElapsed = Date.timeIntervalSinceReferenceDate - decodeStart
+
+        print(
+            "KVarN 32K ingest/decode smoke: elapsed=\(elapsed)s, raw=\(rawKVBytes) bytes, "
+                + "compact=\(compactBytes) bytes, peak workspace=\(peakWorkspaceBytes) bytes, "
+                + "one-layer decode=\(decodeElapsed)s")
+
+        XCTAssertEqual(output.shape, [1, 32, 1, 128])
+        XCTAssertLessThan(compactBytes, rawKVBytes)
+        // A regression guard against retaining prompt-sized geometric spare capacity or an
+        // unbounded normalization graph. This is deliberately loose for different Apple GPUs.
+        XCTAssertLessThan(peakWorkspaceBytes, 768 * 1_024 * 1_024)
+        XCTAssertLessThan(decodeElapsed, 0.25)
+        #else
+        throw XCTSkip("Metal memory instrumentation requires arm64 macOS.")
+        #endif
     }
 
     func testLlamaLora() throws {

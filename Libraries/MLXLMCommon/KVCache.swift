@@ -180,6 +180,23 @@ public protocol QuantizedKVCacheProtocol: KVCache {
     func getQuantizedState() -> ((MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?))?
 }
 
+/// Protocol for caches that can update and compute attention from their own storage layout.
+///
+/// Used by compressed caches such as ``VarianceNormalizedKVCache`` that keep completed
+/// tiles in a non-materialized representation and compute scores/values via cache-native
+/// kernels (e.g. `quantizedMM` in a rotated domain).
+public protocol KVCacheAttentionProtocol: KVCache {
+    /// Update the cache with new K/V tensors and compute attention without first returning a
+    /// fully materialized cache tensor pair.
+    func updateAndAttend(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray
+}
+
 /// Base cache implementation providing default behaviors
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
@@ -1742,6 +1759,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
+    case is VarianceNormalizedKVCache: return "VarianceNormalizedKVCache"
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
@@ -2081,6 +2099,80 @@ private func restoreCacheFromMetaState(
             cache.state = state
         }
         cache.metaState = metaState
+        return cache
+
+    case "VarianceNormalizedKVCache":
+        guard metaState.count == 7 || metaState.count == 10 else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: VarianceNormalizedKVCache metadata must contain 7 legacy or 10 versioned values."
+            )
+        }
+        let values = try promptCacheIntegers(Array(metaState.prefix(7)), className: className)
+        let tileSize = values[0]
+        let offset = values[1]
+        let keyBits = values[2]
+        let valueBits = values[3]
+        let sinkhornIterations = values[4]
+        let tileCount = values[5]
+        let tailLength = values[6]
+        guard
+            (try? VarianceNormalizedKVCacheConfiguration(
+                keyBits: keyBits,
+                valueBits: valueBits,
+                tileSize: tileSize,
+                sinkhornIterations: sinkhornIterations)) != nil,
+            offset >= 0,
+            tileCount >= 0,
+            (0 ..< tileSize).contains(tailLength),
+            metaState.count == 7
+                || (Int(metaState[7]) == VarianceNormalizedKVCache.metadataVersion
+                    && (metaState[8] == "none"
+                        || varianceNormalizedDType(named: metaState[8])
+                            .map(isSupportedVarianceNormalizedDType) == true)
+                    && (metaState[9] == "none"
+                        || varianceNormalizedDType(named: metaState[9])
+                            .map(isSupportedVarianceNormalizedDType) == true))
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache metadata."
+            )
+        }
+        let (tiledLength, tileLengthOverflow) = tileCount.multipliedReportingOverflow(
+            by: tileSize)
+        let (representedLength, offsetOverflow) = tiledLength.addingReportingOverflow(tailLength)
+        let tailStateCount =
+            tailLength > 0 ? VarianceNormalizedKVCache.tailStateCount : 0
+        let tileStateCount = state.count - min(state.count, tailStateCount)
+        let hasValidTileStateCount =
+            if tileCount == 0 {
+                tileStateCount == 0
+            } else {
+                tileStateCount.isMultiple(of: tileCount)
+                    && [
+                        VarianceNormalizedKVCache.compactTileStateCount,
+                        VarianceNormalizedKVCache.legacyTileStateCount,
+                    ].contains(tileStateCount / tileCount)
+            }
+        guard
+            !tileLengthOverflow,
+            !offsetOverflow,
+            offset == representedLength,
+            state.count >= tailStateCount,
+            hasValidTileStateCount,
+            state.allSatisfy({ $0.ndim == 4 })
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state."
+            )
+        }
+        let cache = VarianceNormalizedKVCache(
+            tileSize: tileSize,
+            keyBits: keyBits,
+            valueBits: valueBits,
+            sinkhornIterations: sinkhornIterations)
+        cache.metaState = metaState
+        cache.state = state
         return cache
 
     case "ChunkedKVCache":
@@ -2483,7 +2575,8 @@ public func maybeQuantizeKVCache(
 ) {
     if let kvScheme,
         resolveAffineScheme(kvScheme) == nil,
-        resolveTurboScheme(kvScheme) == nil
+        resolveTurboScheme(kvScheme) == nil,
+        resolveVarianceNormalizedScheme(kvScheme) == nil
     {
         return
     }
@@ -2517,4 +2610,127 @@ func maybeAffineQuantizeKVCache(
         return quantized
     }
     return !awaitsCompressionStart
+}
+
+@discardableResult
+func maybeVarianceNormalizeKVCache(
+    cache: inout [KVCache],
+    keyBits: Int,
+    valueBits: Int,
+    tileSize: Int,
+    sinkhornIterations: Int,
+    compressionStart: Int
+) -> Bool {
+    var awaitsCompressionStart = false
+    KVCacheTree.rewrite(&cache) { leaf in
+        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard simple.offset > compressionStart else {
+            awaitsCompressionStart = true
+            return simple
+        }
+
+        let state = simple.innerState()
+        if state.count >= 2 {
+            guard
+                supportsVarianceNormalizedKVCache(
+                    keyHeadDim: state[0].dim(3),
+                    valueHeadDim: state[1].dim(3),
+                    tileSize: tileSize)
+            else {
+                return simple
+            }
+        }
+
+        return simple.toVarianceNormalized(
+            tileSize: tileSize,
+            keyBits: keyBits,
+            valueBits: valueBits,
+            sinkhornIterations: sinkhornIterations)
+    }
+    return !awaitsCompressionStart
+}
+
+// MARK: - Attention Helpers
+
+/// Apply a symbolic or array attention mask to score logits.
+func applyAttentionMask(
+    scores: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode
+) -> MLXArray {
+    switch mask {
+    case .causal:
+        let (qL, kL) = (scores.dim(-2), scores.dim(-1))
+        let qIndices = MLXArray(0 ..< qL) + MLXArray(kL - qL)
+        let kIndices = MLXArray(0 ..< kL)
+        let causalMask = greaterEqual(
+            expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
+        return MLX.where(causalMask, scores, MLXArray.maskFill(for: scores.dtype))
+
+    case .array(let maskArray):
+        if maskArray.dtype == .bool {
+            return MLX.where(maskArray, scores, MLXArray.maskFill(for: scores.dtype))
+        } else {
+            return scores + maskArray
+        }
+
+    case .arrays(let maskArrays):
+        if let maskArray = maskArrays.first {
+            if maskArray.dtype == .bool {
+                return MLX.where(maskArray, scores, MLXArray.maskFill(for: scores.dtype))
+            } else {
+                return scores + maskArray
+            }
+        }
+        return scores
+
+    case .none:
+        return scores
+    }
+}
+
+func attentionScores(
+    queries: MLXArray,
+    keys: MLXArray,
+    scale: Float
+) -> MLXArray {
+    let (batchSize, queryHeadCount, queryLength, headDim) = (
+        queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3)
+    )
+    let kvHeadCount = keys.dim(1)
+    let repeats = queryHeadCount / kvHeadCount
+    let scaledQueries = queries * scale
+
+    if repeats > 1 {
+        let groupedQueries = scaledQueries.reshaped([
+            batchSize, kvHeadCount, repeats, queryLength, headDim,
+        ])
+        let groupedKeys = expandedDimensions(keys, axis: -3)
+        return matmul(groupedQueries, groupedKeys.transposed(0, 1, 2, 4, 3))
+            .reshaped(batchSize, queryHeadCount, queryLength, keys.dim(2))
+    } else {
+        return matmul(scaledQueries, keys.transposed(0, 1, 3, 2))
+    }
+}
+
+func attentionValues(
+    weights: MLXArray,
+    values: MLXArray,
+    queryHeadCount: Int
+) -> MLXArray {
+    let (batchSize, _, queryLength, keyLength) = (
+        weights.dim(0), weights.dim(1), weights.dim(2), weights.dim(3)
+    )
+    let kvHeadCount = values.dim(1)
+    let repeats = queryHeadCount / kvHeadCount
+
+    if repeats > 1 {
+        let groupedWeights = weights.reshaped([
+            batchSize, kvHeadCount, repeats, queryLength, keyLength,
+        ])
+        let groupedValues = expandedDimensions(values, axis: -3)
+        return matmul(groupedWeights, groupedValues)
+            .reshaped(batchSize, queryHeadCount, queryLength, values.dim(3))
+    } else {
+        return matmul(weights, values)
+    }
 }

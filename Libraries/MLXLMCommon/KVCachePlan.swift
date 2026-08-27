@@ -495,6 +495,15 @@ extension GenerateParameters {
                     valuePrecision: valuePrecision,
                     compressionStart: quantizedKVStart))
         }
+        if let varn = resolveVarianceNormalizedScheme(scheme) {
+            return .varianceNormalized(
+                try .init(
+                    keyBits: varn.keyBits,
+                    valueBits: varn.valueBits,
+                    tileSize: varn.tileSize,
+                    sinkhornIterations: varn.sinkhornIterations,
+                    compressionStart: quantizedKVStart))
+        }
         throw KVCacheConfigurationError.unsupportedLegacyScheme(scheme)
     }
 }
