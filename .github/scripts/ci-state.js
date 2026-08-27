@@ -79,4 +79,20 @@ function onComplete({ conclusion, jobs, labels }) {
   return { add: missing(labels, [chosen]), remove: present(labels, candidates) };
 }
 
-module.exports = { STATE_LABELS, RUNNING, INFRA_PREFIX, onStart, onComplete };
+// A cat-* label proves a scan finished. Without this guard, a contributor who
+// pushes twice before the scanner reaches them would be queued for CI on code
+// no scan has read, and CI runs contributor code on the self-hosted mac.
+function onSynchronize(labels) {
+  const scanned = labels.some((name) => name.startsWith("cat-"));
+  // `keep` decides what survives the clear, and the add list is derived from it
+  // separately. Driving both from one list would delete the needs-ci this means
+  // to keep, as soon as the add was suppressed for already being there.
+  const keep = scanned ? ["needs-ci"] : [];
+  const candidates = [RUNNING, ...STATE_LABELS.filter((name) => !keep.includes(name))];
+  return { add: missing(labels, keep), remove: present(labels, candidates) };
+}
+
+module.exports = {
+  STATE_LABELS, RUNNING, INFRA_PREFIX,
+  onStart, onComplete, onSynchronize,
+};

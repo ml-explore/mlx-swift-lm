@@ -172,3 +172,41 @@ test("onComplete leaves exactly one managed label and clears the rest", () => {
   assert.deepEqual(result.add, ["needs-lint"]);
   assert.deepEqual(result.remove, ["ci-running", "needs-ci", "needs-review", "approved"]);
 });
+
+const { onSynchronize } = require("./ci-state.js");
+
+test("a scanned pull request goes back in the CI queue", () => {
+  const result = onSynchronize(["needs-review", "cat-model"]);
+  assert.deepEqual(result.add, ["needs-ci"]);
+  assert.deepEqual(result.remove, ["needs-review"]);
+});
+
+test("a new commit clears an approval", () => {
+  const result = onSynchronize(["ready-to-merge", "approved", "cat-server"]);
+  assert.deepEqual(result.add, ["needs-ci"]);
+  assert.deepEqual(result.remove, ["approved", "ready-to-merge"]);
+});
+
+test("a new commit clears ci-running", () => {
+  const result = onSynchronize(["ci-running", "cat-misc"]);
+  assert.deepEqual(result.add, ["needs-ci"]);
+  assert.deepEqual(result.remove, ["ci-running"]);
+});
+
+test("a pull request already queued keeps its place and costs no write", () => {
+  const result = onSynchronize(["needs-ci", "cat-model"]);
+  assert.deepEqual(result.add, []);
+  assert.deepEqual(result.remove, []);
+});
+
+test("an unscanned pull request is cleared but not queued", () => {
+  const result = onSynchronize(["needs-review"]);
+  assert.deepEqual(result.add, []);
+  assert.deepEqual(result.remove, ["needs-review"]);
+});
+
+test("onSynchronize leaves labels outside its list alone", () => {
+  const result = onSynchronize(["cat-model", "unread", "changes requested"]);
+  assert.deepEqual(result.add, ["needs-ci"]);
+  assert.deepEqual(result.remove, []);
+});
