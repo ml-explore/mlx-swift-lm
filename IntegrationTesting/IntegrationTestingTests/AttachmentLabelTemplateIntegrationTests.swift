@@ -8,6 +8,12 @@ import MLXVLM
 import Testing
 import Tokenizers
 
+#if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+import FoundationModels
+
+@testable import MLXFoundationModels
+#endif
+
 private let templateDownloader: any Downloader = #hubDownloader()
 private let templateTokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
 
@@ -170,5 +176,48 @@ struct AttachmentLabelTemplateIntegrationTests {
         #expect(
             !prompt.contains(family.placeholder + "[A]"),
             "\(family): the first label must not follow a placeholder; got: \(prompt)")
+    }
+
+    #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
+
+    /// The label check against each family's real tokenizer, which keeps the unit
+    /// tests honest: their stubs assume every placeholder is a special token, and
+    /// GLM-OCR's is not.
+    @Test(arguments: labeledPromptFamilies)
+    func theFamilysOwnPlaceholderIsRefusedAsALabel(family: LabeledPromptFamily) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let tokenizer = try await tokenizer(for: family)
+        let entry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(Transcript.TextSegment(content: Self.prose))],
+                responseFormat: nil))
+
+        // Each token separately, so a three-token block is checked on its middle
+        // token, which is the one GLM-OCR does not flag special.
+        for marker in family.placeholder.markerTokens {
+            let attachment = TranscriptConverter.LabeledAttachment(label: marker, entry: entry)
+            #expect(throws: LanguageModelError.self) {
+                try AttachmentLabelValidator.default.validate([attachment], with: tokenizer)
+            }
+        }
+    }
+
+    #endif
+}
+
+extension String {
+    /// The separate markers in a placeholder, so a three-token block yields three.
+    fileprivate var markerTokens: [String] {
+        var tokens: [String] = []
+        var current = ""
+        for character in self {
+            current.append(character)
+            if character == ">" || character == "]" {
+                tokens.append(current)
+                current = ""
+            }
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
     }
 }
