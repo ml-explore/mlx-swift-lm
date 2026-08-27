@@ -48,8 +48,8 @@ const INFRA_PREFIX = "Infra: ";
 
 // The names these steps carried before they gained the prefix. A fork pull
 // request runs its own copy of the CI workflow, so a copy branched before the
-// rename still reports the old names. Retire this list together with the
-// matching one in the mlx-ops config, once no open pull request predates it.
+// rename still reports the old names. This list can go once no open pull
+// request predates the rename.
 const LEGACY_INFRA_STEPS = [
   "Verify MetalToolchain installed",
   "Assert Xcode 27 and the macOS 27 SDK",
