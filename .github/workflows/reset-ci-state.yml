@@ -1,13 +1,13 @@
 name: Reset CI state
 
 # A new commit on an open pull request makes every CI result and every approval
-# stale, so this puts the pull request back in the queue.
+# stale. This workflow puts the pull request back in the queue.
 #
-# pull_request_target, not pull_request: in a public repository a pull_request
-# workflow holds a read-only token on a fork's pull request and could not write
-# a label. GitHub's warning about pull_request_target is about checking out and
-# running the pull request's code. The checkout below takes repository-owned
-# code and never touches the contributor's branch.
+# The trigger is pull_request_target. In a public repository, a pull_request
+# workflow gets a read-only token on a fork's pull request, so it cannot write a
+# label. GitHub warns that pull_request_target can check out and run the pull
+# request's code. The checkout below takes repository-owned code only. It never
+# checks out the contributor's branch.
 
 on:
   pull_request_target:
@@ -18,7 +18,7 @@ permissions:
   contents: read
   pull-requests: write
 
-# Two pushes in quick succession must not interleave their label writes.
+# Two fast pushes must not interleave their label writes.
 concurrency:
   group: reset-ci-state-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -32,12 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # No ref on purpose. A pull_request_target event runs in the context
-          # of a repository-owned branch, never the pull request's head, so this
-          # checkout always holds the classifier the script below loads. Pinning
-          # base.sha instead names the commit the pull request started from,
-          # which for any pull request opened before this merged holds no
-          # classifier at all, and the require would throw.
+          # The checkout takes no ref on purpose. A pull_request_target event
+          # runs on a repository-owned branch, never on the pull request head.
+          # This checkout therefore always contains the classifier that the
+          # script below loads. A ref of base.sha names the commit the pull
+          # request started from. That commit has no classifier for a pull
+          # request opened before this workflow merged, and the require throws.
           persist-credentials: false
 
       - uses: actions/github-script@v9

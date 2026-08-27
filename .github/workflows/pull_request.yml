@@ -69,14 +69,13 @@ jobs:
         run: |
           pre-commit run --all || (echo "Style checks failed, please install pre-commit and run pre-commit run --all and push the change"; echo ""; git --no-pager diff; exit 1)
 
-  # Tests .github/scripts/ci-state.js, which decides the CI state labels for
-  # every pull request. Node is preinstalled on this image and `node --test` is
-  # built into Node, so this job needs no package.json and no install step.
+  # Runs the tests for .github/scripts/ci-state.js, which picks the CI state
+  # labels. Node has a built-in test runner, so this job needs no install step.
   #
-  # This runs the pull request's own copy of the tests, so a contributor could
-  # weaken them. That cannot change what gets written: ci-state.yml loads the
-  # script from a repository-owned branch, never from the pull request. This
-  # job exists so a reviewer sees a change to either file go red.
+  # A pull request runs its own copy of these tests and can weaken them. That
+  # cannot change the labels, because ci-state.yml runs the script from a
+  # repository branch, not from the pull request. This job makes a change to
+  # either file turn the check red.
   ci_state_script:
     if: github.repository == 'ml-explore/mlx-swift-lm'
     runs-on: ubuntu-22.04

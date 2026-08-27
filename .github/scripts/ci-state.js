@@ -1,7 +1,7 @@
 "use strict";
 
-// The labels this script manages. It never removes a label outside this list,
-// so a separate effort on another label cannot collide with it.
+// The script removes only a label on this list. It does not touch any other
+// label.
 const STATE_LABELS = [
   "needs-scan",
   "needs-ci",
@@ -14,9 +14,8 @@ const STATE_LABELS = [
 
 const RUNNING = "ci-running";
 
-// The labels that describe the run that just ended. approved and
-// ready-to-merge survive a start on purpose: a maintainer may approve while a
-// run is in progress, and onComplete reads that as evidence.
+// approved and ready-to-merge are absent on purpose. onComplete needs to see an
+// approval that arrived during the run.
 const PREVIOUS_OUTCOME = [
   "needs-ci",
   "needs-lint",
@@ -29,9 +28,7 @@ function present(labels, candidates) {
   return candidates.filter((name) => held.has(name));
 }
 
-// Never ask GitHub to add a label the pull request already holds. The add is a
-// no-op there, so suppressing it means a decision that changes nothing costs no
-// API call at all.
+// Never ask GitHub to add a label the pull request already has.
 function missing(labels, candidates) {
   const held = new Set(labels);
   return candidates.filter((name) => !held.has(name));
@@ -41,15 +38,15 @@ function onStart(labels) {
   return { add: missing(labels, [RUNNING]), remove: present(labels, PREVIOUS_OUTCOME) };
 }
 
-// A step whose name starts with this prefix reports the runner image, not the
-// contribution. Only a re-run can clear it, so it must never ask the author
-// for a change.
+// A step whose name starts with this prefix reports a problem in the runner
+// image. It does not report a problem in the contribution. Only a re-run can
+// clear it, so it must never ask the author for a change.
 const INFRA_PREFIX = "Infra: ";
 
-// The names these steps carried before they gained the prefix. A fork pull
-// request runs its own copy of the CI workflow, so a copy branched before the
-// rename still reports the old names. This list can go once no open pull
-// request predates the rename.
+// These are the old step names, from before the prefix. A fork pull request runs
+// its own copy of the CI workflow, so a copy branched before the rename still
+// reports the old names. Delete this list when no open pull request is older
+// than the rename.
 const LEGACY_INFRA_STEPS = [
   "Verify MetalToolchain installed",
   "Assert Xcode 27 and the macOS 27 SDK",
@@ -60,13 +57,11 @@ function isInfraStep(name) {
   return name.startsWith(INFRA_PREFIX) || LEGACY_INFRA_STEPS.includes(name);
 }
 
-// The three orderings below carry the whole correctness of this function.
-// The no-failed-step test comes first, so a timeout or a lost runner reads as
-// "run it again" rather than as a fault. The infrastructure test comes before
-// the lint test, so a MetalToolchain failure never reads as bad formatting.
-// needs-lint claims formatting is the only thing to fix, so it requires lint to
-// be the only failed job. Any other failure alongside it means more work than
-// that label admits.
+// Do not reorder these tests. A failed job with no failed step means a timeout
+// or a lost runner. That result asks for another run, and never asks the author
+// for a change. The build-machine test comes before the lint test, so a
+// MetalToolchain failure never counts as a formatting problem. needs-lint says
+// formatting is the only thing to fix, so only lint failing alone gets it.
 function classify({ conclusion, jobs, labels }) {
   const failedJobs = jobs.filter((job) => job.conclusion === "failure");
 
@@ -93,14 +88,14 @@ function onComplete({ conclusion, jobs, labels }) {
   return { add: missing(labels, [chosen]), remove: present(labels, candidates) };
 }
 
-// A cat-* label proves a scan finished. Without this guard, a contributor who
-// pushes twice before the scanner reaches them would be queued for CI on code
-// no scan has read, and CI runs contributor code on the self-hosted mac.
+// Only a triaged pull request goes back in the queue, and a cat-* label is the
+// mark of that. If no cat-* label is present, the stale labels still go, and the
+// script adds nothing.
 function onSynchronize(labels) {
   const scanned = labels.some((name) => name.startsWith("cat-"));
-  // `keep` decides what survives the clear, and the add list is derived from it
-  // separately. Driving both from one list would delete the needs-ci this means
-  // to keep, as soon as the add was suppressed for already being there.
+  // Two lists on purpose. `keep` says what not to remove. The add list says what
+  // to write, and is empty when the label is already there. If you merge the two
+  // lists, a pull request that already has needs-ci loses it.
   const keep = scanned ? ["needs-ci"] : [];
   const candidates = [RUNNING, ...STATE_LABELS.filter((name) => !keep.includes(name))];
   return { add: missing(labels, keep), remove: present(labels, candidates) };
@@ -117,12 +112,11 @@ async function jobSummaries(github, { owner, repo, runId }) {
   }));
 }
 
-// workflow_run.pull_requests can be empty when the head repository is a fork,
-// so the number is found from the head commit instead. A commit can belong to
-// more than one open pull request when branches are stacked, so prefer the one
-// whose head it is: choosing a sibling makes the caller's head comparison
-// discard a run that was not stale. The last resort covers a commit the
-// association index has not caught up with.
+// GitHub can send an empty pull request list for a fork, so the number comes
+// from the head commit instead. One commit can belong to two open pull requests
+// when branches are stacked. If this picks the wrong one, its head has moved,
+// the caller treats the run as stale, and neither pull request gets a label. The
+// last search covers a commit GitHub has not linked yet.
 async function findPullRequest(github, { owner, repo, headSha }) {
   const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
     owner, repo, commit_sha: headSha,
@@ -137,8 +131,9 @@ async function findPullRequest(github, { owner, repo, headSha }) {
   return pulls.find((pull) => pull.head.sha === headSha) ?? null;
 }
 
-// Adds before it removes. The reverse order leaves a window in which the pull
-// request carries no state label at all, and a reader would see it as untriaged.
+// This function adds labels before it removes labels. In the other order, the
+// pull request has no label for a short time. A reader of the list then sees it
+// as untriaged.
 async function applyLabels(github, { owner, repo, number, add, remove }) {
   if (add.length > 0) {
     await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: add });

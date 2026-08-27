@@ -1,18 +1,18 @@
 name: CI state
 
-# Writes the CI state labels for one pull request.
+# This workflow writes the CI state labels for one pull request.
 #
-# This cannot live in pull_request.yml. In a public repository GITHUB_TOKEN is
-# read-only for a workflow triggered by a fork's pull request, whatever the
-# permissions block says, so such a job cannot label a community contribution.
-# A workflow_run workflow always runs the default branch's copy of this file
-# and does hold a write token.
+# This cannot live in pull_request.yml. In a public repository, GITHUB_TOKEN is
+# read-only for a workflow that a fork's pull request triggers. The permissions
+# block does not change that, so such a job cannot label a community
+# contribution. A workflow_run workflow always runs the default branch copy of
+# this file, and it gets a write token.
 #
-# in_progress, not requested: a run held for maintainer approval has been
-# requested and has not started, and stamping ci-running on it would lie.
+# The trigger uses in_progress. A run held for maintainer approval is requested
+# but has not started, so the requested event would set ci-running too early.
 #
-# No job here checks out the pull request. The checkout is the default branch,
-# which is where the classifier lives.
+# No job here checks out the pull request. Each checkout takes the default
+# branch, which contains the classifier.
 
 on:
   workflow_run:
@@ -26,11 +26,11 @@ permissions:
   contents: read
   pull-requests: write
 
-# The start and the finish of one commit's run must not interleave. Keyed on the
-# commit rather than the run, so a re-run of the same commit also serializes.
-# Never cancel, because a discarded completed event leaves ci-running set. This
-# narrows that window rather than closing it: GitHub holds one pending run per
-# group, so a third event for one commit can still displace a pending one.
+# GitHub runs one workflow at a time for each concurrency group. The group name
+# below holds the commit SHA, so two events for one commit cannot run at the same
+# time. If a completed event is cancelled, ci-running stays set, so never cancel a
+# run here. GitHub also queues only one run per group, so a third event for one
+# commit can still drop a pending run.
 concurrency:
   group: ci-state-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
@@ -53,8 +53,8 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
           script: |
-            // A relative require inside github-script resolves against the
-            // action, not the workspace, so name the workspace explicitly.
+            // Inside github-script, a relative require resolves against the
+            // action directory. Name the workspace path explicitly.
             const state = require(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
             const { owner, repo } = context.repo;
@@ -66,15 +66,18 @@ jobs:
               return;
             }
 
-            // Diagnostic only, and the length alone. The payload carries
-            // contributor-controlled text, which does not belong in a log.
+            // This log line is a diagnostic, and it prints only the count. The
+            // payload holds contributor-controlled text, which must not go into
+            // a log.
             const carried = context.payload.workflow_run.pull_requests ?? [];
             core.info(`workflow_run.pull_requests carried ${carried.length} entries.`);
 
-            // The same guard record_outcome uses. A delayed in_progress event
-            // must not claim a run for a commit the pull request has left:
-            // reset-ci-state.yml has already queued the newer commit, and
-            // removing needs-ci here would strand it.
+            // The author can push another commit before this event arrives. The
+            // run then tests code the pull request no longer has. onStart would
+            // set ci-running and remove the needs-ci that reset-ci-state.yml
+            // added for the new commit. The labels would then say CI runs for
+            // the new commit, which is false. record_outcome makes the same
+            // check.
             if (pull.head.sha !== headSha) {
               core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
               core.info("Not marking this run as running.");
@@ -90,10 +93,11 @@ jobs:
 
   record_outcome:
     name: Record the CI outcome
-    # A run held for maintainer approval, or one skipped outright, never
-    # executed. Its conclusion describes nothing, and letting it through
-    # would clear a maintainer's approval on a pull request whose CI has
-    # not run.
+    # GitHub sends a completed event even when the run never started. A fork pull
+    # request waits for a maintainer to approve the run, and reports the
+    # conclusion action_required. A skipped run reports skipped. Neither
+    # conclusion says anything about the code. onComplete would read both as a
+    # failure, and would remove an approved label that a maintainer set.
     if: >-
       github.event.action == 'completed'
       && github.repository == 'ml-explore/mlx-swift-lm'
@@ -125,8 +129,8 @@ jobs:
             }
 
             // These results describe the commit the run tested. If the head has
-            // moved, they describe code that no longer exists, and
-            // reset-ci-state.yml has already queued the new commit.
+            // moved, the results describe code the pull request no longer has.
+            // reset-ci-state.yml already queued the new commit.
             if (pull.head.sha !== headSha) {
               core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
               core.info("Discarding this run's result.");
