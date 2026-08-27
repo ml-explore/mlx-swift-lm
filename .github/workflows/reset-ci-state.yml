@@ -32,10 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The base commit, never the pull request's head. This checkout exists
-          # only to load the classifier, and this job holds a write token, so it
-          # must not bring in contributor code.
-          ref: ${{ github.event.pull_request.base.sha }}
+          # No ref on purpose. For a pull_request_target event GitHub sets
+          # GITHUB_REF to the default branch, so this takes our own code and
+          # never the pull request's head, and it always holds the classifier
+          # this job loads. Pinning the base commit instead would fail on every
+          # pull request opened before the classifier merged.
           persist-credentials: false
 
       - uses: actions/github-script@v9

@@ -88,9 +88,15 @@ jobs:
 
   record_outcome:
     name: Record the CI outcome
+    # A run held for maintainer approval, or one skipped outright, never
+    # executed. Its conclusion describes nothing, and letting it through
+    # would clear a maintainer's approval on a pull request whose CI has
+    # not run.
     if: >-
       github.event.action == 'completed'
       && github.repository == 'ml-explore/mlx-swift-lm'
+      && github.event.workflow_run.conclusion != 'action_required'
+      && github.event.workflow_run.conclusion != 'skipped'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
