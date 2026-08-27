@@ -92,7 +92,50 @@ function onSynchronize(labels) {
   return { add: missing(labels, keep), remove: present(labels, candidates) };
 }
 
+async function jobSummaries(github, { owner, repo, runId }) {
+  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+    owner, repo, run_id: runId, per_page: 100,
+  });
+  return jobs.map((job) => ({
+    name: job.name,
+    conclusion: job.conclusion,
+    steps: (job.steps ?? []).map((step) => ({ name: step.name, conclusion: step.conclusion })),
+  }));
+}
+
+// workflow_run.pull_requests can be empty when the head repository is a fork,
+// so the number is found from the head commit instead. The fallback covers a
+// commit the association index has not caught up with.
+async function findPullRequest(github, { owner, repo, headSha }) {
+  const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+    owner, repo, commit_sha: headSha,
+  });
+  const open = associated.data.find((pull) => pull.state === "open");
+  if (open) return open;
+
+  const pulls = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: "open", per_page: 100,
+  });
+  return pulls.find((pull) => pull.head.sha === headSha) ?? null;
+}
+
+// Adds before it removes. The reverse order leaves a window in which the pull
+// request carries no state label at all, and a reader would see it as untriaged.
+async function applyLabels(github, { owner, repo, number, add, remove }) {
+  if (add.length > 0) {
+    await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: add });
+  }
+  for (const name of remove) {
+    try {
+      await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+}
+
 module.exports = {
   STATE_LABELS, RUNNING, INFRA_PREFIX,
   onStart, onComplete, onSynchronize,
+  jobSummaries, findPullRequest, applyLabels,
 };

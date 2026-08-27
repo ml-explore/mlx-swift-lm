@@ -210,3 +210,122 @@ test("onSynchronize leaves labels outside its list alone", () => {
   assert.deepEqual(result.add, ["needs-ci"]);
   assert.deepEqual(result.remove, []);
 });
+
+const { jobSummaries, findPullRequest, applyLabels } = require("./ci-state.js");
+
+// A fake Octokit. `paginate` reads the pages off the route function it is
+// given, which is how the real client distinguishes one endpoint from another.
+function makeGithub(options = {}) {
+  const calls = [];
+  const jobsRoute = () => {};
+  jobsRoute.__pages = options.jobs ?? [];
+  const pullsRoute = () => {};
+  pullsRoute.__pages = options.openPulls ?? [];
+  return {
+    calls,
+    paginate: async (route) => route.__pages ?? [],
+    rest: {
+      actions: { listJobsForWorkflowRun: jobsRoute },
+      pulls: { list: pullsRoute },
+      repos: {
+        listPullRequestsAssociatedWithCommit: async () => ({ data: options.associated ?? [] }),
+      },
+      issues: {
+        addLabels: async (params) => {
+          calls.push(`add:${params.labels.join("+")}`);
+        },
+        removeLabel: async (params) => {
+          if (options.removeError) throw options.removeError;
+          calls.push(`remove:${params.name}`);
+        },
+      },
+    },
+  };
+}
+
+test("jobSummaries keeps only the fields the rules read", async () => {
+  const github = makeGithub({
+    jobs: [{
+      id: 1,
+      name: "lint",
+      conclusion: "failure",
+      html_url: "https://example.invalid",
+      steps: [{ number: 1, name: "Run style checks", conclusion: "failure", status: "completed" }],
+    }],
+  });
+  const jobs = await jobSummaries(github, { owner: "o", repo: "r", runId: 9 });
+  assert.deepEqual(jobs, [{
+    name: "lint",
+    conclusion: "failure",
+    steps: [{ name: "Run style checks", conclusion: "failure" }],
+  }]);
+});
+
+test("jobSummaries copes with a job that reports no steps", async () => {
+  const github = makeGithub({ jobs: [{ name: "lint", conclusion: "success" }] });
+  const jobs = await jobSummaries(github, { owner: "o", repo: "r", runId: 9 });
+  assert.deepEqual(jobs, [{ name: "lint", conclusion: "success", steps: [] }]);
+});
+
+test("findPullRequest prefers the open pull request the commit belongs to", async () => {
+  const github = makeGithub({
+    associated: [
+      { number: 10, state: "closed", head: { sha: "aaa" }, labels: [] },
+      { number: 11, state: "open", head: { sha: "aaa" }, labels: [] },
+    ],
+  });
+  const pull = await findPullRequest(github, { owner: "o", repo: "r", headSha: "aaa" });
+  assert.equal(pull.number, 11);
+});
+
+test("findPullRequest falls back to matching the head commit of an open pull request", async () => {
+  const github = makeGithub({
+    associated: [],
+    openPulls: [
+      { number: 20, head: { sha: "bbb" }, labels: [] },
+      { number: 21, head: { sha: "aaa" }, labels: [] },
+    ],
+  });
+  const pull = await findPullRequest(github, { owner: "o", repo: "r", headSha: "aaa" });
+  assert.equal(pull.number, 21);
+});
+
+test("findPullRequest returns null when no open pull request matches", async () => {
+  const github = makeGithub({ associated: [], openPulls: [] });
+  const pull = await findPullRequest(github, { owner: "o", repo: "r", headSha: "aaa" });
+  assert.equal(pull, null);
+});
+
+test("applyLabels adds before it removes, so a state label is never absent", async () => {
+  const github = makeGithub();
+  await applyLabels(github, {
+    owner: "o", repo: "r", number: 5,
+    add: ["needs-review"], remove: ["ci-running", "needs-ci"],
+  });
+  assert.deepEqual(github.calls, ["add:needs-review", "remove:ci-running", "remove:needs-ci"]);
+});
+
+test("applyLabels writes nothing when there is nothing to add", async () => {
+  const github = makeGithub();
+  await applyLabels(github, { owner: "o", repo: "r", number: 5, add: [], remove: [] });
+  assert.deepEqual(github.calls, []);
+});
+
+test("applyLabels ignores a label that has already gone", async () => {
+  const error = new Error("Label does not exist");
+  error.status = 404;
+  const github = makeGithub({ removeError: error });
+  await applyLabels(github, {
+    owner: "o", repo: "r", number: 5, add: [], remove: ["needs-ci"],
+  });
+  assert.deepEqual(github.calls, []);
+});
+
+test("applyLabels reports any other failure", async () => {
+  const error = new Error("Forbidden");
+  error.status = 403;
+  const github = makeGithub({ removeError: error });
+  await assert.rejects(
+    applyLabels(github, { owner: "o", repo: "r", number: 5, add: [], remove: ["needs-ci"] }),
+    /Forbidden/);
+});
