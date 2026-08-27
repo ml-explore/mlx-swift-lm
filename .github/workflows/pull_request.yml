@@ -74,9 +74,9 @@ jobs:
   # built into Node, so this job needs no package.json and no install step.
   #
   # This runs the pull request's own copy of the tests, so a contributor could
-  # weaken them. That cannot change what gets written: ci-state.yml always
-  # loads the default branch's copy of both the script and the tests. This job
-  # exists so a reviewer sees a change to either one go red.
+  # weaken them. That cannot change what gets written: ci-state.yml loads the
+  # script from a repository-owned branch, never from the pull request. This
+  # job exists so a reviewer sees a change to either file go red.
   ci_state_script:
     if: github.repository == 'ml-explore/mlx-swift-lm'
     runs-on: ubuntu-22.04

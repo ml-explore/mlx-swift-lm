@@ -28,7 +28,9 @@ permissions:
 
 # The start and the finish of one commit's run must not interleave. Keyed on the
 # commit rather than the run, so a re-run of the same commit also serializes.
-# Never cancel: a discarded completed event leaves ci-running behind forever.
+# Never cancel, because a discarded completed event leaves ci-running set. This
+# narrows that window rather than closing it: GitHub holds one pending run per
+# group, so a third event for one commit can still displace a pending one.
 concurrency:
   group: ci-state-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false

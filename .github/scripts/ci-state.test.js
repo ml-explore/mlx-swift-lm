@@ -116,6 +116,26 @@ test("an infrastructure step failing alone asks for another run", () => {
   assert.deepEqual(result.add, ["needs-ci"]);
 });
 
+test("an unprefixed infrastructure step also asks for another run", () => {
+  const jobs = [
+    job("lint", "success"),
+    job("mac_build_and_test", "failure", [step("Verify MetalToolchain installed", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("an unprefixed infrastructure step alongside a real failure blames the author", () => {
+  const jobs = [
+    job("mac_build_and_test", "failure", [
+      step("Install MetalToolchain", "failure"),
+      step("Build (Xcode, macOS)", "failure"),
+    ]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
+});
+
 test("an infrastructure step alongside a real failure blames the author", () => {
   const jobs = [
     job("mac_build_and_test", "failure", [

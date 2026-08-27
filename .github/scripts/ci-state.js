@@ -46,6 +46,20 @@ function onStart(labels) {
 // for a change.
 const INFRA_PREFIX = "Infra: ";
 
+// The names these steps carried before they gained the prefix. A fork pull
+// request runs its own copy of the CI workflow, so a copy branched before the
+// rename still reports the old names. Retire this list together with the
+// matching one in the mlx-ops config, once no open pull request predates it.
+const LEGACY_INFRA_STEPS = [
+  "Verify MetalToolchain installed",
+  "Assert Xcode 27 and the macOS 27 SDK",
+  "Install MetalToolchain",
+];
+
+function isInfraStep(name) {
+  return name.startsWith(INFRA_PREFIX) || LEGACY_INFRA_STEPS.includes(name);
+}
+
 // The three orderings below carry the whole correctness of this function.
 // The no-failed-step test comes first, so a timeout or a lost runner reads as
 // "run it again" rather than as a fault. The infrastructure test comes before
@@ -68,7 +82,7 @@ function classify({ conclusion, jobs, labels }) {
       .map((step) => step.name));
 
   if (failedSteps.length === 0) return "needs-ci";
-  if (failedSteps.every((name) => name.startsWith(INFRA_PREFIX))) return "needs-ci";
+  if (failedSteps.every(isInfraStep)) return "needs-ci";
   if (failedJobs.length === 1 && failedJobs[0].name === "lint") return "needs-lint";
   return "needs-changes";
 }
@@ -104,8 +118,11 @@ async function jobSummaries(github, { owner, repo, runId }) {
 }
 
 // workflow_run.pull_requests can be empty when the head repository is a fork,
-// so the number is found from the head commit instead. The fallback covers a
-// commit the association index has not caught up with.
+// so the number is found from the head commit instead. A commit can belong to
+// more than one open pull request when branches are stacked, so prefer the one
+// whose head it is: choosing a sibling makes the caller's head comparison
+// discard a run that was not stale. The last resort covers a commit the
+// association index has not caught up with.
 async function findPullRequest(github, { owner, repo, headSha }) {
   const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
     owner, repo, commit_sha: headSha,
