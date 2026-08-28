@@ -5,6 +5,14 @@ const assert = require("node:assert/strict");
 
 const { STATE_LABELS, RUNNING, onStart } = require("./ci-state.js");
 
+function step(name, conclusion) {
+  return { name, conclusion };
+}
+
+function job(name, conclusion, steps = []) {
+  return { name, conclusion, steps };
+}
+
 test("STATE_LABELS names the seven labels this script manages", () => {
   assert.deepEqual(STATE_LABELS, [
     "needs-scan",
@@ -49,15 +57,41 @@ test("onStart does not re-add ci-running when it is already held", () => {
   assert.deepEqual(onStart(["ci-running", "cat-model"]), { add: [], remove: [] });
 });
 
+const { CONTRACT, CONTRACT_PREFIX, contractOf } = require("./ci-state.js");
+
+test("CONTRACT is a whole number above zero", () => {
+  assert.equal(Number.isInteger(CONTRACT), true);
+  assert.equal(CONTRACT > 0, true);
+});
+
+test("CONTRACT_PREFIX names the step prefix", () => {
+  assert.equal(CONTRACT_PREFIX, "Contract: ");
+});
+
+test("contractOf reads the number from a step that passed", () => {
+  const jobs = [job("ci_state_script", "success", [step("Contract: 4", "success")])];
+  assert.equal(contractOf(jobs), 4);
+});
+
+test("contractOf finds the marker in any job", () => {
+  const jobs = [
+    job("lint", "success", [step("Run style checks", "success")]),
+    job("ci_state_script", "success", [step("Contract: 7", "success")]),
+  ];
+  assert.equal(contractOf(jobs), 7);
+});
+
+test("contractOf returns null when no step names a number", () => {
+  const jobs = [job("lint", "success", [step("Run style checks", "success")]), job("x", "success")];
+  assert.equal(contractOf(jobs), null);
+});
+
+test("contractOf returns null for text that is not digits", () => {
+  assert.equal(contractOf([job("ci_state_script", "success", [step("Contract: two", "success")])]), null);
+  assert.equal(contractOf([job("ci_state_script", "success", [step("Contract: ", "success")])]), null);
+});
+
 const { onComplete } = require("./ci-state.js");
-
-function step(name, conclusion) {
-  return { name, conclusion };
-}
-
-function job(name, conclusion, steps = []) {
-  return { name, conclusion, steps };
-}
 
 const GREEN = [
   job("lint", "success", [step("Run style checks", "success")]),

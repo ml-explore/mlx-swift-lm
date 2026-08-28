@@ -57,6 +57,29 @@ function isInfraStep(name) {
   return name.startsWith(INFRA_PREFIX) || LEGACY_INFRA_STEPS.includes(name);
 }
 
+// Each pull request runs its own copy of pull_request.yml, which may be older
+// than these rules. That copy names this number in a step. If the numbers match,
+// a failing run can give needs-lint or needs-changes. If not, a failing run gets
+// needs-ci. When you rename a step, change this number and the workflow's number
+// together. To stop needs-lint and needs-changes on every pull request, change
+// this number only.
+const CONTRACT = 1;
+
+const CONTRACT_PREFIX = "Contract: ";
+
+// Returns null when no step names a number, and when the text is not digits.
+// Both mean there is no number to compare, so a failing run gets needs-ci.
+function contractOf(jobs) {
+  for (const job of jobs) {
+    for (const step of job.steps ?? []) {
+      if (!step.name.startsWith(CONTRACT_PREFIX)) continue;
+      const digits = step.name.slice(CONTRACT_PREFIX.length).trim();
+      return /^[0-9]+$/.test(digits) ? Number(digits) : null;
+    }
+  }
+  return null;
+}
+
 // Do not reorder these tests. A failed job with no failed step means a timeout
 // or a lost runner. That result asks for another run, and never asks the author
 // for a change. The build-machine test comes before the lint test, so a
@@ -149,6 +172,7 @@ async function applyLabels(github, { owner, repo, number, add, remove }) {
 
 module.exports = {
   STATE_LABELS, RUNNING, INFRA_PREFIX,
+  CONTRACT, CONTRACT_PREFIX, contractOf,
   onStart, onComplete, onSynchronize,
   jobSummaries, findPullRequest, applyLabels,
 };
