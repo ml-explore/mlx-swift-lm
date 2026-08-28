@@ -142,13 +142,17 @@ test("no failed job and a conclusion other than success asks for another run", (
 });
 
 test("a failed job with no failed step asks for another run", () => {
-  const jobs = [job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "success")])];
+  const jobs = [
+    contractJob(CONTRACT),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "success")]),
+  ];
   const result = onComplete({ conclusion: "failure", jobs, labels: [] });
   assert.deepEqual(result.add, ["needs-ci"]);
 });
 
 test("an infrastructure step failing alone asks for another run", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("lint", "success"),
     job("mac_build_and_test", "failure", [step("Infra: verify MetalToolchain installed", "failure")]),
   ];
