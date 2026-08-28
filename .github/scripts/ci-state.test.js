@@ -93,6 +93,12 @@ test("contractOf returns null for text that is not digits", () => {
 
 const { onComplete } = require("./ci-state.js");
 
+// Add this job to a fixture that expects needs-lint or needs-changes. Without
+// it, classify returns needs-ci for every failure in that fixture.
+function contractJob(number) {
+  return job("ci_state_script", "success", [step(`Contract: ${number}`, "success")]);
+}
+
 const GREEN = [
   job("lint", "success", [step("Run style checks", "success")]),
   job("mac_build_and_test", "success", [step("Build (Xcode, macOS)", "success")]),
@@ -161,6 +167,7 @@ test("an unprefixed infrastructure step also asks for another run", () => {
 
 test("an unprefixed infrastructure step alongside a real failure blames the author", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("mac_build_and_test", "failure", [
       step("Install MetalToolchain", "failure"),
       step("Build (Xcode, macOS)", "failure"),
@@ -172,6 +179,7 @@ test("an unprefixed infrastructure step alongside a real failure blames the auth
 
 test("an infrastructure step alongside a real failure blames the author", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("mac_build_and_test", "failure", [
       step("Infra: verify MetalToolchain installed", "failure"),
       step("Build (Xcode, macOS)", "failure"),
@@ -183,6 +191,7 @@ test("an infrastructure step alongside a real failure blames the author", () => 
 
 test("the lint job failing alone gives needs-lint", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("lint", "failure", [step("Run style checks", "failure")]),
     job("mac_build_and_test", "skipped"),
   ];
@@ -192,6 +201,7 @@ test("the lint job failing alone gives needs-lint", () => {
 
 test("lint and a substantive job failing together gives needs-changes", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("lint", "failure", [step("Run style checks", "failure")]),
     job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
   ];
@@ -201,6 +211,7 @@ test("lint and a substantive job failing together gives needs-changes", () => {
 
 test("the documentation check failing gives needs-changes", () => {
   const jobs = [
+    contractJob(CONTRACT),
     job("lint", "success"),
     job("mac_build_and_test", "failure", [step("Verify documentation", "failure")]),
   ];
@@ -211,7 +222,10 @@ test("the documentation check failing gives needs-changes", () => {
 test("the classifier's own test job failing gives needs-changes", () => {
   const jobs = [
     job("lint", "success"),
-    job("ci_state_script", "failure", [step("Test the CI state classifier", "failure")]),
+    job("ci_state_script", "failure", [
+      step(`Contract: ${CONTRACT}`, "success"),
+      step("Test the CI state classifier", "failure"),
+    ]),
   ];
   const result = onComplete({ conclusion: "failure", jobs, labels: [] });
   assert.deepEqual(result.add, ["needs-changes"]);
@@ -220,11 +234,72 @@ test("the classifier's own test job failing gives needs-changes", () => {
 test("onComplete leaves exactly one managed label and clears the rest", () => {
   const result = onComplete({
     conclusion: "failure",
-    jobs: [job("lint", "failure", [step("Run style checks", "failure")])],
+    jobs: [contractJob(CONTRACT), job("lint", "failure", [step("Run style checks", "failure")])],
     labels: ["ci-running", "needs-ci", "needs-review", "approved", "cat-tools", "unread"],
   });
   assert.deepEqual(result.add, ["needs-lint"]);
   assert.deepEqual(result.remove, ["ci-running", "needs-ci", "needs-review", "approved"]);
+});
+
+test("a branch with no contract step asks for another run", () => {
+  const jobs = [job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")])];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("a branch behind the contract asks for another run", () => {
+  const jobs = [
+    contractJob(CONTRACT - 1),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("a branch ahead of the contract also asks for another run", () => {
+  const jobs = [
+    contractJob(CONTRACT + 1),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("a contract number that is not digits asks for another run", () => {
+  const jobs = [
+    job("ci_state_script", "success", [step("Contract: two", "success")]),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("a stale branch that passes still goes to review", () => {
+  const jobs = [contractJob(CONTRACT - 1), ...GREEN];
+  const result = onComplete({ conclusion: "success", jobs, labels: ["ci-running"] });
+  assert.deepEqual(result.add, ["needs-review"]);
+  assert.deepEqual(result.remove, ["ci-running"]);
+});
+
+test("a stale branch failing lint alone asks for another run", () => {
+  const jobs = [
+    contractJob(CONTRACT - 1),
+    job("lint", "failure", [step("Run style checks", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-ci"]);
+});
+
+test("the first contract step in a job wins", () => {
+  const jobs = [
+    job("ci_state_script", "success", [
+      step(`Contract: ${CONTRACT}`, "success"),
+      step(`Contract: ${CONTRACT + 1}`, "success"),
+    ]),
+    job("mac_build_and_test", "failure", [step("Build (Xcode, macOS)", "failure")]),
+  ];
+  const result = onComplete({ conclusion: "failure", jobs, labels: [] });
+  assert.deepEqual(result.add, ["needs-changes"]);
 });
 
 const { onSynchronize } = require("./ci-state.js");

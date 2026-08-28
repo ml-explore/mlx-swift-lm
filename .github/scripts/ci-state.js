@@ -80,11 +80,9 @@ function contractOf(jobs) {
   return null;
 }
 
-// Do not reorder these tests. A failed job with no failed step means a timeout
-// or a lost runner. That result asks for another run, and never asks the author
-// for a change. The build-machine test comes before the lint test, so a
-// MetalToolchain failure never counts as a formatting problem. needs-lint says
-// formatting is the only thing to fix, so only lint failing alone gets it.
+// Keep the three needs-ci checks above the needs-lint check. If one moves
+// down, classify returns needs-lint or needs-changes for a failure the
+// author cannot fix.
 function classify({ conclusion, jobs, labels }) {
   const failedJobs = jobs.filter((job) => job.conclusion === "failure");
 
@@ -99,8 +97,11 @@ function classify({ conclusion, jobs, labels }) {
       .filter((step) => step.conclusion === "failure")
       .map((step) => step.name));
 
+  // A failed job usually has one failed step, which names what broke. After a
+  // timeout or a lost runner, the job fails with no failed step.
   if (failedSteps.length === 0) return "needs-ci";
   if (failedSteps.every(isInfraStep)) return "needs-ci";
+  if (contractOf(jobs) !== CONTRACT) return "needs-ci";
   if (failedJobs.length === 1 && failedJobs[0].name === "lint") return "needs-lint";
   return "needs-changes";
 }
