@@ -156,7 +156,7 @@ test("an infrastructure step failing alone asks for another run", () => {
   assert.deepEqual(result.add, ["needs-ci"]);
 });
 
-test("an unprefixed infrastructure step also asks for another run", () => {
+test("a branch from before the rename has no contract, so it asks for another run", () => {
   const jobs = [
     job("lint", "success"),
     job("mac_build_and_test", "failure", [step("Verify MetalToolchain installed", "failure")]),
@@ -165,7 +165,7 @@ test("an unprefixed infrastructure step also asks for another run", () => {
   assert.deepEqual(result.add, ["needs-ci"]);
 });
 
-test("an unprefixed infrastructure step alongside a real failure blames the author", () => {
+test("an unknown step name alongside a real failure blames the author", () => {
   const jobs = [
     contractJob(CONTRACT),
     job("mac_build_and_test", "failure", [

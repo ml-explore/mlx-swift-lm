@@ -43,18 +43,8 @@ function onStart(labels) {
 // clear it, so it must never ask the author for a change.
 const INFRA_PREFIX = "Infra: ";
 
-// These are the old step names, from before the prefix. A fork pull request runs
-// its own copy of the CI workflow, so a copy branched before the rename still
-// reports the old names. Delete this list when no open pull request is older
-// than the rename.
-const LEGACY_INFRA_STEPS = [
-  "Verify MetalToolchain installed",
-  "Assert Xcode 27 and the macOS 27 SDK",
-  "Install MetalToolchain",
-];
-
 function isInfraStep(name) {
-  return name.startsWith(INFRA_PREFIX) || LEGACY_INFRA_STEPS.includes(name);
+  return name.startsWith(INFRA_PREFIX);
 }
 
 // Each pull request runs its own copy of pull_request.yml, which may be older
