@@ -140,6 +140,13 @@ jobs:
             const jobs = await state.jobSummaries(github, {
               owner, repo, runId: Number(process.env.RUN_ID),
             });
+
+            // A step name is contributor-controlled text, and must not go into a log.
+            const branchContract = state.contractOf(jobs);
+            core.info(
+              `#${pull.number} contract ${branchContract ?? "absent"},`
+              + ` rules expect ${state.CONTRACT}.`);
+
             const change = state.onComplete({
               conclusion: process.env.CONCLUSION,
               jobs,
