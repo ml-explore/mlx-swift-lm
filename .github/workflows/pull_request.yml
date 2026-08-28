@@ -81,6 +81,14 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
+      # This number must equal CONTRACT in .github/scripts/ci-state.js on the
+      # default branch, not in this branch's copy. If you rename a step, change
+      # both numbers in one commit. Keep this step first: a failure in any other
+      # step then cannot stop it running.
+      - name: "Contract: 1"
+        shell: bash
+        run: echo "CI state contract 1"
+
       - uses: actions/checkout@v6
 
       - name: Test the CI state classifier
