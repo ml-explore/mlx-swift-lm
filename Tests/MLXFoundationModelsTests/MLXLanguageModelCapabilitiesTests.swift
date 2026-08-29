@@ -99,7 +99,7 @@ struct MLXLanguageModelCapabilitiesTests {
 
 // MARK: - Stubs (no download/load occurs in these tests; we only check stored state)
 
-private final class CapabilitiesStubDownloader: Downloader, @unchecked Sendable {
+private struct CapabilitiesStubDownloader: Downloader {
     func download(
         id: String,
         revision: String?,
@@ -111,7 +111,7 @@ private final class CapabilitiesStubDownloader: Downloader, @unchecked Sendable 
     }
 }
 
-private final class CapabilitiesStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+private struct CapabilitiesStubTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         struct EmptyTokenizer: MLXLMCommon.Tokenizer {
             func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }

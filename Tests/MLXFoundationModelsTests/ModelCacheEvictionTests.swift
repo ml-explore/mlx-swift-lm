@@ -60,10 +60,12 @@ extension FoundationModelsCacheTests {
                 })
 
             // Drive a load that parks, then fails — populating lastErrors[id].
-            let loadTask = Task { try? await model.preload() }
+            let loadTask = Task { try await model.preload() }
             await gate.waitUntilStarted()
             await gate.release()
-            _ = await loadTask.value
+            await #expect(throws: BlockingDownloaderReleased.self) {
+                try await loadTask.value
+            }
 
             let before = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
             #expect(before != nil, "a failed load should record a cached lastError")
@@ -92,10 +94,12 @@ extension FoundationModelsCacheTests {
                             using: EvictStubTokenizerLoader(),
                             configuration: configuration, progressHandler: progress)
                     })
-                let task = Task { try? await model.preload() }
+                let task = Task { try await model.preload() }
                 await gate.waitUntilStarted()
                 await gate.release()
-                _ = await task.value
+                await #expect(throws: BlockingDownloaderReleased.self) {
+                    try await task.value
+                }
                 return model
             }
 
@@ -137,7 +141,7 @@ extension FoundationModelsCacheTests {
                 })
 
             // Park a genuine (non-warmup) load in flight.
-            let loadTask = Task { try? await model.preload() }
+            let loadTask = Task { try await model.preload() }
             await gate.waitUntilStarted()
 
             // In-flight load is registered and reported.
@@ -154,7 +158,9 @@ extension FoundationModelsCacheTests {
             // Let the parked load fail. The catch-path guard must NOT re-add lastError
             // for the now-superseded task.
             await gate.release()
-            _ = await loadTask.value
+            await #expect(throws: BlockingDownloaderReleased.self) {
+                try await loadTask.value
+            }
 
             let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
             #expect(lastError == nil, "a superseded load must not re-populate cache state")
@@ -199,9 +205,8 @@ private struct BlockingDownloaderReleased: Error {}
 
 /// A `Downloader` that parks inside `download` until the gate is released, so a load
 /// stays deterministically in flight, then fails the load on release.
-private final class BlockingDownloader: Downloader, @unchecked Sendable {
-    private let gate: LoadGate
-    init(gate: LoadGate) { self.gate = gate }
+private struct BlockingDownloader: Downloader {
+    let gate: LoadGate
     func download(
         id: String,
         revision: String?,
@@ -215,7 +220,7 @@ private final class BlockingDownloader: Downloader, @unchecked Sendable {
     }
 }
 
-private final class EvictStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+private struct EvictStubTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any Tokenizer { EvictStubTokenizer() }
 }
 
