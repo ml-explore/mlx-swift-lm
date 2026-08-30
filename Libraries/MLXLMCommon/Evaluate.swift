@@ -14,23 +14,42 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
-/// A sampler that can expose the exact categorical distribution it samples.
+/// A sampler that can prepare and sample an exact categorical distribution.
 ///
-/// The returned values are unnormalized log weights. Applying `softmax` on
-/// the final axis produces the sampler's token probabilities. Keeping the
-/// representation unnormalized avoids an unnecessary `softmax` followed by
-/// `log` before `categorical`, while allowing speculative decoders to compute
-/// exact acceptance ratios and residual distributions.
+/// Preparation applies the sampler's temperature and token filters once. The
+/// returned distribution can then be sampled directly, allowing speculative
+/// decoders to reuse the exact distribution for acceptance ratios and residual
+/// distributions without reapplying those transformations.
 ///
 /// `ArgMaxSampler` intentionally does not conform because greedy decoding is
 /// not a categorical sampling distribution.
+public struct PreparedCategoricalDistribution {
+
+    /// Unnormalized log weights for the categorical distribution.
+    ///
+    /// Applying `softmax` on the final axis produces token probabilities.
+    public let logWeights: MLXArray
+
+    public init(logWeights: MLXArray) {
+        self.logWeights = logWeights
+    }
+}
+
 public protocol LogitDistributionSampler: LogitSampler {
 
-    /// Returns the unnormalized log weights used by the sampler's `sample(logits:)` method.
-    ///
-    /// Applying `softmax` on the final axis produces the categorical
-    /// probabilities represented by these weights.
-    func logWeights(logits: MLXArray) -> MLXArray
+    /// Prepares the exact categorical distribution used for sampling `logits`.
+    func prepare(logits: MLXArray) -> PreparedCategoricalDistribution
+
+    /// Samples from a previously prepared categorical distribution.
+    func sample(prepared: PreparedCategoricalDistribution) -> MLXArray
+}
+
+extension LogitDistributionSampler {
+
+    /// Samples `logits` by preparing its categorical distribution once.
+    public func sample(logits: MLXArray) -> MLXArray {
+        sample(prepared: prepare(logits: logits))
+    }
 }
 
 /// A `LogitProcessor` is an optional visitor of `logits`.
@@ -383,7 +402,7 @@ public struct TopPSampler: LogitDistributionSampler {
         self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
     }
 
-    public func logWeights(logits: MLXArray) -> MLXArray {
+    public func prepare(logits: MLXArray) -> PreparedCategoricalDistribution {
         var logits = logits
         if logits.dtype == .bfloat16 {
             logits = logits.asType(.float32)
@@ -402,12 +421,12 @@ public struct TopPSampler: LogitDistributionSampler {
             logprobs = applyTopK(logprobs, topK: topK)
         }
 
-        return logprobs * (1 / temp)
+        return PreparedCategoricalDistribution(logWeights: logprobs * (1 / temp))
     }
 
-    public func sample(logits: MLXArray) -> MLXArray {
+    public func sample(prepared: PreparedCategoricalDistribution) -> MLXArray {
         return withRandomState(randomState) {
-            categorical(logWeights(logits: logits))
+            categorical(prepared.logWeights)
         }
     }
 
@@ -457,13 +476,13 @@ public struct CategoricalSampler: LogitDistributionSampler {
         self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
     }
 
-    public func logWeights(logits: MLXArray) -> MLXArray {
-        logits * (1 / temp)
+    public func prepare(logits: MLXArray) -> PreparedCategoricalDistribution {
+        PreparedCategoricalDistribution(logWeights: logits * (1 / temp))
     }
 
-    public func sample(logits: MLXArray) -> MLXArray {
+    public func sample(prepared: PreparedCategoricalDistribution) -> MLXArray {
         return withRandomState(randomState) {
-            categorical(logWeights(logits: logits))
+            categorical(prepared.logWeights)
         }
     }
 }
