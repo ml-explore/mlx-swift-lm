@@ -40,6 +40,15 @@ final class NanbeigeTests: XCTestCase {
         return try JSONDecoder().decode(NanbeigeConfiguration.self, from: Data(json.utf8))
     }
 
+    /// Build the model with its weights pinned under a task-local random
+    /// state — task-local rather than MLXRandom.seed, so parallel tests do not
+    /// share (or perturb) the global random stream.
+    private func makeModel(_ config: NanbeigeConfiguration, seed: UInt64 = 1) -> NanbeigeModel {
+        withRandomState(MLXRandom.RandomState(seed: seed)) {
+            NanbeigeModel(config)
+        }
+    }
+
     /// Deterministic pseudo-random tokens, 1-D — the shape the default
     /// `LLMModel.prepare` chunked-prefill path expects.
     private func textTokens(_ count: Int, seed: Int = 0) -> MLXArray {
@@ -100,12 +109,12 @@ final class NanbeigeTests: XCTestCase {
     // MARK: - Cache layout
 
     func testNewCacheAllocatesOneCachePerLoopLayerPair() throws {
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig())
         XCTAssertEqual(try model.newCache(parameters: nil).count, 6)
     }
 
     func testNewCacheHonorsTypedCapacity() throws {
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig())
         let capacity = try KVCacheConfiguration.Capacity(
             maxTokens: 32, preservedPrefixTokens: 3)
         let parameters = GenerateParameters(
@@ -122,7 +131,7 @@ final class NanbeigeTests: XCTestCase {
     }
 
     func testNewCacheClampsTinyLegacyLimit() throws {
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig())
         let caches = try model.newCache(parameters: GenerateParameters(maxKVSize: 1))
 
         XCTAssertEqual(caches.count, 6)
@@ -154,14 +163,14 @@ final class NanbeigeTests: XCTestCase {
             }
             """
         let config = try JSONDecoder().decode(NanbeigeConfiguration.self, from: Data(json.utf8))
-        XCTAssertEqual(try NanbeigeModel(config).newCache(parameters: nil).count, 44)
+        XCTAssertEqual(try makeModel(config).newCache(parameters: nil).count, 44)
     }
 
     // MARK: - Sanitize
 
     func testSanitizeDropsRotaryFreqsAndTiedHead() throws {
         let tied = try makeConfig(extra: ",\n\"tie_word_embeddings\": true")
-        let model = NanbeigeModel(tied)
+        let model = makeModel(tied)
         let sanitized = model.sanitize(weights: [
             "model.layers.0.self_attn.rotary_emb.inv_freq": MLXArray([Float(1)]),
             "model.layers.0.self_attn.q_proj.weight": MLXArray([Float(1)]),
@@ -177,12 +186,12 @@ final class NanbeigeTests: XCTestCase {
     /// 1-loop forward of the same weights (guards against a port that ignores
     /// `num_loops` and silently degenerates to a single pass).
     func testSecondLoopChangesLogits() throws {
-        MLXRandom.seed(11)
-        let looped = NanbeigeModel(try makeConfig())
-        MLXRandom.seed(11)
+        // The same seed twice: both models must share weights so the only
+        // difference between them is the loop count.
+        let looped = makeModel(try makeConfig(), seed: 11)
         var singleConfig = try makeConfig()
         singleConfig.numLoops = 1
-        let single = NanbeigeModel(singleConfig)
+        let single = makeModel(singleConfig, seed: 11)
 
         let tokens = textTokens(9)[.newAxis]
         let loopedOut = looped(tokens, cache: nil)[0..., -1, 0...]
@@ -195,8 +204,7 @@ final class NanbeigeTests: XCTestCase {
     /// that breaks if the per-loop cache slices are mis-indexed — loop 2
     /// reading loop 1's keys shows up here immediately.
     func testWarmContinuationMatchesFullPrefill() throws {
-        MLXRandom.seed(7)
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig(), seed: 7)
         let t1 = textTokens(40)
         let t2 = textTokens(8, seed: 3)
         let full = concatenated([t1, t2], axis: 0)
@@ -219,14 +227,14 @@ final class NanbeigeTests: XCTestCase {
     /// `ChatConventionsProviding`, rather than the centralized `model_type`
     /// inference chains. XML is the trained default for agentic use.
     func testDeclaresXMLFunctionToolCallFormat() throws {
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig())
         XCTAssertEqual(model.toolCallFormat, .xmlFunction)
     }
 
     /// Qwen-compatible thinking tags and tool-call boundary, without claiming
     /// support for the original Qwen3 family's hard-budget transition.
     func testDeclaresTaggedReasoningProtocol() throws {
-        let model = NanbeigeModel(try makeConfig())
+        let model = makeModel(try makeConfig())
         let config = try XCTUnwrap(model.reasoningConfig)
         XCTAssertEqual(config, QwenReasoningProtocol.tagged)
         XCTAssertEqual(config.implicitEndDelimiters, ["<tool_call>"])

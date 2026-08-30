@@ -470,8 +470,10 @@ public func loadParoQuantModel<T: LanguageModel>(
         return (paroConfig.groupSize, paroConfig.bits, .affine)
     }
 
-    // 12. Materialize the @ParameterInfo tensors
-    eval(model)
+    // 12. Prepare generic inference-only state, then materialize the model.
+    // This must follow the final IO-layer topology update above, just like the
+    // standard checkpoint-loading path.
+    materializeModelForInference(model)
     logger.info("ParoQuant model loaded and evaluated")
 
     // 13. Load tokenizer

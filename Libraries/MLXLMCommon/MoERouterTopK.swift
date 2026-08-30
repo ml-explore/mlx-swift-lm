@@ -2,10 +2,10 @@ import MLX
 
 // MARK: - Fused router top-k
 
-/// One-kernel replacement for the decode router tail: `chainRouterTopK`
-/// fully sorts all `E` experts (`ArgPartition::eval_gpu` delegates to
-/// `gpu_merge_sort`) just to name `K` — three serial dispatches, three
-/// encoder-wide barriers, where barrier-bound decode needs one.
+/// One-kernel replacement for the decode router tail. Generic MLX router code
+/// fully sorts all experts to name K winners, then gathers their score values
+/// and may normalize them. For a single decode row, one threadgroup can do the
+/// same work without the serial dispatch boundaries.
 ///
 /// Bit-identical to the chain by construction: the sort is stable
 /// (`sort.h`'s `LessThan` compares values only, ties keep input order), so
@@ -15,6 +15,10 @@ import MLX
 /// equal but differ bitwise), NaN maps above `+inf` (all NaNs tie), and the
 /// sum accumulates sequentially in the output dtype from zero, in slot
 /// order, matching `reduce.metal`'s `thread_reduce`.
+///
+/// `selection` determines the winning experts; `values` supplies the scores
+/// returned for those experts. Keeping them separate covers routers such as
+/// Qwen 3, which selects on logits but weights experts with probabilities.
 private let routerTopKSource = """
     uint row = threadgroup_position_in_grid.y;
     uint t = thread_position_in_threadgroup.x;
@@ -22,10 +26,11 @@ private let routerTopKSource = """
     threadgroup ulong sk[E_];
     threadgroup float top_v[K_];
 
-    float v = static_cast<float>(gates[row * E_ + t]);
+    float v = static_cast<float>(selection[row * E_ + t]);
     uint b = (v == 0.0f) ? 0u : as_type<uint>(v);
     uint mono = isnan(v) ? 0xFFFFFFFFu : (b ^ ((uint)(((int)b) >> 31) | 0x80000000u));
-    ulong key = (((ulong)mono) << 32) | (ulong)t;
+    uint tie = DESCENDING_ ? (0xFFFFFFFFu - t) : t;
+    ulong key = (((ulong)mono) << 32) | (ulong)tie;
     sk[t] = key;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -34,8 +39,9 @@ private let routerTopKSource = """
         above += (sk[j] > key) ? 1 : 0;
     }
     if (above < K_) {
-        top_v[K_ - 1 - above] = v;
-        inds[row * K_ + (K_ - 1 - above)] = t;
+        uint slot = DESCENDING_ ? (uint)above : (uint)(K_ - 1 - above);
+        top_v[slot] = static_cast<float>(values[row * E_ + t]);
+        inds[row * K_ + slot] = t;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -46,7 +52,7 @@ private let routerTopKSource = """
         }
         for (int q = 0; q < K_; ++q) {
             T s = static_cast<T>(top_v[q]);
-            scores[row * K_ + q] = NORM_ ? (s / acc) : s;
+            scores[row * K_ + q] = NORMALIZE_ ? (s / acc) : s;
         }
     }
     """
@@ -58,16 +64,70 @@ private final class RouterTopKKernel: Sendable {
     private init() {
         kernel = MLXFast.metalKernel(
             name: "router_topk_norm",
-            inputNames: ["gates"],
+            inputNames: ["selection", "values"],
             outputNames: ["inds", "scores"],
             source: routerTopKSource
         )
     }
 }
 
-/// Metal's threads-per-threadgroup ceiling; one thread per expert, so past
-/// this the dispatch is invalid, not just slow.
-private let maxFusedRouterExperts = 1024
+/// Metal's threads-per-threadgroup ceiling. The fused router uses one thread
+/// per expert, so larger routers must retain the generic MLX path.
+package let maxFusedRouterExperts = 1024
+
+/// Winner order produced by the generic router expression being replaced.
+///
+/// `argPartition(values, kth: E-K)[(E-K)...]` yields the selected values in
+/// ascending order, while `argPartition(-values, kth: K-1)[..<K]` yields them
+/// in descending order. Expert output reduction is order-sensitive, so the
+/// fused path must preserve that distinction exactly.
+package enum FusedRouterTopKOrder {
+    case ascending
+    case descending
+}
+
+/// Whether a router tensor can use the fused single-row Metal path.
+package func supportsFusedRouterTopK(_ selection: MLXArray, k: Int) -> Bool {
+    let e = selection.dim(-1)
+    return selection.size == e && e <= maxFusedRouterExperts && k > 0 && k <= e
+        && selection.dtype.isFloatingPoint
+}
+
+/// Fused top-k selection, selected-value gather, and optional normalization.
+/// Callers are responsible for restricting production use to the single-row
+/// decode shape with ``supportsFusedRouterTopK(_:k:)``.
+package func fusedRouterTopK(
+    selection: MLXArray,
+    values: MLXArray,
+    k: Int,
+    normalize: Bool,
+    order: FusedRouterTopKOrder
+) -> (indices: MLXArray, scores: MLXArray) {
+    precondition(selection.shape == values.shape, "router selection/value shapes must match")
+    precondition(selection.dtype == values.dtype, "router selection/value dtypes must match")
+
+    let e = selection.dim(-1)
+    precondition(e <= maxFusedRouterExperts, "fused router exceeds Metal threadgroup limit")
+    precondition(k > 0 && k <= e, "invalid fused router top-k")
+
+    let rows = selection.size / e
+    let shape = Array(selection.shape.dropLast()) + [k]
+    let out = RouterTopKKernel.shared.kernel(
+        [selection, values],
+        template: [
+            ("T", selection.dtype),
+            ("E_", e),
+            ("K_", k),
+            ("NORMALIZE_", normalize ? 1 : 0),
+            ("DESCENDING_", order == .descending ? 1 : 0),
+        ],
+        grid: (e, rows, 1),
+        threadGroup: (e, 1, 1),
+        outputShapes: [shape, shape],
+        outputDTypes: [.uint32, values.dtype]
+    )
+    return (out[0], out[1])
+}
 
 /// Top-`k` + optional normalisation over the last axis in one dispatch:
 /// `(indices, scores)` shaped `[..., k]`, bit-identical to
@@ -76,20 +136,9 @@ private let maxFusedRouterExperts = 1024
 func fusedRouterTopK(
     _ gates: MLXArray, k: Int, normalize: Bool
 ) -> (indices: MLXArray, scores: MLXArray) {
-    let e = gates.dim(-1)
-    let rows = gates.size / e
-    let shape = Array(gates.shape.dropLast()) + [k]
-    let out = RouterTopKKernel.shared.kernel(
-        [gates],
-        template: [
-            ("T", gates.dtype), ("E_", e), ("K_", k), ("NORM_", normalize ? 1 : 0),
-        ],
-        grid: (e, rows, 1),
-        threadGroup: (e, 1, 1),
-        outputShapes: [shape, shape],
-        outputDTypes: [.uint32, gates.dtype]
+    fusedRouterTopK(
+        selection: gates, values: gates, k: k, normalize: normalize, order: .ascending
     )
-    return (out[0], out[1])
 }
 
 /// The three-dispatch router tail the fused kernel replaces — the prefill
@@ -111,8 +160,7 @@ func chainRouterTopK(
 package func moeRouterTopK(
     _ gates: MLXArray, k: Int, normalize: Bool
 ) -> (indices: MLXArray, scores: MLXArray) {
-    let e = gates.dim(-1)
-    if gates.size == e, e <= maxFusedRouterExperts {
+    if supportsFusedRouterTopK(gates, k: k) {
         return fusedRouterTopK(gates, k: k, normalize: normalize)
     }
     return chainRouterTopK(gates, k: k, normalize: normalize)

@@ -9,39 +9,40 @@ import Testing
 struct Gemma3nMaskTests {
 
     @Test func slidingDecoderLayerAcceptsBooleanMask() {
-        MLXRandom.seed(42)
-        let config = Gemma3nTextConfiguration()
-        let layer = Gemma3nDecoderLayer(config, layerIdx: 0)
-        let sequenceLength = 4
-        let hiddenStates = MLXRandom.normal([
-            config.altupNumInputs, 1, sequenceLength, config.hiddenSize,
-        ])
-        let perLayerInput = MLXRandom.normal([
-            1, sequenceLength, config.hiddenSizePerLayerInput,
-        ])
-        let mask = createCausalMask(n: sequenceLength, offset: 0, windowSize: 2)
+        withRandomState(MLXRandom.RandomState(seed: 42)) {
+            let config = Gemma3nTextConfiguration()
+            let layer = Gemma3nDecoderLayer(config, layerIdx: 0)
+            let sequenceLength = 4
+            let hiddenStates = MLXRandom.normal([
+                config.altupNumInputs, 1, sequenceLength, config.hiddenSize,
+            ])
+            let perLayerInput = MLXRandom.normal([
+                1, sequenceLength, config.hiddenSizePerLayerInput,
+            ])
+            let mask = createCausalMask(n: sequenceLength, offset: 0, windowSize: 2)
 
-        let output = layer(
-            hiddenStates,
-            mask: .array(mask),
-            perLayerInput: perLayerInput
-        )
-        eval(output)
+            let output = layer(
+                hiddenStates,
+                mask: .array(mask),
+                perLayerInput: perLayerInput
+            )
+            eval(output)
 
-        #expect(output.shape == hiddenStates.shape)
+            #expect(output.shape == hiddenStates.shape)
 
-        // The Boolean mask must block the same positions as the equivalent
-        // additive float mask, rather than acting as an additive 1/0 mask.
-        let additiveMask = MLX.where(
-            mask, MLXArray(Float(0)), MLXArray(-Float.greatestFiniteMagnitude))
-        let reference = layer(
-            hiddenStates,
-            mask: .array(additiveMask),
-            perLayerInput: perLayerInput
-        )
-        eval(reference)
+            // The Boolean mask must block the same positions as the equivalent
+            // additive float mask, rather than acting as an additive 1/0 mask.
+            let additiveMask = MLX.where(
+                mask, MLXArray(Float(0)), MLXArray(-Float.greatestFiniteMagnitude))
+            let reference = layer(
+                hiddenStates,
+                mask: .array(additiveMask),
+                perLayerInput: perLayerInput
+            )
+            eval(reference)
 
-        #expect(allClose(output, reference, rtol: 1e-4, atol: 1e-5).item(Bool.self))
+            #expect(allClose(output, reference, rtol: 1e-4, atol: 1e-5).item(Bool.self))
+        }
     }
 
     @Test func booleanAttentionMaskKeepsItsDType() {

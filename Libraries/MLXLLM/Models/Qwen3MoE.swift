@@ -135,11 +135,19 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
         let softGates = MLX.softmax(gates, axis: -1, precise: true)
 
         let k = topK
-        let inds = MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        var scores = MLX.takeAlong(softGates, inds, axis: -1)
-
-        if normTopkProb {
-            scores = scores / MLX.sum(scores, axis: -1, keepDims: true)
+        let inds: MLXArray
+        let scores: MLXArray
+        if supportsFusedRouterTopK(gates, k: k) {
+            (inds, scores) = fusedRouterTopK(
+                selection: gates, values: softGates, k: k,
+                normalize: normTopkProb, order: .descending)
+        } else {
+            inds = MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            var selected = MLX.takeAlong(softGates, inds, axis: -1)
+            if normTopkProb {
+                selected = selected / MLX.sum(selected, axis: -1, keepDims: true)
+            }
+            scores = selected
         }
 
         let y = switchMLP(x, inds)

@@ -37,6 +37,71 @@ public func scatterUnsort(x: MLXArray, invOrder: MLXArray, shape: [Int]? = nil) 
     return x
 }
 
+/// Fused inverse-permutation and weighted reduction for sorted MoE rows.
+///
+/// `SwitchGLU` sorts expert assignments before its gathered matrix
+/// multiplications. The established path restores a full
+/// `[tokens, topK, hidden]` tensor and then reduces `topK`. This kernel reads
+/// the sorted rows through the inverse permutation and writes
+/// `[tokens, hidden]` directly, avoiding that intermediate allocation.
+private let weightedExpertUnsortKernel = MLXFast.metalKernel(
+    name: "weighted_expert_unsort",
+    inputNames: ["sorted_outputs", "inverse_order", "weights"],
+    outputNames: ["output"],
+    source: """
+            uint feature = thread_position_in_grid.x;
+            uint token = thread_position_in_grid.y;
+
+            T accumulator = (T)0;
+            const uint assignment_base = token * (uint)K;
+            for (uint slot = 0; slot < (uint)K; ++slot) {
+                const uint assignment = assignment_base + slot;
+                const uint sorted_row = (uint)inverse_order[assignment];
+                // Match the legacy bfloat16 multiply-then-reduce rounding.
+                const T weighted = (T)(
+                    (float)sorted_outputs[sorted_row * threads_per_grid.x + feature]
+                    * (float)weights[assignment]);
+                accumulator = accumulator + weighted;
+            }
+            output[token * threads_per_grid.x + feature] = accumulator;
+        """,
+    ensureRowContiguous: true)
+
+/// Reduce sorted top-8 bfloat16 expert rows without materializing their
+/// unsorted assignment tensor. Callers must retain the established path for
+/// every unsupported dtype, shape, or training topology.
+package func weightedExpertUnsort(
+    sortedOutputs: MLXArray,
+    inverseOrder: MLXArray,
+    weights: MLXArray
+) -> MLXArray {
+    let hidden = sortedOutputs.dim(1)
+    precondition(
+        sortedOutputs.ndim == 2 && hidden.isMultiple(of: 64)
+            && sortedOutputs.dtype == .bfloat16,
+        "weightedExpertUnsort requires bfloat16 [assignments, hidden], hidden % 64 == 0")
+    precondition(
+        inverseOrder.ndim == 1 && inverseOrder.dtype == .uint32,
+        "weightedExpertUnsort requires flat uint32 inverse order")
+    precondition(
+        weights.ndim == 2 && weights.dim(1) == 8 && weights.size >= 64
+            && weights.dtype == .bfloat16,
+        "weightedExpertUnsort requires sorted-prefill bfloat16 [tokens, 8]")
+    precondition(
+        sortedOutputs.dim(0) == weights.size && inverseOrder.size == weights.size,
+        "weightedExpertUnsort assignment counts must match")
+
+    let tokens = weights.dim(0)
+    return weightedExpertUnsortKernel(
+        [sortedOutputs, inverseOrder, weights],
+        template: [("T", sortedOutputs.dtype), ("K", 8)],
+        grid: (hidden, tokens, 1),
+        threadGroup: (64, 4, 1),
+        outputShapes: [[tokens, hidden]],
+        outputDTypes: [.bfloat16]
+    )[0]
+}
+
 // MARK: - SwitchGLU
 
 public class SwitchGLU: Module {
@@ -95,7 +160,9 @@ public class SwitchGLU: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+    private func projectExperts(
+        _ x: MLXArray, _ indices: MLXArray
+    ) -> (output: MLXArray, inverseOrder: MLXArray?) {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
         let doSort = indices.size >= 64
@@ -120,11 +187,87 @@ public class SwitchGLU: Module {
             idx,
             sortedIndices: doSort)
 
-        if doSort {
-            x = scatterUnsort(x: x, invOrder: inverseOrder, shape: indices.shape)
+        return (x, doSort ? inverseOrder : nil)
+    }
+
+    private func legacyWeightedReduction(
+        _ projected: (output: MLXArray, inverseOrder: MLXArray?),
+        indices: MLXArray,
+        weights: MLXArray
+    ) -> MLXArray {
+        var output = projected.output
+        if let inverseOrder = projected.inverseOrder {
+            output = scatterUnsort(x: output, invOrder: inverseOrder, shape: indices.shape)
+        }
+        return weightedExpertSum(MLX.squeezed(output, axis: -2), weights)
+    }
+
+    /// Whether this call has the exact frozen, quantized inference topology
+    /// supported by ``weightedExpertUnsort``.
+    package func supportsDirectWeightedReduction(
+        _ x: MLXArray, _ indices: MLXArray, weights: MLXArray
+    ) -> Bool {
+        let projections = [gateProj, upProj, downProj]
+        return inputDims.isMultiple(of: 64)
+            && x.ndim == 2
+            && x.dim(1) == inputDims
+            && x.dtype == .bfloat16
+            && indices.ndim == 2
+            && indices.dim(0) == x.dim(0)
+            && indices.dim(1) == 8
+            && indices.dtype == .uint32
+            && weights.shape == indices.shape
+            && weights.dtype == .bfloat16
+            && indices.size >= 64
+            && projections.allSatisfy {
+                ObjectIdentifier(type(of: $0)) == ObjectIdentifier(QuantizedSwitchLinear.self)
+                    && $0.bias == nil
+            }
+            && trainableParameters().flattened().isEmpty
+    }
+
+    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+        var projected = projectExperts(x, indices)
+
+        if let inverseOrder = projected.inverseOrder {
+            projected.output = scatterUnsort(
+                x: projected.output, invOrder: inverseOrder, shape: indices.shape)
         }
 
-        return MLX.squeezed(x, axis: -2)
+        return MLX.squeezed(projected.output, axis: -2)
+    }
+
+    /// Project and combine selected experts, directly reducing sorted
+    /// production prefill rows when requested and eligible.
+    ///
+    /// Disabled, decode-sized, non-bfloat16, custom, and trainable calls use
+    /// the established scatter + ``weightedExpertSum`` path unchanged.
+    package func callAndWeightedReduce(
+        _ x: MLXArray,
+        _ indices: MLXArray,
+        weights: MLXArray,
+        fuseSortedReduction: Bool
+    ) -> MLXArray {
+        guard fuseSortedReduction,
+            supportsDirectWeightedReduction(x, indices, weights: weights)
+        else {
+            return weightedExpertSum(callAsFunction(x, indices), weights)
+        }
+
+        let projected = projectExperts(x, indices)
+        guard let inverseOrder = projected.inverseOrder,
+            projected.output.ndim == 3,
+            projected.output.dim(-2) == 1,
+            projected.output.dim(-1) == inputDims,
+            projected.output.dtype == .bfloat16
+        else {
+            return legacyWeightedReduction(projected, indices: indices, weights: weights)
+        }
+
+        return weightedExpertUnsort(
+            sortedOutputs: MLX.squeezed(projected.output, axis: -2),
+            inverseOrder: inverseOrder,
+            weights: weights)
     }
 }
 

@@ -138,10 +138,20 @@ class MixtralSparseMoeBlock: Module {
         let gates = gate(x)
 
         let k = topK
-        let inds = MLX.stopGradient(MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k])
+        let inds: MLXArray
+        let selectedLogits: MLXArray
+        if supportsFusedRouterTopK(gates, k: k) {
+            (inds, selectedLogits) = fusedRouterTopK(
+                selection: gates, values: gates, k: k,
+                normalize: false, order: .descending)
+        } else {
+            inds = MLX.stopGradient(
+                MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k])
+            selectedLogits = MLX.takeAlong(gates, inds, axis: -1)
+        }
         // Mixtral applies the softmax over the *selected* expert logits (after top-k),
         // unlike the softmax-then-select ordering used by e.g. Qwen3MoE.
-        let scores = MLX.softmax(MLX.takeAlong(gates, inds, axis: -1), axis: -1, precise: true)
+        let scores = MLX.softmax(selectedLogits, axis: -1, precise: true)
 
         let y = switchMLP(x, inds)
         return weightedExpertSum(y, scores)

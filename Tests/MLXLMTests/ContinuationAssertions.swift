@@ -88,33 +88,36 @@ struct ContinuationAssertions {
     func assertWarmTextContinuation<M: LanguageModel>(
         _ model: M, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        MLXRandom.seed(7)
-        let t1 = textTokens(40)
-        let t2 = textTokens(8, seed: 3)
+        // Task-local rather than MLXRandom.seed: parallel tests must not share
+        // (or perturb) the global random stream.
+        try withRandomState(MLXRandom.RandomState(seed: 7)) {
+            let t1 = textTokens(40)
+            let t2 = textTokens(8, seed: 3)
 
-        let cacheF = try model.newCache(parameters: nil)
-        let (logitsF, _) = try prefill(model, concatenated([t1, t2], axis: 1), cache: cacheF)
+            let cacheF = try model.newCache(parameters: nil)
+            let (logitsF, _) = try prefill(model, concatenated([t1, t2], axis: 1), cache: cacheF)
 
-        let cacheD = try model.newCache(parameters: nil)
-        let (_, s0) = try prefill(model, t1, cache: cacheD)
-        var state = s0
-        var logitsD = MLXArray(0)
-        for j in 0 ..< t2.dim(1) {
-            let out = model(
-                LMInput.Text(tokens: t2[0..., j ..< (j + 1)]), cache: cacheD, state: state)
-            state = out.state
-            logitsD = out.logits[0..., -1, 0...]
+            let cacheD = try model.newCache(parameters: nil)
+            let (_, s0) = try prefill(model, t1, cache: cacheD)
+            var state = s0
+            var logitsD = MLXArray(0)
+            for j in 0 ..< t2.dim(1) {
+                let out = model(
+                    LMInput.Text(tokens: t2[0..., j ..< (j + 1)]), cache: cacheD, state: state)
+                state = out.state
+                logitsD = out.logits[0..., -1, 0...]
+            }
+            let noiseFloor = maxAbsDiff(logitsD, logitsF)
+
+            let cacheW = try model.newCache(parameters: nil)
+            let (_, s1) = try prefill(model, t1, cache: cacheW)
+            let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
+
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(logitsW, logitsF), max(noiseFloor * 10, 1e-3),
+                "warm continuation diverged from full prefill (noise floor \(noiseFloor))",
+                file: file, line: line)
         }
-        let noiseFloor = maxAbsDiff(logitsD, logitsF)
-
-        let cacheW = try model.newCache(parameters: nil)
-        let (_, s1) = try prefill(model, t1, cache: cacheW)
-        let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
-
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), max(noiseFloor * 10, 1e-3),
-            "warm continuation diverged from full prefill (noise floor \(noiseFloor))",
-            file: file, line: line)
     }
 
     /// With an image in turn 1, the rope delta that image accumulated must be carried into
@@ -122,23 +125,24 @@ struct ContinuationAssertions {
     func assertWarmImageContinuation<M: LanguageModel>(
         _ model: M, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        MLXRandom.seed(5)
-        let image = image()
-        let t1 = concatenated([textTokens(10), imageRun(), textTokens(8, seed: 5)], axis: 1)
-        let t2 = textTokens(8, seed: 9)
+        try withRandomState(MLXRandom.RandomState(seed: 5)) {
+            let image = image()
+            let t1 = concatenated([textTokens(10), imageRun(), textTokens(8, seed: 5)], axis: 1)
+            let t2 = textTokens(8, seed: 9)
 
-        let cacheF = try model.newCache(parameters: nil)
-        let (logitsF, _) = try prefill(
-            model, concatenated([t1, t2], axis: 1), image: image, cache: cacheF)
+            let cacheF = try model.newCache(parameters: nil)
+            let (logitsF, _) = try prefill(
+                model, concatenated([t1, t2], axis: 1), image: image, cache: cacheF)
 
-        let cacheW = try model.newCache(parameters: nil)
-        let (_, s1) = try prefill(model, t1, image: image, cache: cacheW)
-        let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
+            let cacheW = try model.newCache(parameters: nil)
+            let (_, s1) = try prefill(model, t1, image: image, cache: cacheW)
+            let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
 
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
-            "state-threaded warm continuation diverged from full prefill",
-            file: file, line: line)
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(logitsW, logitsF), 1e-3,
+                "state-threaded warm continuation diverged from full prefill",
+                file: file, line: line)
+        }
     }
 
     /// Three turns, with the image in the middle one. The continuation must place that image at
@@ -147,44 +151,46 @@ struct ContinuationAssertions {
     func assertImageMidContinuationResumeState<M: LanguageModel>(
         _ model: M, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        MLXRandom.seed(3)
-        let image = image()
-        let t1 = textTokens(12)
-        let t2 = concatenated(
-            [textTokens(4, seed: 2), imageRun(), textTokens(6, seed: 4)], axis: 1)
-        let t3 = textTokens(8, seed: 6)
+        try withRandomState(MLXRandom.RandomState(seed: 3)) {
+            let image = image()
+            let t1 = textTokens(12)
+            let t2 = concatenated(
+                [textTokens(4, seed: 2), imageRun(), textTokens(6, seed: 4)], axis: 1)
+            let t3 = textTokens(8, seed: 6)
 
-        let cacheF = try model.newCache(parameters: nil)
-        let (logitsF, _) = try prefill(
-            model, concatenated([t1, t2, t3], axis: 1), image: image, cache: cacheF)
+            let cacheF = try model.newCache(parameters: nil)
+            let (logitsF, _) = try prefill(
+                model, concatenated([t1, t2, t3], axis: 1), image: image, cache: cacheF)
 
-        let cacheW = try model.newCache(parameters: nil)
-        let (_, s1) = try prefill(model, t1, cache: cacheW)
-        let (_, s2) = try prefill(model, t2, image: image, cache: cacheW, state: s1)
-        let (logitsW, _) = try prefill(model, t3, cache: cacheW, state: s2)
+            let cacheW = try model.newCache(parameters: nil)
+            let (_, s1) = try prefill(model, t1, cache: cacheW)
+            let (_, s2) = try prefill(model, t2, image: image, cache: cacheW, state: s1)
+            let (logitsW, _) = try prefill(model, t3, cache: cacheW, state: s2)
 
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
-            "post-image resume state positioned the following turn wrong",
-            file: file, line: line)
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(logitsW, logitsF), 1e-3,
+                "post-image resume state positioned the following turn wrong",
+                file: file, line: line)
+        }
     }
 
     /// Windowed (chunked) prefill must agree with the single-shot forward on plain text.
     func assertWindowedTextPrefill<M: LanguageModel>(
         _ model: M, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        MLXRandom.seed(11)
-        let prompt = textTokens(40)
+        try withRandomState(MLXRandom.RandomState(seed: 11)) {
+            let prompt = textTokens(40)
 
-        let cacheS = try model.newCache(parameters: nil)
-        let (logitsS, _) = try prefill(model, prompt, cache: cacheS)
+            let cacheS = try model.newCache(parameters: nil)
+            let (logitsS, _) = try prefill(model, prompt, cache: cacheS)
 
-        let cacheC = try model.newCache(parameters: nil)
-        let (logitsC, _) = try prefill(model, prompt, cache: cacheC, stepSize: 8)
+            let cacheC = try model.newCache(parameters: nil)
+            let (logitsC, _) = try prefill(model, prompt, cache: cacheC, stepSize: 8)
 
-        XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsC, logitsS), 1e-3,
-            "windowed prefill diverged from single-shot", file: file, line: line)
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(logitsC, logitsS), 1e-3,
+                "windowed prefill diverged from single-shot", file: file, line: line)
+        }
     }
 
     /// Windowed prefill on an image-bearing prompt must agree with the single-shot forward — the
@@ -198,22 +204,24 @@ struct ContinuationAssertions {
     func assertWindowedImagePrefill<M: LanguageModel>(
         _ model: M, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        MLXRandom.seed(13)
-        let image = image()
-        let prompt = concatenated([textTokens(10), imageRun(), textTokens(12, seed: 7)], axis: 1)
+        try withRandomState(MLXRandom.RandomState(seed: 13)) {
+            let image = image()
+            let prompt = concatenated(
+                [textTokens(10), imageRun(), textTokens(12, seed: 7)], axis: 1)
 
-        let cacheS = try model.newCache(parameters: nil)
-        let (logitsS, _) = try prefill(model, prompt, image: image, cache: cacheS)
+            let cacheS = try model.newCache(parameters: nil)
+            let (logitsS, _) = try prefill(model, prompt, image: image, cache: cacheS)
 
-        for stepSize in [3, 5, 8] {
-            let cacheC = try model.newCache(parameters: nil)
-            let (logitsC, _) = try prefill(
-                model, prompt, image: image, cache: cacheC, stepSize: stepSize)
+            for stepSize in [3, 5, 8] {
+                let cacheC = try model.newCache(parameters: nil)
+                let (logitsC, _) = try prefill(
+                    model, prompt, image: image, cache: cacheC, stepSize: stepSize)
 
-            XCTAssertLessThanOrEqual(
-                maxAbsDiff(logitsC, logitsS), 1e-3,
-                "windowed image prefill diverged from single-shot at stepSize \(stepSize)",
-                file: file, line: line)
+                XCTAssertLessThanOrEqual(
+                    maxAbsDiff(logitsC, logitsS), 1e-3,
+                    "windowed image prefill diverged from single-shot at stepSize \(stepSize)",
+                    file: file, line: line)
+            }
         }
     }
 }

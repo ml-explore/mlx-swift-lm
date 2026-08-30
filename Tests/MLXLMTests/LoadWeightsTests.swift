@@ -24,7 +24,172 @@ private final class SidecarDeclaringModel: TwoLayerModel, AdditionalWeightFilesP
     var additionalWeightFiles: [String] { ["projector.safetensors"] }
 }
 
+private final class PreparedSidecarDeclaringModel: TwoLayerModel,
+    AdditionalWeightFilesProviding, LanguageModel, KVCacheDimensionProvider
+{
+    var additionalWeightFiles: [String] { ["projector.safetensors"] }
+    let kvHeads: [Int] = []
+    private(set) var preparationCount = 0
+    private(set) var projectorValuesAtPreparation: [Float] = []
+
+    func prepare() throws {
+        preparationCount += 1
+        projectorValuesAtPreparation = projector.weight.asArray(Float.self)
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        layer(inputs)
+    }
+}
+
+private final class FailingInferenceStateModel: Module, LanguageModel,
+    KVCacheDimensionProvider
+{
+    enum ExpectedFailure: Error { case preparation }
+
+    let kvHeads: [Int] = []
+
+    func prepare() throws {
+        throw ExpectedFailure.preparation
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        inputs
+    }
+}
+
 final class LoadWeightsTests: XCTestCase {
+
+    // MARK: - Concurrent loading
+
+    func testContiguousLoadGroupsBalanceBytesAndPreserveOrder() {
+        // one huge tensor between small ones: boundaries land after the bytes, never inside
+        let groups = contiguousLoadGroups(byteCounts: [1, 1, 100, 1, 1], groupCount: 2)
+        XCTAssertEqual(groups, [0 ..< 3, 3 ..< 5])
+
+        let even = contiguousLoadGroups(byteCounts: [10, 10, 10, 10], groupCount: 2)
+        XCTAssertEqual(even, [0 ..< 2, 2 ..< 4])
+
+        // every index appears exactly once, in order
+        let many = contiguousLoadGroups(byteCounts: Array(repeating: 7, count: 100), groupCount: 16)
+        XCTAssertEqual(many.flatMap { Array($0) }, Array(0 ..< 100))
+    }
+
+    func testContiguousLoadGroupsDegenerateInputs() {
+        XCTAssertEqual(contiguousLoadGroups(byteCounts: [], groupCount: 4), [])
+        XCTAssertEqual(contiguousLoadGroups(byteCounts: [5], groupCount: 4), [0 ..< 1])
+        XCTAssertEqual(contiguousLoadGroups(byteCounts: [0, 0], groupCount: 4), [0 ..< 2])
+        XCTAssertEqual(contiguousLoadGroups(byteCounts: [1, 2, 3], groupCount: 1), [0 ..< 3])
+    }
+
+    func testSafetensorSpansComeBackInFileOrder() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("model.safetensors")
+        try save(
+            arrays: [
+                "a": MLXArray.zeros([4, 4]),
+                "b": MLXArray.zeros([2]),
+                "c": MLXArray.zeros([8, 8]),
+            ], url: url)
+
+        let spans = try safetensorSpansInFileOrder(url: url)
+
+        XCTAssertEqual(Set(spans.map(\.name)), ["a", "b", "c"])
+        XCTAssertEqual(
+            spans.first { $0.name == "a" }?.byteCount, 4 * 4 * 4, "float32 4x4")
+        // the order is the file's own layout, whatever it is, and covers each tensor once
+        XCTAssertEqual(spans.count, 3)
+    }
+
+    func testSafetensorSpansRejectsAFileThatIsNotSafetensors() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("weights.safetensors")
+        try Data("not a safetensors file at all".utf8).write(to: url)
+
+        XCTAssertThrowsError(try safetensorSpansInFileOrder(url: url))
+    }
+
+    func testLoadWeightArraysMatchesTheSerialLoader() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // two shards with enough tensors to split, plus a duplicate name whose
+        // later-file-wins resolution must match the serial loop
+        var first = [String: MLXArray]()
+        for i in 0 ..< 8 {
+            first["layers.\(i).weight"] = MLXArray(Float(i)) * MLXArray.ones([16, 16])
+        }
+        first["shared.weight"] = MLXArray.zeros([4])
+        var second = [String: MLXArray]()
+        for i in 8 ..< 12 {
+            second["layers.\(i).weight"] = MLXArray(Float(i)) * MLXArray.ones([16, 16])
+        }
+        second["shared.weight"] = MLXArray.ones([4])
+
+        let urls = [
+            directory.appendingPathComponent("model-00001-of-00002.safetensors"),
+            directory.appendingPathComponent("model-00002-of-00002.safetensors"),
+        ]
+        try save(arrays: first, url: urls[0])
+        try save(arrays: second, url: urls[1])
+
+        let (weights, _) = try loadWeightArrays(urls: urls)
+
+        var serial = [String: MLXArray]()
+        for url in urls {
+            let (w, _) = try loadArraysAndMetadata(url: url)
+            serial.merge(w) { _, new in new }
+        }
+
+        XCTAssertEqual(Set(weights.keys), Set(serial.keys))
+        for (name, expected) in serial {
+            let actual = try XCTUnwrap(weights[name])
+            XCTAssertEqual(actual.shape, expected.shape, name)
+            XCTAssertTrue(
+                allClose(actual, expected).item(Bool.self), "\(name) differs from serial load")
+        }
+        // the duplicate resolves to the later file, as the serial loop does
+        XCTAssertEqual(weights["shared.weight"]?.asArray(Float.self), [1, 1, 1, 1])
+    }
+
+    func testLoadWeightArraysSurfacesAMissingFile() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LoadWeightsTests-missing-\(UUID().uuidString).safetensors")
+        XCTAssertThrowsError(try loadWeightArrays(urls: [missing]))
+    }
+
+    func testWeightLoadConcurrencyIsClamped() {
+        XCTAssertEqual(weightLoadConcurrency(processorCount: 2), 4)
+        XCTAssertEqual(weightLoadConcurrency(processorCount: 8), 8)
+        XCTAssertEqual(weightLoadConcurrency(processorCount: 14), 14)
+        XCTAssertEqual(weightLoadConcurrency(processorCount: 32), 16)
+    }
+
+    func testInferencePreparationFailureIsReportedWithoutEscaping() {
+        let report = prepareInferenceState(in: FailingInferenceStateModel())
+
+        XCTAssertFalse(report.succeeded)
+        XCTAssertEqual(report.failures.count, 1)
+        XCTAssertTrue(report.failures[0].modelType.contains("FailingInferenceStateModel"))
+        XCTAssertTrue(
+            report.failures[0].error is FailingInferenceStateModel.ExpectedFailure)
+    }
 
     // MARK: - Index
 
@@ -212,6 +377,19 @@ final class LoadWeightsTests: XCTestCase {
         try loadWeights(modelDirectory: directory, model: model)
 
         XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+    }
+
+    func testLoadWeightsPreparesInferenceStateAfterInstallingParameters() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeSidecarCheckpoint(in: directory)
+
+        let model = PreparedSidecarDeclaringModel()
+        try loadWeights(modelDirectory: directory, model: model)
+
+        XCTAssertEqual(model.preparationCount, 1)
+        XCTAssertEqual(model.projectorValuesAtPreparation, [1, 2, 3, 4])
     }
 
     func testLoadWeightsFailsWhenTheSidecarIsNotDeclared() throws {

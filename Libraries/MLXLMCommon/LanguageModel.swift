@@ -308,6 +308,14 @@ public enum PrepareResult {
 /// - the ``TokenIterator`` accumulates this information into a ``GenerateResult``
 public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 
+    /// Build derived state after checkpoint or adapter topology updates and
+    /// before the model is used for inference.
+    ///
+    /// Implementations may materialize arrays or replace storage-sharing
+    /// module views. The library invokes this lifecycle hook while it has
+    /// exclusive access to the model; inference calls must remain read-only.
+    func prepare() throws
+
     /// Prepare the cache state and consume the ``LMInput``.
     ///
     /// `state` is the ``LMOutput/state`` a caller carried over from earlier
@@ -367,6 +375,9 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 }
 
 extension LanguageModel {
+    /// Most language models have no derived inference state to prepare.
+    public func prepare() throws {}
+
     @available(
         *, deprecated, renamed: "prepare(_:cache:state:prefill:)",
         message:
