@@ -26,9 +26,9 @@ public protocol LogitSampler {
 /// not a categorical sampling distribution.
 public protocol LogitDistributionSampler: LogitSampler {
 
-    /// Returns the unnormalized log weights used by ``sample(logits:)``.
+    /// Returns the unnormalized log weights used by the sampler's `sample(logits:)` method.
     ///
-    /// Applying ``softmax(_:axis:)`` on the final axis produces the categorical
+    /// Applying `softmax` on the final axis produces the categorical
     /// probabilities represented by these weights.
     func logWeights(logits: MLXArray) -> MLXArray
 }
