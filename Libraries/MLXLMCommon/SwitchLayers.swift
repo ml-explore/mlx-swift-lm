@@ -276,7 +276,7 @@ open class SwitchGLU: Module {
 /// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
 /// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
 /// `gate_proj` / `up_proj`. Used by Gemma 4 26B MoE.
-public class FusedGateUpSwitchGLU: Module {
+open class FusedGateUpSwitchGLU: Module {
     @ModuleInfo(key: "gate_up_proj") var gateUpProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
 
@@ -327,7 +327,7 @@ public class FusedGateUpSwitchGLU: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+    open func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
         let doSort = indices.size >= 64

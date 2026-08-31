@@ -475,7 +475,7 @@ public enum Qwen35Language {
         @ModuleInfo(key: "norm") var norm: RMSNormGated
         @ModuleInfo(key: "out_proj") var outProj: Linear
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.hiddenSize = args.hiddenSize
             self.numVHeads = args.linearNumValueHeads
             self.numKHeads = args.linearNumKeyHeads
@@ -594,7 +594,7 @@ public enum Qwen35Language {
             )
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ inputs: MLXArray,
             mask: MLXArray? = nil,
             cache: MambaCache? = nil,
@@ -715,7 +715,7 @@ public enum Qwen35Language {
         @ModuleInfo(key: "shared_expert") var sharedExpert: MLP
         @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.normTopkProb = args.normTopkProb
             self.numExperts = args.numExperts
             self.topK = args.numExpertsPerTok
@@ -763,7 +763,7 @@ public enum Qwen35Language {
 
         @ModuleInfo(key: "mlp") var mlp: Module
 
-        init(
+        public init(
             _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
             forceFullAttention: Bool = false
         ) {
@@ -792,7 +792,7 @@ public enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ x: MLXArray,
             attentionMask: MLXArray?,
             ssmMask: MLXArray?,
@@ -823,7 +823,7 @@ public enum Qwen35Language {
         let ssmIdx: Int
         let faIdx: Int
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
             _embedTokens.wrappedValue = Embedding(
                 embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
@@ -837,7 +837,7 @@ public enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
             cache: [KVCache?]? = nil,
