@@ -87,6 +87,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Loads the model container for a configuration, forwarding download
     /// progress. Injected so this module carries no HuggingFace or
     /// swift-transformers dependency; the HuggingFace wiring lives in callers.
+    ///
+    /// This closure must honor cancellation while it is suspended. ``evict()``
+    /// and ``evictAll()`` cancel the load task tied to this closure. A closure
+    /// that ignores cancellation keeps running and keeps its caller waiting.
     public typealias ContainerLoader =
         @Sendable (
             _ configuration: ModelConfiguration,
@@ -188,12 +192,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
     /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
-    /// requests reload from the on-disk cache.
+    /// requests reload from the on-disk cache. Cancels every registered
+    /// in-flight load task, the same way ``evict()`` does for one model.
     ///
-    /// Safe to call during in-flight `respond()`/`warmUp()` work: each holds its
-    /// own strong reference to the `ModelContainer` and synchronizes the GPU on
-    /// exit, so dropping the cache's reference cannot free weights out from under
-    /// a live kernel — the weights free via ARC once that work returns.
+    /// Safe to call during in-flight `respond()`/`warmUp()` work that already holds
+    /// a `ModelContainer`: that work keeps its own strong reference and synchronizes
+    /// the GPU on exit, so dropping the cache's reference cannot free weights out
+    /// from under a live kernel — the weights free via ARC once that work returns.
+    ///
+    /// Work still inside its load phase is the other case. This call cancels every
+    /// registered load task, so if the loader honors cancellation, an awaiting
+    /// `preload()` or `respond()` fails instead of completing. The loader decides
+    /// the error type, so it may not be `CancellationError`. The cache coalesces
+    /// concurrent callers for one model onto a single load task, so one such
+    /// failure reaches every caller waiting on that load, including callers that
+    /// never asked for an eviction.
     public static func evictAll() async {
         await cache.evictAll()
     }
@@ -204,8 +217,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///
     /// Safe to call during an in-flight `respond()`: that call retains its own
     /// `ModelContainer` and finishes normally; the weights free via ARC once it
-    /// returns. Evicting a model whose load is still in flight removes it cleanly
-    /// — the in-flight load completes but does not re-populate the cache.
+    /// returns. Evicting a model with an in-flight load cancels that load's task.
+    /// If the loader honors cancellation, the awaiting `preload()` or `respond()`
+    /// call fails instead of completing. The loader decides the error type, so it
+    /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
     }

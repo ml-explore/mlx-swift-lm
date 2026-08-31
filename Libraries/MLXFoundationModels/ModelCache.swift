@@ -78,6 +78,10 @@ actor ModelCache {
     /// agnostic of how a container is acquired -- first caller wins; later
     /// callers reuse the cached container regardless of which loader they
     /// brought along.
+    ///
+    /// The loader must honor cancellation while it is suspended: `evictAll()` and
+    /// `remove(modelID:)` cancel the registered load task, and a loader that
+    /// ignores cancellation keeps running and keeps its awaiter waiting.
     func load(
         modelID: String,
         suppressDownloadingState: Bool = false,
@@ -250,11 +254,15 @@ actor ModelCache {
     }
 
     /// Evicts all cached state: model containers, tokenizers, constraint
-    /// templates, and per-model tokenizer biases. No GPU-stream synchronization
-    /// is required — in-flight callers retain their own `ModelContainer` and
-    /// free it via ARC on completion.
+    /// templates, and per-model tokenizer biases. Cancels every registered load
+    /// task, as `remove(modelID:)` does for a single model. No GPU-stream
+    /// synchronization is required — in-flight callers retain their own
+    /// `ModelContainer` and free it via ARC on completion.
     func evictAll() {
         containers.removeAll()
+        for loadTask in loadingTasks.values {
+            loadTask.task.cancel()
+        }
         loadingTasks.removeAll()
         suppressedLoadIDs.removeAll()
         xgTokenizers.removeAll()
@@ -267,10 +275,10 @@ actor ModelCache {
     /// xgrammar tokenizer, all compiled constraint templates, tokenizer bias,
     /// last load error, the suppressed-download tag, and any in-flight load
     /// registration.
-    /// Best-effort cancels an in-flight load (the load path is not
-    /// cancellation-aware today, so this is a no-op safety net); the
-    /// load-completion guard in `load()` is what prevents a superseded load
-    /// from re-populating after removal.
+    ///
+    /// Cancels an in-flight load and drops its registration. A loader that honors
+    /// cancellation stops early. The load-completion guard in `load()` is
+    /// what prevents any superseded load from re-populating after removal.
     func remove(modelID: String) {
         // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
         loadingTasks[modelID]?.task.cancel()
