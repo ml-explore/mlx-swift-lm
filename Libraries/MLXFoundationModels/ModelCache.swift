@@ -58,7 +58,7 @@ actor ModelCache {
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
     private var suppressedLoadIDs: Set<String> = []
-    private var xgTokenizers: [String: GrammarTokenizer] = [:]
+    private var grammarTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
     /// Clone from template instead of recompiling the grammar each request.
     private var constraintTemplates: [String: GrammarConstraint] = [:]
@@ -155,29 +155,29 @@ actor ModelCache {
     }
 
     /// Gets or creates a cached GrammarTokenizer for the given model.
-    func makeXGTokenizer(
+    func makeGrammarTokenizer(
         modelID: String,
         tokenizer: any Tokenizer
     ) throws -> GrammarTokenizer {
-        if let cached = xgTokenizers[modelID] {
+        if let cached = grammarTokenizers[modelID] {
             return cached
         }
-        let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
-        let xgTok = try GrammarTokenizer(
-            vocab: vocab.vocab,
-            vocabType: vocab.vocabType,
+        let vocabulary = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
+        let grammarTokenizer = try GrammarTokenizer(
+            vocab: vocabulary.vocab,
+            vocabType: vocabulary.vocabType,
             eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
         )
-        xgTokenizers[modelID] = xgTok
-        return xgTok
+        grammarTokenizers[modelID] = grammarTokenizer
+        return grammarTokenizer
     }
 
     /// Whether an `GrammarTokenizer` is already cached for the given model.
-    /// Used by `MLXLanguageModel.hasCachedXGTokenizer` so tests can assert
+    /// Used by `MLXLanguageModel.hasCachedGrammarTokenizer` so tests can assert
     /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
     /// that a later guided respond happens to succeed.
-    func hasCachedXGTokenizer(modelID: String) -> Bool {
-        xgTokenizers[modelID] != nil
+    func hasCachedGrammarTokenizer(modelID: String) -> Bool {
+        grammarTokenizers[modelID] != nil
     }
 
     /// Gets or creates the cached tokenizer-derived logit biases for a model.
@@ -265,7 +265,7 @@ actor ModelCache {
         }
         loadingTasks.removeAll()
         suppressedLoadIDs.removeAll()
-        xgTokenizers.removeAll()
+        grammarTokenizers.removeAll()
         constraintTemplates.removeAll()
         tokenizerBiases.removeAll()
         lastErrors.removeAll()
@@ -285,7 +285,7 @@ actor ModelCache {
         loadingTasks.removeValue(forKey: modelID)
         suppressedLoadIDs.remove(modelID)
         containers.removeValue(forKey: modelID)
-        xgTokenizers.removeValue(forKey: modelID)
+        grammarTokenizers.removeValue(forKey: modelID)
         constraintTemplates = constraintTemplates.filter {
             !$0.key.hasPrefix("\(modelID):")
         }
