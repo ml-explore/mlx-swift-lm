@@ -148,11 +148,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Gets or creates a cached GrammarTokenizer for the given model.
-    static func makeXGTokenizer(
+    static func makeGrammarTokenizer(
         modelID: String,
         tokenizer: any Tokenizer
     ) async throws -> GrammarTokenizer {
-        try await cache.makeXGTokenizer(modelID: modelID, tokenizer: tokenizer)
+        try await cache.makeGrammarTokenizer(modelID: modelID, tokenizer: tokenizer)
     }
 
     /// Gets the cached per-model tokenizer-derived logit biases (closing +
@@ -186,8 +186,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
     /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
     /// `warmUp()` pre-created the tokenizer.
-    static func hasCachedXGTokenizer(modelID: String) async -> Bool {
-        await cache.hasCachedXGTokenizer(modelID: modelID)
+    static func hasCachedGrammarTokenizer(modelID: String) async -> Bool {
+        await cache.hasCachedGrammarTokenizer(modelID: modelID)
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
@@ -376,7 +376,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // per-request schema/tool grammar that prewarm doesn't possess — a
         // pre-built constraint would land under a key no real respond() reads.
         let tokenizer = await container.tokenizer
-        _ = try await Self.makeXGTokenizer(
+        _ = try await Self.makeGrammarTokenizer(
             modelID: modelID, tokenizer: tokenizer)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
@@ -1003,7 +1003,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 tools: requiredToolDefinitions
                             )
 
-                        let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+                        let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                             modelID: modelID,
                             tokenizer: context.tokenizer
                         )
@@ -1011,7 +1011,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             modelID: modelID,
                             kind: .structuralTag,
                             source: toolCallingGrammar,
-                            tokenizer: xgTokenizer,
+                            tokenizer: grammarTokenizer,
                             hostTokenizer: context.tokenizer,
                             fastForward: true
                         )
@@ -1096,7 +1096,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 context: context,
                                 constraint: constraint,
                                 maxTokens: phase2MaxTokens,
-                                vocabSize: Int(xgTokenizer.vocabSize),
+                                vocabSize: Int(grammarTokenizer.vocabSize),
                                 completionReserve: completionReserve,
                                 hardReserve: hardReserve,
                                 closingBias: closingBias,
@@ -1391,14 +1391,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer)
             let constraint = try await MLXLanguageModel.makeConstraint(
                 modelID: modelID,
                 kind: .json,
                 source: schemaJSON,
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 hostTokenizer: context.tokenizer,
                 fastForward: true)
             let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
@@ -1430,7 +1430,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     context: context,
                     constraint: constraint,
                     maxTokens: maxTokens,
-                    vocabSize: Int(xgTokenizer.vocabSize),
+                    vocabSize: Int(grammarTokenizer.vocabSize),
                     completionReserve: completionReserve,
                     hardReserve: hardReserve,
                     closingBias: bias.closing,
