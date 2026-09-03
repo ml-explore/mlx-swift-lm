@@ -19,7 +19,9 @@ struct PromptCacheReusePolicyTests {
         preparedMedia: Bool = false,
         attentionMask: Bool = false,
         modelState: Bool = false,
-        toolResultContinuation: Bool = false
+        toolResultContinuation: Bool = false,
+        speculativeDecoding: Bool = false,
+        canSplitMedia: Bool = false
     ) -> PromptCacheTurn {
         PromptCacheTurn(
             promptTokens: prompt,
@@ -27,7 +29,9 @@ struct PromptCacheReusePolicyTests {
             carriesPreparedMedia: preparedMedia,
             carriesAttentionMask: attentionMask,
             carriesModelState: modelState,
-            isToolResultContinuation: toolResultContinuation)
+            isToolResultContinuation: toolResultContinuation,
+            usesSpeculativeDecoding: speculativeDecoding,
+            canSplitPreparedMedia: canSplitMedia)
     }
 
     /// A cache whose model-wide timeline agrees with `cached`, unless
@@ -102,6 +106,64 @@ struct PromptCacheReusePolicyTests {
             turn: turn(prompt: [1, 2, 3, 4], newMedia: true), cache: alignedCache([1, 2, 3]))
 
         #expect(decision == .rebuild)
+    }
+
+    // MARK: - Append-only media turns
+
+    @Test func `an append-only media turn appends its suffix when the model can split`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 3, 4], newMedia: true, canSplitMedia: true),
+            cache: alignedCache([1, 2, 3]))
+
+        #expect(
+            decision == .appendMediaSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+        #expect(decision.reusesCachedPrefix)
+    }
+
+    /// A VL processor pairs media with an all-ones mask as a matter of course, so
+    /// the media path must not inherit ``ExtendCachedPrefixRule``'s mask guard —
+    /// doing so would disable it for exactly the inputs it serves. Telling a
+    /// benign mask from a real padding mask needs the model's layout knowledge,
+    /// so that check belongs to the splitter.
+    @Test func `a benign attention mask does not block the media split`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(
+                prompt: [1, 2, 3, 4], newMedia: true, attentionMask: true, canSplitMedia: true),
+            cache: alignedCache([1, 2, 3]))
+
+        #expect(
+            decision == .appendMediaSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+    }
+
+    @Test func `a model that cannot split keeps the rebuild on a media turn`() {
+        #expect(
+            PromptCacheReusePolicy().decide(
+                turn: turn(prompt: [1, 2, 3, 4], newMedia: true, canSplitMedia: false),
+                cache: alignedCache([1, 2, 3])) == .rebuild)
+    }
+
+    @Test func `speculative decoding blocks the media split`() {
+        #expect(
+            PromptCacheReusePolicy().decide(
+                turn: turn(
+                    prompt: [1, 2, 3, 4], newMedia: true, speculativeDecoding: true,
+                    canSplitMedia: true),
+                cache: alignedCache([1, 2, 3])) == .rebuild)
+    }
+
+    @Test func `a media turn that diverges from the cache does not split`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], newMedia: true, canSplitMedia: true),
+            cache: alignedCache([1, 2, 3]))
+
+        #expect(decision == .rebuild)
+    }
+
+    @Test func `a misaligned draft cache blocks the media split`() {
+        #expect(
+            PromptCacheReusePolicy().decide(
+                turn: turn(prompt: [1, 2, 3, 4], newMedia: true, canSplitMedia: true),
+                cache: alignedCache([1, 2, 3], draftAligned: false)) == .rebuild)
     }
 
     @Test func `an explicit attention mask blocks suffix reuse`() {

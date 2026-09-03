@@ -1110,6 +1110,16 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
 
 }
 
+// Qwen2-VL deliberately does NOT conform to `PreparedInputSplitting`.
+//
+// Its vision `Attention` runs `scaledDotProductAttention(..., mask: .none)` over a
+// batch derived as `B = frames[0].t` / `L = sequenceLength / B`. For images `t == 1`,
+// so every patch of every image in the payload attends to every other — the images
+// are not isolated from one another. Dropping the cached prefix's rows would then
+// change the features computed for the image that is kept, and the continuation
+// would not match a cold prefill. `Qwen25VL` builds a real per-frame mask
+// (`attentionMask(sequenceLength:cuSeqlens:)`), which is why it can conform.
+
 // MARK: - Configuration
 
 /// Configuration for ``Qwen2VL``
