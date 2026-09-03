@@ -1366,14 +1366,10 @@ public struct GlmOcrMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        // Text precedes the image parts here, which is this template's order.
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content": [
-                ["type": "text", "text": message.content]
-            ]
-                + message.images.map { _ in
-                    ["type": "image"]
-                },
+            "content": contentParts(for: message, layout: .textThenImages),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary

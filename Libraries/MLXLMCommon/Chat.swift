@@ -1,5 +1,21 @@
 // Copyright © 2025 Apple Inc.
 
+import os
+
+private let messageContentLogger = Logger(
+    subsystem: "mlx-swift-lm", category: "MessageContent")
+
+/// Where a message's text goes relative to its images, and whether video parts
+/// are emitted. Each generator keeps the arrangement it already had.
+public enum MessageContentLayout: Sendable {
+    /// Images, then videos, then the caller's text. Qwen2VL, Qwen3VL, Gemma4.
+    case imagesThenVideosThenText
+    /// Images, then the caller's text. No video parts. Mistral3, FastVLM.
+    case imagesThenText
+    /// The caller's text, then images. No video parts. GlmOcr.
+    case textThenImages
+}
+
 public enum Chat {
     public struct Message {
         /// The role of the message sender.
@@ -172,6 +188,52 @@ extension MessageGenerator {
         case nil:
             break
         }
+    }
+
+    /// The content-part array for a message: `[label]` immediately before each
+    /// labeled image, a bare image part for each unlabeled image, video parts where
+    /// the layout emits them, and the caller's text.
+    ///
+    /// Nothing separates the parts, so a message with no labels returns what a
+    /// generator returned before labels existed. The text part is emitted even when
+    /// the content is empty, matching what the generators did.
+    public func contentParts(
+        for message: Chat.Message, layout: MessageContentLayout
+    ) -> [[String: String]] {
+        var parts: [[String: String]] = []
+
+        func appendText(_ text: String) {
+            parts.append(["type": "text", "text": text])
+        }
+
+        func appendImages() {
+            for image in message.images {
+                if let marker = image.labelMarkerCharacter {
+                    // Emitting it would add a placeholder the model counts against pixels.
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt: it holds `\(marker, privacy: .public)`, which vision models build their image placeholders from"
+                    )
+                } else if let label = image.label {
+                    appendText("[\(label)]")
+                }
+                parts.append(["type": "image"])
+            }
+        }
+
+        switch layout {
+        case .imagesThenVideosThenText:
+            appendImages()
+            parts.append(contentsOf: message.videos.map { _ in ["type": "video"] })
+            appendText(message.content)
+        case .imagesThenText:
+            appendImages()
+            appendText(message.content)
+        case .textThenImages:
+            appendText(message.content)
+            appendImages()
+        }
+
+        return parts
     }
 
     public func generate(messages: [Chat.Message]) -> [Message] {
