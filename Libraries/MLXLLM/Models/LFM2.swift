@@ -26,7 +26,11 @@ public struct LFM2Configuration: Codable, Sendable {
     private let _blockDim: Int?
     var blockDim: Int { _blockDim ?? hiddenSize }
     private let _blockFFDim: Int?
-    var blockFFDim: Int { _blockFFDim ?? hiddenSize }
+    private let intermediateSize: Int?
+    /// `intermediate_size` is used by the Transformers LFM2.5 checkpoints while
+    /// older MLX exports use `block_ff_dim`. Prefer the architecture-specific
+    /// field when both are present, but support both checkpoint dialects.
+    var blockFFDim: Int { _blockFFDim ?? intermediateSize ?? hiddenSize }
     let blockMultipleOf: Int
     let blockFFNDimMultiplier: Float
     let blockAutoAdjustFFDim: Bool
@@ -62,6 +66,7 @@ public struct LFM2Configuration: Codable, Sendable {
         case convLCache = "conv_L_cache"
         case _blockDim = "block_dim"
         case _blockFFDim = "block_ff_dim"
+        case intermediateSize = "intermediate_size"
         case blockMultipleOf = "block_multiple_of"
         case blockFFNDimMultiplier = "block_ffn_dim_multiplier"
         case blockAutoAdjustFFDim = "block_auto_adjust_ff_dim"
@@ -88,6 +93,7 @@ public struct LFM2Configuration: Codable, Sendable {
         self.convLCache = try container.decodeIfPresent(Int.self, forKey: .convLCache) ?? 3
         self._blockDim = try container.decodeIfPresent(Int.self, forKey: ._blockDim)
         self._blockFFDim = try container.decodeIfPresent(Int.self, forKey: ._blockFFDim)
+        self.intermediateSize = try container.decodeIfPresent(Int.self, forKey: .intermediateSize)
         self.blockMultipleOf =
             try container.decodeIfPresent(Int.self, forKey: .blockMultipleOf) ?? 256
         self.blockFFNDimMultiplier =
@@ -101,6 +107,70 @@ public struct LFM2Configuration: Codable, Sendable {
 
         let ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 1000000.0
         self.ropeTheta = ropeParameters?["rope_theta"]?.asFloat() ?? ropeTheta
+    }
+}
+
+extension LFM2Configuration: ModelConfigurationValidating {
+    public func validateModelConfiguration() throws {
+        guard modelType == "lfm2" else {
+            throw ModelFactoryError.invalidConfiguration(
+                "LFM2Configuration requires model_type 'lfm2', received '\(modelType)'.")
+        }
+        guard hiddenSize > 0, hiddenLayers > 0, vocabularySize > 0 else {
+            throw ModelFactoryError.invalidConfiguration(
+                "LFM2 dimensions and vocabulary size must be positive.")
+        }
+        guard attentionHeads > 0, kvHeads > 0,
+            hiddenSize.isMultiple(of: attentionHeads),
+            attentionHeads.isMultiple(of: kvHeads)
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "hidden_size must be divisible by num_attention_heads, which must be divisible by num_key_value_heads."
+            )
+        }
+        guard blockDim == hiddenSize else {
+            throw ModelFactoryError.invalidConfiguration(
+                "block_dim (\(blockDim)) must match hidden_size (\(hiddenSize)) for residual connections."
+            )
+        }
+        guard blockFFDim > 0, blockMultipleOf > 0, convLCache > 1,
+            normEps > 0, ropeTheta > 0, blockFFNDimMultiplier > 0
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "LFM2 feed-forward dimensions, norm_eps, rope_theta, and block_ffn_dim_multiplier must be positive; conv_L_cache must be at least 2."
+            )
+        }
+        if let maxPositionEmbeddings, maxPositionEmbeddings <= 0 {
+            throw ModelFactoryError.invalidConfiguration(
+                "max_position_embeddings must be positive.")
+        }
+        if let layerTypes {
+            guard layerTypes.count == hiddenLayers else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "layer_types contains \(layerTypes.count) entries for \(hiddenLayers) layers.")
+            }
+            let supportedTypes = Set(["conv", "full_attention"])
+            guard layerTypes.allSatisfy(supportedTypes.contains) else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "layer_types may contain only 'conv' and 'full_attention'.")
+            }
+            if let explicit = _fullAttnIdxs {
+                let derived = layerTypes.enumerated().compactMap { index, layerType in
+                    layerType == "full_attention" ? index : nil
+                }
+                guard explicit == derived else {
+                    throw ModelFactoryError.invalidConfiguration(
+                        "full_attn_idxs and layer_types describe different layer layouts.")
+                }
+            }
+        }
+        let attentionLayers = fullAttnIdxs
+        guard Set(attentionLayers).count == attentionLayers.count,
+            attentionLayers.allSatisfy({ (0 ..< hiddenLayers).contains($0) })
+        else {
+            throw ModelFactoryError.invalidConfiguration(
+                "full_attn_idxs must contain unique layer indices in range.")
+        }
     }
 }
 
@@ -204,7 +274,9 @@ class LFM2ShortConv: Module {
         _outProj.wrappedValue = Linear(args.hiddenSize, args.hiddenSize, bias: bias)
     }
 
-    public func callAsFunction(_ x: MLXArray, cache: MambaCache?) -> MLXArray {
+    public func callAsFunction(
+        _ x: MLXArray, mask: MLXArray? = nil, cache: MambaCache?
+    ) -> MLXArray {
         let BCx = inProj(x)
         let BCxSplit = BCx.split(parts: 3, axis: -1)
         let B = BCxSplit[0]
@@ -212,19 +284,16 @@ class LFM2ShortConv: Module {
         let x = BCxSplit[2]
         var Bx = B * x
 
-        var state: MLXArray? = nil
-        if let cache {
-            state = cache[0]
-        }
-        if state == nil {
-            state = MLXArray.zeros([Bx.dim(0), lCache - 1, args.hiddenSize], dtype: Bx.dtype)
+        if let mask {
+            Bx = MLX.where(
+                mask.asType(.bool)[.ellipsis, .newAxis], Bx, MLXArray.zeros(like: Bx))
         }
 
-        Bx = concatenated([state!, Bx], axis: -2)
-        if let cache {
-            cache[0] = contiguous(Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...])
-            cache.advance(x.dim(1))
-        }
+        Bx = LFM2RuntimeSupport.convolutionTimeline(
+            input: Bx,
+            stateLength: lCache - 1,
+            hiddenSize: args.hiddenSize,
+            cache: cache)
 
         let convOut = conv(Bx)
         let y = C * convOut
@@ -260,7 +329,7 @@ class LFM2MLP: Module, UnaryLayer {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        w2(silu(w1(x)) * w3(x))
+        w2(compiledSiluProduct(w1(x), w3(x)))
     }
 }
 
@@ -294,13 +363,16 @@ class LFM2DecoderLayer: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        ssmMask: MLXArray?,
+        cache: KVCache?
     ) -> MLXArray {
         let r: MLXArray
         if isAttentionLayer {
-            r = attention!(operatorNorm(x), mask: mask, cache: cache)
+            r = attention!(operatorNorm(x), mask: attentionMask, cache: cache)
         } else {
-            r = conv!(operatorNorm(x), cache: cache as? MambaCache)
+            r = conv!(operatorNorm(x), mask: ssmMask, cache: cache as? MambaCache)
         }
         let h = x + r
         let out = h + feedForward(ffnNorm(h))
@@ -314,6 +386,8 @@ public class LFM2ModelInner: Module {
     let numHiddenLayers: Int
 
     fileprivate let layers: [LFM2DecoderLayer]
+    private let firstAttentionIndex: Int?
+    private let firstConvIndex: Int?
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
@@ -331,38 +405,82 @@ public class LFM2ModelInner: Module {
         self.layers = (0 ..< numHiddenLayers).map { i in
             LFM2DecoderLayer(args, layerIdx: i)
         }
+        self.firstAttentionIndex = args.fullAttnIdxs.first
+        self.firstConvIndex = layers.firstIndex(where: { !$0.isAttentionLayer })
 
         _embeddingNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.normEps)
     }
 
     public func callAsFunction(
-        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
-        cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
+        _ inputs: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        ssmMask: MLXArray? = nil,
+        cache: [KVCache]? = nil,
+        inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
-        var h = inputEmbeddings ?? embedTokens(inputs)
+        forward(
+            inputs,
+            attentionMask: attentionMask,
+            ssmMask: ssmMask,
+            cache: cache,
+            inputEmbeddings: inputEmbeddings,
+            captureLayerIds: []
+        ).hidden
+    }
 
-        let mask =
-            mask
+    /// Runs the target and optionally captures the output of selected decoder layers.
+    /// DSpark checkpoints train against these exact pre-final-norm features.
+    func forward(
+        _ inputs: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        ssmMask: MLXArray? = nil,
+        cache: [KVCache]? = nil,
+        inputEmbeddings: MLXArray? = nil,
+        captureLayerIds: Set<Int>
+    ) -> (hidden: MLXArray, captured: [MLXArray]) {
+        var h = inputEmbeddings ?? embedTokens(inputs)
+        var captured = [MLXArray]()
+
+        let attentionMask =
+            attentionMask
             ?? {
-                let firstAttnIdx = args.fullAttnIdxs.first ?? 0
-                let c = cache != nil && firstAttnIdx < cache!.count ? cache![firstAttnIdx] : nil
-                return createAttentionMask(h: h, cache: c)
+                guard let firstAttentionIndex, let cache, firstAttentionIndex < cache.count else {
+                    return createAttentionMask(h: h, cache: nil, windowSize: nil)
+                }
+                return createAttentionMask(h: h, cache: cache[firstAttentionIndex])
+            }()
+
+        let ssmMask =
+            ssmMask
+            ?? {
+                guard let firstConvIndex, let cache, firstConvIndex < cache.count else {
+                    return nil
+                }
+                return createSSMMask(h: h, cache: cache[firstConvIndex] as? MambaCache)
             }()
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = layer(
+                h, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            if captureLayerIds.contains(i) {
+                captured.append(h)
+            }
         }
 
-        return embeddingNorm(h)
+        return (embeddingNorm(h), captured)
     }
 }
 
-public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider,
+    SpeculativeCacheRewindModel
+{
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
     public let model: LFM2ModelInner
     let configuration: LFM2Configuration
+    public let maximumNativeTargetCacheRewind =
+        LFM2RuntimeSupport.speculativeRollbackCapacity
 
     public init(_ args: LFM2Configuration) {
         self.configuration = args
@@ -380,10 +498,48 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
         return model.embedTokens.asLinear(out)
     }
 
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let emitDrafterState = state?[mtpEmitFlagKey] ?? false
+        let targetLayerIds = emitDrafterState ? (state?[mtpTargetLayerIdsKey] ?? []) : []
+        precondition(
+            Set(targetLayerIds).count == targetLayerIds.count
+                && targetLayerIds.allSatisfy { (0 ..< configuration.hiddenLayers).contains($0) },
+            "LFM2 drafter target layer ids must be unique and in range")
+
+        let output = model.forward(
+            input.tokens,
+            ssmMask: input.mask,
+            cache: cache,
+            captureLayerIds: Set(targetLayerIds))
+        let logits = model.embedTokens.asLinear(output.hidden)
+
+        guard emitDrafterState else { return LMOutput(logits: logits) }
+
+        var outState = state ?? LMOutput.State()
+        outState[mtpLastHiddenStatesKey] =
+            output.captured.isEmpty
+            ? output.hidden : concatenated(output.captured, axis: -1)
+        // LFM DSpark consumes hidden features, not target K/V. Keep the
+        // generic block-drafter state contract explicit with empty maps.
+        outState[mtpSharedKVStatesKey] = [:]
+        outState[mtpSharedKVOffsetsKey] = [:]
+        outState[mtpSharedKVSourceIndicesKey] = [:]
+        return LMOutput(logits: logits, state: outState)
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights: [String: MLXArray] = [:]
+        let shouldStripLanguageModelPrefix =
+            weights.keys.contains(where: { $0.hasPrefix("language_model.model.") })
+            && !weights.keys.contains(where: { $0.hasPrefix("model.") })
 
         for (name, param) in weights {
+            let name =
+                shouldStripLanguageModelPrefix && name.hasPrefix("language_model.")
+                ? String(name.dropFirst("language_model.".count))
+                : name
             var sanitizedParam = param
 
             if name.contains("conv.weight") {
@@ -399,13 +555,11 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        try (0 ..< configuration.hiddenLayers).map { layerIdx in
-            if configuration.fullAttnIdxs.contains(layerIdx) {
-                try makeAttentionKVCache(parameters: parameters)
-            } else {
-                MambaCache()
-            }
-        }
+        try LFM2RuntimeSupport.makeHybridCache(
+            hiddenLayers: configuration.hiddenLayers,
+            fullAttentionIndices: Set(configuration.fullAttnIdxs),
+            convolutionStateLength: configuration.convLCache - 1,
+            parameters: parameters)
     }
 }
 

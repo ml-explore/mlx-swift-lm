@@ -56,6 +56,41 @@ public class LLMModelFactory: ModelFactory {
 Callers with specialized requirements can use these individual components to manually
 load models, if needed.
 
+### LFM2.5 DSpark speculative decoding
+
+Liquid AI's DSpark checkpoints are block drafters rather than standalone
+language models. Register the draft architecture, load the target and its
+matching draft checkpoint, then use the MTP generation overload:
+
+```swift
+await LFM2DSparkRegistration.register()
+
+let target = try await LLMModelFactory.shared.load(
+    from: targetDirectory,
+    using: tokenizerLoader
+)
+let draft = try await MTPDrafterModelFactory.shared.load(
+    from: draftDirectory,
+    using: tokenizerLoader
+)
+let input = try target.processor.prepare(input: UserInput(prompt: prompt))
+
+let stream = try generate(
+    input: input,
+    parameters: GenerateParameters(maxTokens: 256, temperature: 0),
+    context: target,
+    mtpDrafter: draft.model,
+    blockSize: 10
+)
+```
+
+The released 1.2B-Instruct, 2.6B, and 8B-A1B drafters are available from
+`MTPDrafterRegistry`. Each has a nine-token proposal block; the Swift
+iterator's `blockSize` includes the verifier bonus token, hence `10` above.
+DSpark currently requires greedy decoding (`temperature: 0`) so verification
+remains exact. Pair each draft with the target named in its model card; loading
+or running incompatible architecture dimensions fails closed.
+
 ## Evaluation Flow
 
 - Load the Model

@@ -1097,8 +1097,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 message: "Speculative caches must represent the same processed-token position.")
         }
         guard
-            canTrimPromptCache(mainCacheStorage.cache),
-            canTrimPromptCache(draftCacheStorage.cache)
+            mainCacheStorage.cache.allSatisfy({ $0.isTrimmable(after: numDraftTokens) }),
+            draftCacheStorage.cache.allSatisfy({ $0.isTrimmable(after: numDraftTokens) })
         else {
             throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
         }
