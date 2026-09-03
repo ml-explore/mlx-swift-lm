@@ -43,13 +43,13 @@ struct MaxTokenTruncationTests {
                 }
                 """
 
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: TestFixtures.defaultModelID,
                 tokenizer: context.tokenizer
             )
 
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: complexSchema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
@@ -68,7 +68,7 @@ struct MaxTokenTruncationTests {
                     context: context,
                     constraint: constraint,
                     maxTokens: 5,
-                    vocabSize: Int(xgTokenizer.vocabSize)
+                    vocabSize: Int(grammarTokenizer.vocabSize)
                 ) { _ in true }
             }
         }
@@ -122,7 +122,7 @@ struct MaxTokenTruncationTests {
         let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: TestFixtures.defaultModelID,
                 tokenizer: context.tokenizer
             )
@@ -138,7 +138,7 @@ struct MaxTokenTruncationTests {
                 """
 
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: arraySchema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
@@ -157,7 +157,7 @@ struct MaxTokenTruncationTests {
                     context: context,
                     constraint: constraint,
                     maxTokens: 3,
-                    vocabSize: Int(xgTokenizer.vocabSize)
+                    vocabSize: Int(grammarTokenizer.vocabSize)
                 ) { _ in true }
             }
         }
