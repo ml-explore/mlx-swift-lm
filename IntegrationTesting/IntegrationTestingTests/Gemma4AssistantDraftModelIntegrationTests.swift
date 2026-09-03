@@ -93,7 +93,7 @@ struct Gemma4AssistantIntegrationTests {
         // loadWeights enumerates *.safetensors in the directory, sanitizes via
         // the model's sanitize hook, and applies via update(parameters:verify:).
         // If any keys are missing or unexpected, update(verify: [.all]) throws.
-        try loadWeights(modelDirectory: drafterDir, model: model)
+        try await loadWeights(modelDirectory: drafterDir, model: model)
     }
 
     @Test
@@ -107,7 +107,7 @@ struct Gemma4AssistantIntegrationTests {
         let cfg = try JSONDecoder().decode(
             Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
         let model = Gemma4AssistantDraftModel(cfg)
-        try loadWeights(modelDirectory: drafterDir, model: model)
+        try await loadWeights(modelDirectory: drafterDir, model: model)
 
         let fixtureURL =
             fixturesDir
