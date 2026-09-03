@@ -30,10 +30,13 @@ open class RotateQuantizedLinear: QuantizedLinear, RotationStatePreparing {
     // keeps it out of weight loading.
     private var _rotation: RotationDerivedState
 
+    /// - Precondition: `inputDims` is a positive multiple of an even
+    ///   `groupSize`, and `krot >= 1` — see `rotationGeometryProblem`.
     public init(
         inputDims: Int, outputDims: Int, hasBias: Bool,
         groupSize: Int, bits: Int, krot: Int
     ) {
+        assertRotationGeometry(dims: inputDims, groupSize: groupSize, krot: krot)
         self.theta = MLXArray.zeros([krot, inputDims / 2])
         self.pairs = MLXArray.zeros([krot, inputDims], type: Int16.self)
         // Assign through `.wrappedValue` so the `@ParameterInfo(key:)` metadata

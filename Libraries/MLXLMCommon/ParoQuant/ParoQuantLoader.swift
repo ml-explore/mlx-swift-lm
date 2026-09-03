@@ -163,13 +163,21 @@ func convertAutoAWQ(
 
     guard !prefixes.isEmpty else { return }
 
+    // Both scales and biases are cast to the checkpoint's float dtype, read
+    // once from a rotation tensor (`theta` / `channel_scales`, present in every
+    // PARO checkpoint and stored in the model's activation dtype). AWQ ships
+    // f32 scales while `quantizedMM` promotes to the widest of x / scales /
+    // biases, so leaving them mismatched runs the matmul in f32 (upstream fix
+    // z-lab/paroquant#38 pinned f16, which is wrong for a bf16 checkpoint).
+    let floatDType = checkpointFloatDType(weights)
+
     // Pass 1: compute biases from qzeros + scales BEFORE scales are transposed.
     for pfx in prefixes {
         guard let qzeros = weights.removeValue(forKey: "\(pfx)qzeros"),
             let scales = weights["\(pfx)scales"]
         else { continue }
         let zeros = unpackAndReorder(qzeros).asType(.float32)
-        weights["\(pfx)biases"] = (-scales.asType(.float32) * zeros).transposed().asType(.float16)
+        weights["\(pfx)biases"] = (-scales.asType(.float32) * zeros).transposed().asType(floatDType)
     }
 
     // Pass 2: convert remaining keys (qweight, scales, channel_scales).
@@ -194,11 +202,26 @@ func convertAutoAWQ(
             }
         } else if key.hasSuffix("scales") {
             guard prefixes.contains(String(key.dropLast("scales".count))) else { continue }
-            // float16 to match `biases` in `quantizedMM` — f32 scales with
-            // f16 biases mismatch (upstream fix z-lab/paroquant#38).
-            weights[key] = weights[key]!.transposed().asType(.float16)
+            weights[key] = weights[key]!.transposed().asType(floatDType)
         }
     }
+}
+
+/// The dtype the checkpoint keeps its floating-point tensors in — read from
+/// a rotation tensor (dense `.theta` / shared MoE `_theta`, then
+/// `channel_scales`), the one float tensor family every PARO checkpoint
+/// carries. Falls back to float16, the only dtype z-lab has shipped.
+///
+/// Internal (not private) so the conversion contract is unit-testable.
+func checkpointFloatDType(_ weights: [String: MLXArray]) -> DType {
+    for suffix in ["theta", "channel_scales"] {
+        if let key = weights.keys.first(where: { $0.hasSuffix(suffix) }),
+            let dtype = weights[key]?.dtype, dtype.isFloatingPoint
+        {
+            return dtype
+        }
+    }
+    return .float16
 }
 
 // MARK: - MoE Passes
@@ -300,6 +323,17 @@ private func verifyTensorShape(
     }
 }
 
+/// Reject (dims, groupSize, krot) triples the rotation kernels cannot run
+/// before any module is built, with a key path instead of a precondition
+/// trap deep inside the first forward pass. Mirrors `assertRotationGeometry`.
+private func verifyRotationGeometry(
+    path: String, dims: Int, groupSize: Int, krot: Int
+) throws {
+    if let problem = rotationGeometryProblem(dims: dims, groupSize: groupSize, krot: krot) {
+        throw ParoQuantError.unsupportedRotationGeometry(path: path, reason: problem)
+    }
+}
+
 private func rotationLeafModules(model: Module) -> [String: Module] {
     Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
 }
@@ -335,6 +369,7 @@ private func rotationModuleSpec(
     let biases = try requireTensor("\(prefix).biases", weights: weights)
 
     let krot = theta.dim(0)
+    try verifyRotationGeometry(path: prefix, dims: inputDims, groupSize: groupSize, krot: krot)
     try verifyTensorShape(theta, key: "\(prefix).theta", expected: [krot, inputDims / 2])
     try verifyTensorShape(pairs, key: "\(prefix).pairs", expected: [krot, inputDims])
     try verifyTensorShape(
@@ -393,12 +428,18 @@ func patchMoESwitchGLULayers(
             }
         }
 
+        let krot = theta.dim(0)
+        try verifyRotationGeometry(
+            path: "\(path).gate_up_rot", dims: glu.inputDims, groupSize: groupSize, krot: krot)
+        try verifyRotationGeometry(
+            path: "\(path).down_rot", dims: glu.hiddenDims, groupSize: groupSize, krot: krot)
+
         let replacement = RotateSwitchGLU(
             inputDims: glu.inputDims,
             hiddenDims: glu.hiddenDims,
             numExperts: glu.numExperts,
             groupSize: groupSize,
-            krot: theta.dim(0)
+            krot: krot
         )
         updates.append((path, replacement))
     }
@@ -590,12 +631,14 @@ public func loadParoQuantModel<T: LanguageModel>(
 
     // Chat conventions. Same precedence as the model factories: an explicit
     // value from the caller wins; then a registered resolver, which sees the
-    // model id the model cannot; then the model's own declaration.
+    // model id the model cannot; then the model's own declaration, resolved
+    // against the tool dialect the checkpoint's tokenizer files select.
     if config.toolCallFormat == nil {
         config.toolCallFormat =
             ChatConventionsRegistry.shared.toolCallFormat(
                 modelId: config.name, modelType: baseConfig.modelType)
-            ?? model.toolCallFormat
+            ?? ToolCallFormat.resolved(
+                forTokenizerDirectory: directory, modelFormat: model.toolCallFormat)
     }
     if config.reasoningConfig == nil {
         config.reasoningConfig =
@@ -788,6 +831,7 @@ public enum ParoQuantError: LocalizedError {
     case rotationLayerNotFound(String)
     case rotationLayerTypeMismatch(path: String, actualType: String)
     case rotationLayerPatchFailed(String)
+    case unsupportedRotationGeometry(path: String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -806,6 +850,8 @@ public enum ParoQuantError: LocalizedError {
                 "ParoQuant rotation layer \(path) is not a Linear-compatible module: \(actualType)"
         case .rotationLayerPatchFailed(let path):
             return "Failed to replace ParoQuant layer with RotateQuantizedLinear: \(path)"
+        case .unsupportedRotationGeometry(let path, let reason):
+            return "Unsupported ParoQuant rotation geometry at \(path): \(reason)"
         }
     }
 }
