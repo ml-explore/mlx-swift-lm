@@ -52,32 +52,44 @@ extension TokenStreamDecoder {
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
+///
+/// When the model declares a ``ReasoningConfig``, this also splits its thinking
+/// spans out of the response before the tool-call parser sees them. Framed token
+/// protocols (Harmony, Onyx) decode their own reasoning and never reach here.
 struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var detokenizer: NaiveStreamingDetokenizer
     private let toolCallProcessor: ToolCallProcessor
     private var stopStringFilter: StopStringFilter
 
+    /// Absent for models with no reasoning protocol, which then decode and cost
+    /// exactly what they did before.
+    private var reasoningEmitter: ReasoningEventEmitter?
+
     init(
         tokenizer: any Tokenizer,
         format: ToolCallFormat,
         tools: [[String: any Sendable]]?,
-        stopStrings: Set<String>
+        stopStrings: Set<String>,
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         self.toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
         self.stopStringFilter = StopStringFilter(stopStrings: stopStrings)
+        self.reasoningEmitter = reasoning.map {
+            ReasoningEventEmitter(config: $0.config, primedInside: $0.primedInside)
+        }
     }
 
     var rejectedToolCallCount: Int { toolCallProcessor.rejectedToolCallCount }
+
+    var isInsideReasoning: Bool { reasoningEmitter?.isInsideReasoning ?? false }
 
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
         detokenizer.append(token: token)
         guard let chunk = detokenizer.next() else { return true }
 
         let result = stopStringFilter.process(chunk)
-        if let text = result.text,
-            !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
-        {
+        if let text = result.text, !route(text, emit: emit) {
             return false
         }
         if result.stopped {
@@ -88,13 +100,49 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     }
 
     mutating func finish(emit: (TokenStreamEvent) -> Bool) -> Bool {
-        if let text = stopStringFilter.finish(),
-            !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
+        if let text = stopStringFilter.finish(), !route(text, emit: emit) {
+            return false
+        }
+
+        // Drain the reasoning scanner before the tool processor's EOS: an end
+        // delimiter that never arrives as text must not strand held-back thinking,
+        // and what it flushes may still be response text the parser has to see.
+        if let segments = reasoningEmitter?.finalize(),
+            !emitSegments(segments, emit: emit)
         {
             return false
         }
 
         return emitOutputs(toolCallProcessor.processEOSOutputs(), emit: emit)
+    }
+
+    /// Splits reasoning off first and lets only non-reasoning text reach the
+    /// tool-call parser: a model that writes `<|tool_call>` inside its scratchpad
+    /// would otherwise produce a phantom tool call.
+    private mutating func route(_ text: String, emit: (TokenStreamEvent) -> Bool) -> Bool {
+        guard let segments = reasoningEmitter?.process(text) else {
+            return emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
+        }
+        return emitSegments(segments, emit: emit)
+    }
+
+    /// `mutating` defensively rather than by necessity: it touches only the
+    /// class-typed processor today, and marking it so means a later change that does
+    /// advance the emitter here cannot silently write to a copy.
+    private mutating func emitSegments(
+        _ segments: [ReasoningEventEmitter.Segment],
+        emit: (TokenStreamEvent) -> Bool
+    ) -> Bool {
+        for segment in segments {
+            switch segment {
+            case .reasoning(let reasoning):
+                guard emit(.reasoning(reasoning)) else { return false }
+            case .response(let response):
+                guard emitOutputs(toolCallProcessor.processChunkOutputs(response), emit: emit)
+                else { return false }
+            }
+        }
+        return true
     }
 
     /// Maps ordered processor outputs onto stream events, keeping response text,
