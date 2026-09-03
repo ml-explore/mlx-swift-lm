@@ -45,6 +45,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     package enum DraftModelSource: Sendable {
         case loaded(ModelContainer)
         case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
+        case lookup(PromptLookupDraftModel.Configuration)
     }
 
     package let draftModelSource: DraftModelSource
@@ -104,6 +105,40 @@ public struct SpeculativeDecodingConfig: Sendable {
         self.memoryPolicy = memoryPolicy
     }
 
+    /// Initialize model-free speculative decoding by prompt lookup.
+    ///
+    /// Draft tokens come from n-gram matches over the session's own token
+    /// history (see ``PromptLookupDraftModel``), so no draft model is loaded,
+    /// no additional weight memory is used, and no memory policy applies. The
+    /// emitted stream is what the main model would produce on its own — a
+    /// draft is accepted only when it equals the verifier's sampled token.
+    ///
+    /// This shines on agentic/coding workloads, where generation constantly
+    /// copies spans that already appear in the context.
+    ///
+    /// - Parameters:
+    ///   - lookup: n-gram matching configuration; its
+    ///     ``PromptLookupDraftModel/Configuration/vocabularySize`` must cover
+    ///     the main model's vocabulary
+    ///   - numDraftTokens: tokens proposed per verification cycle (vLLM ships
+    ///     3–4 for its ngram speculator)
+    public init(
+        lookup: PromptLookupDraftModel.Configuration,
+        numDraftTokens: Int = 3
+    ) {
+        self.draftModelSource = .lookup(lookup)
+        self.numDraftTokens = numDraftTokens
+        self.memoryPolicy = nil
+    }
+
+    /// The prompt-lookup configuration, when this config drafts by n-gram lookup.
+    public var lookup: PromptLookupDraftModel.Configuration? {
+        if case .lookup(let configuration) = draftModelSource {
+            return configuration
+        }
+        return nil
+    }
+
     package var estimatedDraftModelBytes: Int? {
         guard case .deferred(let bytes, _) = draftModelSource else {
             return nil
@@ -117,6 +152,9 @@ public struct SpeculativeDecodingConfig: Sendable {
             draftModel
         case .deferred(_, let load):
             try await load()
+        case .lookup:
+            preconditionFailure(
+                "prompt-lookup speculation is model-free; there is no draft container to load")
         }
     }
 }
@@ -1069,6 +1107,19 @@ public final class ChatSession {
                                 "Main attention cache offsets diverged from model-cache progress")
                             let mainCacheIsAligned =
                                 kvCache.processedTokenCount == cachedTokenIds.count
+                            if let speculativeDecoding,
+                                speculativeDecoding.lookup != nil,
+                                mainCacheIsAligned,
+                                draftKVCache?.processedTokenCount != kvCache.processedTokenCount
+                            {
+                                // A prompt-lookup draft "cache" is the raw token history,
+                                // which the session ledger reproduces exactly — synthesize
+                                // it in place instead of rebuilding both caches the way an
+                                // auxiliary-model draft cache would require.
+                                let history = PromptLookupTokenCache()
+                                history.append(cachedTokenIds.map(Int32.init))
+                                draftKVCache = KVCacheStorage([history], plan: kvCachePlan)
+                            }
                             let draftCacheIsAligned: Bool
                             if let draftKVCache {
                                 assert(
@@ -1226,6 +1277,50 @@ public final class ChatSession {
 
                         if speculativeDecoding != nil, requiresMainOnlyContinuation {
                             generation = try defaultGeneration()
+                        } else if let speculativeDecoding,
+                            let lookupConfiguration = speculativeDecoding.lookup
+                        {
+                            // Prompt-lookup drafting is model-free: no container to
+                            // load, no memory policy to consult. A rebuild left no
+                            // draft storage; a cold main cache admits an empty history.
+                            if draftKVCache == nil, kvCache.processedTokenCount == 0 {
+                                draftKVCache = KVCacheStorage(
+                                    [PromptLookupTokenCache()], plan: kvCachePlan)
+                            }
+                            if let draftCacheStorage = draftKVCache,
+                                draftCacheStorage.processedTokenCount
+                                    == kvCache.processedTokenCount
+                            {
+                                let iterator = try SpeculativeTokenIterator(
+                                    input: input,
+                                    mainModel: model,
+                                    draftModel: PromptLookupDraftModel(
+                                        configuration: lookupConfiguration),
+                                    mainCacheStorage: kvCache,
+                                    draftCacheStorage: draftCacheStorage,
+                                    mainState: lmState,
+                                    parameters: generateParameters,
+                                    numDraftTokens: speculativeDecoding.numDraftTokens,
+                                    components: components)
+                                lmState = iterator.state
+                                cache = .kvcache(
+                                    .init(
+                                        main: kvCache,
+                                        draft: draftKVCache,
+                                        state: lmState,
+                                        conversation: conversation))
+                                generation = GenerationRun(
+                                    MLXLMCommon.generateTaskRecordingTokens(
+                                        promptTokenCount: input.text.tokens.size,
+                                        modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer,
+                                        iterator: iterator,
+                                        tools: tools))
+                            } else {
+                                // A raw-cache continuation (e.g. a restored snapshot)
+                                // has no ledger to synthesize the drafter history from.
+                                generation = try defaultGeneration()
+                            }
                         } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {

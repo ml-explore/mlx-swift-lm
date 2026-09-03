@@ -1279,6 +1279,63 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertNil(completionInfo?.speculativeDecodingTelemetry)
     }
 
+    func testPromptLookupSpeculationEmitsTelemetryAcrossTurns() async throws {
+        let session = ChatSession(
+            model(),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                lookup: .init(vocabularySize: 100), numDraftTokens: 3),
+            generateParameters: GenerateParameters(maxTokens: 6, temperature: 0))
+
+        let first = try await collectGeneration(session.streamDetails(to: "first"))
+        XCTAssertFalse(first.text.isEmpty)
+        let firstTelemetry = try XCTUnwrap(first.info.speculativeDecodingTelemetry)
+        XCTAssertGreaterThan(firstTelemetry.roundCount, 0)
+        XCTAssertEqual(firstTelemetry.emittedTokenCount, first.info.generationTokenCount)
+
+        // The default test tokenizer renders a fresh prompt every turn, so the
+        // second turn takes the rebuild path and must recreate the drafter's
+        // token history rather than fall back to plain generation.
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        XCTAssertFalse(second.text.isEmpty)
+        let secondTelemetry = try XCTUnwrap(second.info.speculativeDecodingTelemetry)
+        XCTAssertGreaterThan(secondTelemetry.roundCount, 0)
+    }
+
+    func testPromptLookupSpeculationReusesMainCacheAcrossTurns() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            speculativeDecoding: SpeculativeDecodingConfig(
+                lookup: .init(vocabularySize: 100), numDraftTokens: 2),
+            generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLengthValue = await lengthIterator.next()
+        let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "second") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+        let info = try XCTUnwrap(completionInfo)
+        // Reuse must survive speculation: the second turn prefilled at most the
+        // rendered suffix, never the whole transcript.
+        XCTAssertLessThanOrEqual(
+            info.promptTokenCount, secondRenderedLength - firstRenderedLength)
+        XCTAssertNotNil(info.speculativeDecodingTelemetry)
+    }
+
     func testActiveSpeculativeDecodingSafelyRebuildsAcrossTurns() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
         var lengthIterator = renderedLengths.makeAsyncIterator()
