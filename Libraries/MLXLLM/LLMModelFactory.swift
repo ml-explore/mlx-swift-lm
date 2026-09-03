@@ -658,6 +658,18 @@ public final class LLMModelFactory: GenericModelFactory {
     /// by the model itself, e.g. DeepSeek-R1
     public let conventionsRegistry: ChatConventionsRegistry
 
+    /// Returns the model's LoRA metadata from its configuration without loading weights.
+    ///
+    /// The registered model architecture is instantiated so custom `LoRAModel.loraDefaultKeys`
+    /// implementations remain authoritative. No checkpoint files are read.
+    public func loraMetadata(configurationData: Data) async throws -> LoRAModelMetadata? {
+        let baseConfiguration = try JSONDecoder.json5().decode(
+            BaseConfiguration.self, from: configurationData)
+        let model = try await typeRegistry.createModel(
+            configuration: configurationData, modelType: baseConfiguration.modelType)
+        return (model as? LoRAModel)?.loraMetadata
+    }
+
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader

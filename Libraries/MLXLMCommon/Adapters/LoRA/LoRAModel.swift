@@ -9,6 +9,20 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Metadata describing where a model applies LoRA adapters.
+public struct LoRAModelMetadata: Sendable, Equatable {
+    /// Number of model layers that support LoRA adapters.
+    public let layerCount: Int
+
+    /// Default module paths, relative to each LoRA layer, that receive adapters.
+    public let defaultKeys: [String]
+
+    public init(layerCount: Int, defaultKeys: [String]) {
+        self.layerCount = layerCount
+        self.defaultKeys = defaultKeys
+    }
+}
+
 public protocol LoRAModel {
 
     /// Return the layers to apply LoRA adapters to.
@@ -25,6 +39,14 @@ public protocol LoRAModel {
 }
 
 extension LoRAModel {
+
+    /// Metadata for configuring LoRA without inspecting checkpoint weight names.
+    public var loraMetadata: LoRAModelMetadata {
+        LoRAModelMetadata(
+            layerCount: loraLayers.count,
+            defaultKeys: loraDefaultKeys.sorted()
+        )
+    }
 
     /// By default we apply LoRA to all Linear layers.
     /// This is aligned with `mlx-lm` Python logic.
