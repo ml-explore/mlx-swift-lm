@@ -92,7 +92,7 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        try await loadWeights(
+        try await loadWeightsAsync(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection

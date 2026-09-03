@@ -444,7 +444,7 @@ public final class VLMModelFactory: GenericModelFactory {
             context: processorLoadingContext,
             registry: processorLoadingRegistry)
 
-        try await loadWeights(
+        try await loadWeightsAsync(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection)

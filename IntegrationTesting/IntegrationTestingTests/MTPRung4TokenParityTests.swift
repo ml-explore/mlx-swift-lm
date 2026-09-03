@@ -98,7 +98,7 @@ private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
         Gemma4AssistantConfiguration.self,
         from: Data(contentsOf: drafterDir.appendingPathComponent("config.json")))
     let drafter = Gemma4AssistantDraftModel(drafterCfg)
-    try loadWeights(modelDirectory: drafterDir, model: drafter)
+    try await loadWeightsAsync(modelDirectory: drafterDir, model: drafter)
 
     // Target — 8-bit quantized. `loadWeights` auto-applies group quantization
     // when weights carry `.scales` keys, per Libraries/MLXLMCommon/Load.swift:40-52.
@@ -109,7 +109,7 @@ private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
     let targetCfg = try JSONDecoder().decode(
         Gemma4Configuration.self, from: targetConfigData)
     let target = Gemma4(targetCfg)
-    try loadWeights(
+    try await loadWeightsAsync(
         modelDirectory: targetDir,
         model: target,
         perLayerQuantization: targetBase.perLayerQuantization)

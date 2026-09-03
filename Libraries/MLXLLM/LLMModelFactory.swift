@@ -730,7 +730,7 @@ public final class LLMModelFactory: GenericModelFactory {
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
 
-        try await loadWeights(
+        try await loadWeightsAsync(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection)

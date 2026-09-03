@@ -101,7 +101,7 @@ private func loadTargetAndDrafter(
         Gemma4AssistantConfiguration.self,
         from: Data(contentsOf: drafterDir.appendingPathComponent("config.json")))
     let drafter = Gemma4AssistantDraftModel(cfg)
-    try loadWeights(modelDirectory: drafterDir, model: drafter)
+    try await loadWeightsAsync(modelDirectory: drafterDir, model: drafter)
 
     return LoadedPair(context: context, drafter: drafter)
 }
