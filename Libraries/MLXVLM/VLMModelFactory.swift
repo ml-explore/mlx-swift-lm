@@ -106,6 +106,9 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "deepseekocr": create(DeepseekOCRConfiguration.self, DeepseekOCR.init),
+        "unlimited_ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
+        "unlimited-ocr": create(UnlimitedOCRConfiguration.self, UnlimitedOCR.init),
         "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
     ])
 }
@@ -142,6 +145,12 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "DeepseekOCRProcessor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "DeepseekVLV2Processor": create(
+            DeepseekOCRProcessorConfiguration.self, DeepseekOCRProcessor.init),
+        "UnlimitedOCRProcessor": create(
+            UnlimitedOCRProcessorConfiguration.self, UnlimitedOCRProcessor.init),
         "MuseGlimmerProcessor": create(
             MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
     ])
@@ -272,6 +281,27 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    /// DeepSeek-OCR.
+    ///
+    /// > Note: For both OCR entries below the prompt acts as a **mode selector**
+    /// > rather than an instruction — the decoder is a transcription specialist,
+    /// > and the prompt picks which transcription mode to run. A general-VLM
+    /// > default such as "Describe the image in English" would ask it to caption
+    /// > instead, which is why each entry defaults to its own family's mode
+    /// > string. Other DeepSeek-OCR modes include
+    /// > `"<|grounding|>Convert the document to markdown."`; see
+    /// > ``DeepseekOCRSpecialTokens`` for the grounding prompt builders.
+    static public let deepseekOCR5bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-OCR-5bit",
+        defaultPrompt: "Free OCR."
+    )
+
+    /// Unlimited-OCR (DeepSeek-OCR encoder + decoder with R-SWA attention).
+    static public let unlimitedOCR6bit = ModelConfiguration(
+        id: "majentik/Unlimited-OCR-MLX-6bit",
+        defaultPrompt: "document parsing. "
+    )
+
     static public let museGlimmer30B4bit = ModelConfiguration(
         id: "mlx-community/Muse-Glimmer-30B-4bit",
         defaultPrompt: "Describe the image in English",
@@ -303,6 +333,8 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             fastvlm,
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
+            deepseekOCR5bit,
+            unlimitedOCR6bit,
             museGlimmer30B4bit,
         ]
     }
@@ -330,13 +362,15 @@ public final class VLMModelFactory: GenericModelFactory {
         typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
         modelRegistry: AbstractModelRegistry,
         conventionsRegistry: ChatConventionsRegistry = .shared,
-        processorLoadingRegistry: VLMProcessorLoadingRegistry = .shared
+        processorLoadingRegistry: VLMProcessorLoadingRegistry = .shared,
+        honorOrigModelType: Bool = VLMModelFactory.defaultHonorOrigModelType
     ) {
         self.typeRegistry = typeRegistry
         self.processorRegistry = processorRegistry
         self.modelRegistry = modelRegistry
         self.conventionsRegistry = conventionsRegistry
         self.processorLoadingRegistry = processorLoadingRegistry
+        self.honorOrigModelType = honorOrigModelType
     }
 
     /// Shared instance with default behavior.
@@ -357,8 +391,24 @@ public final class VLMModelFactory: GenericModelFactory {
     /// by the model itself, e.g. DeepSeek-R1
     public let conventionsRegistry: ChatConventionsRegistry
 
+    /// Default remap policy: honor a pack's `_orig_model_type`.
+    ///
+    /// Unlimited-OCR packs ship `model_type: deepseekocr` with
+    /// `_orig_model_type: unlimited-ocr` so that loaders which predate the
+    /// Unlimited registration still resolve *something*. Honoring the original
+    /// type is therefore the correct default; pass `false` to load such a pack
+    /// through the plain DeepSeek-OCR path.
+    public static let defaultHonorOrigModelType = true
+
     /// resolvers for processor metadata that is absent or incorrect in a checkpoint
     public let processorLoadingRegistry: VLMProcessorLoadingRegistry
+
+    /// Whether loads honor a checkpoint's `_orig_model_type` remap.
+    ///
+    /// The value is immutable per factory, so callers that need the plain
+    /// DeepSeek path can create a separate factory with `false` without mutable
+    /// process-global state.
+    public let honorOrigModelType: Bool
 
     public func _load(
         configuration: ResolvedModelConfiguration,
@@ -383,10 +433,12 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        let modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
+
         let model: LanguageModel
         do {
             model = try await typeRegistry.createModel(
-                configuration: configData, modelType: baseConfig.modelType)
+                configuration: configData, modelType: modelType)
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)
@@ -435,7 +487,7 @@ public final class VLMModelFactory: GenericModelFactory {
         // but the config file is small and model loading is not a high-concurrency path.
         let processorLoadingContext = VLMProcessorLoadingContext(
             modelId: configuration.name,
-            modelType: baseConfig.modelType,
+            modelType: modelType,
             configurationData: configData)
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)

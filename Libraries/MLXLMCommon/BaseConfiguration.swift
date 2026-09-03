@@ -15,6 +15,14 @@ public struct BaseConfiguration: Codable, Sendable {
     /// The architecture identifier (e.g., "bert", "roberta", "xlm-roberta").
     public let modelType: String
 
+    /// Optional original architecture when a Hub pack shims `model_type`.
+    ///
+    /// Majentik Unlimited-OCR MLX packs ship `model_type=deepseekocr` with
+    /// `_orig_model_type=unlimited-ocr`. Prefer
+    /// ``resolvedModelType(honorOrigModelType:)`` when selecting a registry
+    /// creator.
+    public let origModelType: String?
+
     /// Configuration parameters for weight quantization.
     ///
     /// MLX uses group-wise quantization to reduce memory footprint. This struct
@@ -207,6 +215,30 @@ public struct BaseConfiguration: Codable, Sendable {
         Set(eosTokenIds?.values ?? textConfiguration?.eosTokenIds?.values ?? [])
     }
 
+    /// Model type used for registry lookup.
+    ///
+    /// When `honorOrigModelType` is true (default), Unlimited-OCR packs that
+    /// advertise `_orig_model_type` of `unlimited-ocr` / `unlimited_ocr` resolve
+    /// to that type even if `model_type` is a DeepSeek shim. Pass `false` to
+    /// force the Hub `model_type` (DeepSeek-only verification).
+    ///
+    /// Callers select the immutable policy per factory — see
+    /// `VLMModelFactory.init(…honorOrigModelType:)`.
+    public func resolvedModelType(honorOrigModelType: Bool = true) -> String {
+        guard honorOrigModelType,
+            let orig = origModelType?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !orig.isEmpty
+        else {
+            return modelType
+        }
+        let normalized = orig.lowercased().replacingOccurrences(of: "_", with: "-")
+        if normalized == "unlimited-ocr" {
+            return "unlimited-ocr"
+        }
+        return modelType
+    }
+
     /// The default quantization settings.
     @available(*, deprecated, message: "Please use perLayerQuantization instead")
     public var quantization: Quantization? {
@@ -220,6 +252,7 @@ public struct BaseConfiguration: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
+        case origModelType = "_orig_model_type"
         case quantizationContainer = "quantization"
         case textConfiguration = "text_config"
         case eosTokenIds = "eos_token_id"
