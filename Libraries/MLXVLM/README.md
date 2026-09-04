@@ -111,7 +111,7 @@ Unlimited-OCR (`model_type`: `unlimited-ocr` / `unlimited_ocr`) reuses the whole
 DeepSeek-OCR stack and swaps the decode cache for `RingSlidingKVCache` (R-SWA), so
 the KV cache stays constant-size no matter how long the output runs. Load it the
 same way, with `VLMRegistry.unlimitedOCR6bit` and its default prompt
-`"document parsing. "`.
+`"document parsing."`.
 
 > Note: these packs ship `model_type: deepseekocr` with
 > `_orig_model_type: unlimited-ocr` as a back-compat shim for loaders predating the
