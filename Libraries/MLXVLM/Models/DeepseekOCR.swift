@@ -199,12 +199,17 @@ public struct DeepseekOCRConfiguration: Decodable, Sendable {
     private let _topLevelSlidingWindow: Int?
 
     /// Resolved R-SWA window: language/text config first, then top-level keys.
-    /// Matches Python `LanguageModel.make_cache` (`sliding_window_size or sliding_window`).
+    /// Matches Python `LanguageModel.make_cache` (`sliding_window_size or sliding_window`),
+    /// where `0` is falsy and falls through to the next source like a missing key.
     public var resolvedSlidingWindowSize: Int? {
-        textConfiguration.slidingWindowSize
-            ?? textConfiguration.slidingWindow
-            ?? _topLevelSlidingWindowSize
-            ?? _topLevelSlidingWindow
+        [
+            textConfiguration.slidingWindowSize,
+            textConfiguration.slidingWindow,
+            _topLevelSlidingWindowSize,
+            _topLevelSlidingWindow,
+        ]
+        .compactMap { $0 }
+        .first { $0 != 0 }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -995,14 +1000,11 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     /// `LanguageModel.make_cache`: `RingSlidingKVCache(window_size)` when a
     /// window is set, otherwise a plain cache.
     ///
-    /// The ring cache retains the whole reference prefix and only bounds decode
-    /// tokens, so a caller capacity (`maxKVSize`) cannot be realized on the
-    /// window path and the architecture window is kept as-is. The request is
-    /// still validated so malformed parameters throw the same typed errors as
-    /// on every other model; `LanguageModel.cacheStatus(parameters:)` reports
-    /// the capacity as ignored and generation entry points reject it with
-    /// `KVCacheConfigurationError.incompatibleCapacity(expected:count:)`
-    /// rather than silently exceeding it.
+    /// The ring window is architectural: the cache retains the whole reference
+    /// prefix and bounds only decode tokens, so a caller capacity (`maxKVSize`)
+    /// is validated for well-formedness, then accepted and left unapplied — the
+    /// same treatment model-native `RotatingKVCache` windows receive.
+    /// `LanguageModel.cacheStatus(parameters:)` reports the capacity as ignored.
     ///
     /// - Throws: `KVCacheConfigurationError` when the request is invalid or
     ///   the window is not positive.

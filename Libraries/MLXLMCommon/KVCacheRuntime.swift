@@ -101,6 +101,10 @@ public func validateKVCacheCompatibility(
                 // Architecture-defined sliding windows are independent of the
                 // caller-configurable capacity used for global attention.
                 return false
+            case .ringSliding:
+                // The reference window is architecture-defined as well; the
+                // retained prefix plus decode window never takes a caller capacity.
+                return false
             case .rotating(let rotating):
                 return rotating.maxSize != capacity.maxTokens
                     || rotating.preservedPrefixTokens != capacity.preservedPrefixTokens
@@ -200,6 +204,8 @@ extension KVCacheLeaf {
                 nil
             case .rotating(let rotating):
                 rotating.capacityOrigin == .requested ? .requested : .modelDefined
+            case .ringSliding:
+                .modelDefined
             default:
                 cache.maxSize == nil ? .unbounded : .implementationDefined
             }
@@ -247,7 +253,7 @@ extension KVCacheLeaf {
                 resolvedStrategy: .affine,
                 reason: isBoundaryProtection
                     ? .boundaryProtection : (matches ? nil : .differentStrategy))
-        case .rotating:
+        case .rotating, .ringSliding:
             return status(
                 state: requested == .fullPrecision ? .active : .skipped,
                 resolvedStrategy: .fullPrecision,

@@ -27,8 +27,9 @@ final class UnlimitedOCRCacheTests: XCTestCase {
     }
 
     /// The ring cache keeps the whole reference prefix, so a `maxKVSize` request
-    /// cannot be realized: the architecture window stays and the status reports
-    /// the capacity as ignored, while generation entry points reject it.
+    /// cannot be realized: the architecture window stays, the status reports the
+    /// capacity as ignored, and compatibility validation accepts the request the
+    /// way it accepts model-native `RotatingKVCache` windows.
     func testRingPathKeepsConfigWindowAndReportsMaxKVSizeIgnored() async throws {
         let model = try await VLMTypeRegistry.shared.createModel(
             configuration: Self.configWithoutWindow.data(using: .utf8)!,
@@ -45,13 +46,28 @@ final class UnlimitedOCRCacheTests: XCTestCase {
 
         let status = try unlimited.cacheStatus(parameters: parameters)
         XCTAssertEqual(status.capacityDisposition, .ignored)
-        XCTAssertThrowsError(
+        XCTAssertTrue(status.layers.allSatisfy { $0.capacitySource == .modelDefined })
+        XCTAssertNoThrow(
             try validateKVCacheCompatibility(
-                caches, configuration: KVCacheConfiguration(capacity: try .init(maxTokens: 64)))
-        ) { error in
-            XCTAssertEqual(
-                error as? KVCacheConfigurationError,
-                .incompatibleCapacity(expected: 64, count: 12))
+                caches, configuration: KVCacheConfiguration(capacity: try .init(maxTokens: 64))))
+    }
+
+    /// Python `sliding_window_size or sliding_window` treats `0` as unset, so a
+    /// zero window falls through to the Unlimited default instead of failing.
+    func testZeroSlidingWindowSizeFallsBackToRingWindow128() async throws {
+        let json = Self.configWithoutWindow.replacingOccurrences(
+            of: #""model_type": "unlimited-ocr","#,
+            with: #""model_type": "unlimited-ocr", "sliding_window_size": 0,"#)
+        let model = try await VLMTypeRegistry.shared.createModel(
+            configuration: json.data(using: .utf8)!, modelType: "unlimited-ocr")
+        let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
+        XCTAssertNil(unlimited.config.resolvedSlidingWindowSize)
+
+        let caches = try unlimited.newCache(parameters: nil)
+        XCTAssertEqual(caches.count, 12)
+        for cache in caches {
+            let ring = try XCTUnwrap(cache as? RingSlidingKVCache)
+            XCTAssertEqual(ring.windowSize, 128)
         }
     }
 
