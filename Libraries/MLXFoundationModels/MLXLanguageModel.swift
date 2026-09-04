@@ -139,11 +139,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Configure the buffer pool once per process rather than on every
             // load, so a consumer's own `Memory.cacheLimit` survives our loads.
             _ = Self.configureGPUCacheOnce
-            let container = try await load(configuration) { progress in
-                MLXDownloadProgress.report(progress: progress, modelID: configuration.name)
+            // One identifier per load attempt. Eviction cancels a load and
+            // forgets it at once, so a replacement can start while this one is
+            // still unwinding, and the progress observable needs to tell them
+            // apart.
+            let loadID = UUID()
+            MLXDownloadProgress.reportStarted(modelID: configuration.name, loadID: loadID)
+            defer { MLXDownloadProgress.reportEnded(modelID: configuration.name, loadID: loadID) }
+            return try await load(configuration) { progress in
+                MLXDownloadProgress.report(
+                    progress: progress, modelID: configuration.name, loadID: loadID)
             }
-            MLXDownloadProgress.reportCompleted()
-            return container
         }
     }
 
