@@ -138,6 +138,22 @@ public class BaseConfigurationTests: XCTestCase {
         XCTAssertEqual(config.resolvedModelType(), "unlimited-ocr")
     }
 
+    func testOrigModelTypeResolvesAnyShimmedTypeNormalized() throws {
+        let json =
+            """
+            {
+                "model_type": "base_arch",
+                "_orig_model_type": " Vendor_Native-Arch "
+            }
+            """
+
+        let config = try JSONDecoder().decode(
+            BaseConfiguration.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(config.resolvedModelType(), "vendor-native-arch")
+        XCTAssertEqual(config.resolvedModelType(honorOrigModelType: false), "base_arch")
+    }
+
     func testMissingOrigModelTypeKeepsHubModelType() throws {
         let json =
             """

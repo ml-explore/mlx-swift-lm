@@ -393,11 +393,12 @@ public final class VLMModelFactory: GenericModelFactory {
 
     /// Default remap policy: honor a pack's `_orig_model_type`.
     ///
-    /// Unlimited-OCR packs ship `model_type: deepseekocr` with
-    /// `_orig_model_type: unlimited-ocr` so that loaders which predate the
-    /// Unlimited registration still resolve *something*. Honoring the original
-    /// type is therefore the correct default; pass `false` to load such a pack
-    /// through the plain DeepSeek-OCR path.
+    /// A pack whose native architecture is unknown to older loaders may ship a
+    /// substitute `model_type` and record the native type in `_orig_model_type`.
+    /// When the type registry has a creator for the native type it is the
+    /// better fit, so honoring it is the default; a native type the registry
+    /// cannot build falls back to `model_type`. Pass `false` to always load
+    /// through `model_type`.
     public static let defaultHonorOrigModelType = true
 
     /// resolvers for processor metadata that is absent or incorrect in a checkpoint
@@ -405,9 +406,9 @@ public final class VLMModelFactory: GenericModelFactory {
 
     /// Whether loads honor a checkpoint's `_orig_model_type` remap.
     ///
-    /// The value is immutable per factory, so callers that need the plain
-    /// DeepSeek path can create a separate factory with `false` without mutable
-    /// process-global state.
+    /// The value is immutable per factory, so callers that need the
+    /// `model_type` path can create a separate factory with `false` without
+    /// mutable process-global state.
     public let honorOrigModelType: Bool
 
     public func _load(
@@ -433,12 +434,24 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        let modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
+        // Try the pack's `_orig_model_type` first when this factory honors it;
+        // when the registry has no creator for that type, the pack's `model_type`
+        // is the loadable shim. `modelType` ends up as the key that built the
+        // model so processor resolution sees the same architecture.
+        var modelType = baseConfig.resolvedModelType(honorOrigModelType: honorOrigModelType)
 
         let model: LanguageModel
         do {
-            model = try await typeRegistry.createModel(
-                configuration: configData, modelType: modelType)
+            do {
+                model = try await typeRegistry.createModel(
+                    configuration: configData, modelType: modelType)
+            } catch ModelFactoryError.unsupportedModelType(let unsupported)
+                where unsupported == modelType && modelType != baseConfig.modelType
+            {
+                modelType = baseConfig.modelType
+                model = try await typeRegistry.createModel(
+                    configuration: configData, modelType: modelType)
+            }
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
                 configurationURL.lastPathComponent, configuration.name, error)

@@ -39,7 +39,7 @@ final class VLMRegistryTests: XCTestCase {
     }
 
     func testDeepseekOCRFactoryFailsGracefullyWhenWeightsAreMissing() async throws {
-        let directory = try makeTemporaryDirectory()
+        let directory = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
 
         try Self.deepseekOCRConfig.data(using: .utf8)!.write(
@@ -84,7 +84,115 @@ final class VLMRegistryTests: XCTestCase {
         XCTAssertTrue(processor is DeepseekOCRProcessor)
     }
 
-    private func makeTemporaryDirectory() throws -> URL {
+    // MARK: - `_orig_model_type` policy
+    //
+    // Each creator in the private registry throws `CreatorProbe` naming its
+    // registry key, so a load proves which key the factory selected without
+    // building a model or needing weights.
+
+    func testKnownOrigModelTypeSelectsItsCreatorOverModelType() async throws {
+        let factory = Self.makeProbeFactory(
+            registeredTypes: ["base-arch", "native-arch"], honorOrigModelType: true)
+        let selected = try await Self.selectedModelType(
+            factory: factory, modelType: "base-arch", origModelType: "Native_Arch")
+        XCTAssertEqual(selected, "native-arch")
+    }
+
+    func testUnknownOrigModelTypeFallsBackToModelTypeCreator() async throws {
+        let factory = Self.makeProbeFactory(
+            registeredTypes: ["base-arch"], honorOrigModelType: true)
+        let selected = try await Self.selectedModelType(
+            factory: factory, modelType: "base-arch", origModelType: "unregistered-arch")
+        XCTAssertEqual(selected, "base-arch")
+    }
+
+    func testDisabledPolicyIgnoresKnownOrigModelType() async throws {
+        let factory = Self.makeProbeFactory(
+            registeredTypes: ["base-arch", "native-arch"], honorOrigModelType: false)
+        let selected = try await Self.selectedModelType(
+            factory: factory, modelType: "base-arch", origModelType: "native-arch")
+        XCTAssertEqual(selected, "base-arch")
+    }
+
+    func testOrigModelTypeCreatorFailureOtherThanRegistryMissPropagates() async throws {
+        // A creator registered for the original type that itself reports a
+        // *different* unsupported type is not a registry miss on the original
+        // type, so the factory must surface it rather than fall back.
+        let registry = ModelTypeRegistry<LanguageModel>(creators: [
+            "base-arch": { _ in throw CreatorProbe(modelType: "base-arch") },
+            "native-arch": { _ in throw ModelFactoryError.unsupportedModelType("inner-arch") },
+        ])
+        let factory = VLMModelFactory(
+            typeRegistry: registry, processorRegistry: VLMProcessorTypeRegistry.shared,
+            modelRegistry: VLMRegistry.shared, honorOrigModelType: true)
+        let directory = try Self.writeConfig(modelType: "base-arch", origModelType: "native-arch")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            _ = try await factory.load(from: directory, using: StubTokenizerLoader())
+            XCTFail("expected the creator's error to propagate")
+        } catch ModelFactoryError.unsupportedModelType(let type) {
+            XCTAssertEqual(type, "inner-arch")
+        }
+    }
+
+    func testNeitherOrigNorModelTypeRegisteredReportsModelType() async throws {
+        let factory = Self.makeProbeFactory(registeredTypes: [], honorOrigModelType: true)
+        let directory = try Self.writeConfig(modelType: "base-arch", origModelType: "native-arch")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            _ = try await factory.load(from: directory, using: StubTokenizerLoader())
+            XCTFail("expected an unsupported model type error")
+        } catch ModelFactoryError.unsupportedModelType(let type) {
+            XCTAssertEqual(type, "base-arch")
+        }
+    }
+
+    private struct CreatorProbe: Error {
+        let modelType: String
+    }
+
+    private static func makeProbeFactory(
+        registeredTypes: [String], honorOrigModelType: Bool
+    ) -> VLMModelFactory {
+        var creators: [String: (Data) throws -> LanguageModel] = [:]
+        for type in registeredTypes {
+            creators[type] = { _ in throw CreatorProbe(modelType: type) }
+        }
+        return VLMModelFactory(
+            typeRegistry: ModelTypeRegistry(creators: creators),
+            processorRegistry: VLMProcessorTypeRegistry.shared,
+            modelRegistry: VLMRegistry.shared,
+            honorOrigModelType: honorOrigModelType)
+    }
+
+    /// Loads a config with the given types through `factory` and returns the
+    /// registry key whose creator the factory invoked.
+    private static func selectedModelType(
+        factory: VLMModelFactory, modelType: String, origModelType: String
+    ) async throws -> String {
+        let directory = try writeConfig(modelType: modelType, origModelType: origModelType)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            _ = try await factory.load(from: directory, using: StubTokenizerLoader())
+        } catch let probe as CreatorProbe {
+            return probe.modelType
+        }
+        XCTFail("load finished without invoking a probe creator")
+        return ""
+    }
+
+    private static func writeConfig(modelType: String, origModelType: String) throws -> URL {
+        let directory = try makeTemporaryDirectory()
+        let json = """
+            {"model_type": "\(modelType)", "_orig_model_type": "\(origModelType)"}
+            """
+        try json.data(using: .utf8)!.write(to: directory.appendingPathComponent("config.json"))
+        return directory
+    }
+
+    private static func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("VLMRegistryTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

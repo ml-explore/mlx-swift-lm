@@ -15,12 +15,11 @@ public struct BaseConfiguration: Codable, Sendable {
     /// The architecture identifier (e.g., "bert", "roberta", "xlm-roberta").
     public let modelType: String
 
-    /// Optional original architecture when a Hub pack shims `model_type`.
+    /// Optional native architecture of a pack that shims `model_type` for a
+    /// foreign loader (`_orig_model_type` in `config.json`).
     ///
-    /// Majentik Unlimited-OCR MLX packs ship `model_type=deepseekocr` with
-    /// `_orig_model_type=unlimited-ocr`. Prefer
-    /// ``resolvedModelType(honorOrigModelType:)`` when selecting a registry
-    /// creator.
+    /// Honored when the loading factory opts in; see
+    /// ``resolvedModelType(honorOrigModelType:)``.
     public let origModelType: String?
 
     /// Configuration parameters for weight quantization.
@@ -215,12 +214,15 @@ public struct BaseConfiguration: Codable, Sendable {
         Set(eosTokenIds?.values ?? textConfiguration?.eosTokenIds?.values ?? [])
     }
 
-    /// Model type used for registry lookup.
+    /// Model type to try first for registry lookup.
     ///
-    /// When `honorOrigModelType` is true (default), Unlimited-OCR packs that
-    /// advertise `_orig_model_type` of `unlimited-ocr` / `unlimited_ocr` resolve
-    /// to that type even if `model_type` is a DeepSeek shim. Pass `false` to
-    /// force the Hub `model_type` (DeepSeek-only verification).
+    /// When `honorOrigModelType` is true (default) and the pack declares a
+    /// non-empty `_orig_model_type`, returns that value normalized to lowercase
+    /// with underscores as hyphens; otherwise returns ``modelType``. The shim key
+    /// is informal, so the normalization absorbs the spelling drift seen in the
+    /// wild. Whether the result is loadable is the registry's decision — a
+    /// factory that honors the original type falls back to ``modelType`` when
+    /// its registry has no creator for it.
     ///
     /// Callers select the immutable policy per factory — see
     /// `VLMModelFactory.init(…honorOrigModelType:)`.
@@ -232,11 +234,7 @@ public struct BaseConfiguration: Codable, Sendable {
         else {
             return modelType
         }
-        let normalized = orig.lowercased().replacingOccurrences(of: "_", with: "-")
-        if normalized == "unlimited-ocr" {
-            return "unlimited-ocr"
-        }
-        return modelType
+        return orig.lowercased().replacingOccurrences(of: "_", with: "-")
     }
 
     /// The default quantization settings.
