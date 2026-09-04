@@ -18,6 +18,12 @@ public enum MTPDrafterTypeRegistry {
     /// Shared registry. Empty until a downstream module registers a drafter
     /// type via `await MTPDrafterTypeRegistry.shared.registerModelType(...)`.
     public static let shared: ModelTypeRegistry<any MTPDrafterModel> = .init()
+
+    /// Registry for drafters whose forward pass consumes multimodal position
+    /// state. It is separate from ``shared`` because standalone Qwen MTP
+    /// checkpoints intentionally ship an empty `vision_config`, so their
+    /// target architecture cannot be inferred from drafter metadata alone.
+    public static let visionLanguage: ModelTypeRegistry<any MTPDrafterModel> = .init()
 }
 
 /// Registry of model id (e.g. `"mlx-community/gemma-4-31B-it-assistant-bf16"`)
@@ -32,9 +38,12 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let gemma4_31B_assistant_bf16 = ModelConfiguration(
         id: "mlx-community/gemma-4-31B-it-assistant-bf16"
     )
+    public static let qwen3_8_27b_mtp_4bit = ModelConfiguration(
+        id: "mlx-community/Qwen3.8-27B-MTP-4bit"
+    )
 
     private static func all() -> [ModelConfiguration] {
-        [gemma4_26B_assistant_bf16, gemma4_31B_assistant_bf16]
+        [gemma4_26B_assistant_bf16, gemma4_31B_assistant_bf16, qwen3_8_27b_mtp_4bit]
     }
 }
 
@@ -48,6 +57,13 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
 
     public static let shared = MTPDrafterModelFactory(
         typeRegistry: MTPDrafterTypeRegistry.shared,
+        modelRegistry: MTPDrafterRegistry.shared
+    )
+
+    /// Loader for multimodal drafters. Use this factory when the verifier was
+    /// loaded by `VLMModelFactory` and can emit multimodal RoPE deltas.
+    public static let visionLanguage = MTPDrafterModelFactory(
+        typeRegistry: MTPDrafterTypeRegistry.visionLanguage,
         modelRegistry: MTPDrafterRegistry.shared
     )
 

@@ -391,7 +391,7 @@ struct Qwen35MTPRegistrationTests {
             modelType: "qwen3_5")
         #expect(wrappedTextModel is MLXLLM.Qwen35MTPDraftModel)
 
-        let vlmModel = try await MTPDrafterTypeRegistry.shared.createModel(
+        let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)
@@ -404,14 +404,33 @@ struct Qwen35MTPRegistrationTests {
         #expect(standalone.requiresPromptPrefill)
         #expect(!standalone.requiresSharedTargetKV)
         #expect(standalone.requiresGreedySampling)
+
+        let standaloneVLM = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
+            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8),
+            modelType: "qwen3_5_mtp")
+        #expect(standaloneVLM is MLXVLM.Qwen35VLMNextNDraftModel)
+
+        let textConfig = try JSONDecoder.json5().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let vlmConfig = try JSONDecoder.json5().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let textTarget = MLXLLM.Qwen35TextModel(textConfig)
+        let vlmTarget = MLXVLM.Qwen35(vlmConfig)
+
+        #expect(standalone.isCompatible(with: textTarget))
+        #expect(!standalone.isCompatible(with: vlmTarget))
+        #expect(standaloneVLM.isCompatible(with: vlmTarget))
+        #expect(!standaloneVLM.isCompatible(with: textTarget))
     }
 
     @Test
-    func registrationsAreOrderIndependentForSharedModelTypes() async throws {
+    func registrationsAreIsolatedByTargetArchitecture() async throws {
         await MLXVLM.Qwen35VLMMTPRegistration.register()
         await MLXLLM.Qwen35TextMTPRegistration.register()
 
-        let vlmModel = try await MTPDrafterTypeRegistry.shared.createModel(
+        let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)

@@ -26,6 +26,10 @@ import MLXNN
 /// instance. Drafters that need their own per-stream state additionally
 /// conform to ``StatefulMTPDrafterModel``.
 public protocol MTPDrafterModel: BaseLanguageModel {
+    /// Whether the drafter can consume hidden states and model-owned values
+    /// from this target architecture.
+    func isCompatible(with target: any LanguageModel) -> Bool
+
     /// Largest total verification block the drafter can produce efficiently.
     /// `nil` means the caller may choose any block size.
     var maximumBlockSize: Int? { get }
