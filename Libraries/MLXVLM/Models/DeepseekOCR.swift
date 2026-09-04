@@ -494,7 +494,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     public static let maxNumTilesContextKey = "deepseekocr_max_num_tiles"
 
     @_spi(Testing)
-    public struct PreparedImageInputs: @unchecked Sendable {
+    public struct PreparedImageInputs {
         public let inputIds: MLXArray
         public let pixelValues: MLXArray
         public let localCrops: MLXArray
@@ -841,7 +841,10 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         let imagePlaceholderCount = promptTokens.count(where: { $0 == imageToken })
         let usesFusedPlaceholder = imagePlaceholderCount == 1 && input.images.count > 1
         guard imagePlaceholderCount == input.images.count || usesFusedPlaceholder else {
-            throw VLMError.singleImageAllowed
+            throw VLMError.processing(
+                "DeepseekOCR: \(imagePlaceholderCount) `\(config.imageToken)` placeholder(s) "
+                    + "for \(input.images.count) image(s); expected one per image or a single "
+                    + "placeholder for all pages")
         }
 
         var pixelList = [MLXArray]()
@@ -889,7 +892,10 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             }
             imageIndex += pageRange.count
         }
-        guard imageIndex == input.images.count else { throw VLMError.singleImageAllowed }
+        guard imageIndex == input.images.count else {
+            throw VLMError.processing(
+                "DeepseekOCR: expanded \(imageIndex) page(s) for \(input.images.count) image(s)")
+        }
 
         let localCrops =
             localCropList.isEmpty
@@ -945,8 +951,8 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     public var loraLayers: [Module] { languageModel.layers }
     public var vocabularySize: Int { config.textConfiguration.vocabSize }
 
-    private var imageNewline: MLXArray
-    private var viewSeparator: MLXArray
+    @ParameterInfo(key: "image_newline") private var imageNewline: MLXArray
+    @ParameterInfo(key: "view_separator") private var viewSeparator: MLXArray
 
     public init(_ config: DeepseekOCRConfiguration) {
         self.config = config
@@ -962,8 +968,10 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         let std = Float(1.0 / sqrt(Double(config.textConfiguration.hiddenSize)))
-        self.imageNewline = MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
-        self.viewSeparator = MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
+        self._imageNewline.wrappedValue =
+            MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
+        self._viewSeparator.wrappedValue =
+            MLXRandom.normal([config.textConfiguration.hiddenSize]) * std
     }
 
     /// When `sliding_window_size` is set (Unlimited-OCR packs), use R-SWA
@@ -1041,7 +1049,8 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         // Normalize Unlimited-OCR pack keys onto the DeepseekOCR module tree:
         // language_model.model.* → model.*, root sam/vision/projector → model.*,
-        // view_separator / image_newline → camelCase Module parameters.
+        // view_separator / image_newline under any prefix (Unlimited packs also
+        // ship the `view_seperator` typo) → the root parameters.
         var newWeights = [String: MLXArray]()
         for (key, value) in weights {
             var normalized = key
@@ -1055,9 +1064,9 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
                 || normalized.hasSuffix(".view_separator")
                 || normalized.hasSuffix(".view_seperator")
             {
-                normalized = "viewSeparator"
+                normalized = "view_separator"
             } else if normalized == "image_newline" || normalized.hasSuffix(".image_newline") {
-                normalized = "imageNewline"
+                normalized = "image_newline"
             } else if normalized.hasPrefix("sam_model.") || normalized.hasPrefix("vision_model.")
                 || normalized.hasPrefix("projector.")
             {
@@ -1101,7 +1110,7 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             var newKey: String?
             var adjusted = value
 
-            if key == "viewSeparator" || key == "imageNewline" {
+            if key == "view_separator" || key == "image_newline" {
                 newKey = key
             } else if key == "model.projector.layers.weight" || key == "projector.layers.weight" {
                 newKey = "projector.layers.weight"
@@ -1153,28 +1162,11 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
                 }
             }
 
-            // Bare MLXArray Module properties use camelCase paths (no @ModuleInfo key).
+            // HF packs store CLIP position embeddings as `Embedding.weight` [N, D];
+            // the `position_embedding` parameter is [1, N, D].
             var resolvedKey = finalKey
-            let leafRemaps = [
-                "pos_embed": "posEmbed",
-                "rel_pos_h": "relPosH",
-                "rel_pos_w": "relPosW",
-                "class_embedding": "classEmbedding",
-            ]
-            for (snake, camel) in leafRemaps {
-                if resolvedKey.hasSuffix(".\(snake)") {
-                    resolvedKey =
-                        String(resolvedKey.dropLast(snake.count)) + camel
-                } else if resolvedKey == snake {
-                    resolvedKey = camel
-                }
-            }
-            // HF packs store CLIP position embeddings as Embedding.weight [N, D];
-            // ClipVisionEmbeddings.positionEmbedding is [1, N, D].
             if resolvedKey.hasSuffix(".position_embedding.weight") {
-                resolvedKey =
-                    String(resolvedKey.dropLast(".position_embedding.weight".count))
-                    + ".positionEmbedding"
+                resolvedKey = String(resolvedKey.dropLast(".weight".count))
                 if adjusted.ndim == 2 {
                     adjusted = adjusted.reshaped(1, adjusted.dim(0), adjusted.dim(1))
                 }
@@ -1613,8 +1605,8 @@ private final class VisionAttention: Module {
     @ModuleInfo(key: "qkv") var qkv: Linear
     @ModuleInfo(key: "proj") var proj: Linear
 
-    var relPosH: MLXArray?
-    var relPosW: MLXArray?
+    @ParameterInfo(key: "rel_pos_h") var relPosH: MLXArray?
+    @ParameterInfo(key: "rel_pos_w") var relPosW: MLXArray?
 
     init(_ config: DeepseekOCRConfiguration.VisionConfiguration, windowSize: Int) {
         self.numHeads = config.numAttentionHeads
@@ -1629,8 +1621,8 @@ private final class VisionAttention: Module {
         if useRelPos {
             let inputSize = windowSize > 0 ? windowSize : (config.imageSize / config.patchSize)
             let headDim = config.hiddenSize / config.numAttentionHeads
-            self.relPosH = zeros([2 * inputSize - 1, headDim])
-            self.relPosW = zeros([2 * inputSize - 1, headDim])
+            self._relPosH.wrappedValue = zeros([2 * inputSize - 1, headDim])
+            self._relPosW.wrappedValue = zeros([2 * inputSize - 1, headDim])
         }
     }
 
@@ -1841,7 +1833,7 @@ private final class VisionEncoder: Module {
     @ModuleInfo(key: "net_2") var net2: Conv2d
     @ModuleInfo(key: "net_3") var net3: Conv2d
 
-    var posEmbed: MLXArray?
+    @ParameterInfo(key: "pos_embed") var posEmbed: MLXArray?
     let patchCount: Int
 
     init(_ config: DeepseekOCRConfiguration.VisionConfiguration) {
@@ -1868,7 +1860,7 @@ private final class VisionEncoder: Module {
             padding: IntOrPair(1),
             bias: false)
         if config.useAbsPos {
-            self.posEmbed = zeros([1, patchCount, patchCount, config.hiddenSize])
+            self._posEmbed.wrappedValue = zeros([1, patchCount, patchCount, config.hiddenSize])
         }
     }
 
@@ -1914,8 +1906,10 @@ private struct ClipVisionConfig {
 private final class ClipVisionEmbeddings: Module {
     @ModuleInfo(key: "patch_embedding") var patchEmbedding: Conv2d
 
-    var classEmbedding: MLXArray
-    var positionEmbedding: MLXArray
+    @ParameterInfo(key: "class_embedding") var classEmbedding: MLXArray
+    /// `[1, N, D]`; HF packs ship it as `position_embedding.weight` `[N, D]` and
+    /// ``DeepseekOCR/sanitize(weights:)`` reshapes it onto this key.
+    @ParameterInfo(key: "position_embedding") var positionEmbedding: MLXArray
     let config = ClipVisionConfig()
 
     override init() {
@@ -1925,8 +1919,8 @@ private final class ClipVisionEmbeddings: Module {
             kernelSize: IntOrPair(config.patchSize),
             stride: IntOrPair(config.patchSize),
             bias: false)
-        self.classEmbedding = MLXRandom.normal([config.hiddenSize])
-        self.positionEmbedding = MLXRandom.normal([
+        self._classEmbedding.wrappedValue = MLXRandom.normal([config.hiddenSize])
+        self._positionEmbedding.wrappedValue = MLXRandom.normal([
             1,
             (config.imageSize / config.patchSize) * (config.imageSize / config.patchSize) + 1,
             config.hiddenSize,

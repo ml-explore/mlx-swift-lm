@@ -310,7 +310,11 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertNil(lmInput.video, "multipage base must not pack local crops")
     }
 
-    func testMultipageRejectsMismatchedImageTokenCount() async throws {
+    /// A placeholder/page mismatch is a prompt error, not a single-image limit: the
+    /// thrown error names both counts so the caller can fix the prompt.
+    func testMultipageMismatchedImageTokenCountThrowsProcessingErrorNamingBothCounts()
+        async throws
+    {
         let processor = try makeProcessor()
         let input = UserInput(
             prompt: "<image>page a<image>page b<image>extra",
@@ -322,9 +326,10 @@ final class DeepseekOCRProcessorTests: XCTestCase {
 
         do {
             _ = try await processor.internalPrepare(input: input)
-            XCTFail("expected VLMError.singleImageAllowed for mismatched <image> count")
-        } catch VLMError.singleImageAllowed {
-            // expected
+            XCTFail("expected VLMError.processing for mismatched <image> count")
+        } catch VLMError.processing(let details) {
+            XCTAssertTrue(details.contains("3 `<image>` placeholder(s)"), details)
+            XCTAssertTrue(details.contains("for 2 image(s)"), details)
         }
     }
 

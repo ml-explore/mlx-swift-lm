@@ -127,10 +127,10 @@ public struct SlidingWindowNoRepeatNGramProcessor: LogitProcessor {
         ring.append(token)
     }
 
-    /// CPU reference of the ban rule that ``process(logits:)`` evaluates on the GPU:
-    /// tokens that would complete a repeated n-gram given `history`. Used by the
-    /// equivalence tests.
-    public func bannedTokens(in history: [Int]) -> Set<Int> {
+    /// CPU reference implementation of the ban rule: the tokens that would complete
+    /// a repeated n-gram given `history`. The GPU path in ``process(logits:)`` is
+    /// checked against it by the equivalence tests.
+    func bannedTokens(in history: [Int]) -> Set<Int> {
         guard history.count >= ngramSize else { return [] }
 
         let prefixLen = ngramSize - 1
