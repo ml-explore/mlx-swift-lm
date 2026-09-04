@@ -61,7 +61,7 @@ public final class MLXDownloadProgress {
     /// Rolling (not cumulative) so a stall shows up immediately as the
     /// number dropping toward 0 -- consumers can show "still moving" vs
     /// "stuck" without needing a separate indicator.
-    public private(set) var throughputBytesPerSec: Double?
+    public private(set) var throughputBytesPerSecond: Double?
 
     /// Width of the throughput rolling window. Short enough that stalls
     /// are visible within a few seconds; long enough to smooth out the
@@ -74,19 +74,17 @@ public final class MLXDownloadProgress {
 
     private init() {}
 
-    /// Nonisolated entry point for `reportProgress` so callers from sendable
-    /// closures (e.g. the cache loader's `progressHandler`) don't have to
-    /// hop to the main actor just to read `.shared`. The instance method is
-    /// already nonisolated; this shim only forwards.
-    nonisolated public static func report(progress: Progress, modelID: String) {
+    /// Nonisolated so a producer inside a sendable closure, for example the cache
+    /// loader's `progressHandler`, reaches `shared` without a hop to the main
+    /// actor.
+    nonisolated static func report(progress: Progress, modelID: String) {
         Task { @MainActor in
             shared.reportProgress(progress, modelID: modelID)
         }
     }
 
-    /// Nonisolated entry point for `reportCompleted`. Same rationale as
-    /// ``report(progress:modelID:)``.
-    nonisolated public static func reportCompleted() {
+    /// Nonisolated for the same reason as ``report(progress:modelID:)``.
+    nonisolated static func reportCompleted() {
         Task { @MainActor in
             shared.reportCompleted()
         }
@@ -120,7 +118,7 @@ public final class MLXDownloadProgress {
             self.startedAt = nil
             self.completedBytes = 0
             self.totalBytes = 0
-            self.throughputBytesPerSec = nil
+            self.throughputBytesPerSecond = nil
             self.samples.removeAll()
         }
     }
@@ -138,16 +136,16 @@ public final class MLXDownloadProgress {
             let newest = samples.last,
             samples.count >= 2
         else {
-            throughputBytesPerSec = nil
+            throughputBytesPerSecond = nil
             return
         }
         let dt = newest.time.timeIntervalSince(oldest.time)
         guard dt > 0.1 else {
-            throughputBytesPerSec = nil
+            throughputBytesPerSecond = nil
             return
         }
         let db = newest.bytes - oldest.bytes
-        throughputBytesPerSec = Double(db) / dt
+        throughputBytesPerSecond = Double(db) / dt
     }
 }
 
