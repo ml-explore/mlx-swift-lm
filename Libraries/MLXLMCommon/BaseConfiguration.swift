@@ -217,12 +217,12 @@ public struct BaseConfiguration: Codable, Sendable {
     /// Model type to try first for registry lookup.
     ///
     /// When `honorOrigModelType` is true (default) and the pack declares a
-    /// non-empty `_orig_model_type`, returns that value normalized to lowercase
-    /// with underscores as hyphens; otherwise returns ``modelType``. The shim key
-    /// is informal, so the normalization absorbs the spelling drift seen in the
-    /// wild. Whether the result is loadable is the registry's decision — a
-    /// factory that honors the original type falls back to ``modelType`` when
-    /// its registry has no creator for it.
+    /// non-empty `_orig_model_type`, returns that value trimmed and lowercased;
+    /// otherwise returns ``modelType``. Registry keys keep the Hub spelling
+    /// (underscore and hyphen forms are registered separately when both occur
+    /// in the wild), so the shim is matched as spelled. Whether the result is
+    /// loadable is the registry's decision — a factory that honors the original
+    /// type falls back to ``modelType`` when its registry has no creator for it.
     ///
     /// Callers select the immutable policy per factory — see
     /// `VLMModelFactory.init(…honorOrigModelType:)`.
@@ -234,7 +234,7 @@ public struct BaseConfiguration: Codable, Sendable {
         else {
             return modelType
         }
-        return orig.lowercased().replacingOccurrences(of: "_", with: "-")
+        return orig.lowercased()
     }
 
     /// The default quantization settings.

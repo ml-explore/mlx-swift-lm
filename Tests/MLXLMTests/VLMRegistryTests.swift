@@ -90,12 +90,14 @@ final class VLMRegistryTests: XCTestCase {
     // registry key, so a load proves which key the factory selected without
     // building a model or needing weights.
 
+    /// Most `VLMTypeRegistry` keys are underscore-spelled (`qwen3_vl`, `glm_ocr`, …),
+    /// so the shim must reach an underscore key as spelled, case-insensitively.
     func testKnownOrigModelTypeSelectsItsCreatorOverModelType() async throws {
         let factory = Self.makeProbeFactory(
-            registeredTypes: ["base-arch", "native-arch"], honorOrigModelType: true)
+            registeredTypes: ["base-arch", "native_arch"], honorOrigModelType: true)
         let selected = try await Self.selectedModelType(
             factory: factory, modelType: "base-arch", origModelType: "Native_Arch")
-        XCTAssertEqual(selected, "native-arch")
+        XCTAssertEqual(selected, "native_arch")
     }
 
     func testUnknownOrigModelTypeFallsBackToModelTypeCreator() async throws {

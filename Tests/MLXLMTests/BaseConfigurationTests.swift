@@ -123,7 +123,7 @@ public class BaseConfigurationTests: XCTestCase {
             config.resolvedModelType(honorOrigModelType: false), "deepseekocr")
     }
 
-    func testOrigModelTypeUnderscoreAliasNormalizesToHyphen() throws {
+    func testOrigModelTypeUnderscoreAliasKeepsItsSpelling() throws {
         let json =
             """
             {
@@ -135,10 +135,10 @@ public class BaseConfigurationTests: XCTestCase {
         let config = try JSONDecoder().decode(
             BaseConfiguration.self, from: json.data(using: .utf8)!)
 
-        XCTAssertEqual(config.resolvedModelType(), "unlimited-ocr")
+        XCTAssertEqual(config.resolvedModelType(), "unlimited_ocr")
     }
 
-    func testOrigModelTypeResolvesAnyShimmedTypeNormalized() throws {
+    func testOrigModelTypeResolvesAnyShimmedTypeTrimmedAndLowercased() throws {
         let json =
             """
             {
@@ -150,7 +150,7 @@ public class BaseConfigurationTests: XCTestCase {
         let config = try JSONDecoder().decode(
             BaseConfiguration.self, from: json.data(using: .utf8)!)
 
-        XCTAssertEqual(config.resolvedModelType(), "vendor-native-arch")
+        XCTAssertEqual(config.resolvedModelType(), "vendor_native-arch")
         XCTAssertEqual(config.resolvedModelType(honorOrigModelType: false), "base_arch")
     }
 
