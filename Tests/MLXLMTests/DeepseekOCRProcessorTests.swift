@@ -4,6 +4,7 @@ import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 import XCTest
 
 @_spi(Testing) @testable import MLXVLM
@@ -121,6 +122,60 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(lmInput.image?.pixels.shape, [1, 3, 1024, 1024])
         XCTAssertEqual(lmInput.image?.positionIds?.asArray(Int32.self), [2, 1])
         XCTAssertEqual(lmInput.video?.pixels.shape, [2, 3, 640, 640])
+    }
+
+    func testPrepareTextOnlyReturnsChatTemplateTokensWithoutAnImage() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(prompt: "document parsing. ")
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertNil(lmInput.image, "a text-only prompt must not fabricate an image")
+        XCTAssertNil(lmInput.video)
+        // DeterministicTokenizer: BOS, then one synthetic id per whitespace-delimited word.
+        XCTAssertEqual(lmInput.text.tokens.shape, [1, 3])
+        XCTAssertEqual(lmInput.text.tokens.asArray(Int32.self), [0, 20, 21])
+        XCTAssertEqual(lmInput.text.mask?.asArray(Int8.self), [1, 1, 1])
+    }
+
+    func testInternalPrepareRequiresAnImage() async throws {
+        let processor = try makeProcessor()
+
+        do {
+            _ = try await processor.internalPrepare(input: UserInput(prompt: "document parsing. "))
+            XCTFail("expected VLMError.imageRequired for a text-only prompt")
+        } catch VLMError.imageRequired {
+            // expected
+        }
+    }
+
+    /// End to end: a text-only prompt prefilled through the model (R-SWA ring caches, as on
+    /// Unlimited-OCR packs) must never reach the projector, and its logits must be the plain
+    /// text forward. The probe replaces the projector's `Linear` and counts calls.
+    func testTextOnlyPrefillSkipsVisionTower() async throws {
+        let processor = try makeProcessor()
+        let model = try makeModel()
+        let probe = ProbeLinear(2048, 32)
+        model.update(modules: ModuleChildren.unflattened([("projector.layers", probe as Module)]))
+
+        let lmInput = try await processor.prepare(input: UserInput(prompt: "document parsing. "))
+        let cache = try model.newCache(parameters: nil)
+        XCTAssertTrue(cache.allSatisfy { $0 is RingSlidingKVCache })
+
+        let result = try model.prepare(lmInput, cache: cache, state: nil, prefill: .init())
+        guard case .logits(let output) = result else {
+            return XCTFail("expected prefill logits, got \(result)")
+        }
+        eval(output.logits)
+
+        XCTAssertEqual(probe.callCount, 0, "text-only prefill must not run the vision tower")
+        XCTAssertEqual(output.logits.shape, [1, 3, 32])
+        XCTAssertEqual(cache.first?.offset, 3)
+
+        let direct = model(
+            LMInput.Text(tokens: lmInput.text.tokens),
+            cache: try model.newCache(parameters: nil), state: nil)
+        XCTAssertTrue(allClose(output.logits, direct.logits).item(Bool.self))
     }
 
     func testModeContextHelpers() {
@@ -277,6 +332,41 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
     }
 
+    private func makeModel() throws -> DeepseekOCR {
+        let config = try JSONDecoder().decode(
+            DeepseekOCRConfiguration.self,
+            from: Data(Self.modelConfigJSON.utf8))
+        return DeepseekOCR(config)
+    }
+
+    /// SAM-base vision geometry (so the tower accepts the processor's 1024² global view)
+    /// over a one-layer language model, with an R-SWA window as on Unlimited-OCR packs.
+    private static let modelConfigJSON = #"""
+        {
+         "model_type": "deepseekocr",
+         "sliding_window_size": 8,
+         "vision_config": {
+          "hidden_size": 768,
+          "output_channels": 256,
+          "num_hidden_layers": 12,
+          "num_attention_heads": 12,
+          "image_size": 1024,
+          "patch_size": 16,
+          "global_attn_indexes": [2, 5, 8, 11],
+          "mlp_dim": 3072
+         },
+         "language_config": {
+          "vocab_size": 32,
+          "hidden_size": 32,
+          "intermediate_size": 64,
+          "num_hidden_layers": 1,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 4,
+          "max_position_embeddings": 32
+         }
+        }
+        """#
+
     private static let processorConfigJSON = #"""
         {
          "candidate_resolutions": [[1024, 1024]],
@@ -291,6 +381,16 @@ final class DeepseekOCRProcessorTests: XCTestCase {
          }
         }
         """#
+}
+
+/// A `Linear` that counts how often it is applied.
+private final class ProbeLinear: Linear {
+    var callCount = 0
+
+    override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        callCount += 1
+        return super.callAsFunction(x)
+    }
 }
 
 private struct DeterministicTokenizer: Tokenizer {

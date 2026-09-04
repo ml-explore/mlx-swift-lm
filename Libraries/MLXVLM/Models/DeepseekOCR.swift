@@ -804,24 +804,26 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         }
     }
 
-    @_spi(Testing)
-    public func internalPrepare(input: UserInput) async throws -> PreparedImageInputs {
+    private func chatTemplateTokens(for input: UserInput) throws -> [Int] {
         let messages = DeepseekOCRMessageGenerator(imageToken: config.imageToken).generate(
             from: input)
-        let promptTokens = try tokenizer.applyChatTemplate(
+        return try tokenizer.applyChatTemplate(
             messages: messages,
             tools: input.tools,
             additionalContext: input.additionalContext)
+    }
 
-        guard !input.images.isEmpty else {
-            return .init(
-                inputIds: MLXArray(promptTokens.map(Int32.init)).reshaped(1, promptTokens.count),
-                pixelValues: zeros([1, 3, config.baseSize, config.baseSize], type: Float.self),
-                localCrops: emptyLocalCrops(),
-                imagesSeqMask: zeros([1, promptTokens.count], type: Bool.self),
-                imagesSpatialCrop: zeros([1, 2], type: Int32.self),
-                mode: promptMode(from: input))
-        }
+    private func inputIds(_ tokens: [Int]) -> MLXArray {
+        MLXArray(tokens.map(Int32.init)).reshaped(1, tokens.count)
+    }
+
+    /// Image-bearing prompts only; ``prepare(input:)`` answers text-only prompts itself.
+    ///
+    /// - Throws: `VLMError.imageRequired` when `input.images` is empty.
+    @_spi(Testing)
+    public func internalPrepare(input: UserInput) async throws -> PreparedImageInputs {
+        guard !input.images.isEmpty else { throw VLMError.imageRequired }
+        let promptTokens = try chatTemplateTokens(for: input)
 
         let mode = promptMode(from: input)
         let maxNumTiles = Self.maxNumTiles(from: input.additionalContext)
@@ -896,7 +898,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         let spatial = MLXArray(spatialPairs).reshaped(input.images.count, 2)
 
         return .init(
-            inputIds: MLXArray(tokenized.map(Int32.init)).reshaped(1, tokenized.count),
+            inputIds: inputIds(tokenized),
             pixelValues: pixelValues,
             localCrops: localCrops,
             imagesSeqMask: MLXArray(sequenceMask).reshaped(1, sequenceMask.count),
@@ -905,6 +907,13 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
+        // A text-only turn carries no pixels: Python `get_input_embeddings` returns the
+        // token embeddings untouched when `pixel_values is None`, so no image is fabricated.
+        guard !input.images.isEmpty else {
+            let tokens = inputIds(try chatTemplateTokens(for: input))
+            return LMInput(text: .init(tokens: tokens, mask: ones(like: tokens).asType(.int8)))
+        }
+
         let prepared = try await internalPrepare(input: input)
         let mask = ones(like: prepared.inputIds).asType(.int8)
         let spatial = prepared.imagesSpatialCrop
