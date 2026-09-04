@@ -116,6 +116,66 @@ public class SampleTests: XCTestCase {
         XCTAssertTrue(GenerateParameters(temperature: 0).sampler() is ArgMaxSampler)
     }
 
+    func testCategoricalSamplerPreparesItsSamplingDistribution() {
+        let sampler = CategoricalSampler(temperature: 0.5, seed: 7)
+        let logits = MLXArray([0.0 as Float, 0.5 as Float, 1.0 as Float])[
+            .newAxis, .ellipsis]
+
+        let prepared = sampler.prepare(logits: logits)
+        let probabilities = softmax(prepared.logWeights, axis: -1)
+            .asArray(Float.self)
+        let expected = softmax(logits * 2, axis: -1).asArray(Float.self)
+
+        XCTAssertEqual(probabilities.count, expected.count)
+        for (actual, expected) in zip(probabilities, expected) {
+            XCTAssertEqual(actual, expected, accuracy: 1e-6)
+        }
+    }
+
+    func testTopPSamplerPreparesDistributionWithItsFilters() {
+        let sampler = TopPSampler(
+            temperature: 1.0, topP: 1.0, topK: 2, minP: 0.0, seed: 7)
+        let logits = MLXArray([0.0 as Float, 3.0 as Float, 2.0 as Float, 1.0 as Float])[
+            .newAxis, .ellipsis]
+
+        let prepared = sampler.prepare(logits: logits)
+        let probabilities = softmax(prepared.logWeights, axis: -1)
+            .asArray(Float.self)
+
+        XCTAssertEqual(probabilities[0], 0, accuracy: 1e-7)
+        XCTAssertGreaterThan(probabilities[1], 0)
+        XCTAssertGreaterThan(probabilities[2], 0)
+        XCTAssertEqual(probabilities[3], 0, accuracy: 1e-7)
+        XCTAssertEqual(probabilities.reduce(0, +), 1, accuracy: 1e-6)
+    }
+
+    func testNonGreedyParameterSamplersExposePreparedDistributions() {
+        XCTAssertTrue(
+            GenerateParameters(temperature: 0.7).sampler() is any LogitDistributionSampler)
+        XCTAssertTrue(
+            GenerateParameters(temperature: 0.7, topK: 40).sampler()
+                is any LogitDistributionSampler)
+        XCTAssertFalse(
+            GenerateParameters(temperature: 0).sampler() is any LogitDistributionSampler)
+    }
+
+    func testPreparedSamplingMatchesConvenienceSampling() {
+        let logits = MLXArray([0.0 as Float, 0.5 as Float, 1.0 as Float])[
+            .newAxis, .ellipsis]
+        let convenienceSampler = CategoricalSampler(temperature: 0.8, seed: 42)
+        let preparedSampler = CategoricalSampler(temperature: 0.8, seed: 42)
+        let prepared = preparedSampler.prepare(logits: logits)
+
+        let convenienceTokens = (0 ..< 24).map { _ in
+            convenienceSampler.sample(logits: logits).item(Int.self)
+        }
+        let preparedTokens = (0 ..< 24).map { _ in
+            preparedSampler.sample(prepared: prepared).item(Int.self)
+        }
+
+        XCTAssertEqual(convenienceTokens, preparedTokens)
+    }
+
     func testPresencePenaltyContextPenalizesSeenTokens() {
         var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
         processor.prompt(MLXArray([1, 1, 3]))

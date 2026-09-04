@@ -14,6 +14,44 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
+/// A sampler that can prepare and sample an exact categorical distribution.
+///
+/// Preparation applies the sampler's temperature and token filters once. The
+/// returned distribution can then be sampled directly, allowing speculative
+/// decoders to reuse the exact distribution for acceptance ratios and residual
+/// distributions without reapplying those transformations.
+///
+/// `ArgMaxSampler` intentionally does not conform because greedy decoding is
+/// not a categorical sampling distribution.
+public struct PreparedCategoricalDistribution {
+
+    /// Unnormalized log weights for the categorical distribution.
+    ///
+    /// Applying `softmax` on the final axis produces token probabilities.
+    public let logWeights: MLXArray
+
+    public init(logWeights: MLXArray) {
+        self.logWeights = logWeights
+    }
+}
+
+public protocol LogitDistributionSampler: LogitSampler {
+
+    /// Prepares the exact categorical distribution used for sampling `logits`.
+    func prepare(logits: MLXArray) -> PreparedCategoricalDistribution
+
+    /// Samples from a previously prepared categorical distribution.
+    func sample(prepared: PreparedCategoricalDistribution) -> MLXArray
+}
+
+extension LogitDistributionSampler {
+
+    /// Samples `logits` by preparing its categorical distribution once.
+    public func sample(logits: MLXArray) -> MLXArray {
+        sample(prepared: prepare(logits: logits))
+    }
+}
+
 /// A `LogitProcessor` is an optional visitor of `logits`.
 ///
 /// The ``LogitProcessor`` is called with the input (prompt) before generating tokens:
@@ -338,7 +376,7 @@ public struct ArgMaxSampler: LogitSampler {
 /// Each filter operates on the full vocabulary in original token order, masking
 /// rejected tokens with `-inf`. This matches the composable filter chain in
 /// `mlx_lm.sample_utils.make_sampler`.
-public struct TopPSampler: LogitSampler {
+public struct TopPSampler: LogitDistributionSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
@@ -364,27 +402,31 @@ public struct TopPSampler: LogitSampler {
         self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
     }
 
-    public func sample(logits: MLXArray) -> MLXArray {
+    public func prepare(logits: MLXArray) -> PreparedCategoricalDistribution {
         var logits = logits
         if logits.dtype == .bfloat16 {
             logits = logits.asType(.float32)
         }
 
+        var logprobs = logSoftmax(logits)
+
+        // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
+        }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+
+        return PreparedCategoricalDistribution(logWeights: logprobs * (1 / temp))
+    }
+
+    public func sample(prepared: PreparedCategoricalDistribution) -> MLXArray {
         return withRandomState(randomState) {
-            var logprobs = logSoftmax(logits)
-
-            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
-            if let topP {
-                logprobs = applyTopP(logprobs, topP: topP)
-            }
-            if let minP {
-                logprobs = applyMinP(logprobs, minP: minP)
-            }
-            if let topK {
-                logprobs = applyTopK(logprobs, topK: topK)
-            }
-
-            return categorical(logprobs * (1 / temp))
+            categorical(prepared.logWeights)
         }
     }
 
@@ -423,7 +465,7 @@ public struct TopPSampler: LogitSampler {
 }
 
 /// Sampler that uses `temperature` to sample the logits.
-public struct CategoricalSampler: LogitSampler {
+public struct CategoricalSampler: LogitDistributionSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
 
@@ -434,9 +476,13 @@ public struct CategoricalSampler: LogitSampler {
         self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
     }
 
-    public func sample(logits: MLXArray) -> MLXArray {
+    public func prepare(logits: MLXArray) -> PreparedCategoricalDistribution {
+        PreparedCategoricalDistribution(logWeights: logits * (1 / temp))
+    }
+
+    public func sample(prepared: PreparedCategoricalDistribution) -> MLXArray {
         return withRandomState(randomState) {
-            categorical(logits * (1 / temp))
+            categorical(prepared.logWeights)
         }
     }
 }
