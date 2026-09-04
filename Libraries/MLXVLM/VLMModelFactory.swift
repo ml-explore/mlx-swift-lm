@@ -299,7 +299,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     /// Unlimited-OCR (DeepSeek-OCR encoder + decoder with R-SWA attention).
     static public let unlimitedOCR6bit = ModelConfiguration(
         id: "majentik/Unlimited-OCR-MLX-6bit",
-        defaultPrompt: "document parsing. "
+        defaultPrompt: "document parsing."
     )
 
     static public let museGlimmer30B4bit = ModelConfiguration(

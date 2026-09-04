@@ -18,6 +18,21 @@ final class VLMRegistryTests: XCTestCase {
         }
     }
 
+    /// The pack's `chat_template.jinja` appends its own separator after the
+    /// rendered content (`{{message['content']}} `), so a `defaultPrompt`
+    /// with a trailing (or leading) space would double up whitespace in the
+    /// tokenized prompt. Every DeepSeek-OCR / Unlimited-OCR registry entry's
+    /// `defaultPrompt` must be pre-trimmed.
+    func testOCRRegistryDefaultPromptsHaveNoSurroundingWhitespace() {
+        for configuration in [VLMRegistry.deepseekOCR5bit, VLMRegistry.unlimitedOCR6bit] {
+            let prompt = configuration.defaultPrompt
+            XCTAssertEqual(
+                prompt, prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                "\(configuration.name) defaultPrompt has leading/trailing whitespace: \(String(reflecting: prompt))"
+            )
+        }
+    }
+
     func testDeepseekOCRModelTypeLoadsPinnedHFConfig() async throws {
         let contains = await VLMTypeRegistry.shared.contains("deepseekocr")
         XCTAssertTrue(contains)
