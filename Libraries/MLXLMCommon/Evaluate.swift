@@ -2154,6 +2154,96 @@ public func generateTokens(
     return stream
 }
 
+/// Generates tokens asynchronously using DFlash2 speculative decoding.
+///
+/// Parallel to ``generate(input:cache:parameters:context:mtpDrafter:blockSize:components:wiredMemoryTicket:)``
+/// for a ``DFlash2DrafterModel``: the drafter proposes a block from the
+/// target's hidden states and the target verifies it in one pass, with the
+/// next round built while that pass runs. The target must conform to
+/// ``DFlash2TargetModel``.
+///
+/// - Parameters:
+///   - input: text input for the target model.
+///   - cache: optional ``KVCache`` for the target model.
+///   - parameters: generation parameters.
+///   - context: model context for the target model.
+///   - dflash2Drafter: the drafter; instances hold no per-stream state and
+///     may be shared across iterators.
+///   - blockSize: tokens per verify pass (anchor included); `nil` uses the
+///     drafter's trained block size.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
+///   - wiredMemoryTicket: optional wired memory ticket.
+/// - Returns: an `AsyncStream<Generation>` yielding chunks and tool calls.
+/// - Throws: ``DFlash2SpeculationError`` when the target or input is unsupported.
+public func generate(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    dflash2Drafter: any DFlash2DrafterModel,
+    blockSize: Int? = nil,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<Generation> {
+    let iterator = try DFlash2SpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: dflash2Drafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize,
+        components: components
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            stopStrings: context.configuration.effectiveStopStrings,
+            format: context.configuration.toolCallFormat ?? .json
+        )
+    )
+    return stream
+}
+
+/// Generates raw token IDs asynchronously using DFlash2 speculative decoding.
+///
+/// Parallels
+/// ``generate(input:cache:parameters:context:dflash2Drafter:blockSize:components:wiredMemoryTicket:)``
+/// but yields raw token IDs instead of decoded text or tool calls.
+public func generateTokens(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    dflash2Drafter: any DFlash2DrafterModel,
+    blockSize: Int? = nil,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<TokenGeneration> {
+    let iterator = try DFlash2SpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: dflash2Drafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize,
+        components: components
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: RawTokenLoopHandler()
+    )
+    return stream
+}
+
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.
 ///
 /// Prefer this overload if you want to be able to observe when the underlying generation work is finished

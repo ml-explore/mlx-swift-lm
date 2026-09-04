@@ -136,6 +136,10 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
 
+    /// Post-load stacked `gate|up`; see `SameInputProjectionStacking`.
+    var gateUp: QuantizedLinear?
+    var gateDimensions = 0
+
     init(dimensions: Int, hiddenDimensions: Int) {
         _gateProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
         _downProj.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
@@ -143,7 +147,26 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        if let gateUp {
+            let gu = gateUp(x)
+            return downProj(
+                silu(gu[.ellipsis, ..<gateDimensions]) * gu[.ellipsis, gateDimensions...])
+        }
+        return downProj(silu(gateProj(x)) * upProj(x))
+    }
+}
+
+extension Qwen3NextMLP: SameInputProjectionStacking {
+    func stackSameInputProjections() -> Bool {
+        guard gateUp == nil,
+            let gate = plainQuantizedLinear(gateProj),
+            let up = plainQuantizedLinear(upProj),
+            let stacked = stackedQuantizedLinear([gate, up])
+        else { return false }
+        gateDimensions = gate.weight.dim(0)
+        gateUp = stacked
+        releaseStackedProjections(["gate_proj", "up_proj"])
+        return true
     }
 }
 
