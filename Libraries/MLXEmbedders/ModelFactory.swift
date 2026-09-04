@@ -168,7 +168,7 @@ public struct EmbedderModelContext {
 /// let modelId = "mlx-community/gemma-3-1b-it-qat-4bit"
 /// let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
 ///     from: downloader, using: tokenizerLoader, configuration: .init(id: modelId),
-///     progressHandler: logProgress(modelId)
+///     progress: .download(logProgress(modelId))
 /// )
 /// ```
 public final class EmbedderModelFactory: GenericModelFactory {
