@@ -810,10 +810,19 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     private func chatTemplateTokens(for input: UserInput) throws -> [Int] {
         let messages = DeepseekOCRMessageGenerator(imageToken: config.imageToken).generate(
             from: input)
-        return try tokenizer.applyChatTemplate(
+        var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages,
             tools: input.tools,
             additionalContext: input.additionalContext)
+        // The rendered chat template is encoded without special tokens, while Python's
+        // processor always prepends BOS (`processing_deepseekocr.py tokenize_with_images`,
+        // literal id 0 — used here only when the tokenizer reports no BOS token). A template
+        // that renders `bos_token` itself already starts with it.
+        let bosId = tokenizer.bosToken.flatMap { tokenizer.convertTokenToId($0) } ?? 0
+        if promptTokens.first != bosId {
+            promptTokens.insert(bosId, at: 0)
+        }
+        return promptTokens
     }
 
     private func inputIds(_ tokens: [Int]) -> MLXArray {

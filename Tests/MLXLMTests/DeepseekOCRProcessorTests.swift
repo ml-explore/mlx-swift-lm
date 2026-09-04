@@ -212,7 +212,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
 
         XCTAssertNil(lmInput.image, "a text-only prompt must not fabricate an image")
         XCTAssertNil(lmInput.video)
-        // DeterministicTokenizer: BOS, then one synthetic id per whitespace-delimited word.
+        // BOS from the processor, then one synthetic id per whitespace-delimited word.
         XCTAssertEqual(lmInput.text.tokens.shape, [1, 3])
         XCTAssertEqual(lmInput.text.tokens.asArray(Int32.self), [0, 20, 21])
         XCTAssertEqual(lmInput.text.mask?.asArray(Int8.self), [1, 1, 1])
@@ -227,6 +227,65 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         } catch VLMError.imageRequired {
             // expected
         }
+    }
+
+    /// swift-transformers encodes the rendered chat template with `addSpecialTokens: false`,
+    /// while Python's `tokenize_with_images` always prepends BOS. Without it both DeepSeek-OCR
+    /// and Unlimited-OCR packs ignore the page and emit a degenerate enumeration.
+    func testImagePromptStartsWithTheTokenizerBOSFollowedByTheTemplateTokens() async throws {
+        let tokenizer = DeterministicTokenizer(bosId: 7)
+        let processor = try makeProcessor(tokenizer: tokenizer)
+        let input = UserInput(
+            prompt: "document parsing.",
+            images: [.ciImage(makeSolidImage(width: 200, height: 200, color: .red))],
+            additionalContext: DeepseekOCRProcessor.modeContext(.base))
+
+        let prepared = try await processor.internalPrepare(input: input)
+
+        let ids = prepared.inputIds.asArray(Int32.self).map(Int.init)
+        let template = try tokenizer.applyChatTemplate(
+            messages: DeepseekOCRMessageGenerator().generate(from: input))
+        XCTAssertEqual(template, [999, 21, 22], "the template itself must not carry BOS")
+        XCTAssertEqual(ids.first, 7, "BOS comes from the tokenizer, not Python's literal 0")
+        XCTAssertEqual(prepared.imagesSeqMask[0, 0].item(Bool.self), false)
+        // Template tokens follow unchanged; only the placeholder expands to the lattice.
+        XCTAssertEqual(ids.filter { $0 != 999 }, [7] + template.filter { $0 != 999 })
+        XCTAssertEqual(ids.count(where: { $0 == 999 }), 111)
+    }
+
+    func testTextOnlyPromptStartsWithTheTokenizerBOSFollowedByTheTemplateTokens() async throws {
+        let tokenizer = DeterministicTokenizer(bosId: 7)
+        let processor = try makeProcessor(tokenizer: tokenizer)
+        let input = UserInput(prompt: "document parsing.")
+
+        let lmInput = try await processor.prepare(input: input)
+
+        let template = try tokenizer.applyChatTemplate(
+            messages: DeepseekOCRMessageGenerator().generate(from: input))
+        XCTAssertEqual(template, [20, 21], "the template itself must not carry BOS")
+        XCTAssertEqual(lmInput.text.tokens.asArray(Int32.self).map(Int.init), [7] + template)
+    }
+
+    /// A chat template that renders `bos_token` itself must not get a second BOS.
+    func testTemplateThatRendersBOSGetsExactlyOneBOS() async throws {
+        let tokenizer = DeterministicTokenizer(bosId: 7, templateEmitsBOS: true)
+        let processor = try makeProcessor(tokenizer: tokenizer)
+        let input = UserInput(prompt: "document parsing.")
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertEqual(lmInput.text.tokens.asArray(Int32.self).map(Int.init), [7, 20, 21])
+    }
+
+    /// Python hard-codes `bos_id = 0`; that literal is the fallback for a tokenizer that
+    /// reports no BOS token.
+    func testTokenizerWithoutBOSFallsBackToPythonsLiteralZero() async throws {
+        let processor = try makeProcessor(tokenizer: DeterministicTokenizer(bosId: nil))
+        let input = UserInput(prompt: "document parsing.")
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertEqual(lmInput.text.tokens.asArray(Int32.self).map(Int.init), [0, 20, 21])
     }
 
     /// End to end: a text-only prompt prefilled through the model (R-SWA ring caches, as on
@@ -510,6 +569,12 @@ private final class ProbeLinear: Linear {
 }
 
 private struct DeterministicTokenizer: Tokenizer {
+    /// Id reported for the BOS token; `nil` models a tokenizer without one.
+    var bosId: Int? = 0
+    /// Whether the chat template renders `bos_token` at its head. Off by default, as
+    /// swift-transformers encodes the rendered template with `addSpecialTokens: false`.
+    var templateEmitsBOS = false
+
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         guard !text.isEmpty else { return [] }
         // Split on whitespace but keep DeepSeek special tokens as atomic pieces
@@ -555,14 +620,14 @@ private struct DeterministicTokenizer: Tokenizer {
         }
         switch token {
         case "<image>": return 999
-        case "<s>": return 0
+        case "<s>": return bosId
         default: return nil
         }
     }
 
     func convertIdToToken(_ id: Int) -> String? { nil }
 
-    var bosToken: String? { "<s>" }
+    var bosToken: String? { bosId == nil ? nil : "<s>" }
     var eosToken: String? { nil }
     var unknownToken: String? { nil }
 
@@ -571,7 +636,10 @@ private struct DeterministicTokenizer: Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        var ids = [0]
+        var ids = [Int]()
+        if templateEmitsBOS, let bosId {
+            ids.append(bosId)
+        }
         for message in messages {
             // The production DeepSeek/Unlimited template renders message.content directly.
             // It does not translate Qwen-style structured image parts into <image>.
