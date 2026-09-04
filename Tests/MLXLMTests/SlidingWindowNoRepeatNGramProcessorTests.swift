@@ -79,8 +79,11 @@ public class SlidingWindowNoRepeatNGramProcessorTests: XCTestCase {
         var processor = SlidingWindowNoRepeatNGramProcessor(ngramSize: 3, windowSize: 100)
         processor.prompt(MLXArray([0, 1, 2, 0]))
 
-        // A token whose evaluation materializes a 32 MB intermediate that the test
-        // keeps alive, so `activeMemory` reveals whether the token was evaluated.
+        // Allocator-accounting probe: the token's graph carries a 32 MB intermediate
+        // that the test keeps alive, so `activeMemory` grows by the whole probe once
+        // the token is evaluated (an eager readback lands a few bytes above
+        // `probeBytes`), while the lazy path allocates only kilobytes of its own.
+        // Half the probe is the bound so neither side sits near the threshold.
         let elements = 8 * 1024 * 1024
         let probeBytes = elements * MemoryLayout<Int32>.size
         let probe = MLXArray.arange(elements, dtype: .int32)
@@ -92,7 +95,7 @@ public class SlidingWindowNoRepeatNGramProcessorTests: XCTestCase {
         let processed = processor.process(logits: logits)
 
         XCTAssertLessThan(
-            Memory.activeMemory - before, probeBytes,
+            Memory.activeMemory - before, probeBytes / 2,
             "didSample/process must not evaluate the sampled token")
 
         // Positive control: consuming the logits evaluates the token and the probe.

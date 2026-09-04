@@ -195,11 +195,13 @@ private struct LayerParityTokenizer: Tokenizer {
     var eosToken: String? { nil }
     var unknownToken: String? { nil }
 
+    /// BOS-free like a rendered template encoded without special tokens; the
+    /// processor prepends the tokenizer's BOS (`<s>` = 0) itself.
     func applyChatTemplate(
         messages: [[String: any Sendable]],
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        [0, 20, 999]
+        [20, 999]
     }
 }
