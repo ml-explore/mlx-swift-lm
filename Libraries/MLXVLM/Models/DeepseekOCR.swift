@@ -499,7 +499,10 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
         public let pixelValues: MLXArray
         public let localCrops: MLXArray
         public let imagesSeqMask: MLXArray
-        public let imagesSpatialCrop: MLXArray
+        /// One tile grid per page, `THW(tiles, tilesHigh, tilesWide)`: the Python
+        /// `images_spatial_crop` row `(width_crop_num, height_crop_num)` kept as Swift
+        /// ints so the model never reads crop dimensions back from an array.
+        public let imagesSpatialCrop: [THW]
         public let mode: Mode
     }
 
@@ -843,7 +846,7 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
 
         var pixelList = [MLXArray]()
         var localCropList = [MLXArray]()
-        var spatialPairs = [Int32]()
+        var spatialCrops = [THW]()
         var imagePromptTokens = [[Int]]()
 
         for media in input.images {
@@ -852,7 +855,8 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
                 image: image, mode: mode, maxNumTiles: maxNumTiles, basePadSide: basePadSide)
             pixelList.append(encoded.pixelValues)
             localCropList.append(contentsOf: encoded.localCrops)
-            spatialPairs.append(contentsOf: [Int32(encoded.cropWidth), Int32(encoded.cropHeight)])
+            spatialCrops.append(
+                THW(encoded.cropWidth * encoded.cropHeight, encoded.cropHeight, encoded.cropWidth))
 
             imagePromptTokens.append(
                 makeImagePromptTokens(
@@ -895,14 +899,13 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             pixelList.count == 1
             ? pixelList[0]
             : concatenated(pixelList, axis: 0)
-        let spatial = MLXArray(spatialPairs).reshaped(input.images.count, 2)
 
         return .init(
             inputIds: inputIds(tokenized),
             pixelValues: pixelValues,
             localCrops: localCrops,
             imagesSeqMask: MLXArray(sequenceMask).reshaped(1, sequenceMask.count),
-            imagesSpatialCrop: spatial,
+            imagesSpatialCrop: spatialCrops,
             mode: mode)
     }
 
@@ -916,41 +919,15 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
 
         let prepared = try await internalPrepare(input: input)
         let mask = ones(like: prepared.inputIds).asType(.int8)
-        let spatial = prepared.imagesSpatialCrop
-        var hasLocalCrops = false
-        for page in 0 ..< spatial.dim(0) {
-            let cropWidth = spatial[page, 0].item(Int.self)
-            let cropHeight = spatial[page, 1].item(Int.self)
-            if cropWidth > 1 || cropHeight > 1 {
-                hasLocalCrops = true
-                break
-            }
-        }
+        let hasLocalCrops = prepared.imagesSpatialCrop.contains { $0.w > 1 || $0.h > 1 }
 
-        // Pack gundam locals through `video` and spatial crop through `positionIds`
-        // so DeepseekOCR.prepare can assemble features without extending LMInput.
-        // Multipage: positionIds is [N, 2]; video pixels are concatenated locals.
+        // `image.frames` carries one tile grid per page (`THW(tiles, tilesHigh, tilesWide)`)
+        // and `video.pixels` the gundam local tiles of every page, concatenated in page
+        // order, so DeepseekOCR.prepare can assemble features without extending LMInput.
         return LMInput(
             text: .init(tokens: prepared.inputIds, mask: mask),
-            image: .init(
-                pixels: prepared.pixelValues,
-                positionIds: prepared.imagesSpatialCrop,
-                frames: [
-                    THW(
-                        prepared.pixelValues.dim(0),
-                        prepared.pixelValues.dim(2),
-                        prepared.pixelValues.dim(3))
-                ]),
-            video: hasLocalCrops
-                ? .init(
-                    pixels: prepared.localCrops,
-                    frames: [
-                        THW(
-                            prepared.localCrops.dim(0),
-                            spatial[0, 0].item(Int.self),
-                            spatial[0, 1].item(Int.self))
-                    ])
-                : nil)
+            image: .init(pixels: prepared.pixelValues, frames: prepared.imagesSpatialCrop),
+            video: hasLocalCrops ? .init(pixels: prepared.localCrops) : nil)
     }
 }
 
@@ -1038,13 +1015,10 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
             // Processor / MediaProcessing emit NCHW [B,C,H,W]; MLX Conv2d wants NHWC.
             let globalPixels = nchwToNhwc(pixels)
             let localPixels = input.video.map { nchwToNhwc($0.pixels.asType(pixels.dtype)) }
-            let spatial =
-                input.image?.positionIds
-                ?? MLXArray([Int32(1), Int32(1)]).reshaped(1, 2)
             let imageFeatures = getImageFeatures(
                 globalPixels: globalPixels,
                 localPixels: localPixels,
-                spatialCrops: spatial)
+                tileGrids: input.image?.frames ?? [])
             embeddings = mergeInputIdsWithImageFeatures(
                 inputIds: input.text.tokens, imageFeatures: imageFeatures)
         } else {
@@ -1246,20 +1220,20 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         return concatenated([featuresHW, newlineBroadcast], axis: 1).reshaped(-1, hiddenSize)
     }
 
+    /// - Parameter tileGrids: per-page `THW(tiles, tilesHigh, tilesWide)` from
+    ///   `LMInput.ProcessedImage.frames`; a page without an entry has no local tiles.
     private func getImageFeatures(
         globalPixels: MLXArray,
         localPixels: MLXArray?,
-        spatialCrops: MLXArray
+        tileGrids: [THW]
     ) -> MLXArray {
         let numImages = max(globalPixels.dim(0), 1)
         var pageFeatures = [MLXArray]()
         var patchIdx = 0
 
         for page in 0 ..< numImages {
-            let cropWidth =
-                page < spatialCrops.dim(0) ? spatialCrops[page, 0].item(Int.self) : 1
-            let cropHeight =
-                page < spatialCrops.dim(0) ? spatialCrops[page, 1].item(Int.self) : 1
+            let cropWidth = page < tileGrids.count ? tileGrids[page].w : 1
+            let cropHeight = page < tileGrids.count ? tileGrids[page].h : 1
             let hasLocal =
                 (cropWidth > 1 || cropHeight > 1)
                 && localPixels != nil
@@ -1315,26 +1289,20 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
         projector(fusedVisionFeatures(pixelValues))
     }
 
-    private func mergeInputIdsWithImageFeatures(inputIds: MLXArray, imageFeatures: MLXArray)
+    /// Python `get_input_embeddings` (deepseekocr.py) assigns the page features to
+    /// the image-token positions in order: `input_embeds[idx, image_indices] =
+    /// features`. The k-th image token therefore takes feature k, which is indexed
+    /// here by the running count of image tokens so the prefill graph never reads a
+    /// position back from the GPU.
+    func mergeInputIdsWithImageFeatures(inputIds: MLXArray, imageFeatures: MLXArray)
         -> MLXArray
     {
         let textEmbeddings = languageModel.embedTokens(inputIds)
         let imageMask = inputIds .== config.baseConfiguration.imageTokenId
-        let seqLen = textEmbeddings.dim(1)
-        let imageTokenCount = imageFeatures.dim(1)
-        let firstImageIndex = argMax(imageMask.asType(.int32), axis: 1)[0].item(Int.self)
-        let prePad = firstImageIndex
-        let postPad = max(0, seqLen - firstImageIndex - imageTokenCount)
-
-        var paddedImageFeatures = imageFeatures
-        if prePad > 0 || postPad > 0 {
-            paddedImageFeatures = padded(imageFeatures, widths: [0, .init((prePad, postPad)), 0])
-        }
-        if paddedImageFeatures.dim(1) > seqLen {
-            paddedImageFeatures = paddedImageFeatures[0..., ..<seqLen, 0...]
-        }
-
-        return which(imageMask[.ellipsis, .newAxis], paddedImageFeatures, textEmbeddings)
+        let featureIndex = clip(
+            cumsum(imageMask.asType(.int32), axis: 1) - 1, min: 0, max: imageFeatures.dim(1) - 1)
+        let imageEmbeddings = takeAlong(imageFeatures, featureIndex[.ellipsis, .newAxis], axis: 1)
+        return which(imageMask[.ellipsis, .newAxis], imageEmbeddings, textEmbeddings)
     }
 
     @_spi(Testing)
@@ -1941,14 +1909,6 @@ private struct ClipVisionConfig {
     let imageSize = 224
     let patchSize = 14
     let layerNormEps: Float = 1e-5
-}
-
-private func quickGelu(_ x: MLXArray) -> MLXArray {
-    x * sigmoid(1.702 * x)
-}
-
-private func clippedSilu(_ x: MLXArray) -> MLXArray {
-    clip(x * sigmoid(x), min: -100, max: 100)
 }
 
 private final class ClipVisionEmbeddings: Module {

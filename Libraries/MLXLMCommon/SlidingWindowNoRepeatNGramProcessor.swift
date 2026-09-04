@@ -33,9 +33,15 @@ public struct SlidingWindowNoRepeatNGramProcessor: LogitProcessor {
     public let windowSize: Int
     public let whitelistTokenIds: Set<Int>
 
-    /// Full prompt + generated token history (CPU), matching transformers'
-    /// `input_ids` passed to the Python logits processor each step.
-    private var tokens: [Int] = []
+    /// The last `windowSize` prompt + generated tokens, GPU-resident. Only n-grams
+    /// inside this window can ban a token, so the window is the whole history the
+    /// scan needs (the Python processor slices the same suffix of `input_ids`).
+    private var ring: TokenRing
+    /// Row `i` gathers the `(ngramSize - 1)`-token prefix of the n-gram that starts
+    /// at history position `i`; ``process(logits:)`` slices it to the current length.
+    private let prefixIndices: MLXArray
+    /// `whitelistTokenIds` as an `int32` vector, or `nil` when empty.
+    private let whitelist: MLXArray?
 
     public init(
         ngramSize: Int,
@@ -47,6 +53,13 @@ public struct SlidingWindowNoRepeatNGramProcessor: LogitProcessor {
         self.ngramSize = ngramSize
         self.windowSize = windowSize
         self.whitelistTokenIds = whitelistTokenIds
+        self.ring = TokenRing(capacity: windowSize)
+        let ngramStarts = MLXArray.arange(max(0, windowSize - ngramSize + 1))
+        self.prefixIndices =
+            ngramStarts[0..., .newAxis] + MLXArray.arange(ngramSize - 1)[.newAxis, 0...]
+        self.whitelist =
+            whitelistTokenIds.isEmpty
+            ? nil : MLXArray(whitelistTokenIds.sorted().map { Int32($0) })
     }
 
     /// Convenience for Unlimited-OCR single-image example settings (`n=35`, window `128`).
@@ -72,28 +85,51 @@ public struct SlidingWindowNoRepeatNGramProcessor: LogitProcessor {
     }
 
     public mutating func prompt(_ prompt: MLXArray) {
-        tokens = prompt.asArray(Int.self)
+        ring.loadPrompt(prompt)
     }
 
+    /// Bans the n-gram completions entirely on the GPU.
+    ///
+    /// Nothing here reads a token back to the CPU: the history, the prefix match
+    /// and the scatter of `-inf` are lazy ops on the same stream as the logits, so
+    /// the sampled token `TokenIterator` hands to ``didSample(token:)`` stays in
+    /// flight and the one-step pipeline lookahead is preserved. The only host-side
+    /// value used is the ring's element count.
     public func process(logits: MLXArray) -> MLXArray {
-        let banned = bannedTokens(in: tokens)
-        guard !banned.isEmpty else { return logits }
+        let historyLength = ring.count
+        guard historyLength >= ngramSize, let history = ring.orderedTokens else {
+            return logits
+        }
 
-        let bannedList = Array(banned)
-        let indices = MLXArray(bannedList.map { Int32($0) }).asType(.uint32)[.newAxis, 0...]
-        let negInf = MLXArray(Array(repeating: -Float.infinity as Float, count: bannedList.count))[
-            .newAxis, 0...
-        ]
-        // Match dtype of incoming logits (bf16 decode path is common).
-        return putAlong(logits, indices, values: negInf.asType(logits.dtype), axis: -1)
+        // The n-gram starting at position i has prefix history[i ..< i + n - 1] and
+        // completion history[i + n - 1]; the current prefix is the last n - 1 tokens.
+        let ngramCount = historyLength - ngramSize + 1
+        let prefixes = history[prefixIndices[..<ngramCount]]
+        let currentPrefix = history[ngramCount...]
+        let completions = history[(ngramSize - 1)...]
+        var matches = (prefixes .== currentPrefix).all(axis: 1)
+        if let whitelist {
+            let whitelisted = (completions[0..., .newAxis] .== whitelist[.newAxis, 0...])
+                .any(axis: 1)
+            matches = logicalAnd(matches, logicalNot(whitelisted))
+        }
+
+        // A token may complete several matching n-grams: accumulate with scatter-add
+        // (well-defined for duplicate indices) rather than writing -inf per match.
+        let banned =
+            MLXArray.zeros([logits.dim(-1)], type: Int32.self)
+            .at[completions].add(matches.asType(.int32)) .> 0
+        let negInf = MLXArray(-Float.infinity).asType(logits.dtype)
+        return which(banned[.newAxis, 0...], negInf, logits)
     }
 
     public mutating func didSample(token: MLXArray) {
-        tokens.append(token.item(Int.self))
+        ring.append(token)
     }
 
-    /// Tokens that would complete a repeated n-gram given the current history.
-    /// Exposed for unit tests.
+    /// CPU reference of the ban rule that ``process(logits:)`` evaluates on the GPU:
+    /// tokens that would complete a repeated n-gram given `history`. Used by the
+    /// equivalence tests.
     public func bannedTokens(in history: [Int]) -> Set<Int> {
         guard history.count >= ngramSize else { return [] }
 

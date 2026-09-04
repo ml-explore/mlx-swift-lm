@@ -26,8 +26,8 @@ final class DeepseekOCRLayerParityTests: XCTestCase {
         XCTAssertEqual(Array(prepared.pixelValues.shape), processorGolden.globalPixels.shape)
         XCTAssertEqual(Array(prepared.localCrops.shape), processorGolden.localCrops.shape)
         XCTAssertEqual(
-            prepared.imagesSpatialCrop.asArray(Int32.self).map(Int.init),
-            processorGolden.imagesSpatialCrop.flatMap { $0 })
+            prepared.imagesSpatialCrop.map { [$0.w, $0.h] },
+            processorGolden.imagesSpatialCrop)
         XCTAssertLessThan(
             prepared.pixelValues.asType(.float32).sum().item(Float.self), 0,
             "normalized red fixture should yield negative pixel sum")

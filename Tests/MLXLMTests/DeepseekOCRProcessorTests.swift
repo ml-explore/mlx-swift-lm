@@ -52,7 +52,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(prepared.mode, .gundam)
         XCTAssertEqual(prepared.pixelValues.shape, [1, 3, 1024, 1024])
         XCTAssertEqual(prepared.localCrops.shape, [2, 3, 640, 640])
-        XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [2, 1])
+        XCTAssertEqual(prepared.imagesSpatialCrop.map { [$0.w, $0.h] }, [[2, 1]])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 483)
         // Chat-template tokens with its image placeholder expanded to the lattice.
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
@@ -89,7 +89,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
 
         XCTAssertEqual(prepared.mode, .base)
         XCTAssertEqual(prepared.pixelValues.shape, [1, 3, 640, 640])
-        XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [1, 1])
+        XCTAssertEqual(prepared.imagesSpatialCrop.map { [$0.w, $0.h] }, [[1, 1]])
         XCTAssertEqual(prepared.localCrops.shape, [1, 3, 1024, 1024])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 111)
         XCTAssertEqual(prepared.inputIds.shape[0], 1)
@@ -107,7 +107,8 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         let lmInput = try await processor.prepare(input: input)
 
         XCTAssertEqual(lmInput.image?.pixels.shape, [1, 3, 640, 640])
-        XCTAssertEqual(lmInput.image?.positionIds?.asArray(Int32.self), [1, 1])
+        XCTAssertEqual(lmInput.image?.frames?.map { [$0.t, $0.h, $0.w] }, [[1, 1, 1]])
+        XCTAssertNil(lmInput.image?.positionIds)
         XCTAssertNil(lmInput.video, "base mode must not pack gundam local crops into video")
     }
 
@@ -120,8 +121,87 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         let lmInput = try await processor.prepare(input: input)
 
         XCTAssertEqual(lmInput.image?.pixels.shape, [1, 3, 1024, 1024])
-        XCTAssertEqual(lmInput.image?.positionIds?.asArray(Int32.self), [2, 1])
+        // One tile grid per page: (tiles, tilesHigh, tilesWide) for the 800×400 page.
+        XCTAssertEqual(lmInput.image?.frames?.map { [$0.t, $0.h, $0.w] }, [[2, 1, 2]])
+        XCTAssertNil(lmInput.image?.positionIds)
         XCTAssertEqual(lmInput.video?.pixels.shape, [2, 3, 640, 640])
+    }
+
+    func testPrepareCarriesOneTileGridPerPageInImageFrames() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "Multi page parsing.",
+            images: [
+                .ciImage(makeSolidImage(width: 800, height: 400, color: .red)),
+                .ciImage(makeSolidImage(width: 400, height: 800, color: .blue)),
+            ])
+
+        let lmInput = try await processor.prepare(input: input)
+
+        XCTAssertEqual(lmInput.image?.pixels.shape, [2, 3, 1024, 1024])
+        XCTAssertEqual(
+            lmInput.image?.frames?.map { [$0.t, $0.h, $0.w] }, [[2, 1, 2], [2, 2, 1]],
+            "landscape page tiles 2 wide, portrait page tiles 2 high")
+        XCTAssertEqual(
+            lmInput.video?.pixels.shape, [4, 3, 640, 640],
+            "local tiles of both pages are concatenated in page order")
+    }
+
+    /// The model reads each page's tile grid from `image.frames`: a hand-built LMInput
+    /// with a 2×1 grid must send the two local tiles through the projector as one batch,
+    /// after the global view. The projector probe records shapes without evaluating.
+    func testPrefillDerivesLocalTileBatchFromImageFrames() throws {
+        let model = try makeModel()
+        let probe = ProbeLinear(2048, 32)
+        model.update(modules: ModuleChildren.unflattened([("projector.layers", probe as Module)]))
+
+        let tokens = MLXArray([Int32(0), Int32(20), Int32(21)]).reshaped(1, 3)
+        let lmInput = LMInput(
+            text: .init(tokens: tokens, mask: ones(like: tokens).asType(.int8)),
+            image: .init(pixels: zeros([1, 3, 1024, 1024]), frames: [THW(2, 1, 2)]),
+            video: .init(pixels: zeros([2, 3, 640, 640])))
+
+        let result = try model.prepare(
+            lmInput, cache: try model.newCache(parameters: nil), state: nil, prefill: .init())
+        guard case .logits = result else {
+            return XCTFail("expected prefill logits, got \(result)")
+        }
+
+        // 1024² global view → 256 fused tokens; the 640² tiles → 100 tokens each.
+        XCTAssertEqual(probe.inputShapes, [[1, 256, 2048], [2, 100, 2048]])
+    }
+
+    /// Python `get_input_embeddings` assigns `input_embeds[idx, image_indices] = features`:
+    /// the k-th image token takes feature k even when text separates the page lattices
+    /// (one `<image>` placeholder per page), which a first-index pad would misalign.
+    func testMergeAssignsImageFeaturesToImageTokenPositionsInOrder() throws {
+        let model = try makeModel(configJSON: Self.mergeModelConfigJSON)
+        let image = 999
+        let ids = [5, image, image, image, 6, image, image, 7]
+        let inputIds = MLXArray(ids.map { Int32($0) }).reshaped(1, ids.count)
+        let hiddenSize = 32
+        let features = stacked((0 ..< 5).map { MLXArray.ones([hiddenSize]) * Float($0 + 1) })[
+            .newAxis]
+
+        let merged = model.mergeInputIdsWithImageFeatures(
+            inputIds: inputIds, imageFeatures: features)
+
+        let embedding = try XCTUnwrap(
+            model.parameters().flattened().first { $0.0 == "model.embed_tokens.weight" }?.1)
+        XCTAssertEqual(merged.shape, [1, ids.count, hiddenSize])
+        var featureIndex = 0
+        for (position, token) in ids.enumerated() {
+            let expected: MLXArray
+            if token == image {
+                expected = features[0, featureIndex]
+                featureIndex += 1
+            } else {
+                expected = embedding[token]
+            }
+            XCTAssertTrue(
+                allClose(merged[0, position], expected).item(Bool.self),
+                "position \(position) (token \(token)) must carry feature/embedding")
+        }
     }
 
     func testPrepareTextOnlyReturnsChatTemplateTokensWithoutAnImage() async throws {
@@ -217,8 +297,7 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(prepared.mode, .base)
         // Unlimited multipage base = 1024² (273 image tokens / page), not single-page 640.
         XCTAssertEqual(prepared.pixelValues.shape, [2, 3, 1024, 1024])
-        XCTAssertEqual(prepared.imagesSpatialCrop.shape, [2, 2])
-        XCTAssertEqual(prepared.imagesSpatialCrop.asArray(Int32.self), [1, 1, 1, 1])
+        XCTAssertEqual(prepared.imagesSpatialCrop.map { [$0.w, $0.h] }, [[1, 1], [1, 1]])
         XCTAssertEqual(prepared.imagesSeqMask.asType(.int32).sum().item(Int.self), 546)
         XCTAssertEqual(prepared.inputIds[0, 0].item(Int.self), 0)
         XCTAssertEqual(prepared.imagesSeqMask[0, 0].item(Bool.self), false)
@@ -226,7 +305,8 @@ final class DeepseekOCRProcessorTests: XCTestCase {
 
         let lmInput = try await processor.prepare(input: input)
         XCTAssertEqual(lmInput.image?.pixels.shape, [2, 3, 1024, 1024])
-        XCTAssertEqual(lmInput.image?.positionIds?.shape, [2, 2])
+        XCTAssertEqual(
+            lmInput.image?.frames?.map { [$0.t, $0.h, $0.w] }, [[1, 1, 1], [1, 1, 1]])
         XCTAssertNil(lmInput.video, "multipage base must not pack local crops")
     }
 
@@ -332,10 +412,12 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
     }
 
-    private func makeModel() throws -> DeepseekOCR {
+    private func makeModel(configJSON: String = DeepseekOCRProcessorTests.modelConfigJSON)
+        throws -> DeepseekOCR
+    {
         let config = try JSONDecoder().decode(
             DeepseekOCRConfiguration.self,
-            from: Data(Self.modelConfigJSON.utf8))
+            from: Data(configJSON.utf8))
         return DeepseekOCR(config)
     }
 
@@ -367,6 +449,33 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         }
         """#
 
+    /// Same geometry with a vocabulary that contains the test tokenizer's `<image>` id.
+    private static let mergeModelConfigJSON = #"""
+        {
+         "model_type": "deepseekocr",
+         "image_token_id": 999,
+         "vision_config": {
+          "hidden_size": 768,
+          "output_channels": 256,
+          "num_hidden_layers": 12,
+          "num_attention_heads": 12,
+          "image_size": 1024,
+          "patch_size": 16,
+          "global_attn_indexes": [2, 5, 8, 11],
+          "mlp_dim": 3072
+         },
+         "language_config": {
+          "vocab_size": 1000,
+          "hidden_size": 32,
+          "intermediate_size": 64,
+          "num_hidden_layers": 1,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 4,
+          "max_position_embeddings": 32
+         }
+        }
+        """#
+
     private static let processorConfigJSON = #"""
         {
          "candidate_resolutions": [[1024, 1024]],
@@ -383,12 +492,14 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         """#
 }
 
-/// A `Linear` that counts how often it is applied.
+/// A `Linear` that counts how often it is applied and records its input shapes.
 private final class ProbeLinear: Linear {
     var callCount = 0
+    var inputShapes = [[Int]]()
 
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
         callCount += 1
+        inputShapes.append(x.shape)
         return super.callAsFunction(x)
     }
 }
