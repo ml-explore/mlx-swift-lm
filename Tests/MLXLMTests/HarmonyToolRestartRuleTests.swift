@@ -40,16 +40,15 @@ struct HarmonyToolRestartRuleTests {
     }
 
     private func alignedCache(
-        _ cached: [Int], processed: Int? = nil, hasDraft: Bool = false,
-        draftAligned: Bool = true
+        _ cached: [Int], processed: Int? = nil,
+        speculativeReuseCapability: SpeculativeCacheReuseCapability = .unavailable
     ) -> PromptCacheState {
         let processedTokenCount = processed ?? cached.count
         return PromptCacheState(
             cachedTokens: cached,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            hasDraftCache: hasDraft,
-            draftCacheIsAligned: draftAligned,
+            speculativeReuseCapability: speculativeReuseCapability,
             isTrimmable: true)
     }
 
@@ -105,7 +104,7 @@ struct HarmonyToolRestartRuleTests {
             turn: toolRestart(
                 prompt: [1, 2, Self.callToken, 40], usesSpeculativeDecoding: true),
             cache: alignedCache(
-                [1, 2, 77, Self.callToken], hasDraft: true, draftAligned: false))
+                [1, 2, 77, Self.callToken], speculativeReuseCapability: .unavailable))
 
         #expect(
             decision

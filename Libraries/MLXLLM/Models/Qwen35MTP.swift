@@ -65,7 +65,7 @@ final class Qwen35MTPPredictor: Module {
     }
 }
 
-public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
+public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel {
     public let configuration: Qwen35TextConfiguration
     public let maximumBlockSize: Int? = 2
     public let requiresSharedTargetKV = false
@@ -90,6 +90,35 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
         preconvertedNorms: Bool = false
     ) {
         self.init(configuration.textConfig, preconvertedNorms: preconvertedNorms)
+    }
+
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        let targetConfiguration: Qwen35TextConfiguration
+        switch target {
+        case let target as Qwen35Model:
+            targetConfiguration = target.languageModel.configuration
+        case let target as Qwen35TextModel:
+            targetConfiguration = target.configuration
+        default:
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35MTPDraftModel",
+                expected: "a Qwen3.5 text target",
+                actual: String(describing: type(of: target))
+            )
+        }
+
+        guard
+            targetConfiguration.hiddenSize == configuration.hiddenSize,
+            targetConfiguration.vocabularySize == configuration.vocabularySize
+        else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35MTPDraftModel",
+                expected: "a Qwen3.5 text target with hidden size \(configuration.hiddenSize) "
+                    + "and vocabulary size \(configuration.vocabularySize)",
+                actual: "\(type(of: target)) with hidden size \(targetConfiguration.hiddenSize) "
+                    + "and vocabulary size \(targetConfiguration.vocabularySize)"
+            )
+        }
     }
 
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
@@ -125,6 +154,57 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
             hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
             lmHead: lmHead, sampler: sampler)
         state.proposalAppended = 0
+    }
+
+    public func finalizeDrafterState(
+        target _: any LanguageModel,
+        targetBoundaryHidden _: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool {
+        finalizeShiftedMTPDrafterState(
+            targetProcessedTokenCount: targetProcessedTokenCount,
+            discardedTargetTokens: discardedTargetTokens,
+            state: &state)
+    }
+
+    public func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool {
+        let suffix = normalizedMTPTokenBatch(suffixTokens)
+        let suffixLength = suffix.dim(-1)
+        guard suffixLength > 0,
+            suffixTargetHidden.dim(1) >= suffixLength,
+            targetBoundaryHidden.dim(1) == 1,
+            state.proposalAppended == 0,
+            state.cache.allSatisfy({ $0.offset == state.nextPosition })
+        else { return false }
+
+        let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
+        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
+        let tokens = concatenated(
+            [suffix, normalizedMTPColumn(firstBonus)], axis: 1)
+        let hiddens = concatenated(
+            [targetBoundaryHidden, suffixTargetHidden[0..., ..<suffixLength, 0...]], axis: 1)
+        let mtpHidden = mtp(
+            inputsEmbeds: inputEmbedding(tokens), hiddenStates: hiddens,
+            cache: state.cache, positionOffset: state.nextPosition)
+        state.nextPosition += tokens.dim(1)
+        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
+        state.seedToken = sampleMTPSeed(
+            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
+            lmHead: lmHead, sampler: sampler)
+        state.proposalAppended = 0
+        return state.cache.allSatisfy { $0.offset == state.nextPosition }
     }
 
     public func draftBlock(

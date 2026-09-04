@@ -55,7 +55,7 @@ struct OnyxToolRestartRule: PromptCacheReuseRule {
         let represented = cache.cachedTokens + turn.promptTokens[suffixStart...]
         let draftCanContinue =
             !turn.usesSpeculativeDecoding
-            || (cache.hasDraftCache && cache.draftCacheIsAligned)
+            || cache.speculativeReuseCapability.canContinueWithoutRebuild
         return draftCanContinue
             ? .appendSuffix(suffixStart: suffixStart, representedTokens: represented)
             : .appendSuffixToMain(suffixStart: suffixStart, representedTokens: represented)
