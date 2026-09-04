@@ -6,6 +6,7 @@ import Testing
 
 private let cacheCreators: [@Sendable () -> any KVCache] = [
     { KVCacheSimple() },
+    { FixedCapacityKVCache(maxTokens: 64) },
     { RotatingKVCache(maxSize: 32) },
     { QuantizedKVCache() },
     { VarianceNormalizedKVCache(tileSize: 32, keyBits: 4, valueBits: 4) },
@@ -233,6 +234,25 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         #expect(lhs.metaState == rhs.metaState)
         assertArraysClose(lhs.state, rhs.state)
     }
+}
+
+@Test func testFixedCapacityKVCacheAsymmetricStateRoundTrip() throws {
+    let cache = FixedCapacityKVCache(maxTokens: 8)
+    cache.state = [
+        MLXArray.ones([1, 2, 3, 6], dtype: .float16),
+        MLXArray.ones([1, 2, 3, 4], dtype: .float16) * 2,
+    ]
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache])
+    let (loaded, _) = try loadPromptCache(url: url)
+    let restored = try #require(loaded.first as? FixedCapacityKVCache)
+
+    #expect(restored.maxTokens == 8)
+    #expect(restored.innerState()[0].shape == [1, 2, 8, 6])
+    #expect(restored.innerState()[1].shape == [1, 2, 8, 4])
+    assertArraysClose(restored.state, cache.state)
 }
 
 @Test func testPromptCacheStateRoundTrip() throws {
@@ -603,6 +623,10 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
             className: "VarianceNormalizedKVCache", arrayCount: 8,
             metadata: ["32", "31", "4", "4", "2", "1", "0"]),
         .init(className: "ChunkedKVCache", arrayCount: 0, metadata: ["invalid", "0"]),
+        .init(className: "FixedCapacityKVCache", arrayCount: 0, metadata: ["0"]),
+        .init(
+            className: "FixedCapacityKVCache", arrayCount: 2, metadata: ["1"],
+            arrayShape: [1, 1, 2, 4]),
     ])
 }
 

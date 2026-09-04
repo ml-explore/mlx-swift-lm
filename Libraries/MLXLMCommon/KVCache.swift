@@ -53,6 +53,14 @@ public protocol KVCache: Evaluatable {
     /// get the maximum size (if any)
     var maxSize: Int? { get }
 
+    /// Whether attention against this cache must always be masked, including
+    /// single-token decode.
+    ///
+    /// Fixed-capacity caches return unwritten slots alongside written keys and
+    /// values. Those caches use this requirement to make the shared mask helpers
+    /// delegate every call to ``makeMask(n:windowSize:returnArray:)``.
+    var requiresAttentionMask: Bool { get }
+
     /// update the cache with new keys and values and return all keys/values
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
 
@@ -106,6 +114,19 @@ public protocol KVCache: Evaluatable {
 extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
+    }
+
+    /// Whether attention against this cache must always be masked, including
+    /// single-token decode.
+    ///
+    /// `true` for caches whose ``KVCache/update(keys:values:)`` returns buffers
+    /// that contain unwritten slots -- e.g. the fixed-capacity
+    /// ``FixedCapacityKVCache`` -- so the shared mask helpers delegate mask
+    /// construction to the cache itself instead of assuming a tight buffer.
+    /// Caches that only ever return written keys/values leave this `false` and
+    /// keep the historic behavior.
+    public var requiresAttentionMask: Bool {
+        false
     }
 
     public func isTrimmable(after positions: Int) -> Bool {
@@ -323,6 +344,15 @@ public func makeAttentionMask(
 @_disfavoredOverload
 public func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
     let t = h.dim(1)
+    if let c = cache?.first, c.requiresAttentionMask {
+        // Full-capacity caches must mask every call, decode steps included:
+        // a nil mask would attend to unwritten slots.
+        guard case .array(let mask) = c.makeMask(n: t, windowSize: nil, returnArray: true)
+        else {
+            return nil
+        }
+        return mask
+    }
     if t > 1 {
         var offset = 0
         if let c = cache?.first {
@@ -341,6 +371,11 @@ public func createAttentionMask(h: MLXArray, cache: [KVCache]?, returnArray: Boo
     -> MLXFast.ScaledDotProductAttentionMaskMode
 {
     let t = h.dim(1)
+    if let c = cache?.first, c.requiresAttentionMask {
+        // Full-capacity caches own mask construction at every length; see
+        // ``KVCache/requiresAttentionMask``.
+        return c.makeMask(n: t, windowSize: nil, returnArray: returnArray)
+    }
     if t > 1 {
         var returnArray = returnArray
         var offset = 0
@@ -1763,6 +1798,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
+    case is FixedCapacityKVCache: return "FixedCapacityKVCache"
     case is CacheList: return "CacheList"
     default: return "KVCache"
     }
@@ -2219,6 +2255,36 @@ private func restoreCacheFromMetaState(
             bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
         cache.state = state
         cache.metaState = metaState
+        return cache
+
+    case "FixedCapacityKVCache":
+        try validatePromptCache(
+            className: className, state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [1])
+        guard metaState.count == 1, let maxTokens = Int(metaState[0]), maxTokens > 0,
+            maxTokens <= Int(Int32.max)
+        else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: FixedCapacityKVCache metadata must contain a positive Int32-sized capacity."
+            )
+        }
+        if state.count == 2 {
+            let keys = state[0]
+            let values = state[1]
+            guard keys.dim(0) == values.dim(0), keys.dim(1) == values.dim(1),
+                keys.dim(2) == values.dim(2), keys.dim(2) <= maxTokens
+            else {
+                throw KVCacheError(
+                    message:
+                        "Corrupt prompt cache: FixedCapacityKVCache key/value state must have matching batch, head, and sequence dimensions within capacity."
+                )
+            }
+        }
+        let cache = FixedCapacityKVCache(maxTokens: maxTokens)
+        if !state.isEmpty {
+            cache.state = state
+        }
         return cache
 
     case "CacheList":
