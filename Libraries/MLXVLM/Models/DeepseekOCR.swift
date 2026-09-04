@@ -906,10 +906,6 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
             }
             imageIndex += pageRange.count
         }
-        guard imageIndex == input.images.count else {
-            throw VLMError.processing(
-                "DeepseekOCR: expanded \(imageIndex) page(s) for \(input.images.count) image(s)")
-        }
 
         let localCrops =
             localCropList.isEmpty
@@ -930,6 +926,10 @@ public struct DeepseekOCRProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
+        // There is no video tower; refuse the input rather than silently dropping it.
+        guard input.videos.isEmpty else {
+            throw VLMError.processing("DeepseekOCR does not accept video input")
+        }
         // A text-only turn carries no pixels: Python `get_input_embeddings` returns the
         // token embeddings untouched when `pixel_values is None`, so no image is fabricated.
         guard !input.images.isEmpty else {
@@ -1296,7 +1296,10 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     /// the image-token positions in order: `input_embeds[idx, image_indices] =
     /// features`. The k-th image token therefore takes feature k, which is indexed
     /// here by the running count of image tokens so the prefill graph never reads a
-    /// position back from the GPU.
+    /// position back from the GPU. Unlike Python's scatter, which raises when the
+    /// counts differ, the clamped index reuses the last feature for surplus image
+    /// tokens and drops surplus features; the counts agree whenever the processor's
+    /// patch / downsample geometry matches the vision tower's, as on the shipped packs.
     func mergeInputIdsWithImageFeatures(inputIds: MLXArray, imageFeatures: MLXArray)
         -> MLXArray
     {

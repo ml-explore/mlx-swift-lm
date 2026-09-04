@@ -218,6 +218,20 @@ final class DeepseekOCRProcessorTests: XCTestCase {
         XCTAssertEqual(lmInput.text.mask?.asArray(Int8.self), [1, 1, 1])
     }
 
+    func testPrepareRejectsVideoInputInsteadOfDroppingIt() async throws {
+        let processor = try makeProcessor()
+        let input = UserInput(
+            prompt: "document parsing.",
+            videos: [.url(URL(fileURLWithPath: "/dev/null"))])
+
+        do {
+            _ = try await processor.prepare(input: input)
+            XCTFail("expected VLMError.processing for a video input")
+        } catch VLMError.processing(let details) {
+            XCTAssertTrue(details.contains("video"), details)
+        }
+    }
+
     func testInternalPrepareRequiresAnImage() async throws {
         let processor = try makeProcessor()
 
