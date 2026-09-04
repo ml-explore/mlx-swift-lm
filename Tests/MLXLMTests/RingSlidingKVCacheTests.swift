@@ -83,23 +83,6 @@ final class RingSlidingKVCacheTests: XCTestCase {
         XCTAssertEqual(k2[0, 0, prefillLen + 2, 0].item(Float.self), 12)
     }
 
-    func testMakeCachesReturnsRingSlidingWhenSlidingWindowSizeSet() {
-        let withWindow = makeCaches(numLayers: 3, slidingWindowSize: 128)
-        XCTAssertEqual(withWindow.count, 3)
-        for cache in withWindow {
-            let ring = cache as? RingSlidingKVCache
-            XCTAssertNotNil(ring)
-            XCTAssertEqual(ring?.windowSize, 128)
-        }
-
-        let without = makeCaches(numLayers: 2, slidingWindowSize: nil)
-        XCTAssertEqual(without.count, 2)
-        for cache in without {
-            XCTAssertTrue(cache is KVCacheSimple)
-            XCTAssertFalse(cache is RingSlidingKVCache)
-        }
-    }
-
     func testSerializationRoundTripPreservesRingMetadata() throws {
         let cache = RingSlidingKVCache(windowSize: 4)
         let (pk, pv) = prefill(length: 3)

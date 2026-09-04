@@ -52,9 +52,8 @@ public typealias UnlimitedOCRProcessor = DeepseekOCRProcessor
 /// Leaving `components` empty matches Python Unlimited defaults (guard off).
 public final class UnlimitedOCR: DeepseekOCR {
 
-    public override func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        _ = parameters
-        let window = config.resolvedSlidingWindowSize ?? 128
-        return makeCaches(numLayers: kvHeads.count, slidingWindowSize: window)
+    public override func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try makeLayerCaches(
+            parameters: parameters, slidingWindowSize: config.resolvedSlidingWindowSize ?? 128)
     }
 }

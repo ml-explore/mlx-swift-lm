@@ -981,12 +981,40 @@ public class DeepseekOCR: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     /// When `sliding_window_size` is set (Unlimited-OCR packs), use R-SWA
-    /// `RingSlidingKVCache`; otherwise unbounded `KVCacheSimple`.
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        _ = parameters
-        return makeCaches(
-            numLayers: kvHeads.count,
-            slidingWindowSize: config.resolvedSlidingWindowSize)
+    /// `RingSlidingKVCache`; otherwise a standard attention cache that honors
+    /// `GenerateParameters.maxKVSize`.
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try makeLayerCaches(
+            parameters: parameters, slidingWindowSize: config.resolvedSlidingWindowSize)
+    }
+
+    /// One cache per language layer, mirroring Python Unlimited-OCR
+    /// `LanguageModel.make_cache`: `RingSlidingKVCache(window_size)` when a
+    /// window is set, otherwise a plain cache.
+    ///
+    /// The ring cache retains the whole reference prefix and only bounds decode
+    /// tokens, so a caller capacity (`maxKVSize`) cannot be realized on the
+    /// window path and the architecture window is kept as-is. The request is
+    /// still validated so malformed parameters throw the same typed errors as
+    /// on every other model; `LanguageModel.cacheStatus(parameters:)` reports
+    /// the capacity as ignored and generation entry points reject it with
+    /// `KVCacheConfigurationError.incompatibleCapacity(expected:count:)`
+    /// rather than silently exceeding it.
+    ///
+    /// - Throws: `KVCacheConfigurationError` when the request is invalid or
+    ///   the window is not positive.
+    func makeLayerCaches(parameters: GenerateParameters?, slidingWindowSize: Int?) throws
+        -> [KVCache]
+    {
+        let layers = 0 ..< kvHeads.count
+        guard let slidingWindowSize else {
+            return try layers.map { _ in try makeAttentionKVCache(parameters: parameters) }
+        }
+        guard slidingWindowSize > 0 else {
+            throw KVCacheConfigurationError.invalidSlidingWindow(slidingWindowSize)
+        }
+        _ = try parameters?.effectiveKVCacheCapacity()
+        return layers.map { _ in RingSlidingKVCache(windowSize: slidingWindowSize) }
     }
 
     public func prepare(

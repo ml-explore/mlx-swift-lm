@@ -1244,17 +1244,6 @@ public class RingSlidingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
-/// Build per-layer caches matching Python Unlimited-OCR `LanguageModel.make_cache`.
-///
-/// When `slidingWindowSize` is set, each layer gets a ``RingSlidingKVCache``;
-/// otherwise a standard ``KVCacheSimple``.
-public func makeCaches(numLayers: Int, slidingWindowSize: Int?) -> [KVCache] {
-    if let slidingWindowSize {
-        return (0 ..< numLayers).map { _ in RingSlidingKVCache(windowSize: slidingWindowSize) }
-    }
-    return (0 ..< numLayers).map { _ in KVCacheSimple() }
-}
-
 func resolvedKVQuantizationGroupSize(
     requested: Int,
     keyHeadDim: Int,

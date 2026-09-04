@@ -18,11 +18,54 @@ final class UnlimitedOCRCacheTests: XCTestCase {
         let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
         XCTAssertNil(unlimited.config.resolvedSlidingWindowSize)
 
-        let caches = unlimited.newCache(parameters: nil)
+        let caches = try unlimited.newCache(parameters: nil)
         XCTAssertEqual(caches.count, 12)
         for cache in caches {
             let ring = try XCTUnwrap(cache as? RingSlidingKVCache)
             XCTAssertEqual(ring.windowSize, 128)
+        }
+    }
+
+    /// The ring cache keeps the whole reference prefix, so a `maxKVSize` request
+    /// cannot be realized: the architecture window stays and the status reports
+    /// the capacity as ignored, while generation entry points reject it.
+    func testRingPathKeepsConfigWindowAndReportsMaxKVSizeIgnored() async throws {
+        let model = try await VLMTypeRegistry.shared.createModel(
+            configuration: Self.configWithoutWindow.data(using: .utf8)!,
+            modelType: "unlimited-ocr")
+        let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
+        let parameters = GenerateParameters(maxKVSize: 64)
+
+        let caches = try unlimited.newCache(parameters: parameters)
+        XCTAssertEqual(caches.count, 12)
+        for cache in caches {
+            let ring = try XCTUnwrap(cache as? RingSlidingKVCache)
+            XCTAssertEqual(ring.windowSize, 128)
+        }
+
+        let status = try unlimited.cacheStatus(parameters: parameters)
+        XCTAssertEqual(status.capacityDisposition, .ignored)
+        XCTAssertThrowsError(
+            try validateKVCacheCompatibility(
+                caches, configuration: KVCacheConfiguration(capacity: try .init(maxTokens: 64)))
+        ) { error in
+            XCTAssertEqual(
+                error as? KVCacheConfigurationError,
+                .incompatibleCapacity(expected: 64, count: 12))
+        }
+    }
+
+    /// An invalid request must fail on the ring path with the same typed error
+    /// as on every other model instead of being dropped.
+    func testRingPathRejectsInvalidMaxKVSize() async throws {
+        let model = try await VLMTypeRegistry.shared.createModel(
+            configuration: Self.configWithoutWindow.data(using: .utf8)!,
+            modelType: "unlimited-ocr")
+        let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
+
+        XCTAssertThrowsError(try unlimited.newCache(parameters: GenerateParameters(maxKVSize: 0))) {
+            error in
+            XCTAssertEqual(error as? KVCacheConfigurationError, .invalidCapacity(0))
         }
     }
 

@@ -65,7 +65,7 @@ final class VLMRegistryTests: XCTestCase {
             XCTAssertTrue(model is UnlimitedOCR, modelType)
             let unlimited = try XCTUnwrap(model as? UnlimitedOCR)
             XCTAssertEqual(unlimited.config.resolvedSlidingWindowSize, 128)
-            let caches = unlimited.newCache(parameters: nil)
+            let caches = try unlimited.newCache(parameters: nil)
             XCTAssertEqual(caches.count, 12)
             for cache in caches {
                 let ring = try XCTUnwrap(cache as? RingSlidingKVCache)
