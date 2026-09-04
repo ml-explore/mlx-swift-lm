@@ -35,6 +35,9 @@ package protocol TokenStreamDecoder {
     /// Decoders whose response protocol never rejects tool calls report zero.
     var rejectedToolCallCount: Int { get }
 
+    /// Calls promoted by bounded cross-dialect recovery during this generation.
+    var recoveredToolCallCount: Int { get }
+
     /// Consumes one generated token. Returns `false` when decoding should stop
     /// because of either a semantic boundary or consumer termination.
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool
@@ -49,6 +52,7 @@ extension TokenStreamDecoder {
     package var receivesStopTokens: Bool { false }
     package var isInsideReasoning: Bool { false }
     package var rejectedToolCallCount: Int { 0 }
+    package var recoveredToolCallCount: Int { 0 }
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
@@ -61,14 +65,17 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
         tokenizer: any Tokenizer,
         format: ToolCallFormat,
         tools: [[String: any Sendable]]?,
-        stopStrings: Set<String>
+        stopStrings: Set<String>,
+        recoveryPolicy: ToolCallRecoveryPolicy = .conservative
     ) {
         self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-        self.toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
+        self.toolCallProcessor = ToolCallProcessor(
+            format: format, tools: tools, recoveryPolicy: recoveryPolicy)
         self.stopStringFilter = StopStringFilter(stopStrings: stopStrings)
     }
 
     var rejectedToolCallCount: Int { toolCallProcessor.rejectedToolCallCount }
+    var recoveredToolCallCount: Int { toolCallProcessor.recoveredToolCallCount }
 
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
         detokenizer.append(token: token)

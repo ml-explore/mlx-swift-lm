@@ -225,7 +225,8 @@ func convertParameterValue(
 ) -> any Sendable {
     guard let paramType = getParameterType(funcName: funcName, paramName: paramName, tools: tools)
     else {
-        return value
+        return convertParameterValueUsingDeclaredTypes(
+            value, paramName: paramName, funcName: funcName, tools: tools)
     }
 
     let type = paramType.lowercased()
@@ -266,6 +267,35 @@ func convertParameterValue(
     }
 
     return value
+}
+
+/// Conservative conversion for parameter schemas whose `type` is not a plain
+/// string: union types (`["integer", "null"]`), combinators (`anyOf` /
+/// `oneOf` / `allOf`), and flat-shaped tool declarations that
+/// `getParameterType` cannot see.
+///
+/// The textual wire value is preserved whenever the declared schema admits a
+/// string — or declares no recognizable type at all — so conversion never
+/// invents a type the schema did not ask for. Only when every declared type
+/// is non-string is the value converted, so that downstream schema
+/// validation judges the call the model intended rather than an artifact of
+/// the textual transport.
+private func convertParameterValueUsingDeclaredTypes(
+    _ value: String, paramName: String, funcName: String, tools: [[String: any Sendable]]?
+) -> any Sendable {
+    guard let tools,
+        let parameters = ToolSchemaValidator.parametersSchema(ofToolNamed: funcName, in: tools),
+        let properties = parameters["properties"] as? [String: any Sendable],
+        let schema = properties[paramName] as? [String: any Sendable]
+    else { return value }
+
+    // `extractTypesFromSchema` falls back to `["string"]` when the schema
+    // carries no recognizable type information, so both "no declared types"
+    // and "string admitted" leave the wire value unchanged.
+    let types = extractTypesFromSchema(schema)
+    let normalized = Set(types.map { $0.lowercased() })
+    guard normalized.isDisjoint(with: ["string", "str", "text"]) else { return value }
+    return convertValueWithTypes(value, types: types)
 }
 
 // MARK: - String Utilities

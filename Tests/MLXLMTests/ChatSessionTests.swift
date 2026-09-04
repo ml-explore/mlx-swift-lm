@@ -961,6 +961,26 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertTrue(chunks.isEmpty)
     }
 
+    func testStreamDetailsReportsRecoveredToolCallCount() async throws {
+        let tools: [ToolSpec] = [
+            ["function": ["name": "weather"] as [String: any Sendable]]
+        ]
+        let session = rejectionSession(
+            output: "<function=weather><parameter=city>Paris</parameter></function>",
+            tools: tools)
+        var call: ToolCall?
+        var info: GenerateCompletionInfo?
+
+        for try await event in session.streamDetails(to: "trigger") {
+            if let value = event.toolCall { call = value }
+            if let value = event.info { info = value }
+        }
+
+        XCTAssertEqual(call?.function.name, "weather")
+        XCTAssertEqual(info?.recoveredToolCallCount, 1)
+        XCTAssertEqual(info?.rejectedToolCallCount, 0)
+    }
+
     func testTextStreamThrowsRejectedToolCallError() async throws {
         let session = rejectionSession(output: #"<tool_call>{"#)
 
@@ -1018,6 +1038,24 @@ public class ChatSessionTests: XCTestCase {
             XCTFail("Expected RejectedToolCallError")
         } catch let error as RejectedToolCallError {
             XCTAssertEqual(error.rejection.reason, .incompleteOutput)
+        }
+        XCTAssertEqual(dispatchCount.value, 0)
+    }
+
+    func testToolDispatchWithoutSchemasFailsClosed() async throws {
+        let dispatchCount = CallCounter()
+        let session = rejectionSession(
+            output: #"<tool_call>{"name":"undeclared","arguments":{}}</tool_call>"#,
+            toolDispatch: { _ in
+                dispatchCount.increment()
+                return "should not execute"
+            })
+
+        do {
+            for try await _ in session.streamDetails(to: "trigger") {}
+            XCTFail("Expected RejectedToolCallError")
+        } catch let error as RejectedToolCallError {
+            XCTAssertEqual(error.rejection.reason, .undeclaredTool)
         }
         XCTAssertEqual(dispatchCount.value, 0)
     }

@@ -185,6 +185,28 @@ let processor = ToolCallProcessor(
 )
 ```
 
+### Schema Validation
+
+When you supply tool schemas, the processor does two checks before a call
+becomes executable:
+
+1. The function name must be in the declared tools.
+2. The arguments must not definitively violate the tool's `parameters` schema.
+
+A call that fails a check is not dispatched. It is reported as a
+`RejectedToolCall` with the reason `undeclaredTool` or `invalidArguments`.
+The `detail` of a schema violation says where the problem is and what the
+schema requires, for example `arguments.limit must be an integer`.
+
+The package validates the JSON Schema keywords that tool declarations commonly use:
+`type`, `properties`, `required`, `additionalProperties`, `items`,
+`minItems`, `maxItems`, `uniqueItems`, `minLength`, `maxLength`, `minimum`,
+`maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `enum`, `const`, `anyOf`,
+`oneOf`, and `allOf`. Validation is conservative: an unsupported assertion such
+as `pattern` or `$ref` makes the result uncertain and cannot reject a call on
+its own. A tool without a `parameters` schema accepts all arguments. Without
+tool declarations, all parsed calls pass.
+
 ## Format Resolution
 
 When a model is loaded, the factories resolve the format in this order:

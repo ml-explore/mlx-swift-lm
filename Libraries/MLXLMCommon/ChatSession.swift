@@ -315,6 +315,12 @@ public final class ChatSession {
 
     public var additionalContext: [String: any Sendable]?
     public var tools: [ToolSpec]?
+
+    /// Optional automatic dispatcher for accepted tool calls.
+    ///
+    /// Automatic dispatch is fail-closed: only calls naming a function declared
+    /// in ``tools`` can reach this callback. If `tools` is `nil` or empty, every
+    /// tool-call-shaped model output is rejected without invoking the callback.
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
 
     /// Speculative decoding configuration, nil if disabled.
@@ -898,6 +904,12 @@ public final class ChatSession {
                 speculativeDecoding
             ] in
             do {
+                // Automatic dispatch must always be schema-authorized. Treat a missing
+                // declaration list as an empty allowlist when a dispatcher is installed,
+                // rather than allowing the processor's schema-less parsing mode.
+                let toolValidationSchemas: [ToolSpec]? =
+                    toolDispatch == nil ? tools : (tools ?? [])
+
                 try await cache.update { cache in
 
                     // these are all Sendable
@@ -1201,7 +1213,8 @@ public final class ChatSession {
                                     modelConfiguration: modelConfiguration,
                                     tokenizer: tokenizer,
                                     iterator: iterator,
-                                    tools: tools)
+                                    tools: toolValidationSchemas,
+                                    recoveryPolicy: generateParameters.toolCallRecoveryPolicy)
                             )
                         }
 
@@ -1324,7 +1337,9 @@ public final class ChatSession {
                                             modelConfiguration: modelConfiguration,
                                             tokenizer: tokenizer,
                                             iterator: iterator,
-                                            tools: tools))
+                                            tools: toolValidationSchemas,
+                                            recoveryPolicy: generateParameters
+                                                .toolCallRecoveryPolicy))
                                 }
                             }
                         } else {

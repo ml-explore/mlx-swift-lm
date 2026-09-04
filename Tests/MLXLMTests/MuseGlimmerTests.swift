@@ -1217,6 +1217,55 @@ struct MuseGlimmerAgenticProtocolTests {
         #expect(answer == [.response("sunny")])
     }
 
+    @Test("Onyx rejects proven schema violations and counts them")
+    func onyxSchemaViolationIsCounted() throws {
+        let tokenizer = OnyxTestTokenizer()
+        let boundedTools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "weather.get",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "days": ["type": "integer", "maximum": 5]
+                                as [String: any Sendable]
+                        ],
+                        "required": ["days"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+        var decoder = try #require(
+            ToolCallFormat.atem.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: boundedTools, stopStrings: []))
+        let payload =
+            "<atem:function_calls><atem:invoke name=\"weather.get\">"
+            + "<atem:parameter name=\"days\">6</atem:parameter>"
+            + "</atem:invoke></atem:function_calls>"
+        let tokens = [
+            tokenizer.id(" to=weather.get"), tokenizer.message,
+            tokenizer.id(payload), tokenizer.eot,
+        ]
+        var events: [TokenStreamEvent] = []
+        for token in tokens {
+            _ = decoder.push(token) {
+                events.append($0)
+                return true
+            }
+        }
+
+        #expect(!events.contains { if case .toolCall = $0 { true } else { false } })
+        let rejection = try #require(
+            events.compactMap { event -> RejectedToolCall? in
+                if case .rejectedToolCall(let rejection) = event { return rejection }
+                return nil
+            }.first)
+        #expect(rejection.reason == .invalidArguments)
+        #expect(rejection.toolName == "weather.get")
+        #expect(rejection.detail == "arguments.days must be at most 5")
+        #expect(decoder.rejectedToolCallCount == 1)
+    }
+
     @Test("Onyx decoder emits distinct IDs for consecutive tool frames")
     func consecutiveToolFrames() throws {
         let tokenizer = OnyxTestTokenizer()

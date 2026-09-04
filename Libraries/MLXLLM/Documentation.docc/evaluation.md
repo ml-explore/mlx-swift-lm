@@ -81,17 +81,29 @@ if !toolResults.isEmpty {
 }
 ```
 
-`Generation.toolCall` contains only parsed and authorized calls that may be
-considered for dispatch. Tool-call-shaped output that is malformed, incomplete,
-or names an undeclared function is emitted separately as
+When tool schemas are supplied, `Generation.toolCall` contains only parsed and
+authorized calls that may be considered for dispatch. Tool-call-shaped output
+that is malformed, incomplete, exceeds the parser's bounded safety limit,
+omits a required argument, or names an undeclared function is emitted separately as
 `Generation.rejectedToolCall`; rejected protocol is never returned as a normal
 response chunk. `rawTextPreview` is bounded for diagnostics but can contain
 sensitive argument values, so applications should not log or persist it
 automatically.
 
+Cross-dialect recovery defaults to `ToolCallRecoveryPolicy.conservative`. It
+accepts only structurally complete calls naming an exactly declared tool and
+keeps syntax inside reasoning spans, Markdown code, and ordinary JSON data
+inert. Set `GenerateParameters.toolCallRecoveryPolicy` to `.disabled` to permit
+only the selected native dialect, or `.permissive` to allow the documented
+end-of-stream outer-close repair. `GenerateCompletionInfo` reports both
+`recoveredToolCallCount` and `rejectedToolCallCount` for production telemetry.
+
 The example buffers accepted calls until the generation finishes. This makes
 dispatch atomic at the turn level: if a later call in the same model output is
 rejected, no earlier call has already caused an external side effect.
+`ChatSession` automatic dispatch also fails closed when tool schemas are absent
+or empty: no model-emitted call can reach the dispatch callback without an
+exactly matching declaration.
 
 When `ChatSession` builds its cache from messages, it retains the structured
 transcript and renders the complete conversation for every continuation, as
