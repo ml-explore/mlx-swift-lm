@@ -1118,23 +1118,46 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // models are tool-blind (template ignores `tools:`), so
                         // they fall through to the single-phase path unchanged;
                         // thinking-disabled requests stay single-phase too.
+                        //
+                        // An unspecified level resolves through the template's own
+                        // `defaultOn`, exactly as the prompt does below. The two must
+                        // agree: gating this phase ON while rendering the prompt with
+                        // thinking OFF asks a model to reason from a prompt that told
+                        // its template not to, and for a family that prefills a closed
+                        // empty block (Gemma 4's 31B template) no channel ever opens,
+                        // so the phase burns `maxTokens` and yields no tool call.
                         let thinkThenCallConfig: ReasoningConfig? = {
                             guard declaresReasoning,
                                 let cfg = resolved.reasoningConfig,
-                                case .templateFlag = cfg.promptStrategy,
+                                case .templateFlag(_, let defaultOn) = cfg.promptStrategy,
                                 Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) != false
+                                    for: request.contextOptions.reasoningLevel,
+                                    defaultOn: defaultOn)
                             else { return nil }
                             return cfg
                         }()
+                        // Routing reasoning out of the answer is a different question
+                        // from whether to *drive* a think-then-call phase, so it keys
+                        // on the declaration alone and never on the level. A model can
+                        // open its channel unprompted even when the template was told
+                        // not to think: Gemma 4's 31B template suppresses the entire
+                        // generation prompt on a turn following a tool call or tool
+                        // response - exactly the turn this path serves - and the model
+                        // then emits `<|channel>thought` itself. Deriving the emitter
+                        // from `thinkThenCallConfig` would leave those markers in the
+                        // user-visible answer.
+                        let routedReasoningConfig: ReasoningConfig? =
+                            declaresReasoning ? resolved.reasoningConfig : nil
                         // Thread `enable_thinking` through the tool-aware template
                         // so the prompt's thinking state matches how we drive
                         // generation. For a toggleable model (`.templateFlag`, e.g.
                         // Qwen3 whose `enable_thinking` defaults ON) the effective
                         // value is:
-                        //   - reasoning declared: honor the requested level
-                        //     (default ON), and the think-then-call phase below
-                        //     lets the model reason before the grammar constrains it;
+                        //   - reasoning declared: honor the requested level, falling
+                        //     back to the template's own `defaultOn` when the caller
+                        //     gave none (ON for Qwen3, OFF for Gemma 4), and the
+                        //     think-then-call phase below lets the model reason
+                        //     before the grammar constrains it;
                         //   - reasoning NOT declared: force thinking OFF, mirroring
                         //     the unconstrained path's suppression (see
                         //     `suppressedInput` above).
@@ -1154,8 +1177,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         {
                             let enabled =
                                 declaresReasoning
-                                ? (Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) ?? defaultOn)
+                                ? Self.thinkingEnabled(
+                                    for: request.contextOptions.reasoningLevel,
+                                    defaultOn: defaultOn)
                                 : false
                             toolAwareContext = [key: enabled]
                         } else {
@@ -1176,7 +1200,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     chat: messages,
                                     tools: toolSpecs,
                                     additionalContext: toolAwareContext))
-                            let reasoning = thinkThenCallConfig.map {
+                            let reasoning = routedReasoningConfig.map {
                                 (
                                     config: $0,
                                     primedInside: Self.reasoningPrimedInside(
@@ -2045,6 +2069,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// The effective thinking state for a `.templateFlag` model: an
+        /// unspecified level defers to the template's own `defaultOn`.
+        ///
+        /// Every caller that needs a concrete on/off must resolve through this,
+        /// not by collapsing the optional itself. Reading `nil` as "on" (e.g.
+        /// `!= false`) is only accidentally right for a `defaultOn: true` family
+        /// and silently disagrees with the prompt for a `defaultOn: false` one
+        /// such as Gemma 4, which then reasons from a prompt rendered with
+        /// thinking off.
+        static func thinkingEnabled(
+            for level: ContextOptions.ReasoningLevel?, defaultOn: Bool
+        ) -> Bool {
+            thinkingEnabled(for: level) ?? defaultOn
+        }
+
         /// Decodes the rendered prompt's tail and asks whether it ends inside an
         /// open reasoning block (some model families prefill the opening
         /// delimiter).
@@ -2073,10 +2112,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func reasoningPrimedInside(
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
-            let tokens = input.text.tokens.asArray(Int.self)
-            let renderedTail = tokenizer.decode(tokenIds: Array(tokens.suffix(64)))
-            return ReasoningEventEmitter.promptEndsInsideReasoning(
-                renderedPromptTail: renderedTail, config: config)
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                promptTokens: input.text.tokens.asArray(Int.self), config: config,
+                tokenizer: tokenizer)
         }
 
         /// Think-then-call Phase 1: generate reasoning unconstrained until
