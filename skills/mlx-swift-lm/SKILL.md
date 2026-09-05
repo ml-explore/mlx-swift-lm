@@ -159,6 +159,15 @@ let r2 = try await session.respond(to: "And if you multiply that by 3?")
 await session.clear()
 ```
 
+Add instructions while a response runs with `steer(_:policy:response:)`. Emitted
+output is kept, and `streamDetails` reports `.steering(.applied(ids))` or
+`.steering(.failed(failure))`:
+
+```swift
+let stream = session.streamDetails(to: "Explain this implementation")
+try session.steer("Focus on memory usage")
+```
+
 ### Streaming with `ModelContainer.generate(...)`
 
 For lower-level control, prepare `UserInput` and generate directly:

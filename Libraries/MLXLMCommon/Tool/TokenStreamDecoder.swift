@@ -38,6 +38,9 @@ package protocol TokenStreamDecoder {
     /// Calls promoted by bounded cross-dialect recovery during this generation.
     var recoveredToolCallCount: Int { get }
 
+    /// Whether decoding can end here without flushing an incomplete payload.
+    var canEndForSteering: Bool { get }
+
     /// Consumes one generated token. Returns `false` when decoding should stop
     /// because of either a semantic boundary or consumer termination.
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool
@@ -53,6 +56,8 @@ extension TokenStreamDecoder {
     package var isInsideReasoning: Bool { false }
     package var rejectedToolCallCount: Int { 0 }
     package var recoveredToolCallCount: Int { 0 }
+
+    package var canEndForSteering: Bool { false }
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
@@ -65,6 +70,7 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var detokenizer: any StreamingDetokenizer
     private let toolCallProcessor: ToolCallProcessor
     private var stopStringFilter: StopStringFilter
+    private var hasCompleteText = false
 
     /// Absent for models with no reasoning protocol, which then decode and cost
     /// exactly what they did before.
@@ -104,6 +110,12 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
 
     var isInsideReasoning: Bool { reasoningEmitter?.isInsideReasoning ?? false }
 
+    /// Reasoning models finish their step, so a thought is never cut short.
+    var canEndForSteering: Bool {
+        reasoningEmitter == nil && hasCompleteText && stopStringFilter.buffer.isEmpty
+            && toolCallProcessor.canEndForSteering
+    }
+
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
         if let boundary = reasoningTokens?.boundary(for: token),
             reasoningEmitter?.isBoundary(boundary) == true
@@ -111,7 +123,9 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
             return push(boundary, emit: emit)
         }
         detokenizer.append(token: token)
+        hasCompleteText = false
         guard let chunk = detokenizer.next() else { return true }
+        hasCompleteText = !chunk.isEmpty
         return process(chunk, emit: emit)
     }
 
