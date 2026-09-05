@@ -8,6 +8,7 @@ Common language model code.
 - <doc:upgrade>
 - <doc:wired-memory>
 - <doc:kv-cache-quantization>
+- <doc:steering>
 
 ## Reranking
 

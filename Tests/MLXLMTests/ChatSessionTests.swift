@@ -12,6 +12,505 @@ import XCTest
 /// See also ChatSessionIntegrationTests
 public class ChatSessionTests: XCTestCase {
 
+    private actor SteeringGate {
+        private var open = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        func wait() async {
+            if !open { await withCheckedContinuation { waiter = $0 } }
+        }
+
+        func release() {
+            open = true
+            waiter?.resume()
+            waiter = nil
+        }
+    }
+
+    private struct GatedSteeringProcessor: UserInputProcessor {
+        let base: TestInputProcessor
+        let ready: AsyncStream<Void>.Continuation
+        let gate: SteeringGate
+        var rejectInstruction: String? = nil
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            ready.yield(())
+            await gate.wait()
+            try Task.checkCancellation()
+            if let rejectInstruction, case .chat(let chat) = input.prompt,
+                chat.last?.content == rejectInstruction
+            {
+                throw SteeringTestError.preparationFailed
+            }
+            return try base.prepare(input: input)
+        }
+    }
+
+    private actor SteeringGateSequence {
+        let gates: [SteeringGate]
+        var step = 0
+
+        init(_ gates: [SteeringGate]) { self.gates = gates }
+
+        func next() -> SteeringGate {
+            defer { step += 1 }
+            return gates[step]
+        }
+    }
+
+    private struct SteppedSteeringProcessor: UserInputProcessor {
+        let base: TestInputProcessor
+        let ready: AsyncStream<Void>.Continuation
+        let gates: SteeringGateSequence
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            let gate = await gates.next()
+            ready.yield(())
+            await gate.wait()
+            try Task.checkCancellation()
+            return try base.prepare(input: input)
+        }
+    }
+
+    func testSteeringReusesPrefixAndKeepsOneTurn() async throws {
+        try await checkSteering(policy: .nextSafeBoundary, speculative: false)
+    }
+
+    func testQueuedSteeringFinishesCurrentStep() async throws {
+        try await checkSteering(policy: .nextStepBoundary, speculative: false)
+    }
+
+    func testSteeringFinalizesSpeculativeLookahead() async throws {
+        try await checkSteering(policy: .nextSafeBoundary, speculative: true)
+    }
+
+    func testSteeringRebuildsWhenTemplateRewritesPrefix() async throws {
+        try await checkSteering(policy: .nextSafeBoundary, speculative: false, rewritePrefix: true)
+    }
+
+    private func checkSteering(
+        policy: SteeringPolicy, speculative: Bool, rewritePrefix: Bool = false
+    ) async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let (lengths, lengthContinuation) = AsyncStream<Int>.makeStream()
+        let (messages, messageContinuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let gate = SteeringGate()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: lengthContinuation,
+            rewritesPrefixOnContinuation: rewritePrefix)
+        let configuration = ModelConfiguration(id: "steering-test")
+        let base = TestInputProcessor(
+            tokenizer: tokenizer, configuration: configuration,
+            messageGenerator: RecordingMessageGenerator(continuation: messageContinuation))
+        let processor = GatedSteeringProcessor(base: base, ready: readyContinuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: configuration, tokenizer: tokenizer)
+        let draft = speculative ? ModelContainer(context: model(processor: base)) : nil
+        let session = ChatSession(
+            context,
+            speculativeDecoding: draft.map { SpeculativeDecodingConfig(draftModel: $0) },
+            generateParameters: GenerateParameters(maxTokens: 8, temperature: 0),
+            components: GenerationComponents {
+                ForceTokenSequenceProcessor(state: TokenSequenceState(tokens: [7]))
+            })
+        let stream = session.streamDetails(to: "original task")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        let first = try session.steer("keep the original task", policy: policy)
+        let second = try session.steer("also include tests", policy: policy)
+        await gate.release()
+
+        var infos: [GenerateCompletionInfo] = []
+        var applied: [UUID] = []
+        for try await event in stream {
+            switch event {
+            case .info(let info): infos.append(info)
+            case .steering(.applied(let ids)):
+                XCTAssertEqual(infos.count, 1)
+                applied += ids
+            default: break
+            }
+        }
+        XCTAssertEqual(applied, [first, second])
+        XCTAssertEqual(infos.count, 2)
+        guard infos.count == 2 else { return }
+        if case .nextSafeBoundary = policy {
+            XCTAssertEqual(infos[0].stopReason, .steered)
+            XCTAssertEqual(infos[0].generationTokenCount, 1)
+        } else {
+            XCTAssertEqual(infos[0].stopReason, .length)
+            XCTAssertEqual(infos[0].generationTokenCount, 8)
+        }
+        XCTAssertEqual(infos[1].stopReason, .length)
+        XCTAssertEqual(
+            infos[1].cachedPromptTokenCount,
+            rewritePrefix ? 0 : infos[0].promptTokenCount + infos[0].generationTokenCount)
+        var lengthIterator = lengths.makeAsyncIterator()
+        _ = await lengthIterator.next()
+        let secondLength = await lengthIterator.next()
+        XCTAssertEqual(infos[1].totalPromptTokenCount, secondLength)
+        var messageIterator = messages.makeAsyncIterator()
+        _ = await messageIterator.next()
+        let rendered = await messageIterator.next()
+        XCTAssertEqual(rendered?.map(\.role), [.user, .assistant, .user])
+        XCTAssertEqual(rendered?.first?.content, "original task")
+        XCTAssertEqual(rendered?.last?.content, "keep the original task\n\nalso include tests")
+        XCTAssertFalse(session.canSteer())
+        XCTAssertThrowsError(try session.steer("too late")) {
+            XCTAssertEqual($0 as? SteeringError, .noActiveResponse)
+        }
+        // Subsequent calls reuse the same cache after all speculative cleanup.
+        let followup = try await collectGeneration(session.streamDetails(to: "next turn"))
+        XCTAssertEqual(followup.info.generationTokenCount, 8)
+        if !speculative { XCTAssertGreaterThan(followup.info.cachedPromptTokenCount, 0) }
+    }
+
+    func testSteeringDuringToolDispatchWaitsForResult() async throws {
+        let output = "{\"name\":\"weather\",\"arguments\":{}}"
+        let tokenizer = LiteralTokenizer(output: output + "done")
+        let configuration = ModelConfiguration(
+            id: "steering-tool-test", eosTokenIds: [99], toolCallFormat: .json)
+        let (messages, messageContinuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let base = TestInputProcessor(
+            tokenizer: tokenizer, configuration: configuration,
+            messageGenerator: RecordingMessageGenerator(continuation: messageContinuation))
+        let calls = TokenSequenceState(tokens: [0, 1])
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gate = SteeringGate()
+        let session = ChatSession(
+            model(processor: base),
+            generateParameters: GenerateParameters(maxTokens: 100, temperature: 0),
+            components: GenerationComponents {
+                let text = calls.current == 0 ? output : "done"
+                calls.advance()
+                return ForceTokenSequenceProcessor(
+                    state: TokenSequenceState(tokens: tokenizer.tokens(for: text) + [99]))
+            },
+            toolDispatch: { _ in
+                readyContinuation.yield(())
+                await gate.wait()
+                try Task.checkCancellation()
+                return "sunny"
+            })
+        let stream = session.streamDetails(to: "weather please")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        let id = try session.steer("give temperatures in Celsius")
+        await gate.release()
+        var applied: [UUID] = []
+        var toolCount = 0
+        var infos: [GenerateCompletionInfo] = []
+        for try await event in stream {
+            switch event {
+            case .steering(.applied(let ids)): applied += ids
+            case .toolCall: toolCount += 1
+            case .info(let info): infos.append(info)
+            default: break
+            }
+        }
+        XCTAssertEqual(toolCount, 0)
+        XCTAssertEqual(applied, [id])
+        XCTAssertEqual(infos.count, 2)
+        XCTAssertTrue(infos.allSatisfy { $0.stopReason == .stop })
+        var messageIterator = messages.makeAsyncIterator()
+        _ = await messageIterator.next()
+        let rendered = await messageIterator.next()
+        XCTAssertEqual(rendered?.map(\.role), [.user, .assistant, .tool, .user])
+        XCTAssertEqual(rendered?[2].content, "sunny")
+        XCTAssertEqual(rendered?.last?.content, "give temperatures in Celsius")
+    }
+
+    func testFailedSteeringPreparationRetainsCompletedToolResult() async throws {
+        let output = "{\"name\":\"weather\",\"arguments\":{}}"
+        let tokenizer = LiteralTokenizer(output: output + "done")
+        let configuration = ModelConfiguration(
+            id: "steering-tool-failure-test", eosTokenIds: [99], toolCallFormat: .json)
+        let (messages, messageContinuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let base = TestInputProcessor(
+            tokenizer: tokenizer, configuration: configuration,
+            messageGenerator: RecordingMessageGenerator(continuation: messageContinuation))
+        let prepareGate = SteeringGate()
+        await prepareGate.release()
+        let processor = GatedSteeringProcessor(
+            base: base, ready: AsyncStream<Void>.makeStream().continuation,
+            gate: prepareGate, rejectInstruction: "fail preparation")
+        let context = Self.makeModel(
+            processor: processor, configuration: configuration, tokenizer: tokenizer)
+        let calls = TokenSequenceState(tokens: [0, 1])
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let toolGate = SteeringGate()
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 100, temperature: 0),
+            components: GenerationComponents {
+                let text = calls.current == 0 ? output : "done"
+                calls.advance()
+                return ForceTokenSequenceProcessor(
+                    state: TokenSequenceState(tokens: tokenizer.tokens(for: text) + [99]))
+            },
+            toolDispatch: { _ in
+                readyContinuation.yield(())
+                await toolGate.wait()
+                return "sunny"
+            })
+        let stream = session.streamDetails(to: "weather please")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        try session.steer("fail preparation")
+        await toolGate.release()
+        do {
+            for try await _ in stream {}
+            XCTFail("Expected preparation failure")
+        } catch SteeringTestError.preparationFailed {
+        }
+        _ = try await session.respond(to: "recover")
+        var messageIterator = messages.makeAsyncIterator()
+        _ = await messageIterator.next()
+        let recovered = await messageIterator.next()
+        XCTAssertEqual(recovered?.map(\.role), [.user, .assistant, .tool, .user])
+        XCTAssertEqual(recovered?[2].content, "sunny")
+        XCTAssertEqual(recovered?.last?.content, "recover")
+    }
+
+    /// Manual tool handling is a supported pattern. An instruction that needs
+    /// results the session cannot produce is reported, and the caller keeps the
+    /// tool call it asked for.
+    func testUnappliedSteeringReportsFailureAndKeepsTheResponse() async throws {
+        let session = rejectionSession(output: "{\"name\":\"weather\",\"arguments\":{}}")
+        let stream = session.streamDetails(to: "weather please")
+        let id = try session.steer("also explain the forecast")
+        var toolCount = 0
+        var failures: [SteeringFailure] = []
+        for try await event in stream {
+            if case .toolCall = event { toolCount += 1 }
+            if case .steering(.failed(let failure)) = event { failures.append(failure) }
+        }
+        XCTAssertEqual(toolCount, 1)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first?.ids, [id])
+        XCTAssertEqual(failures.first?.instructions, ["also explain the forecast"])
+        XCTAssertEqual(failures.first?.reason, .toolResultsRequired)
+        XCTAssertThrowsError(try session.steer("late"))
+    }
+
+    func testSessionWithoutTranscriptRejectsSteeringUpFront() async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gate = SteeringGate()
+        let base = TestInputProcessor()
+        let processor = GatedSteeringProcessor(base: base, ready: readyContinuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(
+            context, cache: try context.model.newCache(parameters: nil),
+            generateParameters: GenerateParameters(maxTokens: 3))
+        let stream = session.streamDetails(to: "hello")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        XCTAssertFalse(session.canSteer())
+        XCTAssertThrowsError(try session.steer("more detail")) {
+            XCTAssertEqual($0 as? SteeringError, .notSteerable)
+        }
+        await gate.release()
+        var text = ""
+        for try await event in stream {
+            if let chunk = event.chunk { text += chunk }
+            if case .steering = event { XCTFail("No instruction was accepted") }
+        }
+        XCTAssertFalse(text.isEmpty)
+    }
+
+    func testChainedSteeringAddsOneStepPerInstruction() async throws {
+        let (messages, messageContinuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gates = [SteeringGate(), SteeringGate(), SteeringGate()]
+        await gates[2].release()
+        let base = TestInputProcessor(
+            tokenizer: TestTokenizer(), configuration: ModelConfiguration(id: "chained"),
+            messageGenerator: RecordingMessageGenerator(continuation: messageContinuation))
+        let processor = SteppedSteeringProcessor(
+            base: base, ready: readyContinuation, gates: SteeringGateSequence(gates))
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 4))
+        let stream = session.streamDetails(to: "start")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        let first = try session.steer("more 1", policy: .nextStepBoundary)
+        await gates[0].release()
+        _ = await readyIterator.next()
+        let second = try session.steer("more 2", policy: .nextStepBoundary)
+        await gates[1].release()
+
+        var infos: [GenerateCompletionInfo] = []
+        var applied: [UUID] = []
+        for try await event in stream {
+            if let info = event.info { infos.append(info) }
+            if case .steering(.applied(let ids)) = event { applied += ids }
+        }
+        XCTAssertEqual(applied, [first, second])
+        XCTAssertEqual(infos.count, 3)
+        XCTAssertEqual(infos.map(\.generationTokenCount), [4, 4, 4])
+        var messageIterator = messages.makeAsyncIterator()
+        _ = await messageIterator.next()
+        _ = await messageIterator.next()
+        let rendered = await messageIterator.next()
+        XCTAssertEqual(rendered?.map(\.role), [.user, .assistant, .user, .assistant, .user])
+        XCTAssertEqual(rendered?.last?.content, "more 2")
+    }
+
+    func testLatestResponseTargetsExactlyOneResponse() async throws {
+        let gate = SteeringGate()
+        let base = TestInputProcessor()
+        let processor = GatedSteeringProcessor(
+            base: base, ready: AsyncStream<Void>.makeStream().continuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        XCTAssertNil(session.latestResponse)
+        let first = session.streamDetails(to: "first")
+        let firstID = session.latestResponse
+        let second = session.streamDetails(to: "second")
+        let secondID = session.latestResponse
+        XCTAssertNotNil(firstID)
+        XCTAssertNotEqual(firstID, secondID)
+
+        var appliedToSecond: [UUID] = []
+        let id = try session.steer("only the second", response: secondID)
+        await gate.release()
+        for try await _ in first {}
+        for try await event in second {
+            if case .steering(.applied(let ids)) = event { appliedToSecond += ids }
+        }
+        XCTAssertEqual(appliedToSecond, [id])
+    }
+
+    @MainActor
+    func testActorOwnedRespondAcceptsSteering() async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gate = SteeringGate()
+        let base = TestInputProcessor()
+        let processor = GatedSteeringProcessor(base: base, ready: readyContinuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 3),
+            components: GenerationComponents {
+                ForceTokenSequenceProcessor(state: TokenSequenceState(tokens: [7]))
+            })
+        let response = Task { @MainActor in try await session.respond(to: "original") }
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        try session.steer("continue", policy: .nextStepBoundary)
+        await gate.release()
+        let text = try await response.value
+        await session.synchronize()
+        XCTAssertEqual(
+            text, String(repeating: base.tokenizer.decode(tokenIds: [7, 7, 7]), count: 2))
+    }
+
+    func testSteeringKeepsStandardStringStream() async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gate = SteeringGate()
+        let base = TestInputProcessor()
+        let processor = GatedSteeringProcessor(base: base, ready: readyContinuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 3),
+            components: GenerationComponents {
+                ForceTokenSequenceProcessor(state: TokenSequenceState(tokens: [7]))
+            })
+        let stream = session.streamResponse(to: "original")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        try session.steer("continue", policy: .nextStepBoundary)
+        await gate.release()
+        var response = ""
+        for try await chunk in stream { response += chunk }
+        XCTAssertEqual(
+            response, String(repeating: base.tokenizer.decode(tokenIds: [7, 7, 7]), count: 2))
+        XCTAssertThrowsError(try session.steer("late"))
+    }
+
+    func testUnsteeredResponseStillSupportsManualTools() async throws {
+        let session = rejectionSession(output: "{\"name\":\"weather\",\"arguments\":{}}")
+        var calls = 0
+        for try await event in session.streamDetails(to: "weather please") {
+            if case .toolCall = event { calls += 1 }
+            if case .steering(.applied) = event { XCTFail("No instruction was submitted") }
+        }
+        XCTAssertEqual(calls, 1)
+    }
+
+    private enum SteeringTestError: Error { case preparationFailed }
+
+    func testFailedSteeringPreparationPreservesCommittedConversation() async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let (messages, messageContinuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let gate = SteeringGate()
+        let base = TestInputProcessor(
+            tokenizer: TestTokenizer(), configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: messageContinuation))
+        let processor = GatedSteeringProcessor(
+            base: base, ready: readyContinuation, gate: gate, rejectInstruction: "fail preparation")
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        let stream = session.streamDetails(to: "original")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        try session.steer("fail preparation")
+        await gate.release()
+        do {
+            for try await event in stream {
+                if case .steering(.applied) = event { XCTFail("Failed input cannot be applied") }
+            }
+            XCTFail("Expected preparation failure")
+        } catch SteeringTestError.preparationFailed {
+        }
+        _ = try await session.respond(to: "recover")
+        var messageIterator = messages.makeAsyncIterator()
+        _ = await messageIterator.next()
+        let recovered = await messageIterator.next()
+        XCTAssertEqual(recovered?.map(\.role), [.user, .assistant, .user])
+        XCTAssertEqual(recovered?.first?.content, "original")
+        XCTAssertEqual(recovered?.last?.content, "recover")
+        XCTAssertThrowsError(try session.steer("too late"))
+    }
+
+    func testCancelAndJoinTurnBeforeRunnerStarts() async throws {
+        let session = ChatSession(model(), generateParameters: GenerateParameters(maxTokens: 3))
+        let stream = session.streamDetails(to: "cancel immediately")
+        let consumer = Task { for try await _ in stream {} }
+        consumer.cancel()
+        _ = await consumer.result
+        await session.synchronize()
+        XCTAssertThrowsError(try session.steer("late"))
+        let result = try await session.respond(to: "new task")
+        XCTAssertFalse(result.isEmpty)
+    }
+
+    func testCancelSteerableTurnWhilePreparingThenReuseSession() async throws {
+        let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
+        let gate = SteeringGate()
+        let base = TestInputProcessor()
+        let processor = GatedSteeringProcessor(base: base, ready: readyContinuation, gate: gate)
+        let context = Self.makeModel(
+            processor: processor, configuration: base.configuration, tokenizer: base.tokenizer)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        let stream = session.streamDetails(to: "cancel me")
+        var readyIterator = ready.makeAsyncIterator()
+        _ = await readyIterator.next()
+        try session.steer("pending instruction")
+        let consumer = Task { for try await _ in stream {} }
+        consumer.cancel()
+        _ = await consumer.result
+        await gate.release()
+        await session.synchronize()
+        XCTAssertThrowsError(try session.steer("late"))
+        let result = try await session.respond(to: "new task")
+        XCTAssertFalse(result.isEmpty)
+    }
+
     private struct RecordedMessage: Equatable, Sendable {
         var role: Chat.Message.Role
         var content: String
@@ -271,6 +770,59 @@ public class ChatSessionTests: XCTestCase {
         func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
             try inner.newCache(parameters: parameters)
         }
+    }
+
+    /// Advances its state on every decode step, not just on prefill. A session
+    /// must carry the state the model actually ended on.
+    private final class DecodeStateAdvancingModel: Module, LanguageModel, KVCacheDimensionProvider {
+        static let stepKey = LMOutput.Key<MLXArray>("test.decodeSteps")
+
+        @ModuleInfo var inner: Gemma3TextModel
+
+        var kvHeads: [Int] { (inner as? KVCacheDimensionProvider)?.kvHeads ?? [] }
+
+        init(_ inner: Gemma3TextModel) {
+            self.inner = inner
+        }
+
+        private func batched(_ tokens: MLXArray) -> MLXArray {
+            tokens.ndim == 1 ? tokens[.newAxis, 0...] : tokens
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            let logits = inner(batched(input.text.tokens), cache: cache.isEmpty ? nil : cache)
+            var produced = LMOutput.State()
+            produced[Self.stepKey] = state?[Self.stepKey] ?? MLXArray([Int32(0)])
+            let total = input.text.tokens.dim(-1)
+            prefill.progress?(total, total)
+            return .logits(LMOutput(logits: logits, state: produced))
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            var advanced = LMOutput.State()
+            advanced[Self.stepKey] = (state?[Self.stepKey] ?? MLXArray([Int32(0)])) + 1
+            return LMOutput(logits: inner(batched(input.tokens), cache: cache), state: advanced)
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try inner.newCache(parameters: parameters)
+        }
+    }
+
+    private static func makeDecodeStateAdvancingModel() -> ModelContext {
+        let base = makeModel()
+        guard let inner = base.model as? Gemma3TextModel else {
+            fatalError("expected the test model to be a Gemma3TextModel")
+        }
+        return .init(
+            configuration: base.configuration,
+            model: DecodeStateAdvancingModel(inner),
+            processor: base.processor,
+            tokenizer: base.tokenizer)
     }
 
     private static func makeStateProducingModel() -> ModelContext {
@@ -1778,9 +2330,31 @@ public class ChatSessionTests: XCTestCase {
             "the session dropped the model state produced by its turns")
     }
 
-    /// The end-to-end path the snapshot API exists for: a session that carries
-    /// model state saves it with its cache, and a new session restored from
-    /// that snapshot keeps generating.
+    /// Preserve the final decode state for the next model step.
+    func testSessionCarriesStateProducedWhileDecoding() async throws {
+        let session = ChatSession(
+            Self.makeDecodeStateAdvancingModel(),
+            generateParameters: GenerateParameters(maxTokens: 4))
+
+        func decodeSteps() async throws -> Int32? {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("safetensors")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try await session.saveCache(to: url)
+            return try loadPromptCacheSnapshot(url: url)
+                .state?[DecodeStateAdvancingModel.stepKey]?.item(Int32.self)
+        }
+
+        _ = try await session.respond(to: "first")
+        // Post-prefill state is 0; each of the four decode steps adds one. Storing
+        // the post-prefill value would leave this at 0 and re-anchor the next step
+        // to a position the model has already moved past.
+        let carried = try await decodeSteps()
+        XCTAssertEqual(carried, 4)
+    }
+
+    /// A session restored from a snapshot preserves the model state and cache.
     func testStateProducingSessionSurvivesSaveAndRestore() async throws {
         let context = Self.makeStateProducingModel()
         let session = ChatSession(context, generateParameters: generationParameters)

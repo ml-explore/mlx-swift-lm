@@ -205,9 +205,9 @@ public final class ChatSession {
 
     private struct GenerationRun {
         let stream: AsyncStream<Generation>
-        let task: Task<[Int], Never>
+        let task: Task<RecordedGeneration, Never>
 
-        init(_ pair: (AsyncStream<Generation>, Task<[Int], Never>)) {
+        init(_ pair: (AsyncStream<Generation>, Task<RecordedGeneration, Never>)) {
             (stream, task) = pair
         }
     }
@@ -302,6 +302,7 @@ public final class ChatSession {
 
     private let model: ModelContainer
     public var instructions: String?
+    private let steeringRequests = SessionSteering()
     private let cache: SerialAccessContainer<Cache>
     private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
@@ -706,7 +707,7 @@ public final class ChatSession {
     ///   - videos: list of videos (for use with VLMs)
     ///   - audios: list of audios (for use with VLMs)
     /// - Returns: the model's response
-    public func respond(
+    nonisolated(nonsending) public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
         images: consuming [UserInput.Image],
@@ -731,7 +732,7 @@ public final class ChatSession {
     ///   - video: optional video (for use with VLMs)
     ///   - audio: optional audio (for use with VLMs)
     /// - Returns: the model's response
-    public func respond(
+    nonisolated(nonsending) public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
         image: consuming UserInput.Image? = nil,
@@ -759,7 +760,7 @@ public final class ChatSession {
     ///
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: the model's response
-    public func respond(
+    nonisolated(nonsending) public func respond(
         to messages: consuming [Chat.Message]
     ) async throws -> String {
         var output = ""
@@ -852,6 +853,65 @@ public final class ChatSession {
         }
     }
 
+    /// Identifies one response created by this session.
+    ///
+    /// Read ``ChatSession/latestResponse`` immediately after creating a response
+    /// to capture its ID, then pass it to ``ChatSession/steer(_:policy:response:)``.
+    public struct ResponseID: Hashable, Sendable {
+        let rawValue: UUID
+    }
+
+    /// The response created most recently by this session, or `nil` when none
+    /// is outstanding.
+    ///
+    /// Stream creation registers the response synchronously, before inference
+    /// starts. `respond` registers its response when the async method begins.
+    public var latestResponse: ResponseID? {
+        steeringRequests.latestResponse
+    }
+
+    /// Whether the response is open to steering.
+    ///
+    /// Input validation and queue limits still apply. The answer can change
+    /// before the next call because a response can finish at any time.
+    ///
+    /// - Parameter response: a response to test, or `nil` for the response
+    ///   ``steer(_:policy:response:)`` would target by default.
+    public func canSteer(_ response: ResponseID? = nil) -> Bool {
+        steeringRequests.canSteer(response)
+    }
+
+    /// Add an instruction to a running response without waiting for inference.
+    ///
+    /// Use with `respond`, `streamResponse`, or `streamDetails`. Call from the
+    /// session's isolation domain, just like its other methods. Instructions are
+    /// accepted in order and joined with blank lines into one user message.
+    /// A ``SteeringPolicy/nextSafeBoundary`` request promotes the pending batch;
+    /// emitted output is retained.
+    ///
+    /// - Parameters:
+    ///   - text: the instruction. Whitespace-only text throws
+    ///     ``SteeringError/emptyInstruction``.
+    ///   - policy: when the instruction may enter the model's context.
+    ///   - response: the response to steer. The default targets the response
+    ///     that owns the cache, then the oldest response still accepting input.
+    ///     Pass a ``ResponseID`` from ``latestResponse`` when a session can have
+    ///     more than one response outstanding.
+    /// - Returns: an acceptance ID. `streamDetails` reports
+    ///   ``SteeringEvent/applied(_:)`` once the instruction reaches the
+    ///   model, or ``SteeringEvent/failed(_:)`` if it cannot.
+    /// - Throws: ``SteeringError`` when the instruction is not accepted.
+    ///   Acceptance failures never affect a running response.
+    ///
+    /// At most ``SteeringLimits/maxPendingInstructions`` instructions and
+    /// ``SteeringLimits/maxPendingBytes`` bytes may be pending.
+    @discardableResult
+    public func steer(
+        _ text: String, policy: SteeringPolicy = .nextSafeBoundary, response: ResponseID? = nil
+    ) throws -> UUID {
+        try steeringRequests.steer(text, policy: policy, response: response)
+    }
+
     /// Produces a streaming response to a prompt by transforming the
     /// raw `Generation` values.
     ///
@@ -885,6 +945,8 @@ public final class ChatSession {
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
+        let steering = SteeringControl()
+        steeringRequests.register(steering)
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
@@ -895,10 +957,15 @@ public final class ChatSession {
                 model,
                 instructions, processing, tools, toolDispatch,
                 additionalContext, cache, loadedDraftModel, generateParameters, components,
-                speculativeDecoding
+                speculativeDecoding, steeringRequests
             ] in
+            defer {
+                steering.finish()
+                steeringRequests.remove(steering)
+            }
             do {
                 try await cache.update { cache in
+                    steeringRequests.start(steering)
 
                     // these are all Sendable
                     let processor = await model.processor
@@ -932,7 +999,7 @@ public final class ChatSession {
                     var draftKVCache: KVCacheStorage?
                     // Per-call model state (e.g. M-RoPE rope deltas) carried
                     // across turns alongside the KV cache; updated after each
-                    // prefill and stored back at the end of the turn.
+                    // model step and stored back at the end of the turn.
                     var lmState: LMOutput.State?
                     var conversation: Conversation?
                     switch cache {
@@ -991,7 +1058,34 @@ public final class ChatSession {
                             .init(main: kvCache, conversation: conversation))
                     }
 
+                    let executionStream = StreamOrDevice.default.stream
+                    var needsExecutionFence = false
+                    defer {
+                        if needsExecutionFence { executionStream.synchronize() }
+                    }
                     var pendingMessages = inputMessages.consume()
+                    var applyingSteering: [SteeringControl.Request] = []
+
+                    // Reports instructions this response accepted but will not apply.
+                    // Steering is an input channel: a failure here reports the
+                    // instruction and leaves the response to finish normally.
+                    @Sendable func reportSteeringFailure(
+                        _ requests: [SteeringControl.Request], _ reason: SteeringError
+                    ) {
+                        guard !requests.isEmpty else { return }
+                        let failure = SteeringFailure(
+                            ids: requests.map(\.id), instructions: requests.map(\.text),
+                            reason: reason)
+                        if let value = transform(.steering(.failed(failure))) {
+                            _ = continuation.yield(value)
+                        }
+                    }
+
+                    // A raw restored cache has no transcript to continue from, so this
+                    // response cannot be steered. Answer future callers immediately and
+                    // report anything accepted before the cache was known.
+                    reportSteeringFailure(
+                        steering.setSteerable(conversation != nil), .notSteerable)
 
                     // How this model's generated token stream relates to a chat
                     // template re-render is a property of its response protocol,
@@ -1001,7 +1095,28 @@ public final class ChatSession {
                             .promptCacheReuseRules(tokenizer: tokenizer) ?? [])
 
                     // loop can restart on tool calls
-                    restart: while !pendingMessages.isEmpty {
+                    while !pendingMessages.isEmpty {
+                        let messageCheckpoint = conversation?.messages.count
+                        let committedToolResults =
+                            Array(pendingMessages.prefix { $0.role == .tool })
+                        var dispatchedResults: [Chat.Message] = []
+                        var recordedStep = false
+                        var finishedStep = false
+                        defer {
+                            if !recordedStep, let messageCheckpoint {
+                                conversation?.messages.removeSubrange(messageCheckpoint...)
+                                conversation?.messages.append(contentsOf: committedToolResults)
+                                conversation?.cachedTokens.removeAll()
+                                conversation?.uncommittedTokens.removeAll()
+                            }
+                            if recordedStep && !finishedStep {
+                                conversation?.messages.append(contentsOf: dispatchedResults)
+                            }
+                            cache = .kvcache(
+                                .init(
+                                    main: kvCache, draft: draftKVCache,
+                                    state: lmState, conversation: conversation))
+                        }
                         let isToolResultContinuation =
                             pendingMessages.contains { $0.role == .tool }
                             && conversation?.messages.last?.tool?.calls?.isEmpty == false
@@ -1020,6 +1135,7 @@ public final class ChatSession {
                             // continuation behavior for this explicitly low-level API.
                             templateMessages = leadingMessages + pendingMessages
                         }
+                        try Task.checkCancellation()
                         let containsNewMedia = pendingMessages.contains {
                             !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty
                         }
@@ -1030,6 +1146,7 @@ public final class ChatSession {
                             chat: templateMessages,
                             processing: processing,
                             tools: tools, additionalContext: additionalContext)
+                        needsExecutionFence = true
                         let preparedInput = try await processor.prepare(input: userInput)
                         var input = preparedInput
                         pendingMessages.removeAll()
@@ -1201,7 +1318,8 @@ public final class ChatSession {
                                     modelConfiguration: modelConfiguration,
                                     tokenizer: tokenizer,
                                     iterator: iterator,
-                                    tools: tools)
+                                    tools: tools,
+                                    steering: conversation == nil ? nil : steering)
                             )
                         }
 
@@ -1324,7 +1442,8 @@ public final class ChatSession {
                                             modelConfiguration: modelConfiguration,
                                             tokenizer: tokenizer,
                                             iterator: iterator,
-                                            tools: tools))
+                                            tools: tools,
+                                            steering: conversation == nil ? nil : steering))
                                 }
                             }
                         } else {
@@ -1332,6 +1451,15 @@ public final class ChatSession {
                             generation = try defaultGeneration()
                         }
 
+                        if !applyingSteering.isEmpty {
+                            if let value = transform(
+                                .steering(.applied(applyingSteering.map(\.id)))),
+                                case .terminated = continuation.yield(value)
+                            {
+                                generation.task.cancel()
+                            }
+                            applyingSteering.removeAll()
+                        }
                         var pendingToolCalls: [ToolCall] = []
                         var assistant = AssistantGeneration()
 
@@ -1344,7 +1472,10 @@ public final class ChatSession {
                             // the transform (streamDetails path)
                             if let toolCall = item.toolCall, toolDispatch != nil {
                                 pendingToolCalls.append(toolCall)
-                            } else if let value = transform(item) {
+                            }
+                            if item.toolCall == nil || toolDispatch == nil,
+                                let value = transform(item)
+                            {
                                 if case .terminated = continuation.yield(value) {
                                     assistant.wasTerminatedByConsumer = true
                                     generation.task.cancel()
@@ -1369,7 +1500,10 @@ public final class ChatSession {
                         // wait for the task to complete -- this is important in
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
-                        let generatedTokens = await generation.task.value
+                        let generated = await generation.task.value
+                        needsExecutionFence = false
+                        let generatedTokens = generated.tokens
+                        lmState = generated.state.consume()
 
                         if var currentConversation = conversation {
                             let recordedAssistant = currentConversation.record(
@@ -1385,9 +1519,13 @@ public final class ChatSession {
                                 // such as user/user on strict chat templates.
                                 currentConversation.messages.removeSubrange(
                                     conversationMessageCountBeforePending...)
+                                currentConversation.messages.append(
+                                    contentsOf: committedToolResults)
                             }
                             conversation = currentConversation
                         }
+
+                        recordedStep = true
 
                         if let rejection = assistant.rejectedToolCalls.first,
                             failOnRejectedToolCall || toolDispatch != nil
@@ -1413,15 +1551,46 @@ public final class ChatSession {
                                     .assistant("", toolCalls: pendingToolCalls))
                             }
                             for toolCall in pendingToolCalls {
+                                try Task.checkCancellation()
                                 let toolResult = try await toolDispatch(toolCall)
-                                pendingMessages.append(
-                                    .tool(
-                                        toolResult, id: toolCall.id,
-                                        name: toolCall.function.name))
+                                let result = Chat.Message.tool(
+                                    toolResult, id: toolCall.id, name: toolCall.function.name)
+                                pendingMessages.append(result)
+                                dispatchedResults.append(result)
                             }
-                            continue restart
                         }
+
+                        try Task.checkCancellation()
+                        applyingSteering = try steering.take(closeIfEmpty: pendingMessages.isEmpty)
+                        if !applyingSteering.isEmpty {
+                            // This step cannot carry the instructions into a new user
+                            // message. Report them and let the response finish; the
+                            // client still has its output and can resubmit.
+                            let blocked: SteeringError?
+                            if conversation == nil {
+                                blocked = .notSteerable
+                            } else if !assistant.toolCalls.isEmpty && toolDispatch == nil {
+                                blocked = .toolResultsRequired
+                            } else if !assistant.shouldRecord {
+                                blocked = .emptyResponse
+                            } else {
+                                blocked = nil
+                            }
+
+                            if let blocked {
+                                reportSteeringFailure(applyingSteering, blocked)
+                                applyingSteering.removeAll()
+                            } else {
+                                pendingMessages.append(
+                                    .user(applyingSteering.map(\.text).joined(separator: "\n\n")))
+                            }
+                        }
+                        finishedStep = true
                     }
+
+                    // Instructions accepted after the last step drained the mailbox,
+                    // including a batch this response reported as failed above.
+                    reportSteeringFailure(try steering.closeAndTake(), .responseEnded)
 
                     // Store the carried state back alongside the KV cache so
                     // the next turn resumes with correct position anchoring.
@@ -1435,12 +1604,19 @@ public final class ChatSession {
                     continuation.finish()
                 }
             } catch {
+                // Close the mailbox before the consumer observes the error, so a
+                // client that reacts by steering is told the response has ended.
+                steering.finish()
                 continuation.finish(throwing: error)
             }
         }
 
-        continuation.onTermination = { _ in
-            task.cancel()
+        steering.setTask(task)
+        continuation.onTermination = { termination in
+            if case .cancelled = termination {
+                steering.cancel()
+                task.cancel()
+            }
         }
 
         return stream
@@ -1475,11 +1651,11 @@ public final class ChatSession {
         }
     }
 
-    /// Wait for exclusive access to the KVCache.
+    /// Wait for registered response runners and exclusive access to the KVCache.
     ///
-    /// This is useful for cases where a program is terminating and wants to ensure that any
-    /// async operations are complete.
-    public func synchronize() async {
+    /// Use this after cancelling a stream consumer to await inference and GPU cleanup.
+    nonisolated(nonsending) public func synchronize() async {
+        await steeringRequests.synchronize()
         await cache.read { _ in }
     }
 
