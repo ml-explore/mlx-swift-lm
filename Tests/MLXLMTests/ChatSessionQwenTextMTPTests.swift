@@ -60,8 +60,8 @@ struct ChatSessionQwenTextMTPTests {
         }
     }
 
-    @Test("single text turn reports MTP speculation")
-    func singleTextTurnReportsMTPTelemetry() async throws {
+    @Test("single text turn reports MTP speculation", arguments: [false, true])
+    func singleTextTurnReportsMTPTelemetry(observing: Bool) async throws {
         let parameters = GenerateParameters(maxTokens: 4, temperature: 0)
         let session = ChatSession(
             makeModelContext(),
@@ -73,7 +73,10 @@ struct ChatSessionQwenTextMTPTests {
             generateParameters: parameters
         )
 
-        let result = try await collect(session.streamDetails(to: "a"))
+        let result = try await collect(
+            observing
+                ? session.observe(to: "a", using: .text)
+                : session.streamDetails(to: "a"))
         let greedyResult = try await collect(greedySession.streamDetails(to: "a"))
 
         #expect(result.text == greedyResult.text)
@@ -82,6 +85,60 @@ struct ChatSessionQwenTextMTPTests {
         #expect((result.info.proposedDraftTokens ?? 0) > 0)
         #expect(result.info.acceptedDraftTokens == result.info.proposedDraftTokens)
         #expect(result.info.passthroughReason == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == nil)
+        #expect(greedyResult.info.speculativeDecodingFallbackReason == nil)
+    }
+
+    @Test(
+        "MTP observations reject active speculation and allow staging fallback",
+        arguments: [false, true])
+    func observationRejectsActiveMTPButAllowsStagingFallback(fallback: Bool) async throws {
+        let probe = MTPStagingProbe()
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+        let warm = try await collect(session.streamDetails(to: "warm"))
+        #expect((warm.info.proposedDraftTokens ?? 0) > 0)
+        probe.cache.refusesSpeculativeStaging = fallback
+
+        do {
+            var probabilityCount = 0
+            var completion: GenerateCompletionInfo?
+            for try await event in session.observe(to: "a", using: .logProbabilities(topCount: 1)) {
+                if event.logProbabilities != nil { probabilityCount += 1 }
+                if let info = event.generation?.info { completion = info }
+            }
+            #expect(fallback)
+            let info = try #require(completion)
+            #expect(probabilityCount == info.generationTokenCount)
+            #expect(info.speculativeDecodingFallbackReason == .unsupportedCache)
+        } catch ChatSession.ObservationError.unsupportedSpeculativeDecoding {
+            #expect(!fallback)
+        }
+
+        probe.cache.refusesSpeculativeStaging = false
+        let resumed = try await collect(session.streamDetails(to: "resume"))
+        #expect(resumed.info.generationTokenCount == 4)
+    }
+
+    @Test("one-token MTP generation has no proposals and no session fallback")
+    func oneTokenMTPGenerationDoesNotReportFallback() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: .init(maxTokens: 1, temperature: 0)
+        )
+
+        let result = try await collect(session.streamDetails(to: "a"))
+
+        #expect(result.text == "x")
+        #expect(result.info.generationTokenCount == 1)
+        #expect(result.info.proposedDraftTokens == 0)
+        #expect(result.info.acceptedDraftTokens == 0)
+        #expect(result.info.speculativeDecodingTelemetry == nil)
+        #expect(result.info.passthroughReason == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == nil)
     }
 
     @Test("cold MTP staging refusal falls back before target prefill")
@@ -106,6 +163,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.speculativeDecodingTelemetry == nil)
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == .unsupportedCache)
         #expect(probe.cache.refusedWidths == [2])
         #expect(probe.cacheCreationCount == 1)
         #expect(probe.preparations.count == 1)
@@ -161,6 +219,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.speculativeDecodingTelemetry == nil)
         #expect(second.info.proposedDraftTokens == nil)
         #expect(second.info.acceptedDraftTokens == nil)
+        #expect(second.info.speculativeDecodingFallbackReason == .unsupportedCache)
     }
 
     @Test("MTP preparation errors after cache mutation propagate without retry")
@@ -214,6 +273,8 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
         #expect(result.info.passthroughReason == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == .unsupportedSampling)
+        #expect(regularResult.info.speculativeDecodingFallbackReason == nil)
     }
 
     @Test("a target-only sampling turn drops the warm MTP continuation")
@@ -233,11 +294,13 @@ struct ChatSessionQwenTextMTPTests {
         #expect(targetOnly.info.promptTokenCount == 2)
         #expect(targetOnly.info.cachedPromptTokenCount > 0)
         #expect(targetOnly.info.proposedDraftTokens == nil)
+        #expect(targetOnly.info.speculativeDecodingFallbackReason == .unsupportedSampling)
         // A target-only pass commits its final token directly, so the next
         // append has only the new user token left to prefill.
         #expect(afterDrop.info.promptTokenCount == 1)
         #expect(afterDrop.info.cachedPromptTokenCount > 0)
         #expect(afterDrop.info.proposedDraftTokens == nil)
+        #expect(afterDrop.info.speculativeDecodingFallbackReason == .unavailableContinuation)
     }
 
     @Test("a cache-plan change rebuilds target and MTP state together")
@@ -256,6 +319,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(rebuilt.info.promptTokenCount > 2)
         #expect((rebuilt.info.proposedDraftTokens ?? 0) > 0)
         #expect(rebuilt.info.passthroughReason == nil)
+        #expect(rebuilt.info.speculativeDecodingFallbackReason == nil)
     }
 
     @Test("second text turn resumes MTP from the warm prompt cache")
@@ -276,6 +340,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.cachedPromptTokenCount > 0)
         #expect((second.info.proposedDraftTokens ?? 0) > 0)
         #expect(second.info.passthroughReason == nil)
+        #expect(second.info.speculativeDecodingFallbackReason == nil)
     }
 
     @Test("stateless MTP reuses the warm main cache on the second text turn")
@@ -312,6 +377,8 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.proposedDraftTokens == nil)
         #expect(second.info.acceptedDraftTokens == nil)
         #expect(second.info.speculativeDecodingTelemetry == nil)
+        #expect(first.info.speculativeDecodingFallbackReason == nil)
+        #expect(second.info.speculativeDecodingFallbackReason == .unavailableContinuation)
     }
 
     @Test("raw prompt cache keeps its prefix and falls back to target-only generation")
@@ -335,12 +402,17 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
         #expect(result.info.speculativeDecodingTelemetry == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == .unavailableContinuation)
         // Existing raw prefix (3) + rendered fragment (1) + generated tokens (4).
         #expect(status.processedTokenCount == 8)
     }
 
-    @Test("prepared media falls back to target-only and retains the main cache")
-    func preparedMediaFallsBackAndRetainsMainCache() async throws {
+    @Test(
+        "prepared media reports the configured fallback and retains the main cache",
+        arguments: [true, false], [Float(0), Float(0.6)])
+    func preparedMediaFallsBackAndRetainsMainCache(
+        speculationEnabled: Bool, temperature: Float
+    ) async throws {
         let tokenizer = DeterministicMTPTokenizer()
         let processor = PreparedMediaMTPInputProcessor(tokenizer: tokenizer)
         let context = ModelContext(
@@ -349,10 +421,11 @@ struct ChatSessionQwenTextMTPTests {
             processor: processor,
             tokenizer: tokenizer
         )
+        let configuration = try makeMTPConfiguration()
         let session = ChatSession(
             context,
-            speculativeDecoding: try makeMTPConfiguration(),
-            generateParameters: .init(maxTokens: 4, temperature: 0)
+            speculativeDecoding: speculationEnabled ? configuration : nil,
+            generateParameters: .init(maxTokens: 4, temperature: temperature)
         )
 
         let result = try await collect(session.streamDetails(to: "a"))
@@ -362,6 +435,13 @@ struct ChatSessionQwenTextMTPTests {
         #expect(result.info.proposedDraftTokens == nil)
         #expect(result.info.acceptedDraftTokens == nil)
         #expect(result.info.speculativeDecodingTelemetry == nil)
+        if speculationEnabled {
+            #expect(
+                result.info.speculativeDecodingFallbackReason
+                    == (temperature == 0 ? .unsupportedMedia : .unsupportedSampling))
+        } else {
+            #expect(result.info.speculativeDecodingFallbackReason == nil)
+        }
         #expect(status.processedTokenCount == 5)
     }
 
@@ -389,6 +469,8 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.cachedPromptTokenCount > 0)
         #expect(second.info.proposedDraftTokens == nil)
         #expect(second.info.speculativeDecodingTelemetry == nil)
+        #expect(first.info.speculativeDecodingFallbackReason == nil)
+        #expect(second.info.speculativeDecodingFallbackReason == .unsupportedMedia)
     }
 
     @Test("consumer cancellation finalizes MTP before a clean next turn")
@@ -421,8 +503,8 @@ struct ChatSessionQwenTextMTPTests {
                 == result.info.promptTokenCount + result.info.generationTokenCount - 1)
     }
 
-    @Test("automatic tool restart resumes MTP from the warm prompt cache")
-    func automaticToolRestartResumesWarmMTP() async throws {
+    @Test("automatic tool restart reports MTP continuation eligibility", arguments: [true, false])
+    func automaticToolRestartReportsMTPContinuation(resumable: Bool) async throws {
         let probe = ToolRestartProbe()
         let tokenizer = ToolRestartMTPTokenizer(probe: probe)
         let processor = ToolRestartMTPInputProcessor(tokenizer: tokenizer)
@@ -446,9 +528,11 @@ struct ChatSessionQwenTextMTPTests {
                 ] as [String: any Sendable],
             ] as [String: any Sendable],
         ]
+        let drafter: any MTPDrafterModel =
+            resumable ? QwenStyleMTPDrafter() : NonResumableMTPDrafter()
         let session = ChatSession(
             context,
-            speculativeDecoding: try makeMTPConfiguration(),
+            speculativeDecoding: try makeMTPConfiguration(model: drafter),
             generateParameters: .init(maxTokens: 24, temperature: 0),
             tools: [weatherTool],
             toolDispatch: { call in
@@ -483,17 +567,24 @@ struct ChatSessionQwenTextMTPTests {
         #expect(
             restartInfo.cachedPromptTokenCount
                 == firstInfo.promptTokenCount + firstInfo.generationTokenCount - 1)
-        for info in result.infos {
+        for info in result.infos.prefix(resumable ? 2 : 1) {
             #expect(info.speculativeDecodingTelemetry != nil)
             #expect((info.proposedDraftTokens ?? 0) > 0)
             #expect(info.passthroughReason == nil)
+            #expect(info.speculativeDecodingFallbackReason == nil)
         }
-        // The final verifier sample is emitted but becomes input to the next
-        // MTP round, so it deliberately has no K/V row yet.
+        if !resumable {
+            #expect(restartInfo.speculativeDecodingTelemetry == nil)
+            #expect(restartInfo.proposedDraftTokens == nil)
+            #expect(restartInfo.acceptedDraftTokens == nil)
+            #expect(restartInfo.passthroughReason == nil)
+            #expect(restartInfo.speculativeDecodingFallbackReason == .unavailableContinuation)
+        }
+        // A speculative pass leaves its final verifier sample uncommitted.
         #expect(
             status.processedTokenCount
                 == restartInfo.cachedPromptTokenCount + restartInfo.promptTokenCount
-                + restartInfo.generationTokenCount - 1)
+                + restartInfo.generationTokenCount - (resumable ? 1 : 0))
     }
 
     private func makeModelContext(probe: MTPStagingProbe? = nil) -> ModelContext {
