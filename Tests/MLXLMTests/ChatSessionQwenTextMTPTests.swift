@@ -2,9 +2,10 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import Testing
+
+@testable import MLXLMCommon
 
 @Suite(.serialized)
 struct ChatSessionQwenTextMTPTests {
@@ -81,6 +82,110 @@ struct ChatSessionQwenTextMTPTests {
         #expect((result.info.proposedDraftTokens ?? 0) > 0)
         #expect(result.info.acceptedDraftTokens == result.info.proposedDraftTokens)
         #expect(result.info.passthroughReason == nil)
+    }
+
+    @Test("cold MTP staging refusal falls back before target prefill")
+    func coldStagingRefusalUsesOrdinaryGeneration() async throws {
+        let probe = MTPStagingProbe()
+        probe.cache.refusesSpeculativeStaging = true
+        let parameters = GenerateParameters(maxTokens: 4, temperature: 0)
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: parameters
+        )
+        let baseline = ChatSession(makeModelContext(), generateParameters: parameters)
+
+        let result = try await collect(session.streamDetails(to: "a"))
+        let expected = try await collect(baseline.streamDetails(to: "a"))
+        let preparation = try #require(probe.preparations.first)
+        let status = try await session.cacheStatus()
+
+        #expect(result.text == expected.text)
+        #expect(result.info.promptTokenCount == expected.info.promptTokenCount)
+        #expect(result.info.speculativeDecodingTelemetry == nil)
+        #expect(result.info.proposedDraftTokens == nil)
+        #expect(result.info.acceptedDraftTokens == nil)
+        #expect(probe.cache.refusedWidths == [2])
+        #expect(probe.cacheCreationCount == 1)
+        #expect(probe.preparations.count == 1)
+        #expect(preparation.tokens == [7])
+        #expect(preparation.cachedTokens.isEmpty)
+        #expect(!preparation.emitsMTPState)
+        #expect(probe.draftCount == 0)
+        #expect(status.processedTokenCount == 5)
+        #expect(probe.cache.offset == status.processedTokenCount)
+    }
+
+    @Test("warm MTP staging refusal preserves target cache and carried state")
+    func warmStagingRefusalPreservesTargetContinuation() async throws {
+        let probe = MTPStagingProbe()
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        let first = try await collect(session.streamDetails(to: "a"))
+        let firstStatus = try await session.cacheStatus()
+        let firstProcessedTokenCount = try #require(firstStatus.processedTokenCount)
+        let prefix = probe.cache.cachedTokens
+        let draftsBeforeRefusal = probe.draftCount
+        #expect((first.info.proposedDraftTokens ?? 0) > 0)
+        #expect(probe.finalizedPositions == [firstProcessedTokenCount])
+        #expect(prefix == [7, 4, 4, 4])
+
+        probe.cache.refusesSpeculativeStaging = true
+        let second = try await collect(session.streamDetails(to: "b"))
+        let status = try await session.cacheStatus()
+        #expect(probe.preparations.count == 2)
+        let preparation = try #require(probe.preparations.last)
+
+        #expect(second.text == first.text)
+        #expect(probe.cache.refusedWidths == [2])
+        #expect(probe.cacheCreationCount == 1)
+        #expect(preparation.cacheID == ObjectIdentifier(probe.cache))
+        #expect(preparation.cachedTokens == prefix)
+        #expect(preparation.tokens == [4, 7])
+        #expect(preparation.targetMarker == 42)
+        #expect(!preparation.emitsMTPState)
+        #expect(Array(probe.cache.cachedTokens.prefix(prefix.count)) == prefix)
+        #expect(second.info.promptTokenCount == 2)
+        #expect(second.info.cachedPromptTokenCount == firstProcessedTokenCount)
+        #expect(
+            status.processedTokenCount
+                == second.info.cachedPromptTokenCount + second.info.promptTokenCount
+                + second.info.generationTokenCount)
+        #expect(probe.cache.offset == status.processedTokenCount)
+        #expect(probe.draftCount == draftsBeforeRefusal)
+        #expect(second.info.speculativeDecodingTelemetry == nil)
+        #expect(second.info.proposedDraftTokens == nil)
+        #expect(second.info.acceptedDraftTokens == nil)
+    }
+
+    @Test("MTP preparation errors after cache mutation propagate without retry")
+    func preparationFailureAfterCacheMutationDoesNotFallBack() async throws {
+        let probe = MTPStagingProbe()
+        probe.failAfterPreparationWrite = true
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        do {
+            _ = try await collect(session.streamDetails(to: "a"))
+            Issue.record("Expected the target preparation error")
+        } catch let error as KVCacheError {
+            #expect(error.message == "Target preparation failed after a cache write")
+        }
+
+        #expect(probe.preparations.count == 1)
+        #expect(probe.preparations.first?.emitsMTPState == true)
+        #expect(probe.cache.cachedTokens == [7])
+        #expect(probe.cacheCreationCount == 1)
+        #expect(probe.cache.refusedWidths.isEmpty)
+        #expect(probe.draftCount == 0)
     }
 
     @Test("default sampling bypasses Qwen MTP before cache policy")
@@ -391,12 +496,12 @@ struct ChatSessionQwenTextMTPTests {
                 + restartInfo.generationTokenCount - 1)
     }
 
-    private func makeModelContext() -> ModelContext {
+    private func makeModelContext(probe: MTPStagingProbe? = nil) -> ModelContext {
         let tokenizer = DeterministicMTPTokenizer()
         let processor = DeterministicMTPInputProcessor(tokenizer: tokenizer)
         return ModelContext(
             configuration: processor.configuration,
-            model: MTPStateEmittingTarget(),
+            model: MTPStateEmittingTarget(probe: probe),
             processor: processor,
             tokenizer: tokenizer
         )
@@ -695,15 +800,48 @@ private struct ToolRestartMTPInputProcessor: UserInputProcessor {
 /// Deterministic attention-only target that publishes the same MTP state shape
 /// used by Qwen text models, while keeping this ChatSession test lightweight.
 private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimensionProvider {
+    private let probe: MTPStagingProbe?
     var kvHeads: [Int] { [1] }
+
+    init(probe: MTPStagingProbe? = nil) {
+        self.probe = probe
+    }
+
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        guard let probe else { return try [makeAttentionKVCache(parameters: parameters)] }
+        probe.cacheCreationCount += 1
+        return [probe.cache]
+    }
+
+    func cacheStatus(parameters: GenerateParameters?) throws -> KVCacheStatus {
+        let cache: [KVCache] =
+            probe == nil
+            ? try newCache(parameters: parameters)
+            : [SpeculativeStagingCache()]
+        return KVCacheStatus(
+            cache: cache, plan: try parameters?.kvCachePlan() ?? .disabled, phase: .planned)
+    }
 
     func prepare(
         _ input: LMInput,
-        cache _: [KVCache],
-        state _: LMOutput.State?,
+        cache: [KVCache],
+        state: LMOutput.State?,
         prefill _: PrefillParameters
     ) throws -> PrepareResult {
-        .tokens(input.text)
+        if let probe, let cache = cache.first as? SpeculativeStagingCache {
+            probe.preparations.append(
+                .init(
+                    cacheID: ObjectIdentifier(cache), cachedTokens: cache.cachedTokens,
+                    tokens: input.text.tokens.asArray(Int.self),
+                    emitsMTPState: state?[mtpEmitFlagKey] == true,
+                    targetMarker: state?[stagingTargetMarkerKey]))
+            if probe.failAfterPreparationWrite {
+                let values = input.text.tokens.asType(.float32).reshaped([1, 1, -1, 1])
+                _ = cache.update(keys: values, values: values)
+                throw KVCacheError(message: "Target preparation failed after a cache write")
+            }
+        }
+        return .tokens(input.text)
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
@@ -724,7 +862,10 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
         emitMTPState: Bool
     ) -> LMOutput {
         let positions = tokens.dim(-1)
-        let newKV = MLXArray.zeros([1, 1, positions, 1])
+        let newKV =
+            probe == nil
+            ? MLXArray.zeros([1, 1, positions, 1])
+            : tokens.asType(.float32).reshaped([1, 1, positions, 1])
         let sharedKV = cache?.first?.update(keys: newKV, values: newKV) ?? (newKV, newKV)
 
         let vocabularySize = 16
@@ -734,11 +875,13 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
         }
         let logits = MLXArray(values, [1, positions, vocabularySize])
 
-        guard emitMTPState else {
-            return LMOutput(logits: logits)
-        }
-
         var outputState = LMOutput.State()
+        if probe != nil {
+            outputState[stagingTargetMarkerKey] = 42
+        }
+        guard emitMTPState else {
+            return LMOutput(logits: logits, state: probe == nil ? nil : outputState)
+        }
         outputState[mtpLastHiddenStatesKey] = MLXArray.zeros([1, positions, 4])
         outputState[mtpSharedKVStatesKey] = ["full_attention": sharedKV]
         outputState[mtpSharedKVSourceIndicesKey] = ["full_attention": 0]
@@ -752,6 +895,12 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
 /// Qwen-like contract: private per-stream state, prompt prefill, greedy-only,
 /// no dependency on target-shared K/V, and one drafted token per round.
 private final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
+    private let probe: MTPStagingProbe?
+
+    init(probe: MTPStagingProbe? = nil) {
+        self.probe = probe
+    }
+
     var maximumBlockSize: Int? { 2 }
     var requiresSharedTargetKV: Bool { false }
     let requiresPromptPrefill = true
@@ -771,6 +920,7 @@ private final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
         positionDeltas _: MLXArray?,
         state: inout MTPDrafterState
     ) -> Bool {
+        probe?.finalizedPositions.append(targetProcessedTokenCount)
         state.nextPosition = targetProcessedTokenCount
         state.seedToken = nil
         state.seedHidden = nil
@@ -819,10 +969,82 @@ private final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
     }
 
     private func draftedTokens(batchSize: Int, blockSize: Int) -> MLXArray {
-        MLXArray(
+        if let probe { probe.draftCount += 1 }
+        return MLXArray(
             Array(repeating: Int32(4), count: batchSize * (blockSize - 1)),
             [batchSize, blockSize - 1]
         )
+    }
+}
+
+private let stagingTargetMarkerKey = LMOutput.Key<Int>("staging-test-target-marker")
+
+private final class MTPStagingProbe {
+    struct Preparation {
+        let cacheID: ObjectIdentifier
+        let cachedTokens: [Float]
+        let tokens: [Int]
+        let emitsMTPState: Bool
+        let targetMarker: Int?
+    }
+
+    let cache = SpeculativeStagingCache()
+    var cacheCreationCount = 0
+    var preparations: [Preparation] = []
+    var draftCount = 0
+    var finalizedPositions: [Int] = []
+    var failAfterPreparationWrite = false
+}
+
+private final class SpeculativeStagingCache: KVCache {
+    private let storage: KVCacheSimple
+    var refusesSpeculativeStaging = false
+    var refusedWidths: [Int] = []
+
+    init(storage: KVCacheSimple = KVCacheSimple()) {
+        self.storage = storage
+    }
+
+    var offset: Int { storage.offset }
+    var maxSize: Int? { storage.maxSize }
+    var isTrimmable: Bool { storage.isTrimmable }
+    var cachedTokens: [Float] { storage.state.first?.asArray(Float.self) ?? [] }
+    var state: [MLXArray] {
+        get { storage.state }
+        set { storage.state = newValue }
+    }
+    var metaState: [String] {
+        get { storage.metaState }
+        set { storage.metaState = newValue }
+    }
+
+    func isTrimmable(after positions: Int) -> Bool {
+        if refusesSpeculativeStaging && positions > 1 {
+            refusedWidths.append(positions)
+            return false
+        }
+        return storage.isTrimmable(after: positions)
+    }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        storage.update(keys: keys, values: values)
+    }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int { storage.trim(n) }
+
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        storage.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    func innerState() -> [MLXArray] { storage.innerState() }
+
+    func copy() -> any KVCache {
+        let copy = SpeculativeStagingCache(storage: storage.copy() as! KVCacheSimple)
+        copy.refusesSpeculativeStaging = refusesSpeculativeStaging
+        return copy
     }
 }
 
