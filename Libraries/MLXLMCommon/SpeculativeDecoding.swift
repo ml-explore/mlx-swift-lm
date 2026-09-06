@@ -3,6 +3,24 @@
 import Foundation
 import MLX
 
+/// Why a configured ``ChatSession`` selected ordinary generation instead of speculation.
+public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
+    /// The drafter requires greedy sampling, but the temperature is nonzero.
+    case unsupportedSampling
+
+    /// The prepared input contains image, video, or audio tensors.
+    case unsupportedMedia
+
+    /// The initial MTP cache-staging probe refused speculation.
+    case unsupportedCache
+
+    /// Required speculative state is missing, misaligned, or cannot follow the cache operation.
+    case unavailableContinuation
+
+    /// The draft-model memory policy selected ordinary generation.
+    case memoryBudgetExceeded
+}
+
 private func defaultSpeculativeDecodingMemoryLimit() -> Int? {
     guard let bytes = GPU.maxRecommendedWorkingSetBytes(), bytes > 0 else {
         return nil

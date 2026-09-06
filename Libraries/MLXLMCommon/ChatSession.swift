@@ -1160,6 +1160,7 @@ public final class ChatSession {
 
                     // loop can restart on tool calls
                     restart: while !pendingMessages.isEmpty {
+                        var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
                         // Only a cache these calls were generated into can resume them.
                         let isToolResultContinuation =
                             pendingMessages.contains { $0.role == .tool }
@@ -1516,6 +1517,15 @@ public final class ChatSession {
                         }
 
                         if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                            if speculativeDecoding != nil {
+                                if !speculationIsEligibleForParameters {
+                                    speculativeDecodingFallbackReason = .unsupportedSampling
+                                } else if carriesPreparedMedia {
+                                    speculativeDecodingFallbackReason = .unsupportedMedia
+                                } else {
+                                    speculativeDecodingFallbackReason = .unavailableContinuation
+                                }
+                            }
                             generation = try defaultGeneration()
                         } else if let speculativeDecoding,
                             case .mtp(_, let blockSize) = speculativeDecoding.strategy,
@@ -1544,6 +1554,7 @@ public final class ChatSession {
                                         toolCallPolicy: generateParameters.toolCallPolicy))
                             } catch MTPInitializationError.unsupportedSpeculativeCache {
                                 mtpDrafterContinuation = nil
+                                speculativeDecodingFallbackReason = .unsupportedCache
                                 generation = try defaultGeneration()
                             }
                         } else if let speculativeDecoding {
@@ -1560,6 +1571,7 @@ public final class ChatSession {
                             }
 
                             if shouldFallBackBeforeLoadingDraft {
+                                speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                 generation = try defaultGeneration()
                             } else {
                                 let cachedDraftContainer = await loadedDraftModel.read { $0 }
@@ -1585,6 +1597,7 @@ public final class ChatSession {
                                             evaluation: memoryEvaluation)
                                     }
 
+                                    speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                     generation = try defaultGeneration()
                                 } else {
                                     if cachedDraftContainer == nil {
@@ -1659,7 +1672,10 @@ public final class ChatSession {
                             prefilledReasoningStartDelimiter: prefilledReasoningStartDelimiter)
 
                         for await item in generation.stream {
-                            let item = item.attributingCachedPromptTokens(cachedPromptTokenCount)
+                            let item = item.attributingSessionMetadata(
+                                cachedPromptTokenCount: cachedPromptTokenCount,
+                                speculativeDecodingFallbackReason: speculativeDecodingFallbackReason
+                            )
                             assistant.consume(item)
 
                             // collect tool calls for dispatch; if no
