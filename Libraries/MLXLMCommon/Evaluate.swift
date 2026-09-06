@@ -2992,6 +2992,12 @@ public struct GenerateCompletionInfo: Sendable {
     /// Speculative decoding telemetry, when generation used speculative decoding.
     public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
 
+    /// Why ``ChatSession`` selected ordinary generation despite configured speculation.
+    ///
+    /// Nil means no session fallback was recorded; it does not prove speculative rounds occurred.
+    /// Lower-level generation APIs leave this nil; MTP iterator diagnostics use ``passthroughReason``.
+    public internal(set) var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
+
     /// Number of tool-call-shaped outputs rejected during this generation.
     public let rejectedToolCallCount: Int
 
@@ -3035,7 +3041,8 @@ public struct GenerateCompletionInfo: Sendable {
         passthroughReason: String? = nil,
         speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil,
         rejectedToolCallCount: Int = 0,
-        recoveredToolCallCount: Int = 0
+        recoveredToolCallCount: Int = 0,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.cachedPromptTokenCount = cachedPromptTokenCount
@@ -3052,6 +3059,7 @@ public struct GenerateCompletionInfo: Sendable {
         self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
         self.rejectedToolCallCount = rejectedToolCallCount
         self.recoveredToolCallCount = recoveredToolCallCount
+        self.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
     }
 
     public func summary() -> String {
@@ -3090,7 +3098,8 @@ public struct GenerateCompletionInfo: Sendable {
             passthroughReason: passthroughReason,
             speculativeDecodingTelemetry: speculativeDecodingTelemetry,
             rejectedToolCallCount: rejected,
-            recoveredToolCallCount: recovered)
+            recoveredToolCallCount: recovered,
+            speculativeDecodingFallbackReason: speculativeDecodingFallbackReason)
     }
 }
 
@@ -3160,14 +3169,14 @@ public enum Generation: Sendable {
         (batch ?? []) + [element]
     }
 
-    /// Attributes `count` prompt tokens to a reused KV-cache prefix on a `.info`
-    /// payload; every other case passes through unchanged.
-    ///
-    /// The generation loop is handed an already narrowed prompt, so only the
-    /// cache owner can supply this. See ``GenerateCompletionInfo/cachedPromptTokenCount``.
-    func attributingCachedPromptTokens(_ count: Int) -> Generation {
-        guard count > 0, case .info(var info) = self else { return self }
-        info.cachedPromptTokenCount = count
+    /// Adds session-owned cache and fallback metadata to `.info`; other events pass through.
+    func attributingSessionMetadata(
+        cachedPromptTokenCount: Int,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
+    ) -> Generation {
+        guard case .info(var info) = self else { return self }
+        info.cachedPromptTokenCount = cachedPromptTokenCount
+        info.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
         return .info(info)
     }
 }
