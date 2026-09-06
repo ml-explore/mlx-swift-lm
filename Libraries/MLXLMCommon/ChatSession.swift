@@ -1418,26 +1418,31 @@ public final class ChatSession {
                             case .mtp(_, let blockSize) = speculativeDecoding.strategy,
                             let drafter = mtpDrafter
                         {
-                            let iterator = try MTPSpeculativeTokenIterator(
-                                input: input,
-                                mainModel: model,
-                                drafter: drafter,
-                                mainCacheStorage: kvCache,
-                                mainState: lmState,
-                                mtpContinuation: mtpDrafterContinuation,
-                                parameters: generateParameters,
-                                blockSize: blockSize,
-                                components: components
-                            )
+                            do {
+                                let iterator = try MTPSpeculativeTokenIterator(
+                                    input: input,
+                                    mainModel: model,
+                                    drafter: drafter,
+                                    mainCacheStorage: kvCache,
+                                    mainState: lmState,
+                                    mtpContinuation: mtpDrafterContinuation,
+                                    parameters: generateParameters,
+                                    blockSize: blockSize,
+                                    components: components
+                                )
 
-                            generation = GenerationRun(
-                                MLXLMCommon.generateTaskRecordingTokens(
-                                    promptTokenCount: input.text.tokens.size,
-                                    modelConfiguration: modelConfiguration,
-                                    tokenizer: tokenizer,
-                                    iterator: iterator,
-                                    tools: toolValidationSchemas,
-                                    toolCallPolicy: generateParameters.toolCallPolicy))
+                                generation = GenerationRun(
+                                    MLXLMCommon.generateTaskRecordingTokens(
+                                        promptTokenCount: input.text.tokens.size,
+                                        modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer,
+                                        iterator: iterator,
+                                        tools: toolValidationSchemas,
+                                        toolCallPolicy: generateParameters.toolCallPolicy))
+                            } catch MTPInitializationError.unsupportedSpeculativeCache {
+                                mtpDrafterContinuation = nil
+                                generation = try defaultGeneration()
+                            }
                         } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {

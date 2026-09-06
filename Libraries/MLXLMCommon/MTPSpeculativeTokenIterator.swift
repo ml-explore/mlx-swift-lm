@@ -3,6 +3,18 @@
 import Foundation
 import MLX
 
+enum MTPInitializationError: Error, LocalizedError {
+    // Only emitted by the initial staging probe, before target prefill.
+    case unsupportedSpeculativeCache
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedSpeculativeCache:
+            "MTP speculative decoding requires a stageable main KV cache."
+        }
+    }
+}
+
 /// Generator of tokens using MTP (Multi-Token Prediction) speculative
 /// decoding.
 ///
@@ -209,8 +221,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 let probe = self.mainCacheStorage.beginRound(
                     maximumPositions: effectiveBlockSize)
             else {
-                throw KVCacheError(
-                    message: "MTP speculative decoding requires a stageable main KV cache.")
+                throw MTPInitializationError.unsupportedSpeculativeCache
             }
             self.mainCacheStorage.rollback(probe)
         }
