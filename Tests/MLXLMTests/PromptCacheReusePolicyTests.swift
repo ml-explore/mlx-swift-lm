@@ -171,8 +171,10 @@ struct PromptCacheReusePolicyTests {
     @Test func `a misaligned draft cache blocks the media split`() {
         #expect(
             PromptCacheReusePolicy().decide(
-                turn: turn(prompt: [1, 2, 3, 4], newMedia: true, canSplitMedia: true),
-                cache: alignedCache([1, 2, 3], draftAligned: false)) == .rebuild)
+                turn: turn(
+                    prompt: [1, 2, 3, 4], newMedia: true, speculative: true,
+                    canSplitMedia: true),
+                cache: alignedCache([1, 2, 3], speculativeReuseCapability: .unavailable)) == .rebuild)
     }
 
     @Test func `an explicit attention mask blocks suffix reuse`() {

@@ -1375,7 +1375,7 @@ func testDrafterSeesExactlyTheWindowItCanAttendOver() throws {
 func testMTPIteratorRejectsACacheItCannotStage() {
     let model = PositionScriptedMainModel(
         script: mixedAcceptanceScript(drafted: 7), slidingWindow: 8)
-    #expect(throws: KVCacheError.self) {
+    #expect(throws: MTPInitializationError.self) {
         _ = try MTPSpeculativeTokenIterator(
             input: LMInput(tokens: MLXArray([Int32(1), 2, 3])),
             mainModel: model,
