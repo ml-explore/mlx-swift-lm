@@ -265,7 +265,6 @@ struct AppendOnlyMediaRule: PromptCacheReuseRule {
             !turn.usesSpeculativeDecoding,
             !cache.cachedTokens.isEmpty,
             cache.mainCacheIsAligned,
-            cache.speculativeStateIsAligned,
             turn.promptTokens.count > cache.cachedTokens.count,
             turn.promptTokens.starts(with: cache.cachedTokens)
         else {
