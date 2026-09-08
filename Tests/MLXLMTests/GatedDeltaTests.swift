@@ -169,9 +169,10 @@ public class GatedDeltaTests: XCTestCase {
     /// the ops path, which is differentiable. The Python model spells the
     /// same thing `use_kernel=not self.training`.
     ///
-    /// T is longer than one step on purpose: the recurrence carries state
-    /// forward, and a gradient that reached only the last step would still
-    /// look non-zero.
+    /// T spans more than one recompute chunk on purpose: the ops path runs
+    /// the recurrence in chunks through a custom function whose backward
+    /// recomputes the chunk, and a gradient that stopped at a chunk boundary
+    /// would still pass at T <= 16.
     func testGatedDeltaOpsPathIsDifferentiable() throws {
         let inputs = makeInputs(T: 40)
         let loss: ([MLXArray]) -> [MLXArray] = { arrays in
@@ -210,7 +211,8 @@ public class GatedDeltaTests: XCTestCase {
     ///
     /// Training takes the ops path and inference takes the kernel, so a model
     /// would be fine-tuned against arithmetic it never runs at generation
-    /// time if these two disagreed.
+    /// time if these two disagreed. T spans three recompute chunks, which is
+    /// where a mistake in carrying state across a chunk boundary would show.
     ///
     /// **Compared relative to the state, not absolutely.** These inputs are
     /// random, so the recurrent state compounds: it reaches ~1.2e6 by T = 40,
