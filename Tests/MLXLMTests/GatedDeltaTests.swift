@@ -159,4 +159,101 @@ public class GatedDeltaTests: XCTestCase {
         )
     }
 
+    /// A model in training mode must be able to differentiate the recurrence.
+    ///
+    /// The fused kernel is a `CustomKernel`, which has no VJP, so the first
+    /// backward pass of a LoRA fine-tune of Qwen3.5 or Qwen3-Next died with
+    /// `[Primitive::vjp] Not implemented for CustomKernel` - three of every
+    /// four layers in those models are gated-delta layers, so this was every
+    /// fine-tune of them rather than an edge case. `useKernel: false` takes
+    /// the ops path, which is differentiable. The Python model spells the
+    /// same thing `use_kernel=not self.training`.
+    ///
+    /// T is longer than one step on purpose: the recurrence carries state
+    /// forward, and a gradient that reached only the last step would still
+    /// look non-zero.
+    func testGatedDeltaOpsPathIsDifferentiable() throws {
+        let inputs = makeInputs(T: 40)
+        let loss: ([MLXArray]) -> [MLXArray] = { arrays in
+            let (y, _) = gatedDeltaUpdate(
+                q: arrays[0], k: arrays[1], v: arrays[2],
+                a: inputs.a, b: inputs.b,
+                aLog: inputs.aLog, dtBias: inputs.dtBias,
+                useKernel: false
+            )
+            return [y.asType(.float32).square().sum()]
+        }
+        let (value, gradients) = valueAndGrad(loss, argumentNumbers: [0, 1, 2])(
+            [inputs.q, inputs.k, inputs.v])
+        eval(value)
+        eval(gradients)
+
+        XCTAssertEqual(gradients.count, 3)
+        for (name, gradient) in zip(["q", "k", "v"], gradients) {
+            let magnitude = abs(gradient.asType(.float32)).max()
+            eval(magnitude)
+            let largest = magnitude.item(Float.self)
+            XCTAssertTrue(
+                largest.isFinite,
+                "d(loss)/d\(name) is \(largest); the recurrence produced a "
+                    + "non-finite gradient."
+            )
+            XCTAssertGreaterThan(
+                largest, 0,
+                "d(loss)/d\(name) is all zero, so no gradient reached the "
+                    + "input through the recurrence."
+            )
+        }
+    }
+
+    /// Turning the kernel off must not change the answer.
+    ///
+    /// Training takes the ops path and inference takes the kernel, so a model
+    /// would be fine-tuned against arithmetic it never runs at generation
+    /// time if these two disagreed.
+    ///
+    /// **Compared relative to the state, not absolutely.** These inputs are
+    /// random, so the recurrent state compounds: it reaches ~1.2e6 by T = 40,
+    /// where the two paths differ by 1.25 - about one part in a million, and
+    /// the same one part in a million as at T = 16, which is a single chunk
+    /// and has no boundary to get wrong. An absolute bound would therefore
+    /// be a test of how long the sequence is rather than of the arithmetic.
+    func testGatedDeltaOpsPathMatchesTheKernel() throws {
+        let inputs = makeInputs(T: 40)
+        let (yKernel, stateKernel) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v,
+            a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias,
+            useKernel: true
+        )
+        let (yOps, stateOps) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v,
+            a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias,
+            useKernel: false
+        )
+
+        /// Largest disagreement as a fraction of the largest value involved.
+        func relativeDrift(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
+            let left = lhs.asType(.float32)
+            let right = rhs.asType(.float32)
+            let drift = abs(left - right).max()
+            let scale = maximum(abs(left).max(), abs(right).max())
+            eval(drift)
+            eval(scale)
+            let magnitude = scale.item(Float.self)
+            return magnitude > 0 ? drift.item(Float.self) / magnitude : drift.item(Float.self)
+        }
+
+        XCTAssertLessThan(
+            relativeDrift(yKernel, yOps), 1e-4,
+            "The differentiable ops path and the fused kernel disagree on the "
+                + "output, so training and inference would run different maths."
+        )
+        XCTAssertLessThan(
+            relativeDrift(stateKernel, stateOps), 1e-4,
+            "The two paths disagree on the carried recurrent state."
+        )
+    }
+
 }

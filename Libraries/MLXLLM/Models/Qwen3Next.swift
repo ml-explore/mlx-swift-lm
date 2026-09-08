@@ -323,7 +323,8 @@ public final class Qwen3NextGatedDeltaNet: Module {
             aLog: aLog,
             dtBias: dtBias,
             state: recState,
-            mask: mask
+            mask: mask,
+            useKernel: !training
         )
 
         let normalized = norm(out, gate: z)

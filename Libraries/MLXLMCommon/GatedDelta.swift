@@ -296,7 +296,8 @@ public func gatedDeltaUpdate(
     aLog: MLXArray,
     dtBias: MLXArray,
     state: MLXArray? = nil,
-    mask: MLXArray? = nil
+    mask: MLXArray? = nil,
+    useKernel: Bool = true
 ) -> (MLXArray, MLXArray) {
     let beta = sigmoid(b).asType(.float32)
     let g = computeGatedDeltaG(aLog, a, dtBias)
@@ -320,7 +321,11 @@ public func gatedDeltaUpdate(
     // Dk = 192 (a multiple of 32), but the value is config-driven, so route any
     // non-multiple-of-32 Dk to the ops fallback, which handles an arbitrary key
     // dimension correctly (slower, but never truncating).
-    if GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
+    //
+    // `useKernel: false` is for training: the kernel is a custom Metal
+    // kernel and has no gradient, so a model in training mode passes
+    // `!training` here, as the Python model does with `use_kernel`.
+    if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 
