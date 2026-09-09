@@ -141,7 +141,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
         model.freeze()
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(layers: layers, keys: keys) { (layer: Module) in
+        replaceLayers(in: model, layers: layers, keys: keys) { (layer: Module) in
             createReplacementLayer(target: layer, configuration: configuration)
         }
 
@@ -182,7 +182,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(layers: layers, keys: keys) { (layer: Module) in
+        replaceLayers(in: model, layers: layers, keys: keys) { (layer: Module) in
             createReplacementLayer(target: layer, configuration: configuration)
         }
 
@@ -204,7 +204,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
         try load(into: model)
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(layers: layers, keys: keys) { (lora: LoRALayer) in
+        replaceLayers(in: model, layers: layers, keys: keys) { (lora: LoRALayer) in
             lora.fused()
         }
     }
@@ -219,7 +219,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(layers: layers, keys: keys) { (lora: LoRALayer) in
+        replaceLayers(in: model, layers: layers, keys: keys) { (lora: LoRALayer) in
             lora.reverted()
         }
     }
@@ -251,11 +251,17 @@ private func createReplacementLayer(
 }
 
 /// Traverses the model and replaces its layers using a transformation closure.
+///
+/// Invalidates the model's compiled traces on any replacement: a trace holds the
+/// module tree it was built from, so an adapter added, fused, or reverted here
+/// would otherwise be invisible to it.
 private func replaceLayers<T>(
+    in model: Module,
     layers: ArraySlice<Module>,
     keys: [String],
     transforming transform: (T) -> Module?
 ) {
+    var replaced = false
     for layer in layers {
         var update: [(String, Module)] = []
         for (key, child) in layer.namedModules() where keys.contains(key) {
@@ -266,6 +272,11 @@ private func replaceLayers<T>(
 
         if !update.isEmpty {
             layer.update(modules: .unflattened(update))
+            replaced = true
         }
+    }
+
+    if replaced {
+        model.invalidateCompiledTraces()
     }
 }

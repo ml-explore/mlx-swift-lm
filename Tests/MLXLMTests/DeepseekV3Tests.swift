@@ -9,7 +9,7 @@ import XCTest
 final class DeepseekV3Tests: XCTestCase {
 
     // Tiny MoE config: 4 routed experts in 2 groups, top-1 group, top-2 experts.
-    private func makeConfig() throws -> DeepseekV3Configuration {
+    private func makeConfig(numHiddenLayers: Int = 2) throws -> DeepseekV3Configuration {
         let json = """
             {
                 "model_type": "deepseek_v3",
@@ -17,7 +17,7 @@ final class DeepseekV3Tests: XCTestCase {
                 "hidden_size": 8,
                 "intermediate_size": 16,
                 "moe_intermediate_size": 8,
-                "num_hidden_layers": 2,
+                "num_hidden_layers": \(numHiddenLayers),
                 "num_attention_heads": 2,
                 "num_key_value_heads": 2,
                 "n_routed_experts": 4,
@@ -74,5 +74,29 @@ final class DeepseekV3Tests: XCTestCase {
         eval(logits)
 
         XCTAssertEqual(logits.shape, [1, 3, 32])
+    }
+
+    func testSanitizeDropsPredictionLayerAfterDeepseekV3Stack() throws {
+        let model = DeepseekV3Model(try makeConfig(numHiddenLayers: 61))
+        let sanitized = model.sanitize(weights: [
+            "model.layers.60.self_attn.q_proj.weight": MLXArray.zeros([1]),
+            "model.layers.61.self_attn.q_proj.weight": MLXArray.zeros([1]),
+        ])
+
+        XCTAssertNotNil(sanitized["model.layers.60.self_attn.q_proj.weight"])
+        XCTAssertNil(sanitized["model.layers.61.self_attn.q_proj.weight"])
+    }
+
+    func testSanitizeUsesConfiguredLayerCount() throws {
+        let model = DeepseekV3Model(try makeConfig(numHiddenLayers: 78))
+        let sanitized = model.sanitize(weights: [
+            "model.layers.61.self_attn.q_proj.weight": MLXArray.zeros([1]),
+            "model.layers.77.self_attn.q_proj.weight": MLXArray.zeros([1]),
+            "model.layers.78.self_attn.q_proj.weight": MLXArray.zeros([1]),
+        ])
+
+        XCTAssertNotNil(sanitized["model.layers.61.self_attn.q_proj.weight"])
+        XCTAssertNotNil(sanitized["model.layers.77.self_attn.q_proj.weight"])
+        XCTAssertNil(sanitized["model.layers.78.self_attn.q_proj.weight"])
     }
 }

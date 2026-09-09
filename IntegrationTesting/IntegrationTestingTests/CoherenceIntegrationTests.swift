@@ -34,7 +34,7 @@ private func runCoherence(_ configuration: ModelConfiguration) async throws {
 private func releaseModel(_ configuration: ModelConfiguration) async {
     await models.evictLLM(configuration)
     Stream.gpu.synchronize()
-    GPU.clearCache()
+    Memory.clearCache()
 }
 
 /// Fast, reliable, architecturally-diverse subset that runs by default so the

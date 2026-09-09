@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXNN
 
 /// One static-shaped piece of a hybrid model's single-token decode graph.
 ///
@@ -29,6 +30,13 @@ package struct CompiledDecodeSegment: Sendable, Equatable {
     /// two updated state tensors per linear layer.
     package var attentionOutputOffset: Int { 1 + 2 * linearLayers.count }
 
+    /// Every decoder layer this segment runs, in order. The weights of these
+    /// layers are the compile state of the segment's trace.
+    package var layerIndices: [Int] {
+        (attentionPostLayer.map { [$0] } ?? []) + linearLayers
+            + (attentionPreLayer.map { [$0] } ?? [])
+    }
+
     /// Build the maximal segments separated by full-attention cache writes.
     package static func schedule(linearLayers: [Bool]) -> [Self] {
         var segments: [Self] = []
@@ -47,37 +55,45 @@ package struct CompiledDecodeSegment: Sendable, Equatable {
     }
 }
 
-/// Lazily compiles and retains one MLX function for every decode segment.
+/// Lazily compiles and retains one `CompiledTrace` per decode segment.
 ///
-/// Models create this after their schedule is known. Compilation remains lazy
-/// because model weights are loaded after initialization. The lock ensures two
-/// concurrent first decode calls cannot install different traces.
-package final class CompiledDecodeSegmentCache {
-    private let lock = NSLock()
-    private var functions: [(([MLXArray]) -> [MLXArray])?]
+/// Models create this with their schedule; compilation stays lazy because
+/// weights load after initialization. Each segment declares the modules its
+/// body reads, so the trace sees current weights rather than the ones it was
+/// first traced with.
+package final class CompiledDecodeSegmentCache<Owner: Module>: CompiledTraceInvalidating {
 
-    package init(count: Int) {
+    /// Runs segment `index` over the flat argument list.
+    package typealias Body = @Sendable (Owner, Int, [MLXArray]) -> [MLXArray]
+
+    /// Returns the modules whose weights segment `index` reads: the layers in
+    /// `layerIndices`, plus anything else the body touches such as the
+    /// embedding or the final norm.
+    package typealias StateProvider = @Sendable (Owner, Int) -> [Module]
+
+    private let traces: [CompiledTrace<Owner>]
+
+    package init(count: Int, state: @escaping StateProvider, body: @escaping Body) {
         precondition(count > 0, "compiled decode requires at least one segment")
-        self.functions = Array(repeating: nil, count: count)
+        self.traces = (0 ..< count).map { index in
+            CompiledTrace<Owner>(
+                state: { state($0, index) },
+                body: { owner, arguments in body(owner, index, arguments) })
+        }
     }
 
     package var compiledCount: Int {
-        lock.withLock { functions.compactMap { $0 }.count }
+        traces.filter(\.isCompiled).count
     }
 
-    package func call(
-        at index: Int,
-        arguments: [MLXArray],
-        body: @escaping ([MLXArray]) -> [MLXArray]
+    package func callAsFunction(
+        _ owner: Owner, at index: Int, _ arguments: [MLXArray]
     ) -> [MLXArray] {
-        let function = lock.withLock {
-            if let function = functions[index] {
-                return function
-            }
-            let function = compile(body)
-            functions[index] = function
-            return function
-        }
-        return function(arguments)
+        traces[index](owner, arguments)
+    }
+
+    /// Drops every segment trace. See `CompiledTrace.invalidate()`.
+    package func invalidate() {
+        traces.forEach { $0.invalidate() }
     }
 }

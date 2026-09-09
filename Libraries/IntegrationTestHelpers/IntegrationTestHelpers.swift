@@ -293,7 +293,7 @@ public actor IntegrationTestModels {
     }
 
     /// Drop the cached container for `configuration` so ARC can free its
-    /// GPU-resident weights between tests. Pair with `GPU.clearCache()` at the
+    /// GPU-resident weights between tests. Pair with `Memory.clearCache()` at the
     /// call site to release the freed buffers back to the system — without this,
     /// loading many large models in one serialized run accumulates weights until
     /// the process is jetsammed (Metal compiler XPC failures / crashes).

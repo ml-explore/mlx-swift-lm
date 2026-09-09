@@ -3,6 +3,7 @@
 import Foundation
 import FoundationModels
 import MLXLMCommon
+import Synchronization
 import Testing
 
 @testable import MLXFoundationModels
@@ -152,7 +153,7 @@ extension FoundationModelsCacheTests {
 
 /// Minimal no-op transport stubs so an `MLXLanguageModel` can be constructed purely to
 /// exercise the instance `evict()` path. They are never driven to a real load here.
-private final class EvictBiasStubDownloader: Downloader, @unchecked Sendable {
+private struct EvictBiasStubDownloader: Downloader {
     func download(
         id: String,
         revision: String?,
@@ -162,7 +163,8 @@ private final class EvictBiasStubDownloader: Downloader, @unchecked Sendable {
     ) async throws -> URL { URL(fileURLWithPath: "/no/such/path") }
 }
 
-private final class EvictBiasStubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private struct EvictBiasStubTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any Tokenizer {
         CountingTokenizer(tokens: [])
     }
@@ -170,18 +172,22 @@ private final class EvictBiasStubTokenizerLoader: TokenizerLoader, @unchecked Se
 
 /// Tokenizer with a fixed vocab that counts `convertIdToToken` calls, so a test can
 /// assert whether a bias computation re-scanned the vocab (cache miss) or not (hit).
-/// `@unchecked Sendable`: the counter is mutated only from serialized test calls.
-private final class CountingTokenizer: Tokenizer, @unchecked Sendable {
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private final class CountingTokenizer: Tokenizer, Sendable {
     let tokens: [String]
-    private(set) var idLookupCount = 0
+    private let lookupCount = Mutex(0)
 
-    init(tokens: [String]) { self.tokens = tokens }
+    init(tokens: [String]) {
+        self.tokens = tokens
+    }
+
+    var idLookupCount: Int { lookupCount.withLock { $0 } }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
     func convertTokenToId(_ token: String) -> Int? { tokens.firstIndex(of: token) }
     func convertIdToToken(_ id: Int) -> String? {
-        idLookupCount += 1
+        lookupCount.withLock { $0 += 1 }
         guard id >= 0, id < tokens.count else { return nil }
         return tokens[id]
     }

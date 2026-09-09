@@ -323,7 +323,8 @@ public final class Qwen3NextGatedDeltaNet: Module {
             aLog: aLog,
             dtBias: dtBias,
             state: recState,
-            mask: mask
+            mask: mask,
+            useKernel: !training
         )
 
         let normalized = norm(out, gate: z)
@@ -524,7 +525,7 @@ public class Qwen3NextModelInner: Module {
     let faIdx: Int
 
     private let decodeSegments: [CompiledDecodeSegment]
-    private let compiledSegments: CompiledDecodeSegmentCache
+    private let compiledSegments: CompiledDecodeSegmentCache<Qwen3NextModelInner>
 
     var compiledDecodeSegmentCount: Int { compiledSegments.compiledCount }
 
@@ -549,7 +550,21 @@ public class Qwen3NextModelInner: Module {
         let segments = CompiledDecodeSegment.schedule(
             linearLayers: layers.map(\.isLinear))
         self.decodeSegments = segments
-        self.compiledSegments = CompiledDecodeSegmentCache(count: segments.count)
+        self.compiledSegments = CompiledDecodeSegmentCache(
+            count: segments.count,
+            state: { model, index in
+                // Everything `segmentBody` reads: the layers it runs, plus the
+                // final norm the last segment ends with. The embedding runs
+                // outside the trace.
+                var modules: [Module] = segments[index].layerIndices.map { model.layers[$0] }
+                if index == segments.count - 1 {
+                    modules.append(model.norm)
+                }
+                return modules
+            },
+            body: { model, index, arguments in
+                model.segmentBody(at: index, arguments)
+            })
 
         super.init()
     }
@@ -668,11 +683,7 @@ public class Qwen3NextModelInner: Module {
                 arguments.append(mambaCache[1]!)
             }
 
-            let outputs = compiledSegments.call(
-                at: segmentIndex, arguments: arguments
-            ) { [unowned self] arguments in
-                segmentBody(at: segmentIndex, arguments)
-            }
+            let outputs = compiledSegments(self, at: segmentIndex, arguments)
 
             carry = outputs[0]
             for (stateIndex, layerIndex) in segment.linearLayers.enumerated() {

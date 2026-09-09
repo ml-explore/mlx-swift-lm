@@ -426,6 +426,16 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         return lmHead(out)
     }
 
+    private func isMultiTokenPredictionLayer(_ key: String) -> Bool {
+        let components = key.split(separator: ".", maxSplits: 3)
+        guard components.count >= 3,
+            components[0] == "model", components[1] == "layers",
+            let layerIndex = Int(components[2])
+        else { return false }
+
+        return layerIndex >= args.numHiddenLayers
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var newWeights = weights
 
@@ -469,7 +479,7 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         }
 
         return newWeights.filter { key, _ in
-            !key.starts(with: "model.layers.61") && !key.contains("rotary_emb.inv_freq")
+            !isMultiTokenPredictionLayer(key) && !key.contains("rotary_emb.inv_freq")
         }
     }
 

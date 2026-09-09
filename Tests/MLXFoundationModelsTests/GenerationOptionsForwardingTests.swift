@@ -4,12 +4,12 @@
 
 import Foundation
 import FoundationModels
+import Synchronization
 import Testing
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private final class SeedRecorder: @unchecked Sendable, Hashable {
-    private let lock = NSLock()
-    private var storage: UInt64?
+private final class SeedRecorder: Sendable, Hashable {
+    private let storage = Mutex<UInt64?>(nil)
 
     static func == (lhs: SeedRecorder, rhs: SeedRecorder) -> Bool {
         lhs === rhs
@@ -20,15 +20,11 @@ private final class SeedRecorder: @unchecked Sendable, Hashable {
     }
 
     func record(_ seed: UInt64?) {
-        lock.lock()
-        storage = seed
-        lock.unlock()
+        storage.withLock { $0 = seed }
     }
 
     var seed: UInt64? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage
+        storage.withLock { $0 }
     }
 }
 

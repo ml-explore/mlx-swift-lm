@@ -222,7 +222,7 @@ public class ChatSessionTests: XCTestCase {
         }
 
         func prepare(input: UserInput) async throws -> LMInput {
-            let text = try await base.prepare(input: input).text
+            let text = try base.prepare(input: input).text
             guard consumeFirst() else { return LMInput(text: text) }
             return LMInput(
                 text: text,

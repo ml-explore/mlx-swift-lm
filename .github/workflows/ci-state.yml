@@ -1,0 +1,159 @@
+name: CI state
+
+# This workflow writes the CI state labels for one pull request.
+#
+# This cannot live in pull_request.yml. In a public repository, GITHUB_TOKEN is
+# read-only for a workflow that a fork's pull request triggers. The permissions
+# block does not change that, so such a job cannot label a community
+# contribution. A workflow_run workflow always runs the default branch copy of
+# this file, and it gets a write token.
+#
+# The trigger uses in_progress. A run held for maintainer approval is requested
+# but has not started, so the requested event would set ci-running too early.
+#
+# No job here checks out the pull request. Each checkout takes the default
+# branch, which contains the classifier.
+
+on:
+  workflow_run:
+    workflows: [Build and Test]
+    types:
+      - in_progress
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+# GitHub runs one workflow at a time for each concurrency group. The group name
+# below holds the commit SHA, so two events for one commit cannot run at the same
+# time. If a completed event is cancelled, ci-running stays set, so never cancel a
+# run here. GitHub also queues only one run per group, so a third event for one
+# commit can still drop a pending run.
+concurrency:
+  group: ci-state-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  mark_running:
+    name: Mark CI running
+    if: >-
+      github.event.action == 'in_progress'
+      && github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            // Inside github-script, a relative require resolves against the
+            // action directory. Name the workspace path explicitly.
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const headSha = process.env.HEAD_SHA;
+
+            const pull = await state.findPullRequest(github, { owner, repo, headSha });
+            if (!pull) {
+              core.info(`No open pull request for ${headSha}. Nothing to label.`);
+              return;
+            }
+
+            // This log line is a diagnostic, and it prints only the count. The
+            // payload holds contributor-controlled text, which must not go into
+            // a log.
+            const carried = context.payload.workflow_run.pull_requests ?? [];
+            core.info(`workflow_run.pull_requests carried ${carried.length} entries.`);
+
+            // The author can push another commit before this event arrives. The
+            // run then tests code the pull request no longer has. onStart would
+            // set ci-running and remove the needs-ci that reset-ci-state.yml
+            // added for the new commit. The labels would then say CI runs for
+            // the new commit, which is false. record_outcome makes the same
+            // check.
+            if (pull.head.sha !== headSha) {
+              core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
+              core.info("Not marking this run as running.");
+              return;
+            }
+
+            const change = state.onStart(pull.labels.map((label) => label.name));
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });
+
+  record_outcome:
+    name: Record the CI outcome
+    # GitHub sends a completed event even when the run never started. A fork pull
+    # request waits for a maintainer to approve the run, and reports the
+    # conclusion action_required. A skipped run reports skipped. Neither
+    # conclusion says anything about the code. onComplete would read both as a
+    # failure, and would remove an approved label that a maintainer set.
+    if: >-
+      github.event.action == 'completed'
+      && github.repository == 'ml-explore/mlx-swift-lm'
+      && github.event.workflow_run.conclusion != 'action_required'
+      && github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        with:
+          script: |
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const headSha = process.env.HEAD_SHA;
+
+            const pull = await state.findPullRequest(github, { owner, repo, headSha });
+            if (!pull) {
+              core.info(`No open pull request for ${headSha}. Nothing to label.`);
+              return;
+            }
+
+            // These results describe the commit the run tested. If the head has
+            // moved, the results describe code the pull request no longer has.
+            // reset-ci-state.yml already queued the new commit.
+            if (pull.head.sha !== headSha) {
+              core.info(`#${pull.number} moved from ${headSha} to ${pull.head.sha}.`);
+              core.info("Discarding this run's result.");
+              return;
+            }
+
+            const jobs = await state.jobSummaries(github, {
+              owner, repo, runId: Number(process.env.RUN_ID),
+            });
+
+            // A step name is contributor-controlled text, and must not go into a log.
+            const branchContract = state.contractOf(jobs);
+            core.info(
+              `#${pull.number} contract ${branchContract ?? "absent"},`
+              + ` rules expect ${state.CONTRACT}.`);
+
+            const change = state.onComplete({
+              conclusion: process.env.CONCLUSION,
+              jobs,
+              labels: pull.labels.map((label) => label.name),
+            });
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });

@@ -128,8 +128,8 @@ struct CompositeLogitProcessorTests {
 
     @Test
     func copyProducesIndependentProcessors() {
-        var first = AddConstantProcessor(constant: 1.0)
-        var composite = CompositeLogitProcessor([first])
+        let first = AddConstantProcessor(constant: 1.0)
+        let composite = CompositeLogitProcessor([first])
         var cloned = composite.copy()
 
         cloned.didSample(token: MLXArray(UInt32(10)))

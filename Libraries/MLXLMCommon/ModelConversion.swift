@@ -218,7 +218,7 @@ public enum ModelConversionError: LocalizedError, Equatable {
 /// Quantize and save an already-instantiated model from a compatible safetensors directory.
 ///
 /// The function loads safetensors weights, runs the model's sanitizer through
-/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)``, applies quantization,
+/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)-6eqw7``, applies quantization,
 /// writes safetensors shards and an index, copies tokenizer/config sidecar files, and updates
 /// `config.json` with the requested quantization block.
 public func convert(
@@ -652,6 +652,9 @@ private func quantizeForModelConversion(
         }
 
     model.update(modules: ModuleChildren.unflattened(updates))
+    // Quantized layers replace their float counterparts; drop traces of the
+    // old tree.
+    model.invalidateCompiledTraces()
 
     return .init(
         defaultQuantization: effectiveDefaultQuantization.asModelConversionQuantization,

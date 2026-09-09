@@ -50,7 +50,7 @@ public class MediaProcesingTests: XCTestCase {
 
         let video = UserInput.Video.url(fileURL)
 
-        try await Device.withDefaultDevice(.cpu) {
+        await Device.withDefaultDevice(.cpu) {
             do {
                 let _ = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 1)
             } catch {

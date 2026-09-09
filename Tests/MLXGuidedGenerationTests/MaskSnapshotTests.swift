@@ -33,8 +33,8 @@ struct MaskSnapshotTests {
     @Test
     func stableHashForIdenticalMasks() {
         // Same mask data should produce identical hashes
-        var mask1: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
-        var mask2: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
+        let mask1: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
+        let mask2: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
 
         let snapshot1 = mask1.withUnsafeBufferPointer { buf in
             MaskSnapshot.capture(sampleMask: buf.baseAddress!, vocabSize: 64, tokenIndex: 0)
@@ -48,8 +48,8 @@ struct MaskSnapshotTests {
 
     @Test
     func differentMasksProduceDifferentHashes() {
-        var mask1: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
-        var mask2: [UInt32] = [0xDEAD_BEEF, 0x0000_0000]
+        let mask1: [UInt32] = [0xDEAD_BEEF, 0xCAFE_BABE]
+        let mask2: [UInt32] = [0xDEAD_BEEF, 0x0000_0000]
 
         let snapshot1 = mask1.withUnsafeBufferPointer { buf in
             MaskSnapshot.capture(sampleMask: buf.baseAddress!, vocabSize: 64, tokenIndex: 0)

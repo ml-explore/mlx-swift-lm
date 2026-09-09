@@ -1,0 +1,56 @@
+name: Reset CI state
+
+# A new commit on an open pull request makes every CI result and every approval
+# stale. This workflow puts the pull request back in the queue.
+#
+# The trigger is pull_request_target. In a public repository, a pull_request
+# workflow gets a read-only token on a fork's pull request, so it cannot write a
+# label. GitHub warns that pull_request_target can check out and run the pull
+# request's code. The checkout below takes repository-owned code only. It never
+# checks out the contributor's branch.
+
+on:
+  pull_request_target:
+    types:
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Two fast pushes must not interleave their label writes.
+concurrency:
+  group: reset-ci-state-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  requeue:
+    name: Requeue for CI
+    if: github.repository == 'ml-explore/mlx-swift-lm'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The checkout takes no ref on purpose. A pull_request_target event
+          # runs on a repository-owned branch, never on the pull request head.
+          # This checkout therefore always contains the classifier that the
+          # script below loads. A ref of base.sha names the commit the pull
+          # request started from. That commit has no classifier for a pull
+          # request opened before this workflow merged, and the require throws.
+          persist-credentials: false
+
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const state = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ci-state.js`);
+            const { owner, repo } = context.repo;
+            const pull = context.payload.pull_request;
+
+            const change = state.onSynchronize(pull.labels.map((label) => label.name));
+            core.info(`#${pull.number} add: ${change.add.join(", ") || "nothing"}`);
+            core.info(`#${pull.number} remove: ${change.remove.join(", ") || "nothing"}`);
+            await state.applyLabels(github, {
+              owner, repo, number: pull.number, ...change,
+            });

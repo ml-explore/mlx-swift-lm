@@ -20,11 +20,11 @@ public struct FalconH1Configuration: Codable, Sendable {
     var attentionInMultiplier: Float
     var attentionOutMultiplier: Float
     var bosTokenId: Int
-    var embeddingMultiplier: Float
+    @_spi(FalconH1Encoder) public var embeddingMultiplier: Float
     var eosTokenId: Int
     var headDim: Int
     var hiddenAct: String
-    var hiddenSize: Int
+    @_spi(FalconH1Encoder) public var hiddenSize: Int
     var initializerRange: Float
     var intermediateSize: Int?
     var keyMultiplier: Float
@@ -48,12 +48,12 @@ public struct FalconH1Configuration: Codable, Sendable {
     var mlpMultipliers: [Float]
     var modelType: String
     var numAttentionHeads: Int
-    var numHiddenLayers: Int
+    @_spi(FalconH1Encoder) public var numHiddenLayers: Int
     var numKeyValueHeads: Int
     var numLogitsToKeep: Int
     var padTokenId: Int
     var projectorsBias: Bool
-    var rmsNormEps: Float
+    @_spi(FalconH1Encoder) public var rmsNormEps: Float
     var ropeTraditional: Bool
     var ropeScaling: Float?
     var ropeTheta: Float
@@ -567,7 +567,12 @@ class FalconH1MLP: Module, UnaryLayer {
 
 // MARK: - DecoderLayer
 
-class FalconH1DecoderLayer: Module {
+/// One Falcon-H1 decoder layer (Mamba-2 mixer + attention + MLP, run in parallel).
+///
+/// Exposed at `@_spi(FalconH1Encoder)` scope so opted-in client code can drive the layer
+/// stack directly, keeping it off the advertised public API of MLXLLM. Mirrors the Gemma
+/// encoder exposures.
+@_spi(FalconH1Encoder) public class FalconH1DecoderLayer: Module {
     @ModuleInfo(key: "feed_forward") var feedForward: FalconH1MLP
     @ModuleInfo(key: "mamba") var mamba: FalconH1Mixer
     @ModuleInfo(key: "self_attn") var attention: FalconH1Attention
@@ -591,7 +596,7 @@ class FalconH1DecoderLayer: Module {
         )
     }
 
-    func callAsFunction(
+    @_spi(FalconH1Encoder) public func callAsFunction(
         _ h: MLXArray,
         cache: CacheList?,
         attnMask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -625,12 +630,17 @@ public class FalconH1ModelInner: Module {
     let hiddenSize: Int
 
     let _mupVector: MLXArray
-    let layers: [FalconH1DecoderLayer]
+    @_spi(FalconH1Encoder) public let layers: [FalconH1DecoderLayer]
 
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo(key: "final_layernorm") var finalLayerNorm: RMSNorm
+    @_spi(FalconH1Encoder) @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
+    @_spi(FalconH1Encoder) @ModuleInfo(key: "final_layernorm") public var finalLayerNorm: RMSNorm
 
-    init(_ args: FalconH1Configuration) {
+    /// Exposed at `@_spi(FalconH1Encoder)` so a client can build the decoder stack on its
+    /// own, without `FalconH1Model`'s head. Constructing the wrapper instead is not
+    /// equivalent: it adds an `lm_head` whenever `tie_word_embeddings` is false (the
+    /// decoded default), which a client supplying its own head does not want and would
+    /// have to account for when matching module keys against a checkpoint.
+    @_spi(FalconH1Encoder) public init(_ args: FalconH1Configuration) {
         self.args = args
         self.vocabSize = args.vocabSize
         self.hiddenSize = args.hiddenSize
@@ -645,10 +655,39 @@ public class FalconH1ModelInner: Module {
         _finalLayerNorm.wrappedValue = RMSNorm(dimensions: hiddenSize, eps: args.rmsNormEps)
     }
 
-    func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil, cache: [CacheList]? = nil)
-        -> MLXArray
-    {
-        var h = embedTokens(inputs)
+    /// Run the decoder stack over token ids, returning the final hidden state.
+    ///
+    /// Exposed at `@_spi(FalconH1Encoder)` alongside
+    /// ``callAsFunction(inputsEmbeds:cache:)`` so a client can reach hidden states rather
+    /// than logits, and can check its own composite-embedding path against the plain
+    /// token path.
+    @_spi(FalconH1Encoder) public func callAsFunction(
+        _ inputs: MLXArray, mask: MLXArray? = nil, cache: [CacheList]? = nil
+    ) -> MLXArray {
+        callAsFunction(inputsEmbeds: embedTokens(inputs), cache: cache)
+    }
+
+    /// Run the decoder stack over an already-computed input embedding.
+    ///
+    /// Exposed at `@_spi(FalconH1Encoder)` scope for models that build their own slow-stack
+    /// input rather than looking up a single token — for example a DualAR TTS model whose
+    /// input is a text embedding summed with several codebook embeddings. Such a client
+    /// cannot go through ``callAsFunction(_:mask:cache:)`` because it never has a single
+    /// token id to embed.
+    ///
+    /// - Important: ``FalconH1Model/sanitize(weights:)`` folds `embedding_multiplier` into
+    ///   `embed_tokens.weight`, which is correct when the token lookup is the only thing
+    ///   entering the stack. A client passing a COMPOSITE embedding must account for the
+    ///   multiplier over the whole composite. Either scale every non-`embedTokens`
+    ///   contribution by `embeddingMultiplier` before summing (so the folded lookup and the
+    ///   scaled remainder agree), or load an unfolded table and scale the sum. The two are
+    ///   algebraically identical — `(raw + other) * m == folded + other * m` — but mixing
+    ///   them silently leaves one half unscaled, which degrades output without any shape or
+    ///   load error to catch it.
+    @_spi(FalconH1Encoder) public func callAsFunction(
+        inputsEmbeds: MLXArray, cache: [CacheList]? = nil
+    ) -> MLXArray {
+        var h = inputsEmbeds
 
         let cache: [CacheList?] = cache ?? Array(repeating: nil, count: layers.count)
 

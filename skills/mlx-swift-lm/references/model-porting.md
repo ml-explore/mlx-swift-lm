@@ -332,6 +332,45 @@ extension YourModel: LoRAModel {
 
 If you need custom keys, override `loraDefaultKeys`.
 
+## Compiled decode paths
+
+`compile` traces a function once and turns every `MLXArray` the body reads, but
+does not take as an argument, into a constant of that trace. A body that reads
+weights through a captured module therefore keeps the values of its first call
+and ignores a loaded adapter or a training step.
+
+`compile` in this package resolves to the `MLXLMCommon` overload, whose
+`@Sendable` body cannot capture a `Module` or an `MLXArray`, so that mistake
+does not build. Use it for bodies that read only their arguments:
+
+```swift
+private let siluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(shapeless: true) {
+    gate, up in silu(gate) * up
+}
+```
+
+For a body that reads weights, use `CompiledTrace`. It takes the owner as a
+parameter and declares the modules whose weights the body reads, which become
+compile `inputs:`:
+
+```swift
+final class YourMoEBlock: Module, UnaryLayer {
+    // Default state is the owner, which covers a body that stays inside it.
+    private let compiledForward = CompiledTrace<YourMoEBlock> { block, arguments in
+        [block.forward(arguments[0])]
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        compiledForward(self, x)
+    }
+}
+```
+
+Traces are lazy, so a trace created in `init` still reads weights loaded later,
+and it never retains its owner. Anything that replaces modules invalidates a
+trace: `Module.invalidateCompiledTraces()` resets every trace in a model tree
+and already runs on the adapter and quantization paths.
+
 ## Registration
 
 1. Add model type mapping in `Libraries/MLXLLM/LLMModelFactory.swift`:
@@ -349,6 +388,8 @@ If you need custom keys, override `loraDefaultKeys`.
 - Bias flags are model-specific (check config and Python implementation).
 - GQA models require `kvHeads` distinct from `attentionHeads`.
 - Sliding-window or special caches may require overriding `newCache` or `prepare`.
+- A compiled body must read weights through `CompiledTrace`, not through a
+  captured `self`, or the trace bakes them in.
 
 ## Minimal checklist
 

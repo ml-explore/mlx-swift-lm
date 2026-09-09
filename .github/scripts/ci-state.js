@@ -1,0 +1,169 @@
+"use strict";
+
+// The script removes only a label on this list. It does not touch any other
+// label.
+const STATE_LABELS = [
+  "needs-scan",
+  "needs-ci",
+  "needs-lint",
+  "needs-changes",
+  "needs-review",
+  "approved",
+  "ready-to-merge",
+];
+
+const RUNNING = "ci-running";
+
+// approved and ready-to-merge are absent on purpose. onComplete needs to see an
+// approval that arrived during the run.
+const PREVIOUS_OUTCOME = [
+  "needs-ci",
+  "needs-lint",
+  "needs-changes",
+  "needs-review",
+];
+
+function present(labels, candidates) {
+  const held = new Set(labels);
+  return candidates.filter((name) => held.has(name));
+}
+
+// Never ask GitHub to add a label the pull request already has.
+function missing(labels, candidates) {
+  const held = new Set(labels);
+  return candidates.filter((name) => !held.has(name));
+}
+
+function onStart(labels) {
+  return { add: missing(labels, [RUNNING]), remove: present(labels, PREVIOUS_OUTCOME) };
+}
+
+// A step whose name starts with this prefix reports a problem in the runner
+// image. It does not report a problem in the contribution. Only a re-run can
+// clear it, so it must never ask the author for a change.
+const INFRA_PREFIX = "Infra: ";
+
+function isInfraStep(name) {
+  return name.startsWith(INFRA_PREFIX);
+}
+
+// Each pull request runs its own copy of pull_request.yml, which may be older
+// than these rules. That copy names this number in a step. If the numbers match,
+// a failing run can give needs-lint or needs-changes. If not, a failing run gets
+// needs-ci. When you rename a step, change this number and the workflow's number
+// together. To stop needs-lint and needs-changes on every pull request, change
+// this number only.
+const CONTRACT = 1;
+
+const CONTRACT_PREFIX = "Contract: ";
+
+// Returns null when no step names a number, and when the text is not digits.
+// Both mean there is no number to compare, so a failing run gets needs-ci.
+function contractOf(jobs) {
+  for (const job of jobs) {
+    for (const step of job.steps ?? []) {
+      if (!step.name.startsWith(CONTRACT_PREFIX)) continue;
+      const digits = step.name.slice(CONTRACT_PREFIX.length).trim();
+      return /^[0-9]+$/.test(digits) ? Number(digits) : null;
+    }
+  }
+  return null;
+}
+
+// Keep the three needs-ci checks above the needs-lint check. If one moves
+// down, classify returns needs-lint or needs-changes for a failure the
+// author cannot fix.
+function classify({ conclusion, jobs, labels }) {
+  const failedJobs = jobs.filter((job) => job.conclusion === "failure");
+
+  if (failedJobs.length === 0) {
+    if (conclusion !== "success") return "needs-ci";
+    const approved = labels.includes("approved") || labels.includes("ready-to-merge");
+    return approved ? "ready-to-merge" : "needs-review";
+  }
+
+  const failedSteps = failedJobs.flatMap((job) =>
+    (job.steps ?? [])
+      .filter((step) => step.conclusion === "failure")
+      .map((step) => step.name));
+
+  // A failed job usually has one failed step, which names what broke. After a
+  // timeout or a lost runner, the job fails with no failed step.
+  if (failedSteps.length === 0) return "needs-ci";
+  if (failedSteps.every(isInfraStep)) return "needs-ci";
+  if (contractOf(jobs) !== CONTRACT) return "needs-ci";
+  if (failedJobs.length === 1 && failedJobs[0].name === "lint") return "needs-lint";
+  return "needs-changes";
+}
+
+function onComplete({ conclusion, jobs, labels }) {
+  const chosen = classify({ conclusion, jobs, labels });
+  const candidates = [RUNNING, ...STATE_LABELS.filter((name) => name !== chosen)];
+  return { add: missing(labels, [chosen]), remove: present(labels, candidates) };
+}
+
+// Only a triaged pull request goes back in the queue, and a cat-* label is the
+// mark of that. If no cat-* label is present, the stale labels still go, and the
+// script adds nothing.
+function onSynchronize(labels) {
+  const scanned = labels.some((name) => name.startsWith("cat-"));
+  // Two lists on purpose. `keep` says what not to remove. The add list says what
+  // to write, and is empty when the label is already there. If you merge the two
+  // lists, a pull request that already has needs-ci loses it.
+  const keep = scanned ? ["needs-ci"] : [];
+  const candidates = [RUNNING, ...STATE_LABELS.filter((name) => !keep.includes(name))];
+  return { add: missing(labels, keep), remove: present(labels, candidates) };
+}
+
+async function jobSummaries(github, { owner, repo, runId }) {
+  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+    owner, repo, run_id: runId, per_page: 100,
+  });
+  return jobs.map((job) => ({
+    name: job.name,
+    conclusion: job.conclusion,
+    steps: (job.steps ?? []).map((step) => ({ name: step.name, conclusion: step.conclusion })),
+  }));
+}
+
+// GitHub can send an empty pull request list for a fork, so the number comes
+// from the head commit instead. One commit can belong to two open pull requests
+// when branches are stacked. If this picks the wrong one, its head has moved,
+// the caller treats the run as stale, and neither pull request gets a label. The
+// last search covers a commit GitHub has not linked yet.
+async function findPullRequest(github, { owner, repo, headSha }) {
+  const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+    owner, repo, commit_sha: headSha,
+  });
+  const open = associated.data.find((pull) => pull.state === "open" && pull.head.sha === headSha)
+    ?? associated.data.find((pull) => pull.state === "open");
+  if (open) return open;
+
+  const pulls = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: "open", per_page: 100,
+  });
+  return pulls.find((pull) => pull.head.sha === headSha) ?? null;
+}
+
+// This function adds labels before it removes labels. In the other order, the
+// pull request has no label for a short time. A reader of the list then sees it
+// as untriaged.
+async function applyLabels(github, { owner, repo, number, add, remove }) {
+  if (add.length > 0) {
+    await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: add });
+  }
+  for (const name of remove) {
+    try {
+      await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+}
+
+module.exports = {
+  STATE_LABELS, RUNNING, INFRA_PREFIX,
+  CONTRACT, CONTRACT_PREFIX, contractOf,
+  onStart, onComplete, onSynchronize,
+  jobSummaries, findPullRequest, applyLabels,
+};

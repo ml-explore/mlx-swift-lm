@@ -4,6 +4,7 @@
 
 import Foundation
 import FoundationModels
+import Synchronization
 import Testing
 
 @testable import MLXFoundationModels
@@ -14,6 +15,28 @@ import Testing
 @Suite("GenerationEvent observer")
 struct GenerationEventObserverTests {
 
+    /// Drains `channel` until it closes or the caller cancels this task.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func drain(
+        _ channel: LanguageModelExecutorGenerationChannel
+    ) -> Task<Void, any Error> {
+        Task {
+            for try await _ in channel {}
+        }
+    }
+
+    /// Awaits a cancelled drain task, recording any error other than the
+    /// expected `CancellationError`.
+    private func assertDrainCancelled(_ task: Task<Void, any Error>) async {
+        do {
+            try await task.value
+        } catch is CancellationError {
+            // expected: the drain loop was still running when we cancelled it.
+        } catch {
+            Issue.record("drain task failed with unexpected error: \(error)")
+        }
+    }
+
     /// Runs `body` with an attached observer and a drained channel, returning
     /// every mirrored event the observer received.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -21,30 +44,27 @@ struct GenerationEventObserverTests {
         _ body: (LanguageModelExecutorGenerationChannel) async -> Void
     ) async -> [MLXLanguageModel.Executor.GenerationEvent] {
         let channel = LanguageModelExecutorGenerationChannel()
-        let drain = Task<Void, Never> {
-            do { for try await _ in channel {} } catch {}
-        }
+        let drainTask = drain(channel)
         let box = EventBox()
-        await MLXLanguageModel.Executor.$generationObserver.withValue({ box.append($0) }) {
-            await body(channel)
-        }
-        drain.cancel()
+        await MLXLanguageModel.Executor.$generationObserver.withValue(
+            { box.append($0) },
+            operation: { await body(channel) }
+        )
+        drainTask.cancel()
+        await assertDrainCancelled(drainTask)
         return box.events
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private final class EventBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storage: [MLXLanguageModel.Executor.GenerationEvent] = []
-        func append(_ e: MLXLanguageModel.Executor.GenerationEvent) {
-            lock.lock()
-            storage.append(e)
-            lock.unlock()
+    private final class EventBox: Sendable {
+        private let storage = Mutex<[MLXLanguageModel.Executor.GenerationEvent]>([])
+
+        func append(_ event: MLXLanguageModel.Executor.GenerationEvent) {
+            storage.withLock { $0.append(event) }
         }
+
         var events: [MLXLanguageModel.Executor.GenerationEvent] {
-            lock.lock()
-            defer { lock.unlock() }
-            return storage
+            storage.withLock { $0 }
         }
     }
 
@@ -87,11 +107,12 @@ struct GenerationEventObserverTests {
 
         // Not inside withValue: generationObserver is nil (shipping behavior).
         let channel = LanguageModelExecutorGenerationChannel()
-        let drain = Task<Void, Never> { do { for try await _ in channel {} } catch {} }
+        let drainTask = drain(channel)
         await MLXLanguageModel.Executor.emit(
             text: "x", entryID: nil, destination: .reasoning, into: channel)
-        drain.cancel()
+        drainTask.cancel()
         // Reaching here without trapping is the assertion.
+        await assertDrainCancelled(drainTask)
     }
 }
 

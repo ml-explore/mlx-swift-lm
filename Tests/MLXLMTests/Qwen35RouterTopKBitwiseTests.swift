@@ -88,7 +88,7 @@ final class Qwen35RouterTopKBitwiseTests: XCTestCase {
                         assertRouterMatchesChain(zeros, k: k, normalize: normalize, "±0 \(tag)")
 
                         // NaN above everything, all NaNs tie; indices only.
-                        var nans = MLX.where(
+                        let nans = MLX.where(
                             MLXRandom.uniform(low: Float(0), high: 1, [rows, e]) .< 0.05,
                             MLXArray(Float.nan), MLXRandom.normal([rows, e])
                         ).asType(dtype)

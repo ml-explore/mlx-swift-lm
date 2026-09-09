@@ -104,7 +104,7 @@ package func weightedExpertUnsort(
 
 // MARK: - SwitchGLU
 
-public class SwitchGLU: Module {
+open class SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
@@ -160,10 +160,24 @@ public class SwitchGLU: Module {
         super.init()
     }
 
+    /// Transform the expanded input ahead of the expert gather/sort.
+    ///
+    /// This pair of hooks exists so subclasses can wrap the expert
+    /// projections without copying `projectExperts`' dataflow — and
+    /// silently detaching from future changes to it, e.g. the gather/sort
+    /// threshold or the compiled activation product. `RotateSwitchGLU`
+    /// rotates activations here; the identity defaults add no graph nodes.
+    func transformInput(_ x: MLXArray) -> MLXArray { x }
+
+    /// Transform the activated hidden state ahead of `downProj`.
+    /// Identity by default — see `transformInput`.
+    func transformHidden(_ x: MLXArray) -> MLXArray { x }
+
     private func projectExperts(
         _ x: MLXArray, _ indices: MLXArray
     ) -> (output: MLXArray, inverseOrder: MLXArray?) {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
+        x = transformInput(x)
 
         let doSort = indices.size >= 64
 
@@ -176,12 +190,13 @@ public class SwitchGLU: Module {
 
         let xUp = upProj(x, idx, sortedIndices: doSort)
         let xGate = gateProj(x, idx, sortedIndices: doSort)
-        let activated =
+        var activated =
             if let activationProduct {
                 activationProduct(xGate, xUp)
             } else {
                 activation(xGate) * xUp
             }
+        activated = transformHidden(activated)
         x = downProj(
             activated,
             idx,
@@ -226,7 +241,7 @@ public class SwitchGLU: Module {
             && trainableParameters().flattened().isEmpty
     }
 
-    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+    open func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var projected = projectExperts(x, indices)
 
         if let inverseOrder = projected.inverseOrder {
@@ -276,7 +291,7 @@ public class SwitchGLU: Module {
 /// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
 /// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
 /// `gate_proj` / `up_proj`. Used by Gemma 4 26B MoE.
-public class FusedGateUpSwitchGLU: Module {
+open class FusedGateUpSwitchGLU: Module {
     @ModuleInfo(key: "gate_up_proj") var gateUpProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
 
@@ -327,7 +342,7 @@ public class FusedGateUpSwitchGLU: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
+    open func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
         let doSort = indices.size >= 64
@@ -362,7 +377,7 @@ public class FusedGateUpSwitchGLU: Module {
 
 // MARK: - SwitchLinear
 
-public class SwitchLinear: Module, Quantizable {
+open class SwitchLinear: Module, Quantizable {
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "bias") var bias: MLXArray?
 
@@ -405,7 +420,7 @@ public class SwitchLinear: Module, Quantizable {
         self._bias.wrappedValue = bias
     }
 
-    public func callAsFunction(
+    open func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
         let weightT = self.weight.swappedAxes(-1, -2)
@@ -423,7 +438,7 @@ public class SwitchLinear: Module, Quantizable {
     }
 }
 
-public class QuantizedSwitchLinear: SwitchLinear, Quantized {
+open class QuantizedSwitchLinear: SwitchLinear, Quantized {
     @ModuleInfo(key: "scales") var scales: MLXArray
     @ModuleInfo(key: "biases") var biases: MLXArray?
 
@@ -451,7 +466,7 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
         self.freeze()
     }
 
-    override public func callAsFunction(
+    override open func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
         var result = MLX.gatherQuantizedMM(

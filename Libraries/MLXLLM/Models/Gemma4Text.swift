@@ -963,8 +963,11 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
 // MARK: - LoRA
 
 extension Gemma4TextModel: LoRAModel {
+    /// Decoder layers, not just attention: LoRA keys are matched against the
+    /// children of each returned module, so `mlp.*` targets only resolve when
+    /// the layer itself is returned (as Gemma3Text / Qwen35 / Llama do).
     public var loraLayers: [Module] {
-        model.layers.map { $0.selfAttn }
+        model.layers
     }
 }
 

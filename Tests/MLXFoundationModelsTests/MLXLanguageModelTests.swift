@@ -38,7 +38,7 @@ struct MLXLanguageModelInitTests {
 
 /// Minimal `Downloader` conformance. The tests in this suite only verify
 /// MLXLanguageModel's construction surface; no download is actually invoked.
-private final class StubDownloader: Downloader, @unchecked Sendable {
+private struct StubDownloader: Downloader {
     func download(
         id: String,
         revision: String?,
@@ -51,7 +51,7 @@ private final class StubDownloader: Downloader, @unchecked Sendable {
 }
 
 /// Minimal `TokenizerLoader` conformance. As above, never invoked here.
-private final class StubTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+private struct StubTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any Tokenizer {
         StubTokenizer()
     }

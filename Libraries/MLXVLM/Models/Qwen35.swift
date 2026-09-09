@@ -227,7 +227,7 @@ public struct Qwen35Configuration: Codable, Sendable {
 
 // MARK: - Language
 
-enum Qwen35Language {
+public enum Qwen35Language {
 
     final class RotaryEmbedding {
         private let invFreq: MLXArray
@@ -447,7 +447,7 @@ enum Qwen35Language {
         }
     }
 
-    final class GatedDeltaNet: Module {
+    open class GatedDeltaNet: Module {
         let hiddenSize: Int
         let numVHeads: Int
         let numKHeads: Int
@@ -475,7 +475,7 @@ enum Qwen35Language {
         @ModuleInfo(key: "norm") var norm: RMSNormGated
         @ModuleInfo(key: "out_proj") var outProj: Linear
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.hiddenSize = args.hiddenSize
             self.numVHeads = args.linearNumValueHeads
             self.numKHeads = args.linearNumKeyHeads
@@ -517,7 +517,7 @@ enum Qwen35Language {
         }
 
         @discardableResult
-        override func update(
+        open override func update(
             parameters: ModuleParameters, verify: VerifyUpdate,
             path: [String] = [], modulePath: [String] = []
         ) throws -> Self {
@@ -536,7 +536,7 @@ enum Qwen35Language {
                 parameters: parameters, verify: verify, path: path, modulePath: modulePath)
         }
 
-        override func updateModule(key: String, _ value: Any) throws {
+        open override func updateModule(key: String, _ value: Any) throws {
             let replacesInputProjection =
                 key == "in_proj_qkv" || key == "in_proj_z"
                 || key == "in_proj_b" || key == "in_proj_a"
@@ -594,7 +594,7 @@ enum Qwen35Language {
             )
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ inputs: MLXArray,
             mask: MLXArray? = nil,
             cache: MambaCache? = nil,
@@ -652,7 +652,8 @@ enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: state,
-                    mask: prefixMask)
+                    mask: prefixMask,
+                    useKernel: !training)
                 let (suffixOut, suffixState) = gatedDeltaUpdate(
                     q: qNormed[0..., split..., 0..., 0...],
                     k: kNormed[0..., split..., 0..., 0...],
@@ -662,7 +663,8 @@ enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: prefixState,
-                    mask: suffixMask)
+                    mask: suffixMask,
+                    useKernel: !training)
                 out = concatenated([prefixOut, suffixOut], axis: 1)
                 state = suffixState
 
@@ -691,7 +693,8 @@ enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: state,
-                    mask: mask)
+                    mask: mask,
+                    useKernel: !training)
             }
 
             if let cache {
@@ -704,7 +707,7 @@ enum Qwen35Language {
         }
     }
 
-    final class SparseMoeBlock: Module, UnaryLayer {
+    open class SparseMoeBlock: Module, UnaryLayer {
         let normTopkProb: Bool
         let numExperts: Int
         let topK: Int
@@ -715,7 +718,7 @@ enum Qwen35Language {
         @ModuleInfo(key: "shared_expert") var sharedExpert: MLP
         @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.normTopkProb = args.normTopkProb
             self.numExperts = args.numExperts
             self.topK = args.numExpertsPerTok
@@ -735,7 +738,7 @@ enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(_ x: MLXArray) -> MLXArray {
+        open func callAsFunction(_ x: MLXArray) -> MLXArray {
             var gates = gate(x)
             gates = MLX.softmax(gates, axis: -1, precise: true)
 
@@ -752,7 +755,7 @@ enum Qwen35Language {
         }
     }
 
-    final class DecoderLayer: Module {
+    open class DecoderLayer: Module {
         let isLinear: Bool
 
         @ModuleInfo(key: "self_attn") var selfAttn: Attention?
@@ -763,7 +766,7 @@ enum Qwen35Language {
 
         @ModuleInfo(key: "mlp") var mlp: Module
 
-        init(
+        public init(
             _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
             forceFullAttention: Bool = false
         ) {
@@ -792,7 +795,7 @@ enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ x: MLXArray,
             attentionMask: MLXArray?,
             ssmMask: MLXArray?,
@@ -815,7 +818,7 @@ enum Qwen35Language {
         }
     }
 
-    final class Model: Module {
+    open class Model: Module {
         @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
         @ModuleInfo(key: "layers") fileprivate var layers: [DecoderLayer]
         @ModuleInfo(key: "norm") var norm: RMSNorm
@@ -823,7 +826,7 @@ enum Qwen35Language {
         let ssmIdx: Int
         let faIdx: Int
 
-        init(_ args: Qwen35Configuration.TextConfiguration) {
+        public init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
             _embedTokens.wrappedValue = Embedding(
                 embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
@@ -837,7 +840,7 @@ enum Qwen35Language {
             super.init()
         }
 
-        func callAsFunction(
+        open func callAsFunction(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
             cache: [KVCache?]? = nil,
@@ -1415,15 +1418,18 @@ public class Qwen35: Module, VLMModel {
         // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
         // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
         // so the VLM and text paths agree: a pre-converted MLX checkpoint
-        // (conv1d already sanitized, no MTP tensors) has already been shifted at
+        // (conv1d already sanitized) has already been shifted at
         // conversion time and must NOT be shifted again — doing so double-shifts
         // every layernorm and produces garbage tokens. Computed on the incoming
         // weights, before the `mtp.` filter below.
-        let hasMTPWeights = weights.keys.contains { $0.contains("mtp.") }
         let hasUnsanitizedConv1d = weights.contains { key, value in
             key.contains("conv1d.weight") && value.dim(-1) != 1
         }
-        let shouldShiftNormWeights = hasMTPWeights || hasUnsanitizedConv1d
+        // MTP tensors are not proof of a raw checkpoint: a converted checkpoint can
+        // keep them (the framework uses them for speculative decoding), and shifting
+        // its already-shifted norms a second time produces garbage tokens. The conv1d
+        // layout is the reliable signal on its own.
+        let shouldShiftNormWeights = hasUnsanitizedConv1d
 
         var weights = weights.filter { !$0.key.contains("mtp.") }
 

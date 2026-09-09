@@ -419,6 +419,36 @@ final class LoadWeightsTests: XCTestCase {
         XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
     }
 
+    func testAsyncLoadWeightsMatchesTheSynchronousOverload() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeSidecarCheckpoint(in: directory)
+
+        // In an async context this resolves to the async overload, which suspends the caller
+        // and runs the load on a global queue instead of blocking a cooperative thread.
+        let model = SidecarDeclaringModel()
+        try await loadWeights(modelDirectory: directory, model: model)
+
+        XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+    }
+
+    func testAsyncLoadWeightsPropagatesErrors() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeSidecarCheckpoint(in: directory)
+
+        // same undeclared-sidecar failure as the synchronous overload
+        let model = TwoLayerModel()
+        do {
+            try await loadWeights(modelDirectory: directory, model: model)
+            XCTFail("expected the keyNotFound error the synchronous overload throws")
+        } catch {
+            // expected
+        }
+    }
+
     /// Writes a checkpoint whose index names only `model.safetensors` while the head lives in
     /// `projector.safetensors`, the `jinaai/jina-reranker-v3-mlx` layout.
     private func writeSidecarCheckpoint(in directory: URL) throws {

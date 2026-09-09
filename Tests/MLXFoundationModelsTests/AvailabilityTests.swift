@@ -87,12 +87,14 @@ extension FoundationModelsCacheTests {
                         configuration: configuration, progressHandler: progress)
                 })
 
-            let warmTask = Task { try? await model.warmUp() }
+            let warmTask = Task { try await model.warmUp() }
             await gate.waitUntilStarted()
 
             let availability = await model.availability
             await gate.release()
-            _ = await warmTask.value
+            await #expect(throws: BlockingDownloaderReleased.self) {
+                try await warmTask.value
+            }
 
             #expect(
                 availability == .available,
@@ -125,12 +127,14 @@ extension FoundationModelsCacheTests {
             // preload() is NOT a warmup, so its in-flight load is not suppressed —
             // proving the suppression is what differs (and that the real
             // `.downloading` signal is not regressed).
-            let loadTask = Task { try? await model.preload() }
+            let loadTask = Task { try await model.preload() }
             await gate.waitUntilStarted()
 
             let availability = await model.availability
             await gate.release()
-            _ = await loadTask.value
+            await #expect(throws: BlockingDownloaderReleased.self) {
+                try await loadTask.value
+            }
 
             #expect(
                 availability == .downloading,
@@ -160,12 +164,14 @@ extension FoundationModelsCacheTests {
                         configuration: configuration, progressHandler: progress)
                 })
 
-            let warmTask = Task { try? await model.warmUp() }
+            let warmTask = Task { try await model.warmUp() }
             await gate.waitUntilStarted()
 
             let availability = await model.availability
             await gate.release()
-            _ = await warmTask.value
+            await #expect(throws: BlockingDownloaderReleased.self) {
+                try await warmTask.value
+            }
 
             #expect(
                 availability == .downloading,
@@ -189,7 +195,7 @@ extension FoundationModelsCacheTests {
 
 // MARK: - Test Stubs
 
-private final class StubAvailabilityDownloader: Downloader, @unchecked Sendable {
+private struct StubAvailabilityDownloader: Downloader {
     func download(
         id: String,
         revision: String?,
@@ -201,7 +207,7 @@ private final class StubAvailabilityDownloader: Downloader, @unchecked Sendable 
     }
 }
 
-private final class StubAvailabilityTokenizerLoader: TokenizerLoader, @unchecked Sendable {
+private struct StubAvailabilityTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any Tokenizer {
         StubAvailabilityTokenizer()
     }
@@ -267,9 +273,8 @@ private struct BlockingDownloaderReleased: Error {}
 
 /// A `Downloader` that parks inside `download` until the gate is released, so a
 /// load stays deterministically in flight while the test reads `availability`.
-private final class BlockingDownloader: Downloader, @unchecked Sendable {
-    private let gate: LoadGate
-    init(gate: LoadGate) { self.gate = gate }
+private struct BlockingDownloader: Downloader {
+    let gate: LoadGate
 
     func download(
         id: String,
