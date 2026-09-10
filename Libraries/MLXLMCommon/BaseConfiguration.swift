@@ -15,6 +15,13 @@ public struct BaseConfiguration: Codable, Sendable {
     /// The architecture identifier (e.g., "bert", "roberta", "xlm-roberta").
     public let modelType: String
 
+    /// Optional native architecture of a pack that shims `model_type` for a
+    /// foreign loader (`_orig_model_type` in `config.json`).
+    ///
+    /// Honored when the loading factory opts in; see
+    /// ``resolvedModelType(honorOrigModelType:)``.
+    public let origModelType: String?
+
     /// Configuration parameters for weight quantization.
     ///
     /// MLX uses group-wise quantization to reduce memory footprint. This struct
@@ -207,6 +214,29 @@ public struct BaseConfiguration: Codable, Sendable {
         Set(eosTokenIds?.values ?? textConfiguration?.eosTokenIds?.values ?? [])
     }
 
+    /// Model type to try first for registry lookup.
+    ///
+    /// When `honorOrigModelType` is true (default) and the pack declares a
+    /// non-empty `_orig_model_type`, returns that value trimmed and lowercased;
+    /// otherwise returns ``modelType``. Registry keys keep the Hub spelling
+    /// (underscore and hyphen forms are registered separately when both occur
+    /// in the wild), so the shim is matched as spelled. Whether the result is
+    /// loadable is the registry's decision — a factory that honors the original
+    /// type falls back to ``modelType`` when its registry has no creator for it.
+    ///
+    /// Callers select the immutable policy per factory — see
+    /// `VLMModelFactory.init(…honorOrigModelType:)`.
+    public func resolvedModelType(honorOrigModelType: Bool = true) -> String {
+        guard honorOrigModelType,
+            let orig = origModelType?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !orig.isEmpty
+        else {
+            return modelType
+        }
+        return orig.lowercased()
+    }
+
     /// The default quantization settings.
     @available(*, deprecated, message: "Please use perLayerQuantization instead")
     public var quantization: Quantization? {
@@ -220,6 +250,7 @@ public struct BaseConfiguration: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
+        case origModelType = "_orig_model_type"
         case quantizationContainer = "quantization"
         case textConfiguration = "text_config"
         case eosTokenIds = "eos_token_id"

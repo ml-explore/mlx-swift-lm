@@ -9,6 +9,9 @@ MLX Swift was developed with contributions from the following individuals:
 - [John Mai](https://github.com/johnmai-dev): Added support for multiple models (Qwen2, Starcoder2, InternLM2, Qwen3,
   Qwen3 MoE, GLM-4, MiMo, BitNet, SmolLM3, LFM2, Baichuan-M1, GPT-OSS, FalconH1, Exaone4, Qwen3.5, Qwen3.5 MoE).
 - [Christoph Rohde](https://github.com/CodebyCR): Improved Embedders documentation. Added Gemma 3 Embedding Model.
+- [John Auxillos](https://github.com/jyauxi): Added DeepSeek-OCR and Unlimited-OCR VLM support,
+  including `RingSlidingKVCache` for Reference Sliding Window Attention. The DeepSeek-OCR port is
+  adapted from [mzbac/deepseek-ocr.swift](https://github.com/mzbac/deepseek-ocr.swift) (MIT).
 
 <a href="https://github.com/ml-explore/mlx-swift-lm/graphs/contributors">
   <img class="dark-light" src="https://contrib.rocks/image?repo=ml-explore/mlx-swift-lm&anon=0&columns=20&max=100&r=true" />

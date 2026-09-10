@@ -466,6 +466,19 @@ struct TokenRing {
         return count < capacity ? buffer[..<count] : buffer
     }
 
+    /// The valid tokens oldest-first, or `nil` if empty.
+    ///
+    /// Once the ring has wrapped, `buffer` holds the tokens rotated by `writeIndex`
+    /// (the oldest token sits at `writeIndex`), so the two halves are re-joined here.
+    var orderedTokens: MLXArray? {
+        guard count > 0 else { return nil }
+        if count < capacity {
+            return buffer[..<count]
+        }
+        return writeIndex == 0
+            ? buffer : concatenated([buffer[writeIndex...], buffer[..<writeIndex]])
+    }
+
     /// Bulk-load from a prompt. Keeps the last `capacity` tokens.
     mutating func loadPrompt(_ prompt: MLXArray) {
         let promptTokens = prompt.asType(.int32).flattened()

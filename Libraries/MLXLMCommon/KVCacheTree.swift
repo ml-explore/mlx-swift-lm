@@ -5,6 +5,9 @@ struct KVCacheLeaf {
     enum Kind {
         case recurrent
         case rotating(RotatingKVCache)
+        /// Reference sliding window (``RingSlidingKVCache``): an architecture-defined
+        /// window like a model-native rotating cache, but with the prefix retained.
+        case ringSliding
         case simple(KVCacheSimple)
         case affine(QuantizedKVCache)
         case turboQuant(TurboQuantKVCache)
@@ -19,6 +22,7 @@ struct KVCacheLeaf {
         switch cache {
         case is MambaCache, is ArraysCache: .recurrent
         case let cache as RotatingKVCache: .rotating(cache)
+        case is RingSlidingKVCache: .ringSliding
         case let cache as TurboQuantKVCache: .turboQuant(cache)
         case let cache as VarianceNormalizedKVCache: .varianceNormalized(cache)
         case let cache as QuantizedKVCache: .affine(cache)
@@ -42,14 +46,14 @@ struct KVCacheLeaf {
     /// Whether this leaf participates in TurboQuant boundary protection.
     ///
     /// The ranking must remain stable as simple caches are replaced by their
-    /// affine or TurboQuant representations. Rotating and unsupported caches
-    /// are excluded because TurboQuant cannot rewrite them; including them
-    /// would shift protection away from the first and last eligible layers in
-    /// mixed cache topologies.
+    /// affine or TurboQuant representations. Rotating, ring-sliding, and
+    /// unsupported caches are excluded because TurboQuant cannot rewrite them;
+    /// including them would shift protection away from the first and last
+    /// eligible layers in mixed cache topologies.
     var participatesInTurboQuantBoundaryProtection: Bool {
         switch kind {
         case .simple, .affine, .turboQuant: true
-        case .recurrent, .rotating, .varianceNormalized, .unsupported: false
+        case .recurrent, .rotating, .ringSliding, .varianceNormalized, .unsupported: false
         }
     }
 
@@ -63,7 +67,7 @@ struct KVCacheLeaf {
         switch kind {
         case .recurrent:
             return nil
-        case .rotating, .unsupported:
+        case .rotating, .ringSliding, .unsupported:
             return strategy == .fullPrecision
         case .simple(let simple):
             let state = simple.innerState()
