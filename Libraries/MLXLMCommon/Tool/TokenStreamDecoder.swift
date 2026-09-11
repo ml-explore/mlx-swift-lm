@@ -35,6 +35,9 @@ package protocol TokenStreamDecoder {
     /// Decoders whose response protocol never rejects tool calls report zero.
     var rejectedToolCallCount: Int { get }
 
+    /// Whether decoding can end here without flushing an incomplete payload.
+    var canEndForSteering: Bool { get }
+
     /// Consumes one generated token. Returns `false` when decoding should stop
     /// because of either a semantic boundary or consumer termination.
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool
@@ -49,6 +52,7 @@ extension TokenStreamDecoder {
     package var receivesStopTokens: Bool { false }
     package var isInsideReasoning: Bool { false }
     package var rejectedToolCallCount: Int { 0 }
+    package var canEndForSteering: Bool { false }
 }
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
@@ -56,6 +60,7 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var detokenizer: NaiveStreamingDetokenizer
     private let toolCallProcessor: ToolCallProcessor
     private var stopStringFilter: StopStringFilter
+    private var hasCompleteText = false
 
     init(
         tokenizer: any Tokenizer,
@@ -70,9 +75,16 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
 
     var rejectedToolCallCount: Int { toolCallProcessor.rejectedToolCallCount }
 
+    var canEndForSteering: Bool {
+        hasCompleteText && stopStringFilter.buffer.isEmpty
+            && toolCallProcessor.canEndForSteering
+    }
+
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
         detokenizer.append(token: token)
+        hasCompleteText = false
         guard let chunk = detokenizer.next() else { return true }
+        hasCompleteText = !chunk.isEmpty
 
         let result = stopStringFilter.process(chunk)
         if let text = result.text,

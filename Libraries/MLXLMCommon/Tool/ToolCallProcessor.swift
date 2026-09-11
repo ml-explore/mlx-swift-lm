@@ -95,6 +95,11 @@ public class ToolCallProcessor {
 
     // MARK: - Computed Properties
 
+    var canEndForSteering: Bool {
+        state == .normal && toolCallBuffer.isEmpty && orderedOutputQueue.isEmpty
+            && toolCalls.isEmpty && rejectedToolCallCount == 0
+    }
+
     /// Whether this processor uses inline format (no start tag).
     private var isInlineFormat: Bool {
         parser.startTag == nil

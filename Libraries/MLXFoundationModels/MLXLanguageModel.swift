@@ -1761,6 +1761,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ) {
                 try Task.checkCancellation()
                 switch generation {
+                case .steering: break
                 case .chunk(let text):
                     await Self.emit(
                         text: text, entryID: entryID, destination: .response, into: channel)

@@ -710,8 +710,8 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Per-call model state (e.g. M-RoPE rope deltas), seeded from the
     /// initializer's `state`, replaced by prefill, then threaded through
     /// every decode step. A caller continuing this cache later (as
-    /// ``ChatSession`` does across turns) reads it back after
-    /// initialization and seeds the next iterator with it.
+    /// ``ChatSession`` does across turns) reads it back after generation
+    /// and seeds the next iterator with it.
     public internal(set) var state: LMOutput.State?
 
     var y: LMInput.Text
@@ -1738,6 +1738,7 @@ public func generate(
 /// // Process the stream asynchronously to handle text chunks and completion info.
 /// for await generation in stream {
 ///     switch generation {
+///     case .steering: break
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
 ///     case .info(let info):
@@ -1793,6 +1794,7 @@ public func generate(
 ///
 /// for await generation in stream {
 ///     switch generation {
+///     case .steering: break
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
 ///     case .info(let info):
@@ -1926,8 +1928,9 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     tokenizer: Tokenizer,
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
-) -> (AsyncStream<Generation>, Task<[Int], Never>) {
+    tools: [[String: any Sendable]]? = nil,
+    steering: SteeringControl? = nil
+) -> (AsyncStream<Generation>, Task<RecordedGeneration, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -1935,6 +1938,7 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
         tokenCollector: RecordingGeneratedTokens(),
+        steering: modelConfiguration.allowsEarlySteeringBoundary ? steering : nil,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
             stopStrings: modelConfiguration.effectiveStopStrings,
@@ -2266,12 +2270,17 @@ private protocol GeneratedTokenCollector: Sendable {
     associatedtype Result: Sendable
 
     mutating func record(_ token: Int)
-    consuming func result() -> Result
+    consuming func result(state: LMOutput.State?) -> Result
 }
 
 private struct IgnoringGeneratedTokens: GeneratedTokenCollector {
     mutating func record(_ token: Int) {}
-    consuming func result() {}
+    consuming func result(state: LMOutput.State?) {}
+}
+
+struct RecordedGeneration: Sendable {
+    let tokens: [Int]
+    let state: SendableBox<LMOutput.State?>
 }
 
 private struct RecordingGeneratedTokens: GeneratedTokenCollector {
@@ -2281,8 +2290,8 @@ private struct RecordingGeneratedTokens: GeneratedTokenCollector {
         tokens.append(token)
     }
 
-    consuming func result() -> [Int] {
-        tokens
+    consuming func result(state: LMOutput.State?) -> RecordedGeneration {
+        RecordedGeneration(tokens: tokens, state: SendableBox(state))
     }
 }
 
@@ -2316,10 +2325,12 @@ private func generateLoopTask<
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     includeStopToken: Bool = false,
     tokenCollector: consuming Collector,
+    steering: SteeringControl? = nil,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Collector.Result, Never>) {
     let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
 
+    let executionStream = StreamOrDevice.default.stream
     let iterator = SendableBox(iterator)
     let handler = SendableBox(handler)
     let tokenCollector = consume tokenCollector
@@ -2349,9 +2360,13 @@ private func generateLoopTask<
             // `while let token = iterator.next()` form) allowed one extra asyncEval to be
             // submitted post-cancellation, which faults if the app has backgrounded
             // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
-            // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+            // post-loop block below assigns `.cancelled`; the captured execution stream still
             // settles any in-flight evaluation at the end of the task body.
             tokenLoop: while !Task.isCancelled {
+                if let steering, handler.canEndForSteering, steering.requestsEarlyBoundary {
+                    stopReason = .steered
+                    break
+                }
                 guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
                 tokenCollector.record(token)
 
@@ -2444,12 +2459,12 @@ private func generateLoopTask<
             _ = continuation.yield(handler.infoEvent(info))
 
             // Synchronize with the stream to ensure tasks are completed
-            Stream().synchronize()
+            executionStream.synchronize()
 
             // Finalize the stream
             continuation.finish()
 
-            return tokenCollector.result()
+            return tokenCollector.result(state: iterator.state)
         }
 
         if let ticket = wiredMemoryTicket {
@@ -2487,6 +2502,10 @@ public enum GenerateStopReason: Sendable {
 
     /// Generation stopped because the configured max token limit was reached.
     case length
+
+    /// This model step ended at a supported boundary to apply pending steering.
+    /// The owning chat turn continues with the additional user input.
+    case steered
 
     /// Generation stopped due to explicit task cancellation or early stream termination.
     case cancelled
@@ -2629,6 +2648,7 @@ public struct GenerateCompletionInfo: Sendable {
 /// - `.toolCall`: A tool call parsed from the generated output.
 /// - `.rejectedToolCall`: Tool-call-shaped output that was not executable.
 /// - `.info`: Metadata and performance statistics about the generation process.
+/// - `.steering`: The outcome of accepted steering instructions.
 public enum Generation: Sendable {
     /// A generated text chunk as a String.
     case chunk(String)
@@ -2642,9 +2662,13 @@ public enum Generation: Sendable {
     /// A tool-call-shaped model output rejected by parsing or authorization.
     case rejectedToolCall(RejectedToolCall)
 
+    /// The outcome of steering instructions submitted to a chat session.
+    case steering(SteeringEvent)
+
     /// Generated text or nil
     public var chunk: String? {
         switch self {
+        case .steering: nil
         case .chunk(let string): string
         case .info: nil
         case .toolCall: nil
@@ -2655,6 +2679,7 @@ public enum Generation: Sendable {
     /// Completion info or nil
     public var info: GenerateCompletionInfo? {
         switch self {
+        case .steering: nil
         case .chunk: nil
         case .info(let info): info
         case .toolCall: nil
@@ -2665,6 +2690,7 @@ public enum Generation: Sendable {
     /// Tool call or nil
     public var toolCall: ToolCall? {
         switch self {
+        case .steering: nil
         case .chunk: nil
         case .info: nil
         case .toolCall(let toolCall): toolCall
@@ -2675,10 +2701,19 @@ public enum Generation: Sendable {
     /// Rejected tool call or nil.
     public var rejectedToolCall: RejectedToolCall? {
         switch self {
+        case .steering: nil
         case .chunk: nil
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall(let rejection): rejection
+        }
+    }
+
+    /// Steering event or nil.
+    public var steering: SteeringEvent? {
+        switch self {
+        case .steering(let event): event
+        default: nil
         }
     }
 
@@ -2758,6 +2793,7 @@ private protocol TokenLoopHandler: SendableMetatype {
     /// Whether semantic parsing needs to observe EOS tokens even though they
     /// are not included in the public output or generation token count.
     var receivesStopTokens: Bool { get }
+    var canEndForSteering: Bool { get }
 
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
     mutating func onToken(
@@ -2781,6 +2817,7 @@ private protocol TokenLoopHandler: SendableMetatype {
 }
 
 extension TokenLoopHandler {
+    var canEndForSteering: Bool { false }
     var additionalStopTokenIDs: Set<Int> { [] }
     var receivesStopTokens: Bool { false }
 }
@@ -2791,6 +2828,12 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
     private static let logger = Logger(
         subsystem: "mlx-swift-lm", category: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
+    private var hasResponse = false
+    private var hasNonTextOutput = false
+
+    var canEndForSteering: Bool {
+        hasResponse && !hasNonTextOutput && decoder.canEndForSteering
+    }
 
     init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
@@ -2864,22 +2907,26 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             return .more
 
         case .response(let response):
+            hasResponse = hasResponse || !response.isEmpty
             if case .terminated = emit(.chunk(response)) {
                 return .cancelled
             }
             return .more
 
         case .toolCall(let toolCall):
+            hasNonTextOutput = true
             if case .terminated = emit(.toolCall(toolCall)) {
                 return .cancelled
             }
             return .more
 
         case .protocolError(let message):
+            hasNonTextOutput = true
             Self.logger.error("\(message)")
             return .more
 
         case .rejectedToolCall(let rejection):
+            hasNonTextOutput = true
             if case .terminated = emit(.rejectedToolCall(rejection)) {
                 return .cancelled
             }
