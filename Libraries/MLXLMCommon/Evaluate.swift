@@ -944,14 +944,14 @@ public struct TokenIterator: TokenIteratorProtocol {
             // way in its generation loop.
             asyncEval([token] + cache.flatMap { $0.state })
 
-            tokenCount += 1
-
             // Periodically return freed buffers that cannot be reused (odd or
             // monotonically growing sizes accumulate in the pool otherwise).
-            // Matches mlx-lm's clear cadence.
+            // Matches mlx-lm, which also clears on the first token, after prefill.
             if tokenCount % 256 == 0 {
                 MLX.Memory.clearCache()
             }
+
+            tokenCount += 1
 
             return previousY.tokens.item(Int.self)
         }
