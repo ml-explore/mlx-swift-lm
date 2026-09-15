@@ -1094,6 +1094,18 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        forward(input, cache: cache, state: state, lastTokenOnly: false)
+    }
+
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        forward(input, cache: cache, state: state, lastTokenOnly: true)
+    }
+
+    private func forward(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?, lastTokenOnly: Bool
+    ) -> LMOutput {
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
         let hiddenStates: MLXArray
         if emitDrafterState {
@@ -1105,11 +1117,16 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             hiddenStates = model(input.tokens, cache: cache)
         }
 
+        let projection: Module = lmHead ?? model.embedTokens
+        let projectionInput =
+            lastTokenOnly && !emitDrafterState
+            ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
+            : hiddenStates
         let logits: MLXArray
         if let lmHead {
-            logits = lmHead(hiddenStates)
+            logits = lmHead(projectionInput)
         } else {
-            logits = model.embedTokens.asLinear(hiddenStates)
+            logits = model.embedTokens.asLinear(projectionInput)
         }
 
         guard emitDrafterState else {
@@ -1243,6 +1260,12 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
         languageModel(input, cache: cache, state: state)
+    }
+
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        languageModel.nextTokenLogits(input, cache: cache, state: state)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
