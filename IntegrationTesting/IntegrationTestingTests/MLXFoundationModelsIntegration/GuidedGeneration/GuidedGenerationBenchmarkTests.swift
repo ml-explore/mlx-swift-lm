@@ -322,13 +322,13 @@ struct GuidedGenerationBenchmarkTests {
         let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
         let modelID = TestFixtures.defaultModelID
-        let (xgTokenizer, hostTokenizer): (GrammarTokenizer, any Tokenizer) =
+        let (grammarTokenizer, hostTokenizer): (GrammarTokenizer, any Tokenizer) =
             try await container.perform { context in
-                let xg = try await MLXLanguageModel.makeXGTokenizer(
+                let tokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
-                return (xg, context.tokenizer)
+                return (tokenizer, context.tokenizer)
             }
 
         let schema = """
@@ -349,7 +349,7 @@ struct GuidedGenerationBenchmarkTests {
         for _ in 0 ..< iterations {
             let start = ContinuousClock.now
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: schema,
                 fastForward: true,
                 hostTokenizer: hostTokenizer
@@ -447,12 +447,12 @@ struct GuidedGenerationBenchmarkTests {
         modelID: String = TestFixtures.defaultModelID
     ) async throws -> RunResult {
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: Self.benchmarkSchema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
@@ -472,7 +472,7 @@ struct GuidedGenerationBenchmarkTests {
                 context: context,
                 constraint: constraint,
                 maxTokens: Self.benchmarkMaxTokens,
-                vocabSize: Int(xgTokenizer.vocabSize)
+                vocabSize: Int(grammarTokenizer.vocabSize)
             ) { text in
                 charCount += text.count
                 deltaCount += 1
