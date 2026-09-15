@@ -1288,10 +1288,7 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
         // a deterministic ~9 px bbox offset vs the Python mlx-vlm reference.
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content":
-                message.images.map { _ in ["type": "image"] }
-                + message.videos.map { _ in ["type": "video"] }
-                + [["type": "text", "text": message.content]],
+            "content": contentParts(for: message, layout: .imagesThenVideosThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary

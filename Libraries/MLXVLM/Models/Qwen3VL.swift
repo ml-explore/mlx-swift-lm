@@ -2032,17 +2032,9 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        let imageContent = message.images.map { _ in
-            ["type": "image"]
-        }
-        let textContent = [["type": "text", "text": message.content]]
-        let videoContent = message.videos.map { _ in
-            ["type": "video"]
-        }
-
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content": imageContent + videoContent + textContent,
+            "content": contentParts(for: message, layout: .imagesThenVideosThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
