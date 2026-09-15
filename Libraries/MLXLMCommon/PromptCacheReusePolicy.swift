@@ -132,8 +132,8 @@ struct PromptCacheState: Sendable {
     /// when absence matters.
     var draftCacheIsAligned: Bool = true
 
-    /// Every cache supports rewinding.
-    var isTrimmable: Bool = false
+    /// Exact rewind limit across all participating layers.
+    var maxTrimCount: Int = 0
 }
 
 /// One reusability rule.
@@ -257,7 +257,7 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && trimCount > 0
             && cache.mainCacheIsAligned
             && cache.draftCacheIsAligned
-            && cache.isTrimmable
+            && trimCount <= cache.maxTrimCount
             && !turn.carriesNewMedia
             && !turn.carriesPreparedMedia
             && !turn.carriesAttentionMask

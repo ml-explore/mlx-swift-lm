@@ -1114,8 +1114,8 @@ public final class ChatSession {
                                 mainCacheIsAligned: mainCacheIsAligned,
                                 hasDraftCache: draftKVCache != nil,
                                 draftCacheIsAligned: draftCacheIsAligned,
-                                isTrimmable: canTrimPromptCache(kvCache.cache)
-                                    && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
+                                maxTrimCount: (kvCache.cache + (draftKVCache?.cache ?? []))
+                                    .map(\.maxTrimCount).min() ?? 0)
 
                             var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
 

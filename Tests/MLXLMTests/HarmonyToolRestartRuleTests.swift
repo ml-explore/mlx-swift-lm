@@ -50,7 +50,7 @@ struct HarmonyToolRestartRuleTests {
             mainCacheIsAligned: processedTokenCount == cached.count,
             hasDraftCache: hasDraft,
             draftCacheIsAligned: draftAligned,
-            isTrimmable: true)
+            maxTrimCount: cached.count)
     }
 
     // MARK: - Splicing

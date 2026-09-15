@@ -48,7 +48,7 @@ struct PromptCacheReusePolicyTests {
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
             draftCacheIsAligned: draftAligned,
-            isTrimmable: trimmable)
+            maxTrimCount: trimmable ? cached.count : 0)
     }
 
     // MARK: - Fresh and empty caches
@@ -68,7 +68,7 @@ struct PromptCacheReusePolicyTests {
             cachedTokens: [],
             processedTokenCount: 12,
             mainCacheIsAligned: false,
-            isTrimmable: true)
+            maxTrimCount: 12)
 
         #expect(
             PromptCacheReusePolicy().decide(turn: turn(prompt: [1, 2, 3]), cache: cache) == .rebuild
