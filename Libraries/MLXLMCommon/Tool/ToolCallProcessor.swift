@@ -696,6 +696,7 @@ public class ToolCallProcessor {
         toolCallBuffer += chunk
         var leadingToken: String?
         var leadingTokenWasRecorded = false
+        var enteredCollectingThisChunk = false
 
         switch state {
         case .normal:
@@ -734,6 +735,7 @@ public class ToolCallProcessor {
             leadingTokenWasRecorded = true
             guard toolCallBuffer.hasPrefix(startTag) else { return leadingToken }
             state = .collectingToolCall
+            enteredCollectingThisChunk = true
             fallthrough
 
         case .collectingToolCall:
@@ -746,6 +748,20 @@ public class ToolCallProcessor {
             guard let endTag = parser.endTag else {
                 return leadingToken
             }
+
+            // Only the text this chunk appended can complete the end tag: an
+            // earlier occurrence was already in the buffer when the previous
+            // chunk was scanned. Scanning the whole buffered call on every
+            // chunk is quadratic in the call's length — seconds for a call of
+            // ten thousand tokens. The chunk that completes the start tag
+            // scans the whole buffer, which then holds at most the start tag
+            // and that chunk.
+            guard
+                enteredCollectingThisChunk
+                    || ToolCallFrameScanner.marker(
+                        endTag, mayHaveArrivedIn: toolCallBuffer,
+                        appendedByteCount: chunk.utf8.count)
+            else { return leadingToken }
 
             // `<tool_call>` frames close only after a structurally complete
             // payload, so a literal close marker inside a JSON string argument
