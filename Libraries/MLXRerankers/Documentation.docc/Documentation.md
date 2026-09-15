@@ -129,6 +129,9 @@ Jina reranker v3 accepts at most 64 documents in one listwise request. Pairwise 
 Qwen rerankers use token-budgeted micro-batches and check task cancellation between input
 encoding and model batches.
 
+Qwen3 projects only each row's final valid hidden state when scoring a batch, avoiding
+vocabulary logits for the other input tokens. Singleton requests retain cached prefill.
+
 ## Model Compatibility
 
 Single-logit encoder rerankers use a sigmoid-normalized relevance score. Multi-label encoder checkpoints

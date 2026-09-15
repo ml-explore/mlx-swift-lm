@@ -203,6 +203,19 @@ public class Qwen3Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
+extension Qwen3Model: CausalRerankerModel {
+    package func lastTokenLogits(_ inputs: MLXArray, sequenceLengths: [Int]) -> MLXArray {
+        let hidden = model(inputs, cache: nil)
+        let lastHidden = stacked(
+            sequenceLengths.enumerated().map { row, length in hidden[row, length - 1] })
+        if let lmHead {
+            return lmHead(lastHidden)
+        } else {
+            return model.embedTokens.asLinear(lastHidden)
+        }
+    }
+}
+
 public struct Qwen3Configuration: Codable, Sendable {
     var hiddenSize: Int
     var hiddenLayers: Int

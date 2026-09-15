@@ -604,6 +604,77 @@ struct RerankerTests {
         #expect(model.callShapes == [[1, 512]])
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func qwenFinalTokenLogitsMatchFullProjection(tied: Bool, quantized: Bool) throws {
+        let configuration = try JSONDecoder().decode(
+            MLXLLM.Qwen3Configuration.self,
+            from: Data(
+                """
+                {
+                  "vocab_size": 128, "hidden_size": 64, "num_hidden_layers": 2,
+                  "intermediate_size": 128, "num_attention_heads": 4,
+                  "num_key_value_heads": 2, "head_dim": 16, "rms_norm_eps": 1e-6,
+                  "tie_word_embeddings": \(tied)
+                }
+                """.utf8))
+
+        for dtype: DType in [.float32, .float16] {
+            let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+                MLXLLM.Qwen3Model(configuration)
+            }
+            model.apply { $0.dtype.isFloatingPoint ? $0.asType(dtype) : $0 }
+            if quantized {
+                quantize(model: model, groupSize: 32, bits: 4)
+            }
+            for lengths in [[1], [1, 3, 8], [8, 4, 8]] {
+                let width = lengths.max() ?? 1
+                let rows = lengths.enumerated().map { row, length in
+                    (0 ..< width).map { column in
+                        column < length ? (row * 13 + column * 7 + 1) % 128 : 0
+                    }
+                }
+                let tokens = MLXArray(rows.flatMap { $0 }).reshaped(lengths.count, width)
+                let full = model(tokens, cache: nil)
+                let expected = stacked(
+                    lengths.enumerated().map { row, length in full[row, length - 1] })
+                let actual = model.lastTokenLogits(tokens, sequenceLengths: lengths)
+
+                #expect(actual.shape == [lengths.count, 128])
+                let tolerance: Float = dtype == .float16 ? 0.02 : 0.0001
+                #expect(abs(actual - expected).max().item(Float.self) < tolerance)
+            }
+        }
+    }
+
+    @Test func causalScoringUsesFinalTokenCapabilityAndKeepsSingletonPrefill() async throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let container = makeModelContainer(
+            model: TestFinalTokenRerankerModel(tokenizer: tokenizer), tokenizer: tokenizer)
+        let reference = makeModelContainer(
+            model: TestCausalRerankerModel(
+                trueTokenID: tokenizer.trueTokenID, falseTokenID: tokenizer.falseTokenID),
+            tokenizer: tokenizer)
+        let documents = ["bbbb", "a", String(repeating: "c", count: 1_000)]
+        let options = RerankExecutionOptions(maxBatchSize: 2, maxBatchTokens: 1_024)
+
+        let actual = try await container.causalRerankerScores(
+            query: "q", documents: documents, instruction: nil,
+            maxInputTokens: 512, options: options)
+        let expected = try await reference.causalRerankerScores(
+            query: "q", documents: documents, instruction: nil,
+            maxInputTokens: 512, options: options)
+        let calls = try await container.perform { context in
+            let model = try #require(context.model as? TestFinalTokenRerankerModel)
+            return (model.projectedLengths, model.fullForwardShapes)
+        }
+
+        #expect(actual == expected)
+        #expect(calls.0.count == 1)
+        #expect(calls.0.first?.count == 2)
+        #expect(calls.0.first?.first != calls.0.first?.last)
+        #expect(calls.1 == [[1, 512]])
+    }
+
     @Test func jinaFactoryRegistrationUsesArchitecture() async throws {
         let model = try await LLMTypeRegistry.shared.createModel(
             configuration: try jinaConfigurationData(), modelType: "qwen3")
@@ -955,6 +1026,38 @@ private final class TestEncoderRerankerModel: Module, RerankerModel, @unchecked 
             return tiled(MLXArray([Float(0), Float(2)]), repetitions: [inputs.dim(0), 1])
         }
     }
+}
+
+private final class TestFinalTokenRerankerModel: Module, CausalRerankerModel {
+    private let base: TestCausalRerankerModel
+    private(set) var projectedLengths = [[Int]]()
+    private(set) var fullForwardShapes = [[Int]]()
+
+    init(tokenizer: ByteRerankerTokenizer) {
+        base = TestCausalRerankerModel(
+            trueTokenID: tokenizer.trueTokenID, falseTokenID: tokenizer.falseTokenID)
+    }
+
+    func lastTokenLogits(_ inputs: MLXArray, sequenceLengths: [Int]) -> MLXArray {
+        projectedLengths.append(sequenceLengths)
+        let full = base(.init(tokens: inputs), cache: nil, state: nil).logits
+        return stacked(sequenceLengths.enumerated().map { row, length in full[row, length - 1] })
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        fullForwardShapes.append(input.tokens.shape)
+        return base(input, cache: cache, state: state)
+    }
+
+    func newCache(parameters: GenerateParameters?) -> [KVCache] { [] }
 }
 
 private final class TestCausalRerankerModel: Module, LanguageModel, ListwiseRerankerModel,
