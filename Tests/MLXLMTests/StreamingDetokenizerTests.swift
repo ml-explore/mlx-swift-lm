@@ -103,12 +103,13 @@ private struct SplitMultibyteTokenizer: MLXLMCommon.Tokenizer {
 final class StreamingDetokenizerTests: XCTestCase {
 
     private func stream(_ tokens: [Int], _ tokenizer: any Tokenizer) -> String {
-        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        var det = tokenizer.makeStreamingDetokenizer()
         var out = ""
         for id in tokens {
             det.append(token: id)
             if let text = det.next() { out += text }
         }
+        if let text = det.finish() { out += text }
         return out
     }
 

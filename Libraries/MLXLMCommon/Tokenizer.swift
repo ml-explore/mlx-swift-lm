@@ -9,6 +9,10 @@ public protocol Tokenizer: Sendable {
     func convertTokenToId(_ token: String) -> Int?
     func convertIdToToken(_ id: Int) -> String?
 
+    /// Creates independent decoding state for one generated sequence.
+    /// Override to supply a tokenizer-specific incremental implementation.
+    func makeStreamingDetokenizer() -> any StreamingDetokenizer
+
     var bosToken: String? { get }
     var eosToken: String? { get }
     var unknownToken: String? { get }
@@ -21,6 +25,10 @@ public protocol Tokenizer: Sendable {
 }
 
 extension Tokenizer {
+    public func makeStreamingDetokenizer() -> any StreamingDetokenizer {
+        NaiveStreamingDetokenizer(tokenizer: self)
+    }
+
     public func encode(text: String) -> [Int] {
         encode(text: text, addSpecialTokens: true)
     }
@@ -64,8 +72,21 @@ public enum TokenizerError: LocalizedError {
     }
 }
 
+/// Decodes one generated sequence. Preserve special tokens for downstream protocol parsing.
+/// `next()` returns available text, or nil until more tokens arrive. Custom implementations
+/// should emit stable text, holding incomplete bytes or context-dependent suffixes as needed.
 public protocol StreamingDetokenizer: IteratorProtocol<String> {
     mutating func append(token: Int)
+
+    /// Ends the sequence and returns all remaining text, including any unread output.
+    /// Call after the last token and before finishing downstream parsers. Repeated calls
+    /// return nil. Create a new decoder before appending another sequence.
+    mutating func finish() -> String?
+}
+
+extension StreamingDetokenizer {
+    /// Preserves the legacy behavior for decoders without a final flush operation.
+    public mutating func finish() -> String? { nil }
 }
 
 public struct NaiveStreamingDetokenizer: StreamingDetokenizer {

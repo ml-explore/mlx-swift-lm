@@ -2443,7 +2443,12 @@ private func generateLoopTask<
                 iterator = finalizing
             }
 
-            handler.onGenerationEnd(emit: continuation.yield)
+            switch handler.onGenerationEnd(emit: continuation.yield) {
+            case .more: break
+            case .stop:
+                if stopReason != .cancelled { stopReason = .stop }
+            case .cancelled: stopReason = .cancelled
+            }
 
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
@@ -2801,7 +2806,7 @@ private protocol TokenLoopHandler: SendableMetatype {
     /// Called after the token loop finishes, before the info event.
     mutating func onGenerationEnd(
         emit: (sending Output) -> AsyncStream<Output>.Continuation.YieldResult
-    )
+    ) -> TokenLoopDisposition
 
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
@@ -2848,7 +2853,7 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
 
     mutating func onGenerationEnd(
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
-    ) {
+    ) -> TokenLoopDisposition {
         var decoder = self.decoder
         var disposition = TokenLoopDisposition.more
         _ = decoder.finish { event in
@@ -2856,6 +2861,7 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             return disposition.shouldContinue
         }
         self.decoder = decoder
+        return disposition
     }
 
     func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
@@ -2955,7 +2961,7 @@ private struct RawTokenLoopHandler: TokenLoopHandler {
 
     mutating func onGenerationEnd(
         emit: (sending TokenGeneration) -> AsyncStream<TokenGeneration>.Continuation.YieldResult
-    ) {}
+    ) -> TokenLoopDisposition { .more }
 
     func infoEvent(_ info: GenerateCompletionInfo) -> TokenGeneration {
         .info(info)
