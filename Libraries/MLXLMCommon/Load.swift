@@ -151,7 +151,18 @@ private final class ConcurrentLoadState: @unchecked Sendable {
 /// range's I/O inside the work item), and the results are merged in file order. A file whose
 /// header cannot be parsed is loaded whole by one work item, which is exactly the serial
 /// loader's behavior for that file.
-func loadWeightArrays(urls: [URL]) throws -> (
+/// Whether `key` names a weight under one of `prefixes`.
+///
+/// Weight names are matched both before `sanitize` (raw checkpoint keys, which may carry an
+/// extra leading scope such as `model.`) and after (module paths), so a prefix matches at
+/// the start of the key or after any `.`.
+func isDeferredWeight(_ key: String, prefixes: [String]) -> Bool {
+    prefixes.contains { key.hasPrefix($0) || key.contains("." + $0) }
+}
+
+func loadWeightArrays(
+    urls: [URL], deferredWeightPrefixes: [String] = []
+) throws -> (
     weights: [String: MLXArray], metadata: [String: String]
 ) {
     struct WorkItem {
@@ -208,8 +219,15 @@ func loadWeightArrays(urls: [URL]) throws -> (
                 selected = all
             }
 
-            // force this range's I/O here, on this stream, in file-offset order
-            if !selected.isEmpty { eval(Array(selected.values)) }
+            // force this range's I/O here, on this stream, in file-offset order --
+            // except deferred weights, which stay lazy until their first use
+            let toEval =
+                deferredWeightPrefixes.isEmpty
+                ? Array(selected.values)
+                : selected.compactMap { key, value in
+                    isDeferredWeight(key, prefixes: deferredWeightPrefixes) ? nil : value
+                }
+            if !toEval.isEmpty { eval(toEval) }
             state.merge(file: item.file, weights: selected, metadata: metadata)
         } catch {
             state.record(error: error)
@@ -375,11 +393,14 @@ public func loadWeights(
     var weights = [String: MLXArray]()
     var metadata = [String: String]()
     let additionalFiles = (model as? any AdditionalWeightFilesProviding)?.additionalWeightFiles
+    let deferredPrefixes =
+        (model as? any DeferredWeightsProviding)?.deferredWeightPrefixes ?? []
     let weightURLs = try safetensorWeightURLs(
         in: modelDirectory,
         selection: weightFileSelection,
         additionalFiles: additionalFiles ?? [])
-    (weights, metadata) = try loadWeightArrays(urls: weightURLs)
+    (weights, metadata) = try loadWeightArrays(
+        urls: weightURLs, deferredWeightPrefixes: deferredPrefixes)
 
     // per-model cleanup (models can inspect metadata to customize behavior)
     weights = model.sanitize(weights: weights, metadata: metadata)
@@ -405,7 +426,7 @@ public func loadWeights(
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.
-    materializeModelForInference(model)
+    materializeModelForInference(model, deferredWeightPrefixes: deferredPrefixes)
 }
 
 /// Async variant of

@@ -1016,8 +1016,27 @@ struct MuseGlimmerImageBudgetTests {
     }
 }
 
+@Suite("MuseGlimmer text-only prepare")
+struct MuseGlimmerTextOnlyPrepareTests {
+
+    /// A text-only turn must not carry an attention mask: a batch of one has
+    /// nothing to pad, the model never reads `LMInput.text.mask`, and
+    /// `ChatSession` treats a masked input as non-resumable — vetoing prompt
+    /// cache reuse and re-prefilling the whole conversation on every agentic
+    /// turn.
+    @Test("text-only input carries no attention mask")
+    func noMaskWithoutImages() async throws {
+        let processor = MuseGlimmerProcessor(
+            MuseGlimmerProcessorConfiguration(),
+            tokenizer: MuseGlimmerStubTokenizer())
+        let input = try await processor.prepare(input: UserInput(prompt: "hello"))
+        #expect(input.text.mask == nil)
+        #expect(input.text.tokens.shape == [1, 4])
+    }
+}
+
 /// Minimal tokenizer: the budget tests only exercise `preprocess`, which never
-/// touches it.
+/// touches it, and the text-only prepare test only needs a fixed template.
 private struct MuseGlimmerStubTokenizer: Tokenizer {
     func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
@@ -1030,7 +1049,7 @@ private struct MuseGlimmerStubTokenizer: Tokenizer {
         messages: [[String: any Sendable]],
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
-    ) throws -> [Int] { [] }
+    ) throws -> [Int] { [1, 2, 3, 4] }
 }
 
 @Suite("MuseGlimmer agentic protocol")

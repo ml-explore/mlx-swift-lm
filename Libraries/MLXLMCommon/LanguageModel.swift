@@ -37,6 +37,31 @@ public protocol AdditionalWeightFilesProviding {
     var additionalWeightFiles: [String] { get }
 }
 
+/// Weights that stay lazy at load time and materialize on first use.
+///
+/// `loadWeights` normally evaluates every tensor while loading, so the whole checkpoint is
+/// resident before the first token. A model can conform to this protocol to keep some
+/// weights lazy: they are still read, sanitized, verified, and assigned to the module tree
+/// as usual, but their bytes stay in the (memory-mapped) checkpoint until the first
+/// evaluation that uses them.
+///
+/// The motivating case is a VLM serving text-only requests: MuseGlimmer's unquantized
+/// vision stack is ~3.7 GB that a text session never touches, and on a 24 GB machine that
+/// is the difference between fitting inside and spilling past Metal's wired-memory limit.
+///
+/// The trade-offs are that the checkpoint files must remain readable until the deferred
+/// weights are first used, and that first use pays the read inside the evaluation instead
+/// of at load time.
+public protocol DeferredWeightsProviding {
+    /// Weight-name prefixes whose tensors stay lazy at load time.
+    ///
+    /// Prefixes are module paths in the post-`sanitize` layout (e.g. `"vision_tower."`).
+    /// They are matched both at the start of a name and after any `.`, so raw checkpoint
+    /// names that carry an extra leading scope (e.g. `model.vision_tower.`) are also
+    /// covered before `sanitize` runs.
+    var deferredWeightPrefixes: [String] { get }
+}
+
 /// Optional metadata a model wants written into converted safetensors.
 ///
 /// Model-specific metadata lets future loaders distinguish transformed MLX-native
