@@ -1706,7 +1706,7 @@ public func generate(
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
 /// one-shot calls, but for "chat session" type calls consider using
-/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:tools:toolCallPolicy:)``
+/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:tools:toolCallPolicy:reasoningPrimedInside:)``
 /// so that the end of the generation task can be observed.
 ///
 /// - Parameters:
@@ -1745,6 +1745,8 @@ public func generate(
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
+///     case .reasoning(let text):
+///         print("Thinking: \(text)")
 ///     case .info(let info):
 ///         print("Finished: \(info.tokensPerSecond) tokens/s.")
 ///     case .toolCall(let call):
@@ -1771,7 +1773,10 @@ public func generate(
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
         tools: tools,
-        toolCallPolicy: parameters.toolCallPolicy)
+        toolCallPolicy: parameters.toolCallPolicy,
+        reasoningPrimedInside: promptPrimesReasoning(
+            input: input, modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer))
     return stream
 }
 
@@ -1801,6 +1806,8 @@ public func generate(
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
+///     case .reasoning(let text):
+///         print("Thinking: \(text)")
 ///     case .info(let info):
 ///         print("Finished: \(info.tokensPerSecond) tokens/s.")
 ///     case .toolCall(let call):
@@ -1864,7 +1871,15 @@ public func generate(
             stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json,
             tools: tools,
-            toolCallPolicy: parameters.toolCallPolicy
+            toolCallPolicy: parameters.toolCallPolicy,
+            reasoning: context.configuration.reasoningConfig.map {
+                (
+                    config: $0,
+                    primedInside: promptPrimesReasoning(
+                        input: input, modelConfiguration: context.configuration,
+                        tokenizer: context.tokenizer)
+                )
+            }
         )
     )
     return stream
@@ -1884,7 +1899,10 @@ public func generate(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
-        wiredMemoryTicket: wiredMemoryTicket)
+        wiredMemoryTicket: wiredMemoryTicket,
+        reasoningPrimedInside: promptPrimesReasoning(
+            input: input, modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer))
     return stream
 }
 
@@ -1905,6 +1923,11 @@ public func generate(
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
 ///   - tools: Optional tool schemas used to parse tool-call arguments into their declared types.
 ///   - toolCallPolicy: Recovery and validation rules for generated tool calls.
+///   - reasoningPrimedInside: whether the rendered prompt ends inside an open reasoning
+///     block, which some families prefill (e.g. DeepSeek-R1's trailing `<think>`). Callers
+///     holding the prompt should pass
+///     ``ReasoningEventEmitter/promptEndsInsideReasoning(promptTokens:config:tokenizer:)``;
+///     leaving it `false` would misroute a primed model's whole thought block into `.chunk`.
 /// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
 public func generateTask<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
@@ -1913,7 +1936,8 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
-    toolCallPolicy: ToolCallPolicy = .init()
+    toolCallPolicy: ToolCallPolicy = .init(),
+    reasoningPrimedInside: Bool = false
 ) -> (AsyncStream<Generation>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1926,7 +1950,10 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
             stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
             tools: tools,
-            toolCallPolicy: toolCallPolicy
+            toolCallPolicy: toolCallPolicy,
+            reasoning: modelConfiguration.reasoningConfig.map {
+                (config: $0, primedInside: reasoningPrimedInside)
+            }
         )
     )
 }
@@ -1940,7 +1967,8 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
-    toolCallPolicy: ToolCallPolicy = .init()
+    toolCallPolicy: ToolCallPolicy = .init(),
+    reasoningPrimedInside: Bool = false
 ) -> (AsyncStream<Generation>, Task<[Int], Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1954,10 +1982,40 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
             stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
             tools: tools,
-            toolCallPolicy: toolCallPolicy
+            toolCallPolicy: toolCallPolicy,
+            reasoning: modelConfiguration.reasoningConfig.map {
+                (config: $0, primedInside: reasoningPrimedInside)
+            }
         )
     )
 }
+
+/// Whether the rendered prompt ends inside an open reasoning block, for seeding the
+/// token loop's reasoning scanner.
+///
+/// The prompt is decoded only when the model resolves a
+/// ``ModelConfiguration/reasoningConfig``, and then only its tail: a prefilled
+/// delimiter is the last thing a generation prompt writes, so copying a long prompt
+/// out of its `MLXArray` to read the final few tokens would cost more than it saves.
+func promptPrimesReasoning(
+    input: LMInput, modelConfiguration: ModelConfiguration, tokenizer: Tokenizer
+) -> Bool {
+    guard let config = modelConfiguration.reasoningConfig else { return false }
+    // Flatten first. VLM processors emit `[1, N]`, and a range subscript slices axis 0,
+    // so slicing the unflattened array would take the batch axis, not the tokens.
+    let tokens = input.text.tokens.flattened()
+    let tail =
+        tokens.size > promptTailTokenCount
+        ? tokens[(tokens.size - promptTailTokenCount)...]
+        : tokens
+    return ReasoningEventEmitter.promptEndsInsideReasoning(
+        promptTokens: tail.asArray(Int.self), config: config, tokenizer: tokenizer)
+}
+
+/// How much of the prompt tail ``promptPrimesReasoning`` materializes. At least
+/// `ReasoningEventEmitter`'s own tail window, so slicing here cannot narrow what the
+/// emitter would have examined.
+private let promptTailTokenCount = 64
 
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
 ///
@@ -2123,7 +2181,15 @@ public func generate(
             stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json,
             tools: tools,
-            toolCallPolicy: parameters.toolCallPolicy
+            toolCallPolicy: parameters.toolCallPolicy,
+            reasoning: context.configuration.reasoningConfig.map {
+                (
+                    config: $0,
+                    primedInside: promptPrimesReasoning(
+                        input: input, modelConfiguration: context.configuration,
+                        tokenizer: context.tokenizer)
+                )
+            }
         )
     )
     return stream
@@ -2652,12 +2718,26 @@ public struct GenerateCompletionInfo: Sendable {
 ///
 /// This enum distinguishes between the following:
 /// - `.chunk`: A decoded string from one or more tokens generated by the language model.
+/// - `.reasoning`: Thinking text the model framed as private to itself.
 /// - `.toolCall`: A tool call parsed from the generated output.
 /// - `.rejectedToolCall`: Tool-call-shaped output that was not executable.
 /// - `.info`: Metadata and performance statistics about the generation process.
 public enum Generation: Sendable {
     /// A generated text chunk as a String.
     case chunk(String)
+
+    /// Thinking text, delivered separately from the answer and with the
+    /// protocol's delimiters already removed.
+    ///
+    /// Only produced for models whose response protocol frames reasoning: a
+    /// resolved ``ModelConfiguration/reasoningConfig`` (`<think>` families,
+    /// Gemma 4's labeled channels) or a framed token protocol that carries its
+    /// own reasoning channel (GPT-OSS Harmony, Onyx).
+    ///
+    /// Reasoning is *not* part of ``chunk``, and these families' own chat
+    /// templates drop it from replayed history, so a caller recording the
+    /// assistant turn should record ``chunk`` alone.
+    case reasoning(String)
 
     /// Completion information summarizing token counts and performance metrics.
     case info(GenerateCompletionInfo)
@@ -2672,6 +2752,18 @@ public enum Generation: Sendable {
     public var chunk: String? {
         switch self {
         case .chunk(let string): string
+        case .reasoning: nil
+        case .info: nil
+        case .toolCall: nil
+        case .rejectedToolCall: nil
+        }
+    }
+
+    /// Reasoning text or nil
+    public var reasoning: String? {
+        switch self {
+        case .chunk: nil
+        case .reasoning(let string): string
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall: nil
@@ -2682,6 +2774,7 @@ public enum Generation: Sendable {
     public var info: GenerateCompletionInfo? {
         switch self {
         case .chunk: nil
+        case .reasoning: nil
         case .info(let info): info
         case .toolCall: nil
         case .rejectedToolCall: nil
@@ -2692,6 +2785,7 @@ public enum Generation: Sendable {
     public var toolCall: ToolCall? {
         switch self {
         case .chunk: nil
+        case .reasoning: nil
         case .info: nil
         case .toolCall(let toolCall): toolCall
         case .rejectedToolCall: nil
@@ -2702,6 +2796,7 @@ public enum Generation: Sendable {
     public var rejectedToolCall: RejectedToolCall? {
         switch self {
         case .chunk: nil
+        case .reasoning: nil
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall(let rejection): rejection
@@ -2821,11 +2916,12 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
     init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
         tools: [[String: any Sendable]]? = nil,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     var additionalStopTokenIDs: Set<Int> { decoder.additionalStopTokenIDs }
@@ -2888,10 +2984,10 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) -> TokenLoopDisposition {
         switch event {
-        case .reasoning:
-            // The public Generation stream intentionally exposes only response
-            // text and tool calls. Protocol-aware clients consume reasoning via
-            // the package-level TokenStreamDecoder contract.
+        case .reasoning(let reasoning):
+            if case .terminated = emit(.reasoning(reasoning)) {
+                return .cancelled
+            }
             return .more
 
         case .response(let response):

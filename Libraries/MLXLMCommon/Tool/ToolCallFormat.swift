@@ -172,11 +172,18 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Ordinary formats share the detokenized tool-call decoder. Protocols
     /// with token-level framing provide their own implementation here, keeping
     /// concrete model behavior out of the generic evaluation loop.
+    ///
+    /// - Parameter reasoning: the model's reasoning protocol and whether the
+    ///   rendered prompt already opened a thinking span. Only the detokenized
+    ///   decoder consumes it: a framed protocol decodes its own reasoning from
+    ///   the token stream, so passing this alongside one would scan the same
+    ///   text twice with two different rulebooks.
     package func makeTokenStreamDecoder(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,
         stopStrings: Set<String>,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) -> any TokenStreamDecoder {
         if let decoder = makeProtocolTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
@@ -186,7 +193,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
         }
         return StandardTokenStreamDecoder(
             tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     /// Builds a decoder only for formats which own a framed token protocol.

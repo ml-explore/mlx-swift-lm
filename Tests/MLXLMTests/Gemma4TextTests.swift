@@ -5,6 +5,18 @@ import MLXLMCommon
 import Testing
 
 struct Gemma4TextTests {
+    /// Gemma 4 declares its reasoning protocol through `ChatConventionsProviding`,
+    /// the seam a model uses for conventions it knows about itself.
+    @Test("Gemma4Text declares the labeled-channel reasoning config")
+    func declaresChannelReasoningConfig() throws {
+        let model = Gemma4TextModel(try Self.configuration(attentionKEqV: false))
+        let config = try #require(model.reasoningConfig)
+        #expect(config == .gemma4)
+        #expect(config.channel == .gemma4)
+        #expect(config.startDelimiter == "<|channel>")
+        #expect(config.endDelimiter == "<channel|>")
+    }
+
     @Test("Gemma4Text handles quantized KV cache in shared full attention")
     func quantizedKVCacheSupportsSharedFullAttention() throws {
         let model = Gemma4TextModel(try Self.configuration(attentionKEqV: false))
