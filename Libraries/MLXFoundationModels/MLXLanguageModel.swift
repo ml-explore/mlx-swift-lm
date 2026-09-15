@@ -324,12 +324,12 @@ private actor ModelCache {
 ///         }
 ///         return cache.repoDirectory(repo: repo, kind: .model)
 ///     },
-///     load: { configuration, progressHandler in
+///     load: { configuration, progress in
 ///         try await loadModelContainer(
 ///             from: #hubDownloader(),
 ///             using: #huggingFaceTokenizerLoader(),
 ///             configuration: configuration,
-///             progressHandler: progressHandler)
+///             progress: progress)
 ///     })
 /// let session = LanguageModelSession(model: model, tools: [], instructions: nil)
 /// let response = try await session.respond(to: "Hello!")
@@ -362,13 +362,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Loads the model container for a configuration, forwarding download
     /// progress. Injected so this module carries no HuggingFace or
     /// swift-transformers dependency; the HuggingFace wiring lives in callers.
+    @available(
+        *, deprecated, message: "Use ProgressContainerLoader with the progress-aware initializer"
+    )
     public typealias ContainerLoader =
         @Sendable (
             _ configuration: ModelConfiguration,
             _ progressHandler: @Sendable @escaping (Progress) -> Void
         ) async throws -> ModelContainer
 
-    private let load: ContainerLoader
+    /// A container loader that receives phase-specific download and weight progress.
+    public typealias ProgressContainerLoader =
+        @Sendable (
+            _ configuration: ModelConfiguration,
+            _ progress: LoadProgressHandlers
+        ) async throws -> ModelContainer
+
+    private let load: ProgressContainerLoader
+    private let progress: LoadProgressHandlers
 
     /// Stable identity for the model cache, executor configuration, tokenizer
     /// caches, availability, and progress reporting. Derived from the
@@ -406,13 +417,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
         let configuration = self.configuration
         let load = self.load
+        let configuredProgress = self.progress
         return {
             // Configure the buffer pool once per process rather than on every
             // load, so a consumer's own `Memory.cacheLimit` survives our loads.
             _ = Self.configureGPUCacheOnce
-            let container = try await load(configuration) { progress in
-                MLXDownloadProgress.report(progress: progress, modelID: configuration.name)
-            }
+            let progress = LoadProgressHandlers(
+                download: { progress in
+                    MLXDownloadProgress.report(progress: progress, modelID: configuration.name)
+                    configuredProgress.download?(progress)
+                },
+                weights: configuredProgress.weights)
+            let container = try await load(configuration, progress)
             MLXDownloadProgress.reportCompleted()
             return container
         }
@@ -506,7 +522,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `.allowed` tool routing, guided `.required` developer tool calls,
     /// and reasoning (chain-of-thought) routing.
     ///
-    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:weightsLocation:load:)``
+    /// Capabilities are declared explicitly by the caller at
+    /// ``init(configuration:capabilities:configurationResolver:weightsLocation:progress:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
     /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -553,6 +570,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     URL(fileURLWithPath: "/Volumes/SharedCache/models/\(id)")
     /// }
     /// ```
+    @_disfavoredOverload
+    @available(*, deprecated, message: "Use init(..., progress:load:)")
     public init(
         configuration: ModelConfiguration,
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
@@ -565,7 +584,33 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
+        self.load = { configuration, progress in
+            try await load(configuration, progress.download ?? { _ in })
+        }
+        self.progress = .init()
+    }
+
+    /// Creates an `MLXLanguageModel` whose loader receives phase-specific model
+    /// loading progress.
+    ///
+    /// Use this initializer when the loader forwards ``LoadProgressHandlers`` to
+    /// `loadModelContainer`. The deprecated `load:` initializer remains available
+    /// for source compatibility with download-only loaders.
+    public init(
+        configuration: ModelConfiguration,
+        capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
+        configurationResolver: any ModelConfigurationResolver =
+            DefaultConfigurationResolver(),
+        weightsLocation: @Sendable @escaping (String) -> URL,
+        progress: LoadProgressHandlers = .init(),
+        load: @escaping ProgressContainerLoader
+    ) {
+        self.configuration = configuration
+        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.configurationResolver = configurationResolver
+        self.weightsLocation = weightsLocation
         self.load = load
+        self.progress = progress
     }
 
     /// Downloads the model and loads its weights into memory.
