@@ -49,6 +49,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
+    /// Distribution surface for non-greedy speculative sampling. Built-in
+    /// temperature/top-p samplers conform; argmax intentionally does not and
+    /// keeps the cheaper exact-token greedy path.
+    let distributionSampler: (any DistributionLogitSampler)?
+
+    /// Independent RNG used for speculative acceptance and residual/bonus
+    /// draws. Draft proposals use `draftSampler`'s own RNG; separating them is
+    /// required by the rejection-sampling proof.
+    let speculativeRandomState: MLXRandom.RandomState
+
+    /// Independent sampler handed to the drafter. Distribution-capable
+    /// drafters receive a copy of the full target processor as well, so their
+    /// proposal distribution matches the target's (penalties included).
+    let draftSampler: LogitSampler
+
+    /// Sampler for older greedy-only drafters whose API cannot receive a
+    /// processor.
+    let legacyDraftSampler: LogitSampler
+
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
     /// Total tokens proposed per round (`blockSize - 1` drafted, plus the
@@ -129,7 +148,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.sampler = parameters.sampler()
         try components.validate(parameters: parameters)
+        self.distributionSampler = self.sampler as? any DistributionLogitSampler
+        self.speculativeRandomState =
+            parameters.seed.map {
+                MLXRandom.RandomState(seed: $0 &+ 0x9E37_79B9_7F4A_7C15)
+            } ?? MLXRandom.RandomState()
         self.processor = components.logitProcessor(parameters: parameters)
+
+        var draftParameters = parameters
+        draftParameters.seed = parameters.seed.map { $0 &+ 0xD1B5_4A32_D192_ED03 }
+        let drafterSampler = draftParameters.sampler()
+        self.draftSampler = drafterSampler
+        self.legacyDraftSampler = drafterSampler
 
         self.maxTokens = parameters.maxTokens
         // A round presents `blockSize` positions at once, and a sliding layer can only show a
@@ -184,7 +214,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     "Qwen MTP currently requires temperature == 0; generating without speculation"
             )
         }
+
+        // Speculative sampling can only preserve the target distribution when
+        // the drafter reports the distribution its proposals were drawn from.
+        // A token-only drafter under a sampling configuration would silently
+        // bias the output, so fail safe to target-only generation. Decided
+        // once here rather than per round: both inputs are known at
+        // construction, and a mid-round exit would strand a staged round.
+        if distributionSampler != nil, !(drafter is any MTPDistributionDrafterModel) {
+            switchToPassthrough(reason: Self.samplingWithoutDraftLogitsReason)
+        }
     }
+
+    static let samplingWithoutDraftLogitsReason =
+        "MTP drafter does not expose the draft distribution required for sampling; "
+        + "generating without speculation"
 
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
@@ -453,10 +497,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         )
 
         let bonusToken = y.tokens
+        let draftOutput: MTPDraftBlockOutput?
         let draftTokens: MLXArray
         if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
             var currentDrafterState = drafterState
         {
+            // Stateful drafters own a private cache the iterator must trim
+            // in step with acceptance, so that path wins over the
+            // distribution one. They propose tokens only; init already sent
+            // sampling runs to passthrough.
+            draftOutput = nil
             draftTokens = statefulDrafter.draftBlock(
                 target: mainModel,
                 lastToken: bonusToken,
@@ -469,8 +519,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 sampler: sampler
             )
             drafterState = currentDrafterState
-        } else {
-            draftTokens = drafter.draftBlock(
+        } else if let distributionDrafter = drafter as? any MTPDistributionDrafterModel {
+            let output = distributionDrafter.draftBlockWithLogits(
                 target: mainModel,
                 lastToken: bonusToken,
                 lastHidden: bonusSlotHidden,
@@ -478,7 +528,30 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 positionDeltas: state[mtpPositionDeltasKey],
                 queryOffset: queryOffset,
                 blockSize: numDraft + 1,  // total round size: bonus + numDraft
-                sampler: sampler
+                // A copy, discarded with the round: the drafter's processor
+                // starts from the canonical state but must not record the
+                // proposals it draws -- only emitted tokens advance
+                // `processor`.
+                processor: processor?.copy(),
+                sampler: draftSampler
+            )
+            draftOutput = output
+            draftTokens = output.tokens
+        } else {
+            // Greedy matching needs tokens only and remains compatible with
+            // the original protocol; init already sent sampling runs to
+            // passthrough, since without `q` nothing here can preserve the
+            // target distribution.
+            draftOutput = nil
+            draftTokens = drafter.draftBlock(
+                target: mainModel,
+                lastToken: bonusToken,
+                lastHidden: bonusSlotHidden,
+                sharedKV: sharedKV,
+                positionDeltas: state[mtpPositionDeltasKey],
+                queryOffset: queryOffset,
+                blockSize: numDraft + 1,
+                sampler: legacyDraftSampler
             )
         }
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
@@ -498,38 +571,36 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
-        eval(flatDraftTokens)
-        let draftTokensList = flatDraftTokens.asArray(Int.self)
-
-        var accepted = 0
-        var finalToken: MLXArray?
-        for i in 0 ..< numDraft {
-            var logits = mainLogits[0..., verifyStart + i, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let targetToken = sampler.sample(logits: logits)
-            eval(targetToken)
-            let targetTokenValue = targetToken.item(Int.self)
-            processor?.didSample(token: targetToken)
-            pendingTokens.append(targetTokenValue)
-            guard targetTokenValue == draftTokensList[i] else {
-                finalToken = targetToken
-                break
-            }
-            accepted += 1
+        let selection: (accepted: Int, emitted: [MLXArray])
+        if let distributionSampler, let draftOutput {
+            selection = selectDistributionPreservingTokens(
+                targetLogits: mainLogits,
+                targetStart: verifyStart,
+                draftTokens: flatDraftTokens,
+                draftProcessedLogits: draftOutput.processedLogits,
+                numDraft: numDraft,
+                sampler: distributionSampler
+            )
+        } else {
+            selection = selectGreedyTokens(
+                targetLogits: mainLogits,
+                targetStart: verifyStart,
+                draftTokens: flatDraftTokens,
+                numDraft: numDraft
+            )
         }
 
-        // Only the all-accepted path samples the bonus row. On rejection the
-        // mismatching target sample above is already the emitted correction.
-        if finalToken == nil {
-            var logits = mainLogits[0..., verifyStart + accepted, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let bonus = sampler.sample(logits: logits)
-            eval(bonus)
-            processor?.didSample(token: bonus)
-            pendingTokens.append(bonus.item(Int.self))
-            finalToken = bonus
-        }
-        let emittedFinalToken = finalToken!
+        let emittedTokens = concatenated(selection.emitted)
+        eval(emittedTokens, flatDraftTokens)
+        let emittedTokenList = emittedTokens.asArray(Int.self)
+        // `didSample` already ran inside the selection walk, for emitted
+        // tokens only.
+        pendingTokens.append(contentsOf: emittedTokenList)
+
+        let accepted = selection.accepted
+        let emittedFinalToken = selection.emitted.last!
+        // Lookahead bookkeeping for early finalization: the accepted drafts
+        // are the pending tokens whose K/V is already committed.
         committedPendingTokenCount = accepted
 
         proposedCount += numDraft
@@ -598,6 +669,136 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         kvCachePlan.apply(to: mainCacheStorage)
 
         y = .init(tokens: emittedFinalToken)
+    }
+
+    /// Greedy verifier walk. The target is evaluated once for the whole
+    /// verify block, then the longest exact candidate prefix is committed and
+    /// followed by the target correction/bonus token.
+    private mutating func selectGreedyTokens(
+        targetLogits: MLXArray,
+        targetStart: Int,
+        draftTokens: MLXArray,
+        numDraft: Int
+    ) -> (accepted: Int, emitted: [MLXArray]) {
+        // Walk position by position and stop at the first mismatch, so the
+        // processor is advanced over emitted tokens only. Sampling the whole
+        // block up front and discarding the tail would make a reference-type
+        // processor record proposals that never reached the consumer.
+        eval(draftTokens)
+        let draftTokenList = draftTokens.asArray(Int.self)
+        var emitted = [MLXArray]()
+        emitted.reserveCapacity(numDraft + 1)
+
+        for i in 0 ..< numDraft {
+            var logits = targetLogits[0..., targetStart + i, 0...]
+            logits = processor?.process(logits: logits) ?? logits
+            let token = sampler.sample(logits: logits)
+            eval(token)
+            emitted.append(token)
+            processor?.didSample(token: token)
+            guard token.item(Int.self) == draftTokenList[i] else {
+                return (i, emitted)
+            }
+        }
+
+        // Every draft matched: the final verifier position predicts one extra
+        // target-only bonus token.
+        var bonusLogits = targetLogits[0..., targetStart + numDraft, 0...]
+        bonusLogits = processor?.process(logits: bonusLogits) ?? bonusLogits
+        let bonus = sampler.sample(logits: bonusLogits)
+        emitted.append(bonus)
+        processor?.didSample(token: bonus)
+        return (numDraft, emitted)
+    }
+
+    /// Distribution-preserving speculative sampling (Leviathan et al.).
+    ///
+    /// Candidate `x ~ q` is accepted with `min(1, p(x) / q(x))`. On the first
+    /// rejection, the correction is sampled from normalized `max(p - q, 0)`;
+    /// if all candidates are accepted, the target bonus is sampled from `p`.
+    /// This preserves the target distribution while allowing the target to
+    /// verify the entire candidate block in one forward pass.
+    private mutating func selectDistributionPreservingTokens(
+        targetLogits: MLXArray,
+        targetStart: Int,
+        draftTokens: MLXArray,
+        draftProcessedLogits: MLXArray,
+        numDraft: Int,
+        sampler distributionSampler: any DistributionLogitSampler
+    ) -> (accepted: Int, emitted: [MLXArray]) {
+        // As in the greedy walk, the processor advances over emitted tokens
+        // only: accepted candidates here, then the correction or bonus.
+        let draftTokenList = draftTokens.asArray(Int.self)
+        var emitted = [MLXArray]()
+        emitted.reserveCapacity(numDraft + 1)
+
+        for i in 0 ..< numDraft {
+            let candidateID = draftTokenList[i]
+            let candidate = draftTokens[i ..< (i + 1)]
+
+            var pLogits = targetLogits[0..., targetStart + i, 0...]
+            pLogits = processor?.process(logits: pLogits) ?? pLogits
+            let pLogProbabilities = distributionSampler.logProbabilities(logits: pLogits)
+            let qLogits = draftProcessedLogits[0..., i, 0...]
+            let qLogProbabilities = distributionSampler.logProbabilities(logits: qLogits)
+
+            let decision = sampleSpeculativeDecision(
+                candidateID: candidateID,
+                targetLogProbabilities: pLogProbabilities,
+                draftLogProbabilities: qLogProbabilities)
+
+            if decision.accepted {
+                emitted.append(candidate)
+                processor?.didSample(token: candidate)
+                continue
+            }
+
+            emitted.append(decision.correction)
+            processor?.didSample(token: decision.correction)
+            return (i, emitted)
+        }
+
+        // Every draft was accepted. The final verifier position predicts one
+        // extra target-only bonus token.
+        var bonusLogits = targetLogits[0..., targetStart + numDraft, 0...]
+        bonusLogits = processor?.process(logits: bonusLogits) ?? bonusLogits
+        let bonusLogProbabilities = distributionSampler.logProbabilities(logits: bonusLogits)
+        let bonus = sampleSpeculative(logProbabilities: bonusLogProbabilities)
+        emitted.append(bonus)
+        processor?.didSample(token: bonus)
+        return (numDraft, emitted)
+    }
+
+    /// Draw acceptance and the possible residual correction in one GPU
+    /// evaluation. Sampling the correction eagerly (and discarding it on
+    /// acceptance) preserves the distribution while avoiding a second or
+    /// third CPU/GPU synchronization per candidate.
+    private func sampleSpeculativeDecision(
+        candidateID: Int,
+        targetLogProbabilities p: MLXArray,
+        draftLogProbabilities q: MLXArray
+    ) -> (accepted: Bool, correction: MLXArray) {
+        let logAcceptance = minimum(
+            p[0, candidateID] - q[0, candidateID],
+            MLXArray(Float(0)))
+        let correctionLogProbabilities = speculativeResidualLogProbabilities(
+            target: p,
+            draft: q)
+        let draws = withRandomState(speculativeRandomState) {
+            (
+                MLXRandom.uniform(Float(0) ..< Float(1), [1]),
+                categorical(correctionLogProbabilities)
+            )
+        }
+        let accepted = log(draws.0) .< logAcceptance
+        eval(accepted, draws.1)
+        return (accepted.item(Bool.self), draws.1)
+    }
+
+    private func sampleSpeculative(logProbabilities: MLXArray) -> MLXArray {
+        withRandomState(speculativeRandomState) {
+            categorical(logProbabilities)
+        }
     }
 
     /// Switch to single-token generation for the remainder of the stream.
@@ -722,6 +923,33 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
             &mainState, discarding: rewound,
             lengths: mainCacheStorage.emittedLength(forLeaf:))
     }
+}
+
+/// Acceptance probability for one candidate in exact speculative sampling.
+/// Kept as a scalar helper so boundary cases (`p=0`, `q=0`, and very small
+/// ratios) can be tested without requiring a Metal device.
+func speculativeAcceptanceProbability(
+    targetLogProbability p: Float,
+    draftLogProbability q: Float
+) -> Double {
+    guard q.isFinite else { return 0 }
+    guard !p.isNaN else { return 0 }
+    if p >= q { return 1 }
+    return Foundation.exp(Double(p - q))
+}
+
+/// Normalized residual distribution `max(p - q, 0)` used after a rejected
+/// speculative candidate. When finite-precision arithmetic collapses the
+/// residual mass, `p` is the stable limiting fallback.
+func speculativeResidualLogProbabilities(
+    target p: MLXArray,
+    draft q: MLXArray
+) -> MLXArray {
+    let residual = maximum(exp(p) - exp(q), MLXArray(Float(0)))
+    let residualMass = residual.sum()
+    let hasResidual = residualMass .> Float(1e-7)
+    let safeMass = maximum(residualMass, MLXArray(Float(1e-7)))
+    return MLX.where(hasResidual, log(residual / safeMass), p)
 }
 
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {

@@ -11,10 +11,11 @@ import Testing
 
 private let preservedStateKey = LMOutput.Key<Int>("tests.mtp.preservedState")
 
-/// Records `draftBlock(...)` invocations and returns a fixed token pattern
-/// so the iterator's draft/verify/accept flow can be exercised without a
-/// real drafter.
-private final class MockDrafter: Module, StatefulMTPDrafterModel {
+/// Stateful drafter mock (the Qwen MTP shape): owns a private cache and
+/// proposes tokens only. Exercises the iterator's stateful path, which is
+/// greedy-only -- without the proposal distribution nothing can preserve
+/// the target's distribution on rejection.
+private final class StatefulMockDrafter: Module, StatefulMTPDrafterModel {
     private(set) var draftBlockCallCount = 0
     var draftedTokenValue: Int32
     let requiresGreedySampling: Bool
@@ -81,6 +82,89 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
         let batch = lastToken.dim(0)
         let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
         return MLXArray(vals, [batch, blockSize - 1])
+    }
+}
+
+/// Records `draftBlock(...)` invocations and returns a fixed token pattern
+/// so the iterator's draft/verify/accept flow can be exercised without a
+/// real drafter. Exposes the proposal distribution, so the iterator takes
+/// the distribution-preserving verify path.
+private final class MockDrafter: Module, MTPDistributionDrafterModel {
+    private(set) var draftBlockCallCount = 0
+    private(set) var draftBlockWithLogitsCallCount = 0
+    /// Calls through the token-only entry point of the base protocol.
+    private(set) var legacyDraftBlockCallCount = 0
+    var draftedTokenValue: Int32
+    let requiresGreedySampling: Bool
+    /// Per-call record of what the iterator handed the drafter: the
+    /// sequence-axis span of each sharedKV entry, the query offset, and
+    /// the position delta. Lets tests assert the state the drafter
+    /// conditions on, not just the tokens that come out of it.
+    private(set) var receivedSharedKVSpans: [[String: Int]] = []
+    private(set) var receivedQueryOffsets: [Int] = []
+    private(set) var receivedPositionDeltaValues: [Int?] = []
+
+    init(draftedTokenValue: Int32 = 7, requiresGreedySampling: Bool = false) {
+        self.draftedTokenValue = draftedTokenValue
+        self.requiresGreedySampling = requiresGreedySampling
+        super.init()
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        legacyDraftBlockCallCount += 1
+        return draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden,
+            sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+            blockSize: blockSize, processor: nil, sampler: sampler
+        ).tokens
+    }
+
+    func draftBlockWithLogits(
+        target _: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden _: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        draftBlockCallCount += 1
+        draftBlockWithLogitsCallCount += 1
+        receivedSharedKVSpans.append(sharedKV.mapValues { $0.0.dim(-2) })
+        receivedQueryOffsets.append(queryOffset)
+        receivedPositionDeltaValues.append(positionDeltas?.item(Int.self))
+        let batch = lastToken.dim(0)
+        let vocab = 20
+        var processor = processor
+        var tokens = [MLXArray]()
+        var logitsRows = [MLXArray]()
+        for _ in 0 ..< (blockSize - 1) {
+            var values = [Float](repeating: 0, count: batch * vocab)
+            for row in 0 ..< batch {
+                values[row * vocab + Int(draftedTokenValue)] = 100
+            }
+            var logits = MLXArray(values, [batch, vocab])
+            logits = processor?.process(logits: logits) ?? logits
+            let token = sampler.sample(logits: logits)
+            processor?.didSample(token: token)
+            tokens.append(token.expandedDimensions(axis: 1))
+            logitsRows.append(logits.expandedDimensions(axis: 1))
+        }
+        return MTPDraftBlockOutput(
+            tokens: concatenated(tokens, axis: 1),
+            processedLogits: concatenated(logitsRows, axis: 1)
+        )
     }
 }
 
@@ -668,12 +752,14 @@ func testMTPSharedKVSpanTrimmedAfterPartialAcceptance() throws {
         0, 0, 0, 0,  // round-2 verify: placeholders; round 2 only needs to run
     ]
     let main = MockMainModel(nextLogitTokens: mainLogitTokens)
-    let drafter = MockDrafter(draftedTokenValue: 5)
+    // Stateful drafter: this is the path that owns a private cache, and it
+    // proposes tokens only, so it is greedy-only.
+    let drafter = StatefulMockDrafter(draftedTokenValue: 5)
     let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
 
     var iter = try MTPSpeculativeTokenIterator(
         input: input, mainModel: main, drafter: drafter, mainCache: nil,
-        parameters: GenerateParameters(maxTokens: 12), blockSize: 4
+        parameters: GenerateParameters(maxTokens: 12, temperature: 0), blockSize: 4
     )
 
     // Drain the prepare bonus and round 1, then check round-1 accounting
@@ -1563,4 +1649,54 @@ func testDiscardingAGeneratedTokenDoesNotMoveTheTimeline() throws {
     #expect(timeline <= prompt.count + emitted)
     #expect(timeline >= prompt.count + emitted - 1)
     #expect(iter.mainCacheStorage.nativeAttentionOffsetsAreAligned)
+}
+
+@Test func distributionDrafterTakesTheLogitsPathAndMatchesGreedyAtTemperatureZero() throws {
+    // A drafter that exposes its proposal distribution must be routed
+    // through `draftBlockWithLogits`, and at temperature 0 the
+    // distribution-preserving verifier must accept exactly what the greedy
+    // one would: the drafter's near-deterministic proposals match the
+    // target's argmax until the target disagrees.
+    let mainLogitTokens: [Int32] = [
+        0, 0, 5,  // prefill follow-up picks bonus 5
+        5, 7, 0, 0,  // round-1 verify: accept draft_1, correct at draft_2
+        0, 0, 0, 0,
+    ]
+    let main = MockMainModel(nextLogitTokens: mainLogitTokens)
+    let drafter = MockDrafter(draftedTokenValue: 5)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 12, temperature: 0), blockSize: 4
+    )
+
+    #expect(iter.next() == 5, "prepare bonus")
+    #expect(iter.next() == 5, "round-1 accepted draft")
+    #expect(iter.next() == 7, "round-1 correction at the first rejected position")
+    #expect(iter.acceptedCount == 1)
+
+    // The logits path was used, not the token-only fallback.
+    #expect(drafter.draftBlockWithLogitsCallCount == 1)
+    #expect(drafter.legacyDraftBlockCallCount == 0)
+}
+
+@Test func samplingWithoutDraftLogitsFallsBackToPassthrough() throws {
+    // A token-only drafter cannot supply `q`, so speculative sampling at
+    // temperature > 0 would silently change the output distribution. The
+    // iterator must generate without speculation instead.
+    let main = MockMainModel(nextLogitTokens: Array(repeating: Int32(5), count: 16))
+    let drafter = StatefulMockDrafter(draftedTokenValue: 5)
+    let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+
+    var iter = try MTPSpeculativeTokenIterator(
+        input: input, mainModel: main, drafter: drafter, mainCache: nil,
+        parameters: GenerateParameters(maxTokens: 6, temperature: 0.7), blockSize: 4
+    )
+
+    _ = iter.next()
+    _ = iter.next()
+    #expect(
+        iter.passthroughReason
+            == MTPSpeculativeTokenIterator.samplingWithoutDraftLogitsReason)
 }
