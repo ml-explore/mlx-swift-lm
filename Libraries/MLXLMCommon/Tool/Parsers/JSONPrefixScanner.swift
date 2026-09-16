@@ -56,7 +56,7 @@ struct JSONPrefixScanner {
     private var token: Token = .none
     private var consumed = 0
 
-    mutating func scan(_ text: String) -> Result {
+    mutating func scan(_ text: some StringProtocol) -> Result {
         let bytes = text.utf8
         var index = bytes.index(bytes.startIndex, offsetBy: consumed)
         while index < bytes.endIndex {

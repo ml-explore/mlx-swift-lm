@@ -26,6 +26,10 @@ import Foundation
 ///   recovery, and a JSON or Qwen-XML payload frame only closes after a
 ///   structurally balanced payload, so a literal close marker inside a string
 ///   argument cannot expose fabricated suffixes to recovery.
+/// - **native markerless calls** (`name\n{json}` for parsers that declare
+///   the dialect): a declared tool name that begins a line is held until its
+///   arguments object closes, then released whole to the native parser. The
+///   schema is the anchor; an undeclared `word\n{...}` stays response data.
 ///
 /// Explicit protocol attempts (`<tool_call>`, `<|tool_call>`, `<function=`,
 /// `[TOOL_CALLS]`) that are malformed, incomplete at end of stream, or name an
@@ -59,6 +63,8 @@ struct TextToolCallRecoveryScanner: Sendable {
         case reasoning(close: String)
         case explicit(ExplicitKind)
         case declaredArgs(name: String)
+        /// The selected parser's markerless `name\n{json}` dialect.
+        case nativeNamedJSON
         /// A backtick run: an inline code span, or a fenced block at line start.
         case codeBacktick
         /// A tilde run: a fenced block at line start, otherwise ordinary text.
@@ -91,10 +97,11 @@ struct TextToolCallRecoveryScanner: Sendable {
     private enum PendingCandidate: Sendable {
         case explicit(ExplicitKind)
         case declaredArgs(name: String)
+        case nativeNamedJSON
 
         func shouldInspect(_ chunk: String) -> Bool {
             switch self {
-            case .explicit(.mistral), .declaredArgs:
+            case .explicit(.mistral), .declaredArgs, .nativeNamedJSON:
                 chunk.contains("}")
             case .explicit(.toolCallFrame), .explicit(.gemma4), .explicit(.qwenFunction):
                 chunk.contains(">")
@@ -115,6 +122,7 @@ struct TextToolCallRecoveryScanner: Sendable {
     private let potentialPrefixEndCharacters: Set<Character>
     private let maximumBufferedByteCount: Int
     private let jsonScanner = JSONLeadingObjectScanner(startCharacter: "{")
+    private let namedJSONScanner: NamedJSONCallScanner?
     private let gemmaScanner = StructuredTextScanner(
         quotes: ["\""], escapeMarker: "<|\"|>")
     private let framedParser = Qwen35ToolCallParser(
@@ -159,6 +167,9 @@ struct TextToolCallRecoveryScanner: Sendable {
 
         let primaryParser = primaryFormat.createParser()
         self.supportsBareJSON = primaryParser.supportsBareJSON
+        self.namedJSONScanner =
+            primaryParser.supportsMarkerlessNamedJSON
+            ? NamedJSONCallScanner(toolNames: allowedToolNames) : nil
         var signals: [Signal] = []
         // Native markers win ties. Alternate dialects may never steal a
         // frame which the selected parser already owns (for example GLM4).
@@ -557,6 +568,33 @@ struct TextToolCallRecoveryScanner: Sendable {
                         }
                         break scanLoop
                     }
+
+                case .nativeNamedJSON:
+                    switch namedJSONScanner?.scan(buffer[...]) {
+                    case .complete(_, let arguments):
+                        // Released whole so the native parser sees the entire call.
+                        let raw = String(buffer[..<arguments.endIndex])
+                        buffer = String(buffer[arguments.endIndex...])
+                        if raw.utf8.count > maximumBufferedByteCount {
+                            appendProtectedText(raw, to: &output)
+                        } else {
+                            appendText(raw, to: &output)
+                        }
+                    case .openArguments:
+                        if buffer.utf8.count > maximumBufferedByteCount {
+                            appendProtectedText(buffer, to: &output)
+                            buffer.removeAll(keepingCapacity: true)
+                            context = .opaqueUntilEOS
+                        } else {
+                            pendingCandidate = .nativeNamedJSON
+                        }
+                        break scanLoop
+                    case .prefix, .mismatch, nil:
+                        // Not a call after all; the name is text and what
+                        // follows is lexed on its own.
+                        appendText(String(buffer[match.range]), to: &output)
+                        buffer = String(buffer[match.range.upperBound...])
+                    }
                 }
             }
         }
@@ -702,6 +740,23 @@ struct TextToolCallRecoveryScanner: Sendable {
             }
         }
 
+        // A native `name\n{` opener is anchored on a declared name at a line
+        // start. An earlier or equal signal keeps precedence: a frame or a
+        // reasoning span that starts on the same line owns what follows.
+        if let namedJSONScanner {
+            var start = firstLineStart(in: text)
+            while let lineStart = start, earliest.map({ lineStart < $0.range.lowerBound }) ?? true {
+                switch namedJSONScanner.scan(text[lineStart...]) {
+                case .complete(let name, _), .openArguments(let name):
+                    let signal = Signal(text: String(name), kind: .nativeNamedJSON)
+                    earliest = (signal, lineStart ..< name.endIndex)
+                    start = nil
+                case .prefix, .mismatch:
+                    start = nextLineStart(after: lineStart, in: text)
+                }
+            }
+        }
+
         // Markerless `name[ARGS]{...}` rehearsals carry no protocol marker,
         // so prose that merely mentions a declared call is indistinguishable
         // from an intended call. Promotion of this dialect is opt-in via the
@@ -791,8 +846,49 @@ struct TextToolCallRecoveryScanner: Sendable {
     private func longestRetainedSuffix(in text: String) -> Int {
         max(
             longestPotentialSignalSuffix(in: text),
+            longestNamedJSONPrefix(in: text),
             trailingRunLength(in: text, character: "`"),
             trailingRunLength(in: text, character: "~"))
+    }
+
+    /// Keep a line-leading declared name, or a prefix of one, that may still
+    /// receive its arguments object when the next token arrives.
+    private func longestNamedJSONPrefix(in text: String) -> Int {
+        guard let namedJSONScanner else { return 0 }
+        let bytes = text.utf8
+        let window =
+            bytes.index(
+                bytes.endIndex, offsetBy: -namedJSONScanner.maximumPrefixLength,
+                limitedBy: bytes.startIndex) ?? bytes.startIndex
+        var start = beginsLine(window, in: text) ? window : nextLineStart(after: window, in: text)
+        while let lineStart = start {
+            if case .prefix = namedJSONScanner.scan(text[lineStart...]) {
+                return text.distance(from: lineStart, to: text.endIndex)
+            }
+            start = nextLineStart(after: lineStart, in: text)
+        }
+        return 0
+    }
+
+    // MARK: - Line starts
+
+    /// Whether `index` immediately follows a newline, or opens the stream.
+    /// Unlike Markdown line starts, no indentation is tolerated.
+    private func beginsLine(_ index: String.Index, in text: String) -> Bool {
+        let bytes = text.utf8
+        if index > bytes.startIndex { return bytes[bytes.index(before: index)] == 10 }
+        guard let previous = previousSourceCharacter else { return true }
+        return previous.utf8.last == 10
+    }
+
+    private func firstLineStart(in text: String) -> String.Index? {
+        beginsLine(text.startIndex, in: text)
+            ? text.startIndex : nextLineStart(after: text.startIndex, in: text)
+    }
+
+    private func nextLineStart(after index: String.Index, in text: String) -> String.Index? {
+        let bytes = text.utf8
+        return bytes[index...].firstIndex(of: 10).map { bytes.index(after: $0) }
     }
 
     /// Keep only a suffix that might become a signal when the next token arrives.
@@ -1107,8 +1203,8 @@ struct TextToolCallRecoveryScanner: Sendable {
         case .explicit(.qwenFunction): dialect = .qwenFunction
         case .explicit(.mistral): dialect = .mistral
         case .declaredArgs: dialect = .declaredArgs
-        case .nativeFrame, .nativeUntilEOS, .nativeInlineJSON, .opaqueJSONValue, .reasoning,
-            .codeBacktick, .codeTilde:
+        case .nativeFrame, .nativeUntilEOS, .nativeInlineJSON, .nativeNamedJSON, .opaqueJSONValue,
+            .reasoning, .codeBacktick, .codeTilde:
             return
         }
         events.append(
