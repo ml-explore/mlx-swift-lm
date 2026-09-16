@@ -271,6 +271,11 @@ public struct LMOutput {
             }
         }
 
+        /// Whether this state currently carries any model-owned values.
+        /// Package code uses this to avoid persisting a non-nil shell after
+        /// transient iterator exchange keys have been removed.
+        package var isEmpty: Bool { contents.isEmpty }
+
         enum SerializationError: LocalizedError {
             case unsupportedValue(key: String, type: String)
 

@@ -902,6 +902,7 @@ public class ChatSessionTests: XCTestCase {
         let thirdRenderedLengthValue = await lengthIterator.next()
         let thirdRenderedLength = try XCTUnwrap(thirdRenderedLengthValue)
         XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
+        XCTAssertNil(newMediaInfo?.speculativeDecodingFallbackReason)
     }
 
     /// Returning *a* suffix is not enough. A conformer that returns the wrong tokens
@@ -1551,6 +1552,7 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+        XCTAssertEqual(completionInfo.speculativeDecodingFallbackReason, .memoryBudgetExceeded)
     }
 
     func testSpeculativeDecodingMemoryPolicyFallbackReusesMainCacheAcrossTurns() async throws {
@@ -1588,6 +1590,7 @@ public class ChatSessionTests: XCTestCase {
             completionInfo?.promptTokenCount,
             secondRenderedLength - firstRenderedLength - 3)
         XCTAssertNil(completionInfo?.speculativeDecodingTelemetry)
+        XCTAssertEqual(completionInfo?.speculativeDecodingFallbackReason, .memoryBudgetExceeded)
     }
 
     func testActiveSpeculativeDecodingSafelyRebuildsAcrossTurns() async throws {
@@ -1737,6 +1740,7 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+        XCTAssertEqual(completionInfo.speculativeDecodingFallbackReason, .memoryBudgetExceeded)
     }
 
     func testSpeculativeDecodingFallsBackForPreparedMedia() async throws {
@@ -1767,6 +1771,28 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+        XCTAssertEqual(completionInfo.speculativeDecodingFallbackReason, .unsupportedMedia)
+    }
+
+    func testSpeculativeDecodingFallsBackForHistoricalMedia() async throws {
+        var context = model()
+        context.processor = MediaAwareInputProcessor(tokenizer: context.tokenizer)
+        let session = ChatSession(
+            context,
+            speculativeDecoding: SpeculativeDecodingConfig(draftModelBytes: 0) {
+                throw UnexpectedDraftModelLoadError()
+            },
+            generateParameters: GenerateParameters(maxTokens: 4, temperature: 0))
+
+        let first = try await collectGeneration(
+            session.streamDetails(
+                to: "inspect this", images: [.array(MLXArray([Float(0)]))]))
+        let second = try await collectGeneration(session.streamDetails(to: "describe it"))
+
+        for info in [first.info, second.info] {
+            XCTAssertNil(info.speculativeDecodingTelemetry)
+            XCTAssertEqual(info.speculativeDecodingFallbackReason, .unsupportedMedia)
+        }
     }
 
     /// Carried model state does not disqualify a turn from speculation. The
@@ -1833,7 +1859,7 @@ public class ChatSessionTests: XCTestCase {
             generateParameters: GenerateParameters(maxTokens: 4, temperature: 0.0)
         )
 
-        func telemetryForTurn(_ prompt: String) async throws -> SpeculativeDecodingTelemetry? {
+        func infoForTurn(_ prompt: String) async throws -> GenerateCompletionInfo {
             var info: GenerateCompletionInfo?
             for try await generation in session.streamDetails(
                 to: prompt,
@@ -1845,17 +1871,20 @@ public class ChatSessionTests: XCTestCase {
                     info = generationInfo
                 }
             }
-            return try XCTUnwrap(info).speculativeDecodingTelemetry
+            return try XCTUnwrap(info)
         }
 
-        let mediaTurn = try await telemetryForTurn("describe this")
+        let mediaTurn = try await infoForTurn("describe this")
         XCTAssertNil(
-            mediaTurn, "a media turn cannot speculate — the draft would have to prefill it")
+            mediaTurn.speculativeDecodingTelemetry,
+            "a media turn cannot speculate — the draft would have to prefill it")
+        XCTAssertEqual(mediaTurn.speculativeDecodingFallbackReason, .unsupportedMedia)
 
-        let textTurn = try await telemetryForTurn("and now in one word")
+        let textTurn = try await infoForTurn("and now in one word")
         XCTAssertNotNil(
-            textTurn,
+            textTurn.speculativeDecodingTelemetry,
             "speculation must resume once a text turn can rebuild both caches from the transcript")
+        XCTAssertNil(textTurn.speculativeDecodingFallbackReason)
     }
 
     func testSpeculativeDecodingFallsBackForPrebuiltCacheWithoutDraftCache() async throws {
@@ -1897,6 +1926,7 @@ public class ChatSessionTests: XCTestCase {
 
         let completionInfo = try XCTUnwrap(info)
         XCTAssertNil(completionInfo.speculativeDecodingTelemetry)
+        XCTAssertEqual(completionInfo.speculativeDecodingFallbackReason, .unavailableContinuation)
     }
 
     func testDeferredSpeculativeDecodingMemoryPolicyFailDoesNotLoadDraftModel() async throws {

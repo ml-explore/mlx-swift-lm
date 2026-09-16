@@ -4,6 +4,19 @@ import Foundation
 import MLX
 import MLXNN
 
+/// A target model cannot provide the architecture-specific state required by
+/// an MTP drafter.
+public enum MTPDrafterCompatibilityError: Error, Sendable, Equatable, LocalizedError {
+    case incompatibleTarget(drafter: String, expected: String, actual: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .incompatibleTarget(let drafter, let expected, let actual):
+            "\(drafter) requires \(expected); received \(actual)."
+        }
+    }
+}
+
 /// Protocol for Multi-Token Prediction (MTP) speculative drafter models.
 ///
 /// Mirrors `EmbeddingModel`'s relationship to `BaseLanguageModel`: this
@@ -43,6 +56,14 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// This keeps stochastic generation on the ordinary target path until a
     /// probability-ratio acceptance sampler is available.
     var requiresGreedySampling: Bool { get }
+
+    /// Validate that `target` provides the architecture-specific state and
+    /// model structure required by this drafter.
+    ///
+    /// Callers must invoke this before prefill or drafting. Implementations
+    /// should keep this check side-effect free and throw
+    /// ``MTPDrafterCompatibilityError`` for unsupported pairings.
+    func validateCompatibility(with target: any LanguageModel) throws
 
     /// K-step drafting from a constant position.
     ///
@@ -181,6 +202,97 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     )
+}
+
+/// Optional capability for stateful MTP drafters whose private state can be
+/// normalized at a generation boundary and resumed from a later prompt suffix.
+///
+/// `ChatSession` deliberately does not know how a drafter's cache is shifted,
+/// which seed values are speculative, or how target hidden states must be
+/// paired with suffix tokens. The MTP iterator owns that lifecycle and calls
+/// this interface at the model seam. Stateful drafters that do not conform are
+/// still usable for cold generations; a warm target cache continues without
+/// speculation rather than combining it with a fresh drafter state.
+public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
+    /// Convert `state` to a canonical boundary after the target cache has
+    /// discarded any verified-but-unemitted lookahead.
+    ///
+    /// Return `false` when the private state cannot be proven to represent the
+    /// supplied target position. The caller then keeps the target cache and
+    /// drops only the MTP continuation.
+    func finalizeDrafterState(
+        target: any LanguageModel,
+        targetBoundaryHidden: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool
+
+    /// Extend a canonical boundary over a prompt suffix and prime the next
+    /// speculative round.
+    ///
+    /// `targetBoundaryHidden` is the hidden state of the final token already
+    /// represented by the warm target cache. `suffixTargetHidden` contains one
+    /// row per newly evaluated suffix token, and `firstBonus` is the token
+    /// sampled after that suffix.
+    func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+}
+
+/// Normalize a shifted drafter cache at a resumable target boundary.
+///
+/// Shifted MTP drafters pair each input token with the target hidden state from
+/// the preceding position. At a generation boundary their private cache must
+/// therefore end one position before the target cache so the saved boundary
+/// hidden state can bridge the next prompt suffix.
+package func finalizeShiftedMTPDrafterState(
+    targetProcessedTokenCount: Int,
+    discardedTargetTokens: Int,
+    state: inout MTPDrafterState
+) -> Bool {
+    let trim = discardedTargetTokens + 1
+    guard state.proposalAppended == 0,
+        targetProcessedTokenCount > 0,
+        state.nextPosition == targetProcessedTokenCount + discardedTargetTokens,
+        state.nextPosition >= trim,
+        trimPromptCache(state.cache, numTokens: trim) == trim
+    else { return false }
+
+    state.nextPosition -= trim
+    state.seedToken = nil
+    state.seedHidden = nil
+    return state.nextPosition == targetProcessedTokenCount - 1
+        && state.cache.allSatisfy { $0.offset == state.nextPosition }
+}
+
+/// Iterator-owned MTP continuation carried atomically with a ChatSession's
+/// target cache, target model state, and transcript.
+///
+/// `targetProcessedTokenCount` is only an alignment witness. The authoritative
+/// position remains `KVCacheStorage.processedTokenCount`.
+package struct MTPDrafterContinuation {
+    package var state: MTPDrafterState
+    package let targetBoundaryHidden: MLXArray
+    package let targetProcessedTokenCount: Int
+
+    package init(
+        state: consuming MTPDrafterState,
+        targetBoundaryHidden: MLXArray,
+        targetProcessedTokenCount: Int
+    ) {
+        self.state = consume state
+        self.targetBoundaryHidden = targetBoundaryHidden
+        self.targetProcessedTokenCount = targetProcessedTokenCount
+    }
 }
 
 extension StatefulMTPDrafterModel {
@@ -339,8 +451,8 @@ public protocol MTPStatsCollecting {
     /// Total tokens accepted by the target across all speculation rounds.
     var acceptedDraftTokens: Int { get }
 
-    /// nil if the iterator stayed in speculative mode for the full stream;
-    /// non-nil if sticky-passthrough engaged, with the reason string captured
-    /// at the moment of engagement.
+    /// Nil when speculation completed with a resumable boundary. Non-nil if
+    /// sticky passthrough engaged or a stateful continuation had to be
+    /// discarded, with the first failure reason captured by the iterator.
     var passthroughReason: String? { get }
 }
