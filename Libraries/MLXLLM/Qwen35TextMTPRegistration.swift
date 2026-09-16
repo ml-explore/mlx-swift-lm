@@ -3,53 +3,44 @@
 import Foundation
 import MLXLMCommon
 
-/// Registers Qwen3.5/Qwen3.6 text MTP drafter model types.
+/// Registers Qwen3.5-family text MTP drafter model types.
 ///
-/// Callers should invoke this once before loading a Qwen text drafter through
-/// `MTPDrafterModelFactory`.
+/// Standalone Qwen MTP checkpoints do not identify the verifier architecture:
+/// their `vision_config` is empty for both text and multimodal use. Text and
+/// multimodal drafters therefore use separate registries instead of relying
+/// on config-shape predicates or registration order.
 public enum Qwen35TextMTPRegistration {
     public static func register() async {
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5_text",
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35TextConfiguration.self, from: data)
-                return Qwen35MTPDraftModel(config)
-            }
-        )
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5_mtp",
-            matches: qwen35TextMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35MTPDraftModel(config, preconvertedNorms: true)
-            }
-        )
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5",
-            matches: qwen35TextMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35MTPDraftModel(config)
-            }
-        )
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5_moe",
-            matches: qwen35TextMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35MTPDraftModel(config)
-            }
-        )
-    }
-}
+        let registry = MTPDrafterTypeRegistry.shared
 
-private func qwen35TextMTPConfiguration(_ data: Data) -> Bool {
-    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-        let vision = root["vision_config"] as? [String: Any]
-    else { return true }
-    return vision.isEmpty
+        for modelType in ["qwen3_5_text", "qwen3_8_text"] {
+            await registry.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder.json5().decode(
+                        Qwen35TextConfiguration.self, from: data)
+                    return Qwen35MTPDraftModel(config)
+                })
+        }
+
+        for modelType in ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"] {
+            await registry.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder.json5().decode(
+                        Qwen35Configuration.self, from: data)
+                    return Qwen35MTPDraftModel(config)
+                })
+        }
+
+        for modelType in ["qwen3_5_mtp", "qwen3_8_mtp"] {
+            await registry.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder.json5().decode(
+                        Qwen35Configuration.self, from: data)
+                    return Qwen35MTPDraftModel(config, preconvertedNorms: true)
+                })
+        }
+    }
 }
