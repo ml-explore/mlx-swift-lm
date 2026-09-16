@@ -580,7 +580,9 @@ public enum MediaProcessing {
         frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
     ) async throws -> ProcessedFrames {
 
-        precondition(!videoFrames.isEmpty)
+        guard !videoFrames.isEmpty else {
+            throw VLMError.processing("Video frame input must contain at least one frame.")
+        }
 
         let startTime = videoFrames.first?.timeStamp ?? .zero
         let endTime = videoFrames.last?.timeStamp ?? .zero
