@@ -1,6 +1,8 @@
 import MLX
-import MLXLMCommon
+import MLXNN
 import XCTest
+
+@testable import MLXLMCommon
 
 final class SwitchLayersTests: XCTestCase {
     private func assertBitIdentical(
@@ -34,6 +36,41 @@ final class SwitchLayersTests: XCTestCase {
             scores = scores / scores.sum(axis: -1, keepDims: true)
         }
         return (indices, scores)
+    }
+
+    func testExpertRouteSortThresholdAccountsForQuantizedWeights() {
+        XCTAssertFalse(shouldSortExpertRoutes(routeCount: 15, quantized: true))
+        XCTAssertTrue(shouldSortExpertRoutes(routeCount: 16, quantized: true))
+        XCTAssertFalse(shouldSortExpertRoutes(routeCount: 63, quantized: false))
+        XCTAssertTrue(shouldSortExpertRoutes(routeCount: 64, quantized: false))
+    }
+
+    func testQuantizedSwitchGLUProducesTheSameOutputAcrossSortThreshold() {
+        let layer = SwitchGLU(inputDims: 32, hiddenDims: 32, numExperts: 8)
+        quantize(model: layer, groupSize: 32, bits: 4)
+
+        let repeated = MLXArray([Int32](repeating: 0, count: 16)).reshaped(4, 4)
+        let alternating = MLXArray((0 ..< 16).map { Int32($0 % 8) }).reshaped(4, 4)
+        let input = MLXArray(0 ..< 128).asType(.float32).reshaped(4, 32) / 128
+
+        func unsortedReference(_ indices: MLXArray) -> MLXArray {
+            let expanded = MLX.expandedDimensions(input, axes: [-2, -3])
+            let up = layer.upProj(expanded, indices)
+            let gate = layer.gateProj(expanded, indices)
+            let activated = compiledSiluProduct(gate, up)
+            return MLX.squeezed(layer.downProj(activated, indices), axis: -2)
+        }
+
+        let repeatedOutput = layer(input, repeated)
+        let repeatedReference = unsortedReference(repeated)
+        let alternatingOutput = layer(input, alternating)
+        let alternatingReference = unsortedReference(alternating)
+
+        eval(repeatedOutput, repeatedReference, alternatingOutput, alternatingReference)
+        XCTAssertEqual(repeatedOutput.shape, [4, 4, 32])
+        XCTAssertEqual(alternatingOutput.shape, [4, 4, 32])
+        XCTAssertTrue(allClose(repeatedOutput, repeatedReference).item(Bool.self))
+        XCTAssertTrue(allClose(alternatingOutput, alternatingReference).item(Bool.self))
     }
 
     func testWeightedExpertSumMatchesGenericExpression() {

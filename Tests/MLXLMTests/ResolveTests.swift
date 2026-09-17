@@ -138,6 +138,74 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
         #expect(resolved.tokenizerDirectory == localDir)
     }
 
+    @Test func remoteModelSubdirectoryScopesDownloadAndResolvedDirectory() async throws {
+        let downloader = MockDownloader()
+        let config = ModelConfiguration(
+            id: "org/multi-variant-model", modelSubdirectory: "4bit")
+
+        let resolved = try await resolve(
+            configuration: config, from: downloader,
+            useLatest: false, progressHandler: { _ in })
+
+        let call = try #require(downloader.calls.value.first)
+        #expect(call.patterns == ["4bit/*.safetensors", "4bit/*.json", "4bit/*.jinja"])
+        #expect(resolved.modelDirectory.lastPathComponent == "4bit")
+        #expect(resolved.tokenizerDirectory == resolved.modelDirectory)
+    }
+
+    @Test func localModelSubdirectoryResolvesWithoutDownload() async throws {
+        let downloader = MockDownloader()
+        let root = URL(filePath: "/local/aggregate")
+        let config = ModelConfiguration(directory: root, modelSubdirectory: "mlx/4bit")
+
+        let resolved = try await resolve(
+            configuration: config, from: downloader,
+            useLatest: false, progressHandler: { _ in })
+
+        #expect(downloader.calls.value.isEmpty)
+        #expect(resolved.modelDirectory.path == "/local/aggregate/mlx/4bit")
+        #expect(try config.modelDirectory == resolved.modelDirectory)
+    }
+
+    @Test(
+        arguments: [
+            "", "/absolute", "../bf16", "./bf16", "variants/../bf16",
+            "variants/./bf16", "variants//bf16", "variants/", "\\\\server\\share",
+            "variants\\bf16", "*", "variants/?", "variants/[ab]", "variants/{a,b}",
+            "variants\n4bit", "variants\u{0000}4bit",
+        ])
+    func unsafeModelSubdirectoryIsRejectedBeforeDownload(_ subdirectory: String) async {
+        let downloader = MockDownloader()
+        let config = ModelConfiguration(id: "org/model", modelSubdirectory: subdirectory)
+
+        await #expect(
+            throws: ModelConfiguration.DirectoryError.invalidModelSubdirectory(subdirectory)
+        ) {
+            try await resolve(
+                configuration: config, from: downloader,
+                useLatest: false, progressHandler: { _ in })
+        }
+        #expect(downloader.calls.value.isEmpty)
+    }
+
+    @Test(
+        arguments: [
+            ("4bit", "/local/aggregate/4bit"),
+            ("mlx/4bit", "/local/aggregate/mlx/4bit"),
+            ("variants/model v1", "/local/aggregate/variants/model v1"),
+            ("variants/.internal", "/local/aggregate/variants/.internal"),
+            ("variants/%2e%2e", "/local/aggregate/variants/%2e%2e"),
+        ])
+    func validModelSubdirectoryRemainsLiteral(
+        _ subdirectory: String, _ expectedPath: String
+    ) throws {
+        let root = URL(filePath: "/local/aggregate", directoryHint: .isDirectory)
+        let config = ModelConfiguration(directory: root, modelSubdirectory: subdirectory)
+
+        #expect(try config.normalizedModelSubdirectory == subdirectory)
+        #expect(try config.modelDirectory.path == expectedPath)
+    }
+
     @Test func localDirectoryWithRemoteTokenizerSource() async throws {
         let downloader = MockDownloader()
         let localDir = URL(filePath: "/local/org/model")

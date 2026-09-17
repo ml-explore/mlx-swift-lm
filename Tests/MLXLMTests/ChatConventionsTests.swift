@@ -217,6 +217,37 @@ struct ChatConventionsTests {
         #expect(resolved == .alwaysOnThinking)
     }
 
+    @Test func lfm25ResolverIsCheckpointSpecific() throws {
+        let resolver = LFM25ConventionsResolver()
+        let resolved = try #require(
+            resolver.reasoningConfig(
+                modelId: "mlx-community/LFM2.5-2.6B-bf16", modelType: "lfm2"))
+
+        #expect(resolved.promptStrategy == .alwaysOn)
+        #expect(resolved.startDelimiter == "<think>")
+        #expect(resolved.endDelimiter == "</think>")
+        #expect(!resolved.isSpecialToken)
+        #expect(
+            resolver.reasoningConfig(
+                modelId: "mlx-community/LFM2-1.2B-4bit", modelType: "lfm2") == nil)
+        #expect(
+            resolver.reasoningConfig(
+                modelId: "mlx-community/LFM2.5-8B-A1B-MLX-4bit",
+                modelType: "lfm2_moe")?.promptStrategy == .alwaysOn)
+        #expect(
+            resolver.reasoningConfig(
+                modelId: "mlx-community/LFM2-8B-A1B-4bit", modelType: "lfm2_moe") == nil)
+        #expect(
+            resolver.reasoningConfig(
+                modelId: "someone/LFM2.5-lookalike", modelType: "llama") == nil)
+    }
+
+    @Test func sharedRegistryResolvesLFM25OutOfTheBox() {
+        let resolved = ChatConventionsRegistry.shared.reasoningConfig(
+            modelId: "LiquidAI/LFM2.5-2.6B-MLX", modelType: "lfm2")
+        #expect(resolved?.promptStrategy == .alwaysOn)
+    }
+
     @Test func emptyRegistryResolvesNothing() {
         let registry = ChatConventionsRegistry()
         #expect(registry.toolCallFormat(modelId: "any/model", modelType: "qwen2") == nil)
