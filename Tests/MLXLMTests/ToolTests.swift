@@ -1441,6 +1441,320 @@ struct ToolTests {
         #expect(toolCall.function.arguments["seen"] == .string("false"))
     }
 
+    @Test("Gemma reads marker-quoted strings inside a nested object")
+    func testGemmaMarkerStringsInNestedObject() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content =
+            #"<|tool_call>call:fhir_search{resourceType:<|"|>Observation<|"|>,"#
+            + #"searchParams:{_count:<|"|>1<|"|>,_sort:<|"|>effective_datetime-1<|"|>}}"#
+            + #"<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: Self.gemmaSearchTools))
+
+        #expect(toolCall.function.name == "fhir_search")
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["resourceType"] == .string("Observation"))
+        #expect(
+            toolCall.function.arguments["searchParams"]
+                == .object(["_count": .string("1"), "_sort": .string("effective_datetime-1")]))
+    }
+
+    @Test("Gemma reads a single-key nested object with a marker-quoted string")
+    func testGemmaSingleKeyNestedObject() throws {
+        let value = try gemmaSearchParams(#"{name:<|"|>Maria Schneider<|"|>}"#)
+
+        #expect(value == .object(["name": .string("Maria Schneider")]))
+    }
+
+    @Test("Gemma reads marker-quoted keys inside nested objects")
+    func testGemmaMarkerQuotedNestedKeys() throws {
+        // The chat template writes keys bare, but the model sometimes marker-quotes them.
+        let value = try gemmaSearchParams(
+            #"{<|"|>given name<|"|>:<|"|>Maria<|"|>,"#
+                + #"filter:{<|"|>a b<|"|>:1,<|"|>code<|"|>:<|"|>8867-4<|"|>}}"#)
+
+        #expect(
+            value
+                == .object([
+                    "given name": .string("Maria"),
+                    "filter": .object(["a b": .int(1), "code": .string("8867-4")]),
+                ]))
+    }
+
+    @Test(
+        "Gemma reads nested keys written with a marker or a leading space",
+        arguments: [
+            #"{_count:<|"|>1<|"|>,<|"|>_sort<|"|>:<|"|>-effectiveDateTime<|"|>}"#,
+            #"{_count:<|"|>1<|"|>, _sort:<|"|>-effectiveDateTime<|"|>}"#,
+        ])
+    func testGemmaNestedKeyVariantsFromModelOutput(_ body: String) throws {
+        // gemma-4-e2b-it wrote both shapes with thinking off; the template writes neither.
+        let value = try gemmaSearchParams(body)
+
+        #expect(value == .object(["_count": .string("1"), "_sort": .string("-effectiveDateTime")]))
+    }
+
+    @Test("Gemma trims a space before a top-level argument key")
+    func testGemmaTopLevelKeyAfterSpace() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools = Self.gemmaTools("get_weather", ["city": "string", "days": "integer"])
+        let content = #"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>, days:3}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .int(3))
+    }
+
+    @Test(
+        "Gemma reads a marker-quoted top-level argument key",
+        arguments: [
+            #"{<|"|>city<|"|>:<|"|>Paris<|"|>,days:3}"#,
+            #"{city:<|"|>Paris<|"|>, <|"|>days<|"|>:3}"#,
+        ])
+    func testGemmaMarkerQuotedTopLevelKey(_ body: String) throws {
+        // The template writes keys bare. gemma-4-e2b-it marker-quoted a nested key in live
+        // output; the top level is read the same way, as transformers and mlx-lm do.
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools = Self.gemmaTools("get_weather", ["city": "string", "days": "integer"])
+        let content = "<|tool_call>call:get_weather\(body)<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .int(3))
+    }
+
+    @Test("Gemma reads marker-quoted strings in an array nested several objects deep")
+    func testGemmaMarkerStringsInDeeplyNestedArray() throws {
+        let marker = #"<|"|>"#
+        let value = try gemmaSearchParams(
+            "{filter:{code:{any:[\(marker)8867-4\(marker),\(marker)line one\nline two\(marker)]},"
+                + "status:\(marker)final\(marker)}}")
+
+        #expect(
+            value
+                == .object([
+                    "filter": .object([
+                        "code": .object([
+                            "any": .array([.string("8867-4"), .string("line one\nline two")])
+                        ]),
+                        "status": .string("final"),
+                    ])
+                ]))
+    }
+
+    @Test("Gemma reads marker-quoted strings inside an array of objects")
+    func testGemmaMarkerStringsInArrayOfObjects() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools = Self.gemmaTools("record_vitals", ["entries": "array", "codes": "array"])
+        let content =
+            #"<|tool_call>call:record_vitals{entries:["#
+            + #"{code:<|"|>8867-4<|"|>,unit:<|"|>/min<|"|>},"#
+            + #"{code:<|"|>8480-6<|"|>,unit:<|"|>mm[Hg]<|"|>}],"#
+            + #"codes:[<|"|>a,b<|"|>,<|"|>c<|"|>]}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(
+            toolCall.function.arguments["entries"]
+                == .array([
+                    .object(["code": .string("8867-4"), "unit": .string("/min")]),
+                    .object(["code": .string("8480-6"), "unit": .string("mm[Hg]")]),
+                ]))
+        #expect(toolCall.function.arguments["codes"] == .array([.string("a,b"), .string("c")]))
+    }
+
+    @Test("Gemma reads bare scalars and marker-quoted strings mixed in one nested object")
+    func testGemmaMixedScalarsAndMarkerStrings() throws {
+        let value = try gemmaSearchParams(#"{active:true,_count:5,name:<|"|>Maria<|"|>}"#)
+
+        #expect(
+            value == .object(["active": .bool(true), "_count": .int(5), "name": .string("Maria")]))
+    }
+
+    @Test("Gemma keeps a raw newline inside a nested marker-quoted string")
+    func testGemmaRawNewlineInNestedString() throws {
+        let marker = #"<|"|>"#
+        let value = try gemmaSearchParams("{note:\(marker)line one\nline two\(marker)}")
+
+        #expect(value == .object(["note": .string("line one\nline two")]))
+    }
+
+    @Test("Gemma keeps a raw tab inside a nested marker-quoted string")
+    func testGemmaRawTabInNestedString() throws {
+        let marker = #"<|"|>"#
+        let value = try gemmaSearchParams("{note:\(marker)dose\t5 mg\(marker)}")
+
+        #expect(value == .object(["note": .string("dose\t5 mg")]))
+    }
+
+    @Test(
+        "Gemma keeps other control characters inside a nested marker-quoted string",
+        arguments: [
+            "\r", "\r\n", "\u{0}", "\u{1}", "\u{8}", "\u{B}", "\u{C}", "\u{1B}", "\u{1F}", "\u{7F}",
+        ])
+    func testGemmaControlCharacterInNestedString(_ control: String) throws {
+        let marker = #"<|"|>"#
+        let value = try gemmaSearchParams("{note:\(marker)a\(control)b\(marker)}")
+
+        #expect(value == .object(["note": .string("a\(control)b")]))
+    }
+
+    @Test("Gemma keeps quotes, backslashes and protocol punctuation inside a nested string")
+    func testGemmaPunctuationInNestedString() throws {
+        let value = try gemmaSearchParams(
+            #"{q:<|"|>say "hi", C:\new\\dir {x:1}, [a]: \u0041<|"|>}"#)
+
+        #expect(value == .object(["q": .string(#"say "hi", C:\new\\dir {x:1}, [a]: \u0041"#)]))
+    }
+
+    @Test("Gemma keeps empty and backslash-ended strings inside a nested object")
+    func testGemmaEmptyAndTrailingBackslashInNestedString() throws {
+        let value = try gemmaSearchParams(#"{a:<|"|><|"|>,b:<|"|>C:\<|"|>,c:<|"|>\\<|"|>}"#)
+
+        #expect(
+            value == .object(["a": .string(""), "b": .string(#"C:\"#), "c": .string(#"\\"#)]))
+    }
+
+    @Test("Gemma keeps non-ASCII text inside a nested marker-quoted string")
+    func testGemmaNonASCIIInNestedString() throws {
+        let value = try gemmaSearchParams(#"{name:<|"|>Jürgen Groß, Straße 5 🩺<|"|>}"#)
+
+        #expect(value == .object(["name": .string("Jürgen Groß, Straße 5 🩺")]))
+    }
+
+    @Test("FunctionGemma reads escape-marker strings inside a nested object")
+    func testFunctionGemmaNestedEscapeStrings() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
+        let content =
+            "<start_function_call>call:f{p:{a:<escape>x, y\nz<escape>,n:2}}<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(
+            toolCall.function.arguments["p"] == .object(["a": .string("x, y\nz"), "n": .int(2)]))
+    }
+
+    @Test(
+        "FunctionGemma keeps escape markers inside JSON-quoted nested strings",
+        arguments: [
+            (#"{"a":"x<escape>y<escape>z"}"#, "x<escape>y<escape>z"),
+            (#"{a:"<escape>hi<escape>"}"#, "<escape>hi<escape>"),
+        ])
+    func testFunctionGemmaMarkersInsideQuotedString(_ literal: String, _ expected: String) throws {
+        // Not in the dialect. Pins that text which already parses is read before any rewrite.
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
+        let content = "<start_function_call>call:f{p:\(literal)}<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["p"] == .object(["a": .string(expected)]))
+    }
+
+    @Test(
+        "FunctionGemma keeps the text of a brace value with an unpaired escape marker",
+        arguments: [
+            #"{a:"<escape>",b:yes}"#,
+            #"{a:"<escape>x<escape>y<escape>",b:yes}"#,
+        ])
+    func testFunctionGemmaUnpairedEscapeMarker(_ literal: String) throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
+        let content = "<start_function_call>call:f{p:\(literal)}<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // Malformed input. The last marker has no partner and `yes` is not JSON,
+        // so the raw text is kept.
+        #expect(toolCall.function.arguments.count == 1)
+        #expect(toolCall.function.arguments["p"] == .string(literal))
+    }
+
+    @Test("FunctionGemma quotes a paired marker and keeps an unpaired one that follows")
+    func testFunctionGemmaUnpairedMarkerAfterPairedString() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
+        let literal = #"{a:<escape>x<escape>,b:"<escape>"}"#
+        let content = "<start_function_call>call:f{p:\(literal)}<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // Malformed input. The text after the unpaired marker is kept as is,
+        // so `b` stays a JSON string.
+        #expect(
+            toolCall.function.arguments["p"]
+                == .object(["a": .string("x"), "b": .string("<escape>")]))
+    }
+
+    @Test("Gemma reads a nested marker-quoted object without a tool schema")
+    func testGemmaNestedMarkerObjectWithoutSchema() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content =
+            #"<|tool_call>call:fhir_search{searchParams:{_count:<|"|>1<|"|>,_sort:<|"|>x<|"|>}}"#
+            + #"<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments.count == 1)
+        #expect(
+            toolCall.function.arguments["searchParams"]
+                == .object(["_count": .string("1"), "_sort": .string("x")]))
+    }
+
+    @Test("Gemma keeps the raw text of a brace value the schema declares a string")
+    func testGemmaStringParameterKeepsRawBraceText() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        // The template would marker-quote a string value. This pins that a string
+        // parameter keeps raw brace text and skips the rewrite.
+        let tools = Self.gemmaTools("annotate", ["payload": "string"])
+        let raw = #"{note:<|"|>a<|"|>}"#
+        let content = "<|tool_call>call:annotate{payload:\(raw)}<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments["payload"] == .string(raw))
+    }
+
+    @Test("Gemma 4 processor reads a streamed nested marker-quoted object")
+    func testGemma4ProcessorStreamedNestedMarkerObject() throws {
+        let processor = ToolCallProcessor(format: .gemma4, tools: Self.gemmaSearchTools)
+        let marker = #"<|"|>"#
+        let content =
+            "<|tool_call>call:fhir_search{resourceType:\(marker)Observation\(marker),"
+            + "searchParams:{_count:\(marker)1\(marker),"
+            + "note:\(marker)line one\nline two\(marker)}}<tool_call|>"
+
+        var visible = ""
+        for character in content {
+            if let text = processor.processChunk(String(character)) { visible += text }
+        }
+        processor.processEOS()
+
+        #expect(visible.isEmpty)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.arguments["resourceType"] == .string("Observation"))
+        #expect(
+            toolCall.function.arguments["searchParams"]
+                == .object(["_count": .string("1"), "note": .string("line one\nline two")]))
+    }
+
     @Test("Test Gemma 4 Format via ToolCallProcessor")
     func testGemma4FormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma4)
@@ -1472,6 +1786,36 @@ struct ToolTests {
         let toolCall = try #require(processor.toolCalls.first)
         #expect(toolCall.function.name == "calculator")
         #expect(toolCall.function.arguments["expression"] == .string("2+2"))
+    }
+
+    private static func gemmaTools(
+        _ name: String, _ properties: [String: String]
+    ) -> [[String: any Sendable]] {
+        [
+            [
+                "function": [
+                    "name": name,
+                    "parameters": [
+                        "type": "object",
+                        "properties": properties.mapValues {
+                            ["type": $0] as [String: any Sendable]
+                        } as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+    }
+
+    private static let gemmaSearchTools = gemmaTools(
+        "fhir_search", ["resourceType": "string", "searchParams": "object"])
+
+    /// Parses a Gemma 4 `fhir_search` call and returns its `searchParams` argument.
+    private func gemmaSearchParams(_ body: String) throws -> JSONValue? {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = "<|tool_call>call:fhir_search{searchParams:\(body)}<tool_call|>"
+        let toolCall = try #require(parser.parse(content: content, tools: Self.gemmaSearchTools))
+        return toolCall.function.arguments["searchParams"]
     }
 
     // MARK: - Kimi K2 Format Tests
