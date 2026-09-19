@@ -70,6 +70,7 @@ public enum LLMTypeRegistry {
         "qwen3_5": create(Qwen35Configuration.self, Qwen35Model.init),
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoEModel.init),
         "qwen3_5_text": create(Qwen35TextConfiguration.self, Qwen35TextModel.init),
+        "prism_hadamard_qwen35": createPrismHadamardQwen35Model,
         "nanbeige": create(NanbeigeConfiguration.self, NanbeigeModel.init),
         "minicpm": create(MiniCPMConfiguration.self, MiniCPMModel.init),
         "starcoder2": create(Starcoder2Configuration.self, Starcoder2Model.init),
@@ -191,6 +192,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "mlx-community/gemma-2-2b-it-4bit",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: "What is the difference between lettuce and cabbage?"
+    )
+
+    static public let bonsai2_27B_ternary_2bit = ModelConfiguration(
+        id: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        defaultPrompt: "What is the difference between a fruit and a vegetable?"
     )
 
     static public let gemma3_1B_qat_4bit = ModelConfiguration(
@@ -510,6 +516,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 
     private static func all() -> [ModelConfiguration] {
         [
+            bonsai2_27B_ternary_2bit,
             codeLlama13b4bit,
             deepSeekR1_7B_4bit,
             falconH1R7B,
