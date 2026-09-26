@@ -128,6 +128,24 @@ final class Qwen35SanitizeTests: XCTestCase {
             "pre-converted norm weight must not be +1 shifted (double-shift => garbage)")
     }
 
+    /// A converted MLX checkpoint can keep its MTP head. Its keys must not
+    /// reach the model, or loading fails with unhandled keys.
+    func testMLXCheckpointDropsMTPWeights() throws {
+        let config = try makeMinimalConfig()
+        let model = Qwen35(config)
+
+        let dummy = MLXArray.zeros([1, 1])
+        let weights: [String: MLXArray] = [
+            "language_model.model.norm.weight": dummy,
+            "language_model.mtp.fc.weight": dummy,
+            "language_model.mtp.layers.0.self_attn.q_proj.weight": dummy,
+        ]
+
+        let sanitized = model.sanitize(weights: weights, metadata: ["format": "mlx"])
+
+        XCTAssertEqual(Set(sanitized.keys), ["language_model.model.norm.weight"])
+    }
+
     /// A raw HF checkpoint (unsanitized conv1d, trailing dim != 1) stores
     /// RMSNorm weights un-shifted, so sanitize must add the `+1`.
     func testRawCheckpointNormWeightsAreShifted() throws {

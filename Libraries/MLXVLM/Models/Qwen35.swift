@@ -1409,7 +1409,8 @@ public class Qwen35: Module, VLMModel {
         MLXArray]
     {
         if metadata["format"]?.lowercased() == "mlx" {
-            return weights
+            // Converted checkpoints can keep the MTP head; the drafter loads it, not this model.
+            return weights.filter { !$0.key.contains("mtp.") }
         }
         return sanitize(weights: weights)
     }
