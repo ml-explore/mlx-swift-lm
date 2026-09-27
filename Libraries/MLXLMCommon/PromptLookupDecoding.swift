@@ -6,7 +6,9 @@ import MLX
 /// Bounded, model-free speculation from token frequencies in the recent context.
 ///
 /// The longest matching n-gram proposes its most frequent continuation when it meets both
-/// thresholds. The target model verifies every proposal. No auxiliary weights are loaded.
+/// thresholds. Each proposed token extends the context for the next one, so a draft chains
+/// frequent continuations and need not appear verbatim in the history. The target model
+/// verifies every proposal. No auxiliary weights are loaded.
 public struct PromptLookupConfiguration: Sendable, Equatable {
     /// Maximum proposed tokens per verification, excluding the carried target token.
     public var maxDraftTokens: Int
@@ -15,6 +17,9 @@ public struct PromptLookupConfiguration: Sendable, Equatable {
     /// Shortest context key to consider.
     public var minNGramLength: Int
     /// Maximum number of recent tokens indexed, independently of the model's KV capacity.
+    ///
+    /// The index allocates about 100 bytes per token and n-gram order up front: about 6 MiB
+    /// with the defaults and about 390 MiB at the largest size and order.
     public var contextSize: Int
     /// Minimum observed repetitions of the proposed context and continuation together.
     public var minimumOccurrences: Int
@@ -72,8 +77,16 @@ public enum PromptLookupError: Error, LocalizedError {
 /// Batched model kernels can differ numerically from single-token kernels near tied logits.
 ///
 /// Attention caches use staged rounds, including wrapped sliding windows. Unsupported recurrent
-/// caches and media inputs continue through ordinary decoding. As with ``TokenIterator``, do
-/// not advance copies of an iterator concurrently: they share the model and cache storage.
+/// caches and media inputs continue through ordinary decoding. Rounds stop at a dynamic
+/// compression threshold, so each position sees the cache representation ordinary decoding
+/// would use. As with ``TokenIterator``, do not advance copies of an iterator concurrently:
+/// they share the model and cache storage. If you stop iterating before `next()` returns
+/// `nil` and keep the cache, call ``finish()`` first.
+///
+/// > Important: Verification passes the model state through every proposed token, and a
+/// > rejection rewinds only the cache. Use this iterator only with models whose
+/// > ``LMOutput/State`` a decode step does not rewrite, as with ``SpeculativeTokenIterator``.
+/// > Positional anchors resolved against the cache offset, such as M-RoPE deltas, qualify.
 public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     private var base: TokenIterator
     private let index: PromptLookupIndex?
@@ -91,6 +104,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     private var rejections = 0
     private var cooldown = 0
     private var lastMemoryClear = 0
+    private var finished = false
     private var telemetry = SpeculativeDecodingTelemetry()
 
     public private(set) var tokenCount = 0
@@ -98,6 +112,8 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     public var state: LMOutput.State? { base.state }
     public var promptPrefillTime: TimeInterval { base.promptPrefillTime }
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { telemetry }
+    public var evictedTokenCount: Int { base.evictedTokenCount }
+    public var reasoningTokenCount: Int? { base.reasoningTokenCount }
     /// Ordinary decode steps, including lookup misses and unsupported cache topologies.
     public private(set) var fallbackTokenCount = 0
     /// Lookups that produced no usable continuation.
@@ -169,8 +185,9 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     }
 
     public mutating func next() -> Int? {
+        guard !finished else { return nil }
         guard maxTokens.map({ tokenCount < $0 }) ?? true else {
-            finalizeGeneration()
+            finish()
             return nil
         }
         if pendingIndex == pending.count {
@@ -195,7 +212,8 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
         let indexedCurrent = knownToken != nil
         if let knownToken { index?.append(knownToken) }
         let remaining = maxTokens.map { $0 - tokenCount } ?? (configuration.maxDraftTokens + 1)
-        guard let index, remaining > 1 else {
+        let count = Swift.min(draftLimit, remaining - 1, positionsBeforeCompression - 1)
+        guard let index, count > 0 else {
             singleStep(indexedCurrent: indexedCurrent)
             return
         }
@@ -206,7 +224,6 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        let count = Swift.min(draftLimit, remaining - 1)
         index.draft(
             maximumTokens: count + (indexedCurrent ? 0 : 1),
             minimumOrder: configuration.minNGramLength,
@@ -238,6 +255,21 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
             return
         }
         verify(round, indexedCurrent: indexedCurrent)
+    }
+
+    /// Positions a round can verify before ordinary decoding would compress the cache.
+    ///
+    /// Ordinary decoding compresses once an uncompressed leaf's offset passes the start, so a
+    /// round must not run later positions against the uncompressed entries.
+    private var positionsBeforeCompression: Int {
+        guard !cacheStorage.isApplicationTerminal,
+            let start = base.kvCachePlan.configuration?.strategy.compressionStart
+        else { return .max }
+        let offsets = KVCacheTree.leaves(in: cache).compactMap { leaf -> Int? in
+            guard case .simple(let simple) = leaf.kind, simple.offset <= start else { return nil }
+            return simple.offset
+        }
+        return offsets.min().map { start + 1 - $0 } ?? .max
     }
 
     private mutating func verify(_ round: KVCacheRound, indexedCurrent: Bool) {
@@ -324,6 +356,34 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
         fallbackTokenCount += 1
     }
 
+    /// Ends generation and removes verified tokens that ``next()`` has not returned from the
+    /// cache, so the cache holds exactly the prompt and the returned tokens.
+    ///
+    /// Call it on the iterator value you advanced before you reuse its cache after stopping
+    /// early. Later calls to ``next()`` return `nil`, and further calls have no effect.
+    /// Streaming generation and ``ChatSession`` call it for you.
+    public mutating func finish() {
+        guard !finished else { return }
+        finished = true
+        let lookahead = committedPending - Swift.min(pendingIndex, committedPending)
+        if lookahead > 0 {
+            if stagedPending {
+                cacheStorage.rewindLastRound(lookahead)
+            } else {
+                cacheStorage.trim(lookahead)
+            }
+            committedPending -= lookahead
+        }
+        // Nothing rewinds after this, so do not keep sliding-window snapshots alive.
+        cacheStorage.discardLastRound()
+        base.kvCachePlan.apply(to: cacheStorage)
+        base.finalizeGeneration()
+    }
+
+    public mutating func recordEmittedToken(_ token: Int) {
+        base.recordEmittedToken(token)
+    }
+
     public mutating func discardGeneratedToken() {
         // The token collector retains stop tokens even when the text stream suppresses them.
         if speculativePending { telemetry.discardGeneratedToken() }
@@ -332,15 +392,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
 
 extension PromptLookupTokenIterator: GenerationFinalizingTokenIterator {
     mutating func finalizeGeneration() {
-        defer { base.kvCachePlan.apply(to: cacheStorage) }
-        let lookahead = committedPending - Swift.min(pendingIndex, committedPending)
-        guard lookahead > 0 else { return }
-        if stagedPending {
-            cacheStorage.rewindLastRound(lookahead)
-        } else {
-            cacheStorage.trim(lookahead)
-        }
-        committedPending = Swift.min(pendingIndex, committedPending)
+        finish()
     }
 }
 

@@ -8,6 +8,10 @@ let parameters = GenerateParameters(
     promptLookup: .init(maxDraftTokens: 8))
 ```
 
-``PromptLookupConfiguration`` bounds the indexed context and draft length and sets the minimum occurrence and confidence thresholds. ``PromptLookupTokenIterator`` also accepts the full `history` when its input is only an uncached suffix. Recurrent or nested caches and media inputs use ordinary decoding.
+``PromptLookupConfiguration`` bounds the indexed context and draft length and sets the minimum occurrence and confidence thresholds. The index allocates its memory up front, about 6 MiB with the defaults. ``PromptLookupTokenIterator`` also accepts the full `history` when its input is only an uncached suffix. Recurrent or nested caches and media inputs use ordinary decoding.
 
-Performance depends on how often the target accepts drafts. Batched greedy verification can differ numerically from single-token decoding near tied logits.
+If you drive ``PromptLookupTokenIterator`` directly and stop before it returns `nil`, call ``PromptLookupTokenIterator/finish()`` before you reuse its cache. It removes verified tokens the iterator has not returned yet.
+
+A rejected proposal rewinds the cache but not ``LMOutput/State``. Use prompt lookup only with models whose state a decode step does not rewrite, as with ``SpeculativeTokenIterator``.
+
+Performance depends on how often the target accepts drafts. It helps most when the output repeats text from the prompt, such as returning an edited file. Batched greedy verification can differ numerically from single-token decoding near tied logits.

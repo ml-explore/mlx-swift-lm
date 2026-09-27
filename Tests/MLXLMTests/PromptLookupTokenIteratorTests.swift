@@ -24,6 +24,8 @@ private final class LookupHistoryModel: Module, LanguageModel, KVCacheDimensionP
     let softLogits: Bool
     var kvHeads: [Int] { [1] }
     private(set) var forwardWidths = [Int]()
+    /// Start position, width, and whether the first cache was compressed, for each forward.
+    private(set) var forwards = [(start: Int, width: Int, compressed: Bool)]()
 
     init(
         prefillStyle: PrefillStyle = .tokens, contextSensitive: Bool = true,
@@ -74,6 +76,7 @@ private final class LookupHistoryModel: Module, LanguageModel, KVCacheDimensionP
         let tokens = input.tokens.asArray(Int.self)
         let base = cache?.first?.offset ?? 0
         forwardWidths.append(tokens.count)
+        forwards.append((base, tokens.count, cache?.first is QuantizedKVCache))
         let positions = Array(base ..< base + tokens.count)
         let keys = MLXArray(
             positions.flatMap { Array(repeating: Float($0), count: 32) },
@@ -139,6 +142,48 @@ private func lookupDrain(_ iterator: inout some TokenIteratorProtocol) -> [Int] 
 
 @Suite(.serialized)
 struct PromptLookupTokenIteratorTests {
+    @Test(arguments: [false, true])
+    func forwardsProcessorLifecycleAndCacheMetrics(recurrent: Bool) throws {
+        struct EmissionProcessor: LogitProcessor, GenerationReasoningTokenCounting {
+            var emittedCount = 0
+            var finalized = false
+            var generationReasoningTokenCount: Int? { finalized ? nil : emittedCount }
+
+            mutating func prompt(_ prompt: MLXArray) {}
+            func process(logits: MLXArray) -> MLXArray { logits }
+            mutating func didSample(token: MLXArray) {}
+            mutating func didEmit(token: Int) { emittedCount += 1 }
+            mutating func finalizeGeneration() {
+                #expect(!finalized)
+                finalized = true
+            }
+        }
+
+        let prompt = Array(repeating: Array(0 ..< 8), count: 3).flatMap { $0 }
+        var iterator = try PromptLookupTokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)),
+            model: LookupHistoryModel(
+                contextSensitive: false, slidingWindow: 8, recurrent: recurrent),
+            parameters: GenerateParameters(maxTokens: 48, temperature: 0),
+            components: GenerationComponents(logitProcessorFactory: { EmissionProcessor() }),
+            configuration: lookupConfiguration())
+
+        for count in 1 ... 12 {
+            let next = iterator.next()
+            let token = try #require(next)
+            #expect(iterator.reasoningTokenCount == count - 1)
+            iterator.recordEmittedToken(token)
+            #expect(iterator.reasoningTokenCount == count)
+        }
+        #expect(((iterator.speculativeDecodingTelemetry?.roundCount ?? 0) > 0) == !recurrent)
+        iterator.finish()
+        iterator.finish()
+        #expect(iterator.reasoningTokenCount == nil)
+        let evicted = iterator.cache.map(\.evictedTokenCount).max() ?? 0
+        #expect(evicted > 0)
+        #expect(iterator.evictedTokenCount == evicted)
+    }
+
     @Test(arguments: [false, true], [0, 1, 2, 7, 48])
     func matchesAutoregressiveWithBothPrefillResults(
         returnsLogits: Bool, maxTokens: Int
@@ -424,6 +469,34 @@ struct PromptLookupTokenIteratorTests {
         #expect(lookupDrain(&lookup) == lookupDrain(&plain))
         #expect(lookup.cache.first is QuantizedKVCache)
         #expect(lookup.cacheStorage.nativeAttentionOffsetsAreAligned)
+    }
+
+    @Test(arguments: [0, 1, 4, 5, 9, 13])
+    func roundsDoNotCrossTheCompressionBoundary(delay: Int) throws {
+        let prompt = Array(repeating: Array(0 ..< 8), count: 2).flatMap { $0 }
+        let start = prompt.count + delay
+        let compression = try AffineKVCacheConfiguration(
+            bits: 8, groupSize: 32, compressionStart: start)
+        let parameters = GenerateParameters(
+            maxTokens: 40, kvCache: .init(strategy: .affine(compression)), temperature: 0)
+        let plainModel = LookupHistoryModel(contextSensitive: false)
+        let lookupModel = LookupHistoryModel(contextSensitive: false)
+        var plain = try TokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)), model: plainModel, parameters: parameters)
+        var lookup = try PromptLookupTokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)), model: lookupModel,
+            parameters: parameters, configuration: lookupConfiguration(maxDraftTokens: 8))
+
+        #expect(lookupDrain(&lookup) == lookupDrain(&plain))
+        #expect(try #require(lookup.speculativeDecodingTelemetry).roundCount > 1)
+        // Ordinary decoding runs position p on a compressed cache exactly when p > start.
+        for model in [plainModel, lookupModel] {
+            for forward in model.forwards.dropFirst() {
+                let last = forward.start + forward.width - 1
+                #expect(forward.compressed == (forward.start > start))
+                #expect(forward.compressed || last <= start)
+            }
+        }
     }
 
     @Test(arguments: [26, 128])
