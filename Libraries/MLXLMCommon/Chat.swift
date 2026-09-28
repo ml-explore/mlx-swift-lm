@@ -213,7 +213,7 @@ extension MessageGenerator {
                         "Leaving an image name out of the prompt: it holds `\(marker)`, which vision models build their image placeholders from"
                     )
                 } else if let label = image.label {
-                    appendText("[\(label)]")
+                    appendText(UserInput.Image.promptText(forLabel: label))
                 }
                 parts.append(["type": "image"])
             }

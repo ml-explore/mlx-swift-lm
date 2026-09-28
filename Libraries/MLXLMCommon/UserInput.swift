@@ -140,6 +140,11 @@ public struct UserInput {
             label?.first(where: Self.markerCharacters.contains)
         }
 
+        /// The text a message generator writes into the prompt for `label`.
+        package static func promptText(forLabel label: String) -> String {
+            "[\(label)]"
+        }
+
         public init(source: Source, label: String? = nil) {
             self.source = source
             self.label = label
@@ -639,5 +644,41 @@ public struct StandInUserInputProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) throws -> LMInput {
         throw UserInputError.notImplemented
+    }
+}
+
+extension Tokenizer {
+
+    /// The special tokens this tokenizer finds in the prompt text of an image label,
+    /// or `nil` when it reads that text as ordinary text. An empty array still means
+    /// that the label is unsafe.
+    package func specialTokenNames(inImageLabel label: String) -> [String]? {
+        // With special tokens added, the tokenizer's own BOS would flag every label.
+        let ids = encode(
+            text: UserInput.Image.promptText(forLabel: label), addSpecialTokens: false)
+        guard containsSpecialToken(ids) else { return nil }
+        return specialTokenNames(inIDs: ids)
+    }
+
+    /// Whether `ids` holds a token that this tokenizer flags special.
+    ///
+    /// The protocol cannot list special tokens, so this compares a decode with and
+    /// without `skipSpecialTokens`. An added token without the special flag passes,
+    /// so callers must refuse the marker characters too.
+    private func containsSpecialToken(_ ids: [Int]) -> Bool {
+        decode(tokenIds: ids, skipSpecialTokens: false)
+            != decode(tokenIds: ids, skipSpecialTokens: true)
+    }
+
+    /// The special tokens in `ids`, in order and without repeats. Each name comes from
+    /// `convertIdToToken`, because decoding one id can change the token's text.
+    private func specialTokenNames(inIDs ids: [Int]) -> [String] {
+        var names: [String] = []
+        var seen = Set<Int>()
+        for id in ids where containsSpecialToken([id]) {
+            guard seen.insert(id).inserted else { continue }
+            names.append(convertIdToToken(id) ?? "token \(id)")
+        }
+        return names
     }
 }
