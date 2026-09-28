@@ -227,7 +227,8 @@ final class GlmOcrContinuationTests: XCTestCase {
             let decodeW = model(LMInput.Text(tokens: next), cache: cacheW, state: s2)
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(decodeW.logits[0..., -1, 0...], decodeF.logits[0..., -1, 0...]), 1e-3,
+                maxAbsDiff(decodeW.logits[0..., -1, 0...], decodeF.logits[0..., -1, 0...]),
+                MatmulPrecision.splitTolerance,
                 "decode after a warm continuation ignored the carried anchor")
         }
     }

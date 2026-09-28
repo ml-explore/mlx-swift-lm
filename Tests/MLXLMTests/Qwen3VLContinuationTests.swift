@@ -135,7 +135,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
                     prefill: .init()))
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(warmLogits, fullLogits), 1e-3,
+                maxAbsDiff(warmLogits, fullLogits), MatmulPrecision.splitTolerance,
                 "rank-1 warm continuation diverged from full prefill")
         }
     }
@@ -231,7 +231,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
                 model.prepare(input, cache: windowedCache, state: nil, prefill: .init(stepSize: 8)))
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(windowedLogits, singleLogits), 1e-3,
+                maxAbsDiff(windowedLogits, singleLogits), MatmulPrecision.splitTolerance,
                 "padding changed Qwen3-VL windowed M-RoPE semantics")
         }
     }

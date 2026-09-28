@@ -114,7 +114,7 @@ struct ContinuationAssertions {
             let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(logitsW, logitsF), max(noiseFloor * 10, 1e-3),
+                maxAbsDiff(logitsW, logitsF), max(noiseFloor * 10, MatmulPrecision.splitTolerance),
                 "warm continuation diverged from full prefill (noise floor \(noiseFloor))",
                 file: file, line: line)
         }
@@ -139,7 +139,7 @@ struct ContinuationAssertions {
             let (logitsW, _) = try prefill(model, t2, cache: cacheW, state: s1)
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(logitsW, logitsF), 1e-3,
+                maxAbsDiff(logitsW, logitsF), MatmulPrecision.splitTolerance,
                 "state-threaded warm continuation diverged from full prefill",
                 file: file, line: line)
         }
@@ -196,11 +196,11 @@ struct ContinuationAssertions {
             let diff = maxAbsDiff(logitsW, logitsF)
             if expectsIsolation {
                 XCTAssertLessThanOrEqual(
-                    diff, 1e-3,
+                    diff, MatmulPrecision.splitTolerance,
                     "split-suffix prefill diverged from full prefill", file: file, line: line)
             } else {
                 XCTAssertGreaterThan(
-                    diff, 1e-3,
+                    diff, MatmulPrecision.splitTolerance,
                     "cross-image vision attention should have changed the logits",
                     file: file, line: line)
             }
@@ -230,7 +230,7 @@ struct ContinuationAssertions {
             let (logitsW, _) = try prefill(model, t3, cache: cacheW, state: s2)
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(logitsW, logitsF), 1e-3,
+                maxAbsDiff(logitsW, logitsF), MatmulPrecision.splitTolerance,
                 "post-image resume state positioned the following turn wrong",
                 file: file, line: line)
         }
@@ -250,7 +250,7 @@ struct ContinuationAssertions {
             let (logitsC, _) = try prefill(model, prompt, cache: cacheC, stepSize: 8)
 
             XCTAssertLessThanOrEqual(
-                maxAbsDiff(logitsC, logitsS), 1e-3,
+                maxAbsDiff(logitsC, logitsS), MatmulPrecision.splitTolerance,
                 "windowed prefill diverged from single-shot", file: file, line: line)
         }
     }
@@ -280,7 +280,7 @@ struct ContinuationAssertions {
                     model, prompt, image: image, cache: cacheC, stepSize: stepSize)
 
                 XCTAssertLessThanOrEqual(
-                    maxAbsDiff(logitsC, logitsS), 1e-3,
+                    maxAbsDiff(logitsC, logitsS), MatmulPrecision.splitTolerance,
                     "windowed image prefill diverged from single-shot at stepSize \(stepSize)",
                     file: file, line: line)
             }

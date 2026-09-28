@@ -111,6 +111,10 @@ func testQwen35MTPDraftInstantiatesDedicatedEmbeddingWhenConfigured() throws {
     #expect(sanitized["model.embed_tokens.weight"] == nil)
 }
 
+/// Bound for comparing a gated-delta-net state reached two ways. Wider on machines whose
+/// float32 matmuls run as TF32; see ``MatmulPrecision``.
+private let gdnStateTolerance = MatmulPrecision.tolerance(float32: 1e-5, reduced: 2e-3)
+
 @Suite(.serialized)
 struct Qwen35MTPMetalTests {
     @Test
@@ -318,7 +322,12 @@ struct Qwen35MTPMetalTests {
         #expect(restored.count == expected.count)
         for (actual, reference) in zip(restored, expected) {
             eval(actual, reference)
-            #expect(allClose(actual, reference, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            // The checkpoint and the prefix run reach the same state through
+            // differently shaped matmuls, so the bound follows the machine's
+            // float32 matmul precision; see MatmulPrecision.
+            #expect(
+                allClose(actual, reference, rtol: gdnStateTolerance, atol: gdnStateTolerance)
+                    .item(Bool.self))
         }
     }
 
@@ -342,7 +351,9 @@ struct Qwen35MTPMetalTests {
         #expect(speculativeCache.restoreSpeculativeCheckpoint())
         for (actual, reference) in zip(speculativeCache.state, prefixCache.state) {
             eval(actual, reference)
-            #expect(allClose(actual, reference, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            #expect(
+                allClose(actual, reference, rtol: gdnStateTolerance, atol: gdnStateTolerance)
+                    .item(Bool.self))
         }
     }
 
