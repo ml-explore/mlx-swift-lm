@@ -1521,7 +1521,7 @@ private func runSynchronousGenerationLoop(
     // exits the program right away, those tasks will still be executing and will
     // hit assertions as the mlx scheduler is torn down. Synchronize with the stream
     // to make sure it is complete.
-    Stream().synchronize()
+    Stream.defaultStream.synchronize()
 
     return SynchronousGenerationLoopResult(
         generatedTokenIds: generatedTokenIds,
@@ -2463,7 +2463,7 @@ private func generateLoopTask<
             _ = continuation.yield(handler.infoEvent(info))
 
             // Synchronize with the stream to ensure tasks are completed
-            Stream().synchronize()
+            Stream.defaultStream.synchronize()
 
             // Finalize the stream
             continuation.finish()
