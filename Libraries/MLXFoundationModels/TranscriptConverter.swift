@@ -137,8 +137,8 @@ struct TranscriptConverter {
                 // FoundationModels renders tool-output attachments; this adapter
                 // does not yet. Warn, so a dropped image shows up in the log.
                 logger.warning(
-                    "Dropping an attachment in tool output (label: \(attachment.label ?? "none")); tool-output images are not yet forwarded to the model"
-                )
+                    "Dropping an attachment in tool output. Tool-output images are not yet forwarded to the model",
+                    metadata: ["label": attachment.label ?? "none"])
                 return nil
             default:
                 logger.debug("Skipping unsupported tool-output segment")
