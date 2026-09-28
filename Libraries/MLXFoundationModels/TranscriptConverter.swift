@@ -6,15 +6,14 @@
 import CoreImage
 import Foundation
 import FoundationModels
+import MLX
 import MLXLMCommon
-import os.log
 
 /// Converts FoundationModels transcript entries to MLX chat message format.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct TranscriptConverter {
 
-    private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX", category: "TranscriptConverter")
+    private static let logger = MLXLogger(label: "TranscriptConverter")
 
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
@@ -33,7 +32,7 @@ struct TranscriptConverter {
                 let dropped = try extractImages(from: instructions.segments, in: entry)
                 if !dropped.isEmpty {
                     logger.warning(
-                        "Dropping \(dropped.count, privacy: .public) image attachment(s) in an instructions entry; attach images to a prompt instead so the model receives them"
+                        "Dropping \(dropped.count) image attachment(s) in an instructions entry; attach images to a prompt instead so the model receives them"
                     )
                 }
                 guard let text else {
@@ -86,7 +85,7 @@ struct TranscriptConverter {
                         arguments = decoded
                     } else {
                         logger.warning(
-                            "Failed to decode arguments for tool: \(call.toolName, privacy: .public)"
+                            "Failed to decode arguments for tool: \(call.toolName)"
                         )
                         arguments = [:]
                     }
@@ -138,7 +137,7 @@ struct TranscriptConverter {
                 // FoundationModels renders tool-output attachments; this adapter
                 // does not yet. Warn, so a dropped image shows up in the log.
                 logger.warning(
-                    "Dropping an attachment in tool output (label: \(attachment.label ?? "none", privacy: .public)); tool-output images are not yet forwarded to the model"
+                    "Dropping an attachment in tool output (label: \(attachment.label ?? "none")); tool-output images are not yet forwarded to the model"
                 )
                 return nil
             default:

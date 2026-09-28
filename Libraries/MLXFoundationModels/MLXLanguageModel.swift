@@ -15,7 +15,6 @@ import Foundation
 import FoundationModels
 import MLXLMCommon
 import MLX
-import os.log
 import MLXGuidedGeneration
 
 // MARK: - MLXLanguageModel
@@ -612,10 +611,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// prewarm (bad id, network gone, OOM). Note it cannot intercept a
         /// Metal command-buffer assertion abort — that is a process crash, not
         /// a catchable Swift error.
-        private static let logger = Logger(
-            subsystem: "com.apple.FoundationModels-MLX", category: "Prewarm")
-        private static let protocolLogger = Logger(
-            subsystem: "com.apple.FoundationModels-MLX", category: "TokenStreamProtocol")
+        private static let logger = MLXLogger(label: "Prewarm")
+        private static let protocolLogger = MLXLogger(label: "TokenStreamProtocol")
 
         /// Prewarms the model: loads weights and pre-compiles Metal shaders so
         /// the first `respond()` pays no cold-start shader-JIT cost.
@@ -644,7 +641,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     try await model.warmUp()
                 } catch {
                     Self.logger.error(
-                        "MLX prewarm failed for \(model.modelID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                        "MLX prewarm failed for \(model.modelID): \(error.localizedDescription)"
                     )
                 }
             }
