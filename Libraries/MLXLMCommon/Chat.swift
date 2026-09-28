@@ -6,7 +6,7 @@ private let messageContentLogger = MLXLogger(label: "MessageContent")
 
 /// Where a message's text goes relative to its images, and whether video parts
 /// are emitted. Each generator keeps the arrangement it already had.
-public enum MessageContentLayout: Sendable {
+package enum MessageContentLayout: Sendable {
     /// Images, then videos, then the caller's text. Qwen2VL, Qwen3VL, Gemma4.
     case imagesThenVideosThenText
     /// Images, then the caller's text. No video parts. Mistral3, FastVLM.
@@ -196,7 +196,7 @@ extension MessageGenerator {
     /// Nothing separates the parts, so a message with no labels returns what a
     /// generator returned before labels existed. The text part is emitted even when
     /// the content is empty, matching what the generators did.
-    public func contentParts(
+    package func contentParts(
         for message: Chat.Message, layout: MessageContentLayout
     ) -> [[String: String]] {
         var parts: [[String: String]] = []
