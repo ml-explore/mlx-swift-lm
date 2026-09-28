@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import MLX
 import MLXLMCommon
 import MLXVLM
 import Testing
@@ -104,5 +105,42 @@ struct SpecialTokenLabelScreenTests {
         let content = try #require(messages.first?["content"] as? [[String: String]])
         #expect(content.filter { $0["type"] == "image" }.count == 1)
         #expect(!content.contains { $0["text"] == "[IMG]" })
+    }
+
+    @Test("A configured generator gets screened labels too")
+    func configuredGeneratorPathIsScreened() async throws {
+        let delegate = CapturingUserInputProcessor()
+        let processor = MessageGeneratorUserInputProcessor(
+            processor: delegate, messageGenerator: Mistral3MessageGenerator(),
+            tokenizer: mistralTokenizer)
+
+        _ = try await processor.prepare(
+            input: UserInput(chat: [
+                .user("what is in this picture?", images: [image("a", label: "IMG")])
+            ]))
+
+        guard case .messages(let messages) = delegate.prompt else {
+            Issue.record("expected generated messages, got \(String(describing: delegate.prompt))")
+            return
+        }
+        let content = try #require(messages.first?["content"] as? [[String: String]])
+        #expect(content.filter { $0["type"] == "image" }.count == 1)
+        #expect(!content.contains { $0["text"] == "[IMG]" })
+    }
+}
+
+/// `@unchecked Sendable` because the lock serializes the stored prompt.
+private final class CapturingUserInputProcessor: UserInputProcessor, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPrompt: UserInput.Prompt?
+
+    var prompt: UserInput.Prompt? {
+        lock.withLock { storedPrompt }
+    }
+
+    func prepare(input: UserInput) async throws -> LMInput {
+        let prompt = input.prompt
+        lock.withLock { storedPrompt = prompt }
+        return LMInput(tokens: MLXArray([Int32(0)]))
     }
 }

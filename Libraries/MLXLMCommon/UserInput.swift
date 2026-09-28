@@ -603,6 +603,7 @@ public protocol UserInputProcessor: Sendable {
 public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
     private let processor: any UserInputProcessor
     private let messageGenerator: any MessageGenerator
+    private let tokenizer: (any Tokenizer)?
 
     public init(
         processor: any UserInputProcessor,
@@ -610,10 +611,21 @@ public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
     ) {
         self.processor = processor
         self.messageGenerator = messageGenerator
+        self.tokenizer = nil
+    }
+
+    package init(
+        processor: any UserInputProcessor,
+        messageGenerator: any MessageGenerator,
+        tokenizer: any Tokenizer
+    ) {
+        self.processor = processor
+        self.messageGenerator = messageGenerator
+        self.tokenizer = tokenizer
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        var input = input
+        var input = tokenizer.map { input.removingSpecialTokenLabels(using: $0) } ?? input
         input.prompt = .messages(messageGenerator.generate(from: input))
         return try await processor.prepare(input: input)
     }
