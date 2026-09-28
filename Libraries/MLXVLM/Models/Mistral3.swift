@@ -614,7 +614,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray?,
         pixelValues: MLXArray?,
         imageSizes: [(Int, Int)]?
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         guard var pixelValues, let imageSizes else {
             guard let inputIds else {
                 fatalError("Either inputIds or pixelValues must be provided")
@@ -654,7 +654,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         let imageFeatures = multiModalProjector(selectedFeatures, imageSizes: imageSizes)
 
         // Merge embeddings
-        return mergeInputIdsWithImageFeatures(
+        return try mergeInputIdsWithImageFeatures(
             imageTokenIndex: config.imageTokenIndex,
             imageFeatures: imageFeatures,
             inputsEmbeds: inputsEmbeds,
@@ -667,7 +667,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         imageFeatures: MLXArray,
         inputsEmbeds: MLXArray,
         inputIds: MLXArray
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let (_, numImagePatches, _) = (
             imageFeatures.dim(0),
             imageFeatures.dim(1),
@@ -682,7 +682,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
 
         // Validate that the number of image tokens matches the number of image patches
         guard imagePositions.count == numImagePatches else {
-            fatalError(
+            throw VLMError.processing(
                 "Image token count (\(imagePositions.count)) does not match image patches (\(numImagePatches)). Ensure the processor adds exactly numImagePatches image tokens."
             )
         }
@@ -736,7 +736,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
             imageSizes = nil
         }
 
-        let embeddings = getInputEmbeddings(
+        let embeddings = try getInputEmbeddings(
             inputIds: inputIds,
             pixelValues: pixelValues,
             imageSizes: imageSizes
