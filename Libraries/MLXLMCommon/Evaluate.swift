@@ -2368,7 +2368,7 @@ private func generateLoopTask<
             // `while let token = iterator.next()` form) allowed one extra asyncEval to be
             // submitted post-cancellation, which faults if the app has backgrounded
             // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
-            // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+            // post-loop block below assigns `.cancelled`; Stream.defaultStream.synchronize() still
             // settles any in-flight evaluation at the end of the task body.
             tokenLoop: while !Task.isCancelled {
                 guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }

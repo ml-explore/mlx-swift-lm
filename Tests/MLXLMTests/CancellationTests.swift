@@ -23,7 +23,7 @@ final class CancellationTests: XCTestCase {
     }
 
     // Stream-consumer break cancels the task via onTermination. The generation task
-    // must still settle (run Stream().synchronize()) before task.value returns.
+    // must still settle (run Stream.defaultStream.synchronize()) before task.value returns.
     func testGenerateTaskSettlesAfterStreamCancellation() async throws {
         let model = makeTinyModel()
         let tokenizer = TestTokenizer()
@@ -44,7 +44,7 @@ final class CancellationTests: XCTestCase {
         // continuation.onTermination → task.cancel().
         for await _ in stream { break }
 
-        // Must complete without hanging. Failure here means Stream().synchronize()
+        // Must complete without hanging. Failure here means Stream.defaultStream.synchronize()
         // was not reached or the task body was not allowed to run to completion.
         await task.value
     }

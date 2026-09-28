@@ -316,7 +316,7 @@ asyncEval(nextToken)  // Starts computation, doesn't wait
 eval(result)  // Waits for completion
 
 // Stream synchronize
-Stream().synchronize()  // Wait for all pending operations
+Stream.defaultStream.synchronize()  // Wait for all pending operations
 ```
 
 ## Task Cancellation Best Practices
