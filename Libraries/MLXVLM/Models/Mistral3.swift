@@ -1012,7 +1012,8 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) async throws -> LMInput {
         // Generate structured messages using the message generator
-        let messages = Mistral3MessageGenerator().generate(from: input)
+        let messages = Mistral3MessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
 
         if input.images.isEmpty {
             // No image - just apply chat template

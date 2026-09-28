@@ -108,7 +108,8 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen3VLMessageGenerator().generate(from: input)
+        let messages = Qwen3VLMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
         var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages,
             tools: input.tools,

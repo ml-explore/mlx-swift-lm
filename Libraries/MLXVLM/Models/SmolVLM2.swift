@@ -227,7 +227,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)  // TODO: Create SmolVLM2MessageGenerator
+        let messages = Qwen2VLMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))  // TODO: Create SmolVLM2MessageGenerator
 
         if input.images.isEmpty && input.videos.isEmpty {
             // No image scenario

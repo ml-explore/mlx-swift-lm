@@ -1417,7 +1417,8 @@ public struct MuseGlimmerProcessor: UserInputProcessor {
         // model without corresponding features.
         guard input.videos.isEmpty else { throw VLMError.singleMediaTypeAllowed }
 
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let messages = Qwen2VLMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
         var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools, additionalContext: input.additionalContext)
 

@@ -1,7 +1,9 @@
 // Copyright © 2026 Apple Inc.
 
+import CoreImage
 import Foundation
 import HuggingFace
+import MLX
 import MLXHuggingFace
 import MLXLMCommon
 import MLXVLM
@@ -176,6 +178,41 @@ struct AttachmentLabelTemplateIntegrationTests {
         #expect(
             !prompt.contains(family.placeholder + "[A]"),
             "\(family): the first label must not follow a placeholder; got: \(prompt)")
+    }
+
+    /// David's repro through the real processor. The label `IMG` renders as `[IMG]`, and
+    /// `Mistral3VLMProcessor` splits the decoded prompt on that text.
+    @Test func mistral3LabelDoesNotAddAnImageBlock() async throws {
+        let directory = try await templateDownloader.download(
+            id: "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+            revision: "a962dcb09eee4169c890e544c9eb938f1113fdee",
+            matching: ["*.json", "*.jinja"],
+            useLatest: false,
+            progressHandler: { _ in })
+        let tokenizer = try await templateTokenizerLoader.load(from: directory)
+        let processor = try await VLMProcessorTypeRegistry.shared.createModel(
+            configuration: try Data(
+                contentsOf: directory.appending(component: "processor_config.json")),
+            processorType: "Mistral3Processor", tokenizer: tokenizer)
+        let imageTokenID = try #require(tokenizer.convertTokenToId("[IMG]"))
+        let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+
+        func imageTokenCount(label: String?) async throws -> Int {
+            let input = UserInput(chat: [
+                .user(Self.prose, images: [.ciImage(image, label: label)])
+            ])
+            let prepared = try await processor.prepare(input: input)
+            return prepared.text.tokens.asType(.int32).asArray(Int32.self)
+                .filter { Int($0) == imageTokenID }.count
+        }
+
+        let unlabeled = try await imageTokenCount(label: nil)
+        let labeled = try await imageTokenCount(label: "IMG")
+        #expect(unlabeled > 0, "the unlabeled prompt must carry one image block")
+        #expect(
+            labeled == unlabeled,
+            "one image must give one image block; got \(labeled) image tokens, expected \(unlabeled)"
+        )
     }
 
     #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)

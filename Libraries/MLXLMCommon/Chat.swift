@@ -289,3 +289,31 @@ public struct NoSystemMessageGenerator: MessageGenerator {
             .map { generate(message: $0) }
     }
 }
+
+extension UserInput {
+
+    /// A copy of this input without the chat image labels that `tokenizer` reads as
+    /// special tokens. Each image stays, so later labels still match their images.
+    package func removingSpecialTokenLabels(using tokenizer: any Tokenizer) -> UserInput {
+        guard case .chat(let messages) = prompt else { return self }
+        var screened = self
+        screened.prompt = .chat(
+            messages.map { message in
+                var message = message
+                message.images = message.images.map { image in
+                    guard let label = image.label,
+                        let names = tokenizer.specialTokenNames(inImageLabel: label)
+                    else { return image }
+                    let named = names.isEmpty ? "a special token" : names.joined(separator: ", ")
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt, because this model's tokenizer reads it as \(named)"
+                    )
+                    var image = image
+                    image.label = nil
+                    return image
+                }
+                return message
+            })
+        return screened
+    }
+}

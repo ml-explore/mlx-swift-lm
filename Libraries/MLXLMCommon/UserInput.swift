@@ -124,8 +124,9 @@ public struct UserInput {
         ///
         /// A model reads this as text, so a smaller vision model may shorten it or ignore
         /// it. Do not rely on a name coming back unchanged: a short single word comes back
-        /// more often than `IMG_4021`. Avoid a name whose bracketed form is a token the
-        /// tokenizer knows, such as `IMG` on Mistral, which becomes an image placeholder.
+        /// more often than `IMG_4021`. A vision processor leaves out and logs a name whose
+        /// bracketed form is one of its tokenizer's special tokens, such as `IMG` on Mistral.
+        /// A message generator used alone has no tokenizer, so it cannot catch such a name.
         ///
         /// Keep `<`, `>`, `|`, `[` and `]` out of a name. Vision models build their image
         /// placeholders from those characters, so such a name can reach the prompt as a

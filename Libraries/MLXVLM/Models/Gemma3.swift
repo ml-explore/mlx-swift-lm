@@ -1080,7 +1080,8 @@ public struct Gemma3Processor: UserInputProcessor {
 
     public func prepare(input: UserInput) async throws -> LMInput {
         // Use structured content message generator for Gemma3's chat template
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        let messages = Qwen2VLMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
 
         var promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools,

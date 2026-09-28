@@ -983,7 +983,8 @@ public struct FastVLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: MLXLMCommon.UserInput) async throws -> MLXLMCommon.LMInput {
-        let messages = FastVLMMessageGenerator().generate(from: input)
+        let messages = FastVLMMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
 
         if input.images.isEmpty {
             // No image scenario
