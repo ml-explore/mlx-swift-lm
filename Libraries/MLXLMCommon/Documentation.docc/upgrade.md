@@ -272,11 +272,39 @@ The `defaultHubApi` global has been removed. Hugging Face Hub access is now prov
 - `ModelFactory._load(hub:configuration:progressHandler:)` → `_load(configuration: ResolvedModelConfiguration)`
 - `ModelFactory._loadContainer`: removed (base `loadContainer` now builds the container from `_load`)
 
-### `UserInput.Image`
+### `UserInput.Image`, `UserInput.Video` and `UserInput.Audio`
 
-`UserInput.Image` was an enum with `ciImage`, `url` and `array` cases. It is now a struct holding a `source` of that enum, plus an optional `label` that a vision message generator writes into the prompt as `[label]` immediately before that image.
+These three media types were enums with these cases:
 
-Construction is unchanged, because the three cases are now static functions with a defaulted label: `UserInput.Image.url(someURL)` still compiles. One form changes:
+- `UserInput.Image`: `ciImage`, `url` and `array`.
+- `UserInput.Video`: `avAsset`, `url` and `frames`.
+- `UserInput.Audio`: `url` and `array`.
 
-- A pattern match moves to the source. `case .ciImage(let image) = input` becomes `case .ciImage(let image) = input.source`.
+Each type is now a struct with a nested `Source` enum. `Source` has the old cases and their payloads. The struct also has a `source` property and an `init(source:)`.
+
+`UserInput.Image` also has an optional `label`. A vision message generator writes the label into the prompt as `[label]`, immediately before the image.
+
+Each old case is now a static function with the same name and argument labels. So the code that creates a media value still compiles:
+
+```swift
+let image = UserInput.Image.url(imageURL)
+let videos = urls.map(UserInput.Video.url)
+let audio: UserInput.Audio = .array(samples)
+```
+
+A `switch`, `if case`, `guard case` or `for case` that matches a media value against a case no longer compiles. Match against the `source` of the media value instead:
+
+```swift
+// Before
+switch video {
+case .url(let url): print(url)
+default: break
+}
+
+// After
+switch video.source {
+case .url(let url): print(url)
+default: break
+}
+```
 
