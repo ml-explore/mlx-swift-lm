@@ -22,7 +22,7 @@ extension UserInput.Audio {
 
     public func asMLXArray(processing: UserInput.AudioProcessing = .init()) async throws -> MLXArray
     {
-        switch self {
+        switch source {
         case .url(let url):
             #if canImport(AVFoundation)
             let asset = AVURLAsset(url: url)

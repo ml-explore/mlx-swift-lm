@@ -232,9 +232,26 @@ public struct UserInput {
     }
 
     /// Representation of an audio resource.
-    public enum Audio {
-        case url(URL)
-        case array(MLXArray)
+    public struct Audio {
+
+        public enum Source {
+            case url(URL)
+            case array(MLXArray)
+        }
+
+        public var source: Source
+
+        public init(source: Source) {
+            self.source = source
+        }
+
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array))
+        }
 
         // See also UserInput+Audio
     }
