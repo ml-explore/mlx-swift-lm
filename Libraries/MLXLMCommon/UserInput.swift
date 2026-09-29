@@ -76,13 +76,36 @@ public struct UserInput {
     }
 
     /// Representation of a video resource.
-    public enum Video {
+    public struct Video {
+
+        public enum Source {
+            #if canImport(AVFoundation)
+            case avAsset(AVAsset)
+            #endif
+            case url(URL)
+            /// Useful for decoded frames held in memory
+            case frames([VideoFrame])
+        }
+
+        public var source: Source
+
+        public init(source: Source) {
+            self.source = source
+        }
+
         #if canImport(AVFoundation)
-        case avAsset(AVAsset)
+        public static func avAsset(_ asset: AVAsset) -> Self {
+            Self(source: .avAsset(asset))
+        }
         #endif
-        case url(URL)
-        /// Useful for decoded frames held in memory
-        case frames([VideoFrame])
+
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        public static func frames(_ frames: [VideoFrame]) -> Self {
+            Self(source: .frames(frames))
+        }
 
         #if canImport(AVFoundation)
         @available(
@@ -90,7 +113,7 @@ public struct UserInput {
             message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
         )
         public func asAVAsset() -> AVAsset {
-            switch self {
+            switch source {
             case .avAsset(let asset):
                 return asset
             case .url(let url):

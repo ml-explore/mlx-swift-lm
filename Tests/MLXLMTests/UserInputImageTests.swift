@@ -53,6 +53,11 @@ struct UserInputImageTests {
         let images = urls.map(UserInput.Image.url)
         #expect(images.count == 2)
         #expect(images.allSatisfy { $0.label == nil })
+        let paths = images.compactMap { image -> String? in
+            guard case .url(let url) = image.source else { return nil }
+            return url.path
+        }
+        #expect(paths == ["/tmp/a.png", "/tmp/b.png"])
     }
 
     @Test("A label can be set after construction")
