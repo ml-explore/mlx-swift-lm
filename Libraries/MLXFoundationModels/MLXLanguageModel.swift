@@ -394,9 +394,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // per the Metal teardown invariant. `prepare` is CPU-only, so on a
             // pre-forward-pass throw this just synchronizes an idle stream.
             defer { Stream.gpu.synchronize() }
-            // A literal prompt, so no attachment label reaches the tokenizer here.
-            // Anything that made this prepare a real transcript would need the
-            // `AttachmentLabelValidator` call that `respond` makes first.
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [.user("warmup")]))
             let params = GenerateParameters(maxTokens: 1)
@@ -665,9 +662,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             let messages = collected
 
-            // The SDK's vision guard never inspects `.attachment` segments, so the
-            // adapter enforces `.vision` here. Only prompt images reach this point:
-            // conversion above dropped instructions and tool-output attachments.
+            // The SDK's vision check does not cover `.attachment` segments, so the adapter
+            // must enforce `.vision` for image attachments itself.
             if !model.capabilities.contains(.vision),
                 messages.contains(where: { !$0.images.isEmpty })
             {
@@ -715,10 +711,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // reasoning config we route on.
             let declaresReasoning = model.capabilities.contains(.reasoning)
             let configurationResolver = model.configurationResolver
-            // Attachment labels, paired with the prompt entry each came from so a
-            // rejection can name it. Captured here, before the actor hop, because
-            // `Transcript.Entry` is `Sendable` but `request` should not be caught
-            // in the perform closure.
             let labeledAttachments = TranscriptConverter.labeledAttachments(in: request.transcript)
 
             do {
@@ -732,13 +724,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // .Video are not Sendable), so route the array through
                 // perform(nonSendable:_:) which boxes it across the actor hop.
                 try await container.perform(nonSendable: messages) { context, messages in
-                    // Reject a label the tokenizer would turn into a special
-                    // token, before it is tokenized into the prompt. This runs
-                    // here rather than beside the vision gate above because the
-                    // answer is per-model and the tokenizer only exists through
-                    // the loaded container: the gate can fail before any download,
-                    // this cannot. The asymmetry is deliberate. Ordering within
-                    // the request is still stable, since the gate runs first.
                     try AttachmentLabelValidator.default.validate(
                         labeledAttachments, with: context.tokenizer)
 

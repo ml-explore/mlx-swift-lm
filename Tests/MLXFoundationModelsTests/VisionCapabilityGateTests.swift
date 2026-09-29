@@ -11,10 +11,9 @@ import Testing
 
 /// The adapter is the only place that can enforce `.vision` for labeled
 /// image attachments, because the SDK's own vision guard doesn't inspect
-/// these public attachment segments, only its own internal image path. The
-/// gate covers prompt attachments: instructions attachments are dropped
-/// during conversion and never reach it. The gate must fire before any
-/// weight download, so these tests run with no model on disk.
+/// these public attachment segments, only its own internal image path.
+/// The gate must fire before any weight download, so these tests run with
+/// no model on disk.
 @Suite("MLXLanguageModel vision capability gate")
 struct VisionCapabilityGateTests {
 
@@ -58,12 +57,8 @@ struct VisionCapabilityGateTests {
         }
     }
 
-    /// An image carried only on the instructions is dropped during conversion,
-    /// so it never reaches the gate and a model without `.vision` must not be
-    /// rejected for it. This is deliberate: it matches FoundationModels, which
-    /// also ignores images attached to a session's instructions. The request
-    /// still fails, but for the unrelated reason that this stub model has no
-    /// weights on disk, which is proof the gate let it through.
+    /// The stub model has no weights, so a failed weight load shows that the gate let
+    /// the request through.
     @Test("Instructions-only image does not trip the vision gate")
     func instructionsOnlyImageDoesNotTripTheGate() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -96,9 +91,6 @@ struct VisionCapabilityGateTests {
                 to: request, model: model, streamingInto: channel)
             Issue.record("Expected the weight load to fail, but respond returned")
         } catch let error as LanguageModelError {
-            // Any LanguageModelError here means the adapter rejected the
-            // request itself rather than getting as far as the weights, and a
-            // vision rejection specifically is the regression this guards.
             Issue.record(
                 "Expected the missing weights to fail the request, got a rejection instead: \(error)"
             )

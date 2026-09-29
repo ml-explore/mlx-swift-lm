@@ -7,12 +7,8 @@ import Testing
 
 @testable import MLXVLM
 
-/// A prompt whose image-token count disagrees with the patch count the vision tower
-/// produced must raise an error the caller can catch.
 struct VLMImageTokenMismatchTests {
 
-    /// Tiny Mistral3. `image_token_index` is 10, and `spatial_merge_size` 1 keeps the
-    /// patch count equal to the grid, so a test can predict it.
     private static func makeTinyMistral3() throws -> Mistral3VLM {
         let json = """
             {
@@ -51,9 +47,6 @@ struct VLMImageTokenMismatchTests {
         }
     }
 
-    /// One 16x16 image against a `patch_size` of 8 gives a 2x2 grid, so the vision
-    /// tower produces 4 patches. The prompt carries a single image token, which is the
-    /// mismatch under test.
     @Test("Mistral3 raises rather than aborting when the counts disagree")
     func mistral3RaisesOnMismatch() throws {
         let model = try Self.makeTinyMistral3()
@@ -70,7 +63,6 @@ struct VLMImageTokenMismatchTests {
         }
     }
 
-    /// Tiny LFM2VL. `image_token_id` is 396 by default, so the prompt below uses it.
     private static func makeTinyLFM2VL() throws -> LFM2VL {
         let json = """
             {
@@ -108,7 +100,6 @@ struct VLMImageTokenMismatchTests {
     func lfm2vlRaisesOnMismatch() throws {
         let model = try Self.makeTinyLFM2VL()
         let tokens = MLXArray([Int32(1), 396, 2]).expandedDimensions(axis: 0)
-        // A 2x2 patch grid, so the tower yields 4 features against the prompt's 1 token.
         let pixels = MLXRandom.normal([1, 4, 3 * 8 * 8]).asType(.float32)
         let input = LMInput(
             text: .init(tokens: tokens),

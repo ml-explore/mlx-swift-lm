@@ -6,8 +6,6 @@ import MLX
 import MLXLMCommon
 import Testing
 
-/// `UserInput.Image` is a struct, so the factories must produce what the enum
-/// cases produced, and a label must default to none.
 @Suite("UserInput.Image label")
 struct UserInputImageTests {
 

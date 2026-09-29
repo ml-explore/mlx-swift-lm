@@ -25,9 +25,9 @@ struct TranscriptConverter {
         try entries.compactMap { entry -> Chat.Message? in
             switch entry {
             case .instructions(let instructions):
-                // Attachments are dropped, matching FoundationModels
-                // (rdar://163210652). Carrying them would count pixels that the
-                // templates emit no placeholder for.
+                // Drop instruction attachments, as FoundationModels does (rdar://163210652).
+                // Some chat templates, such as Qwen3-VL's, write no image placeholder for a
+                // system message. The processor would then get pixels without a placeholder.
                 let text = extractText(from: instructions.segments)
                 let dropped = try extractImages(from: instructions.segments, in: entry)
                 if !dropped.isEmpty {
@@ -42,8 +42,9 @@ struct TranscriptConverter {
                 return Chat.Message.system(text)
 
             case .prompt(let prompt):
-                // Each image carries its own label, which its message generator
-                // writes into the prompt.
+                // User message for prompts. Labeled image attachments
+                // (public `.attachment` segments) ride along as message
+                // images; text is still concatenated as before.
                 let text = extractText(from: prompt.segments)
                 let images = try extractImages(from: prompt.segments, in: entry)
                 let content = text ?? ""
@@ -134,8 +135,6 @@ struct TranscriptConverter {
             case .structure(let structuredSegment):
                 return structuredSegment.content.jsonString
             case .attachment(let attachment):
-                // FoundationModels renders tool-output attachments; this adapter
-                // does not yet. Warn, so a dropped image shows up in the log.
                 logger.warning(
                     "Dropping an attachment in tool output. Tool-output images are not yet forwarded to the model",
                     metadata: ["label": attachment.label ?? "none"])
@@ -171,18 +170,15 @@ struct TranscriptConverter {
         return combined.isEmpty ? nil : combined
     }
 
-    /// Extracts image inputs, each carrying its attachment label, from
-    /// attachment segments.
+    /// Extracts image inputs from image attachment segments.
     ///
-    /// `Transcript.ImageAttachment` hands back unrotated pixels and keeps
-    /// `orientation` as metadata, so the transform is applied here.
+    /// `Transcript.ImageAttachment.ciImage` does not apply `orientation`, so this function
+    /// must apply it.
     ///
-    /// - Parameters:
-    ///   - segments: Array of transcript segments
-    ///   - entry: The entry these segments belong to, for error reporting
+    /// - Parameter segments: Array of transcript segments
     /// - Returns: The image inputs found, in segment order
-    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
-    ///   attachment carries content this adapter cannot render.
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an attachment is
+    ///   not an image.
     private static func extractImages(
         from segments: [Transcript.Segment],
         in entry: Transcript.Entry
@@ -205,16 +201,12 @@ struct TranscriptConverter {
         }
     }
 
-    /// A distinct attachment label and the entry that carried it, so a label
-    /// rejected by ``AttachmentLabelValidator`` can name the prompt it came from.
     struct LabeledAttachment: Sendable {
         let label: String
         let entry: Transcript.Entry
     }
 
-    /// The distinct attachment labels present in `entries`, in first-seen order,
-    /// each paired with the entry it was first seen in. Prompt entries only,
-    /// because instructions attachments are dropped.
+    /// Reads only prompt entries, because the adapter drops the attachments of every other entry.
     static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
         -> [LabeledAttachment]
     {

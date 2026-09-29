@@ -6,12 +6,9 @@ import MLXLMCommon
 import MLXVLM
 import Testing
 
-/// Encodes each listed special token as one id, and each other character as its
-/// own id. `skipSpecialTokens: true` drops exactly the special ids.
 private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
     let specials: [String]
 
-    /// Ordinary characters sit well clear of the special ids.
     private static let scalarBase = 1_000_000
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
@@ -84,7 +81,7 @@ struct SpecialTokenLabelScreenTests {
 
     @Test("A text prompt comes back unchanged")
     func textPromptIsUnchanged() {
-        // `UserInput(prompt:images:)` builds a chat prompt, so set `.text` directly.
+        // `UserInput(prompt:images:)` builds a `.chat` prompt, so set `.text` directly.
         var input = UserInput(prompt: "hello", images: [image("a", label: "IMG")])
         input.prompt = .text("hello")
 
@@ -129,7 +126,7 @@ struct SpecialTokenLabelScreenTests {
     }
 }
 
-/// `@unchecked Sendable` because the lock serializes the stored prompt.
+/// `@unchecked Sendable` is safe only while `lock` guards every access to `storedPrompt`.
 private final class CapturingUserInputProcessor: UserInputProcessor, @unchecked Sendable {
     private let lock = NSLock()
     private var storedPrompt: UserInput.Prompt?

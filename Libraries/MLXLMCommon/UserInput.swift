@@ -104,11 +104,9 @@ public struct UserInput {
         #endif
     }
 
-    /// An image resource, and an optional name for it. A message generator writes
-    /// the name into the prompt as `[label]`, immediately before this image.
+    /// Representation of an image resource.
     public struct Image {
 
-        /// Where this image's pixels come from.
         public enum Source {
             #if canImport(CoreImage)
             case ciImage(CIImage)
@@ -117,31 +115,21 @@ public struct UserInput {
             case array(MLXArray)
         }
 
-        /// Where this image's pixels come from.
         public var source: Source
 
-        /// Optional name for this image, rendered into the prompt as `[label]`.
-        ///
-        /// A model reads this as text, so a smaller vision model may shorten it or ignore
-        /// it. Do not rely on a name coming back unchanged: a short single word comes back
-        /// more often than `IMG_4021`. A vision processor leaves out and logs a name whose
-        /// bracketed form is one of its tokenizer's special tokens, such as `IMG` on Mistral.
-        /// A message generator used alone has no tokenizer, so it cannot catch such a name.
-        ///
-        /// Keep `<`, `>`, `|`, `[` and `]` out of a name. Vision models build their image
-        /// placeholders from those characters, so such a name can reach the prompt as a
-        /// placeholder. `MLXFoundationModels` refuses such a name with an error. Elsewhere
-        /// the name is left out of the prompt and logged.
+        /// Text that a vision message generator writes into the prompt as `[label]`,
+        /// immediately before this image. The generator leaves out and logs a label that
+        /// contains `<`, `>`, `|`, `[` or `]`. A vision processor also leaves out a label
+        /// whose `[label]` form contains a special token, such as `IMG` on Mistral3.
         public var label: String?
 
-        /// The characters vision models build their image placeholders from.
+        /// The characters that delimit image placeholders, such as `<|image_pad|>` and `[IMG]`.
         package static let markerCharacters: Set<Character> = ["<", ">", "|", "[", "]"]
 
         package var labelMarkerCharacter: Character? {
             label?.first(where: Self.markerCharacters.contains)
         }
 
-        /// The text a message generator writes into the prompt for `label`.
         package static func promptText(forLabel label: String) -> String {
             "[\(label)]"
         }
@@ -152,33 +140,33 @@ public struct UserInput {
         }
 
         #if canImport(CoreImage)
-        /// An image from a `CIImage`, with an optional label.
         public static func ciImage(_ image: CIImage, label: String? = nil) -> Self {
             Self(source: .ciImage(image), label: label)
         }
 
-        /// An image from a `CIImage`, usable where a one-argument function is expected.
+        /// Makes `images.map(UserInput.Image.ciImage)` compile, because a function value
+        /// cannot use the default `label`.
         public static func ciImage(_ image: CIImage) -> Self {
             Self(source: .ciImage(image))
         }
         #endif
 
-        /// An image from a file or remote URL, with an optional label.
         public static func url(_ url: URL, label: String? = nil) -> Self {
             Self(source: .url(url), label: label)
         }
 
-        /// An image from a URL, usable where a one-argument function is expected.
+        /// Makes `urls.map(UserInput.Image.url)` compile, because a function value cannot
+        /// use the default `label`.
         public static func url(_ url: URL) -> Self {
             Self(source: .url(url))
         }
 
-        /// An image from an `MLXArray`, with an optional label.
         public static func array(_ array: MLXArray, label: String? = nil) -> Self {
             Self(source: .array(array), label: label)
         }
 
-        /// An image from an `MLXArray`, usable where a one-argument function is expected.
+        /// Makes `arrays.map(UserInput.Image.array)` compile, because a function value
+        /// cannot use the default `label`.
         public static func array(_ array: MLXArray) -> Self {
             Self(source: .array(array))
         }
@@ -662,29 +650,26 @@ public struct StandInUserInputProcessor: UserInputProcessor {
 
 extension Tokenizer {
 
-    /// The special tokens this tokenizer finds in the prompt text of an image label,
-    /// or `nil` when it reads that text as ordinary text. An empty array still means
-    /// that the label is unsafe.
+    /// The special tokens that `[label]` encodes to, or `nil` if it encodes to none.
+    /// An empty array still means that `[label]` contains a special token.
     package func specialTokenNames(inImageLabel label: String) -> [String]? {
-        // With special tokens added, the tokenizer's own BOS would flag every label.
+        // Special tokens that `encode` adds, such as BOS, would otherwise flag every label.
         let ids = encode(
             text: UserInput.Image.promptText(forLabel: label), addSpecialTokens: false)
         guard containsSpecialToken(ids) else { return nil }
         return specialTokenNames(inIDs: ids)
     }
 
-    /// Whether `ids` holds a token that this tokenizer flags special.
-    ///
-    /// The protocol cannot list special tokens, so this compares a decode with and
-    /// without `skipSpecialTokens`. An added token without the special flag passes,
-    /// so callers must refuse the marker characters too.
+    /// The `Tokenizer` protocol cannot list special tokens, so this function compares a
+    /// decode with and without `skipSpecialTokens`. An added token without the special
+    /// flag passes, so callers must refuse the marker characters too.
     private func containsSpecialToken(_ ids: [Int]) -> Bool {
         decode(tokenIds: ids, skipSpecialTokens: false)
             != decode(tokenIds: ids, skipSpecialTokens: true)
     }
 
-    /// The special tokens in `ids`, in order and without repeats. Each name comes from
-    /// `convertIdToToken`, because decoding one id can change the token's text.
+    /// Each name comes from `convertIdToToken`, because decoding one id can change the
+    /// token's text.
     private func specialTokenNames(inIDs ids: [Int]) -> [String] {
         var names: [String] = []
         var seen = Set<Int>()

@@ -4,14 +4,9 @@ import MLX
 
 private let messageContentLogger = MLXLogger(label: "MessageContent")
 
-/// Where a message's text goes relative to its images, and whether video parts
-/// are emitted. Each generator keeps the arrangement it already had.
 package enum MessageContentLayout: Sendable {
-    /// Images, then videos, then the caller's text. Qwen2VL, Qwen3VL, Gemma4.
     case imagesThenVideosThenText
-    /// Images, then the caller's text. No video parts. Mistral3, FastVLM.
     case imagesThenText
-    /// The caller's text, then images. No video parts. GlmOcr.
     case textThenImages
 }
 
@@ -189,13 +184,6 @@ extension MessageGenerator {
         }
     }
 
-    /// The content-part array for a message: `[label]` immediately before each
-    /// labeled image, a bare image part for each unlabeled image, video parts where
-    /// the layout emits them, and the caller's text.
-    ///
-    /// Nothing separates the parts, so a message with no labels returns what a
-    /// generator returned before labels existed. The text part is emitted even when
-    /// the content is empty, matching what the generators did.
     package func contentParts(
         for message: Chat.Message, layout: MessageContentLayout
     ) -> [[String: String]] {
@@ -208,7 +196,6 @@ extension MessageGenerator {
         func appendImages() {
             for image in message.images {
                 if let marker = image.labelMarkerCharacter {
-                    // Emitting it would add a placeholder the model counts against pixels.
                     messageContentLogger.warning(
                         "Leaving an image name out of the prompt: it holds `\(marker)`, which vision models build their image placeholders from"
                     )
@@ -292,8 +279,8 @@ public struct NoSystemMessageGenerator: MessageGenerator {
 
 extension UserInput {
 
-    /// A copy of this input without the chat image labels that `tokenizer` reads as
-    /// special tokens. Each image stays, so later labels still match their images.
+    /// Returns the input unchanged if its prompt is not `.chat`. Call this method before a
+    /// message generator turns the prompt into `.messages`.
     package func removingSpecialTokenLabels(using tokenizer: any Tokenizer) -> UserInput {
         guard case .chat(let messages) = prompt else { return self }
         var screened = self

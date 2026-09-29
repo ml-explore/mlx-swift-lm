@@ -483,11 +483,6 @@ struct TranscriptConverterTests {
     func testInstructionsImageAttachmentIsDropped() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        // FoundationModels drops images attached to instructions (see
-        // rdar://163210652), and both Qwen3-VL and Gemma4 mishandle a system
-        // message that carries images: the templates emit no vision placeholder
-        // for them while the processor is still handed the pixels, so the counts
-        // disagree. Dropping matches the framework and avoids that mismatch.
         let attachment = Transcript.AttachmentSegment(
             content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
             label: "reference")
@@ -667,9 +662,6 @@ struct TranscriptConverterTests {
     func testOrientationIsAppliedToTheImageHandedToTheModel() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        // The SDK stores `orientation` as metadata and returns unrotated pixels
-        // from `ciImage`, so a `.right` attachment reaches the model sideways
-        // unless the adapter applies the transform itself.
         let wide = makeSolidCGImage(width: 8, height: 2)
         let attachment = Transcript.AttachmentSegment(
             content: .image(Transcript.ImageAttachment(wide, orientation: .right)),

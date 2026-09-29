@@ -4,9 +4,6 @@ import Foundation
 import MLXLMCommon
 import Testing
 
-/// The helper that builds a message's content parts. A labeled image is named
-/// immediately before itself, and a message with no labels produces the array
-/// generators produced before labels existed.
 @Suite("Message content parts")
 struct MessageContentPartsTests {
 

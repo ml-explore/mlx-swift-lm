@@ -9,21 +9,11 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-/// A tokenizer whose special tokens the test controls.
-///
-/// Ordinary characters encode as one id per Unicode scalar and decode back to
-/// themselves, so a decode round trip is faithful without a real vocabulary.
-/// Special strings encode to ids the test chooses, and `skipSpecialTokens: true`
-/// drops exactly those, which is the behavior the validator depends on.
 private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
-    /// Special token strings, in match order, paired with their ids.
     let specials: [(text: String, id: Int)]
 
-    /// Added tokens without the special flag: `encode` gives each its own id, but
-    /// `decode(skipSpecialTokens: true)` keeps them.
     var nonSpecialAdded: [(text: String, id: Int)] = []
 
-    /// Ordinary scalars are offset well clear of the special ids.
     private static let scalarBase = 1_000_000
 
     private var allAdded: [(text: String, id: Int)] { specials + nonSpecialAdded }
@@ -40,9 +30,8 @@ private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
                 rest = rest.dropFirst()
             }
         }
-        // A real tokenizer would wrap the text in BOS/EOS here, and both are
-        // special. The validator passes false precisely so that does not reject
-        // every label; encoding them when asked keeps the stub honest about it.
+        // Add a special BOS and EOS when asked, as a real tokenizer does. The tests then
+        // fail if the label check passes `addSpecialTokens: true`.
         return addSpecialTokens ? [bosID] + ids + [eosID] : ids
     }
 
@@ -85,7 +74,6 @@ private struct SpecialTokenStubTokenizer: MLXLMCommon.Tokenizer {
     ) throws -> [Int] { [] }
 }
 
-/// Real ids, so the stubs behave like the tokenizers they stand in for.
 private let qwenTokenizer = SpecialTokenStubTokenizer(specials: [
     ("<|vision_start|>", 151_652),
     ("<|vision_end|>", 151_653),
@@ -99,20 +87,13 @@ private let gemma4Tokenizer = SpecialTokenStubTokenizer(specials: [
     ("<image|>", 258_882),
 ])
 
-/// Mistral-family image tokens are bracket-delimited, which is the same
-/// delimiter a message generator puts around a label. In the published
-/// tokenizer configs for `mlx-community/pixtral-12b-4bit` and
-/// `mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit`, `[IMG]` is id 10
-/// with `special=true`, which is what makes it visible to a check built on
-/// comparing decoding with and without special tokens skipped.
 private let mistralTokenizer = SpecialTokenStubTokenizer(specials: [
     ("[IMG]", 10),
     ("[IMG_BREAK]", 12),
     ("[IMG_END]", 13),
 ])
 
-/// GLM-OCR flags its two block delimiters special, but not the `<|image|>` between
-/// them, and that is the id `GlmOcr` reads as its image token.
+/// In the GLM-OCR tokenizer, the image token `<|image|>` is not a special token.
 private let glmOcrTokenizer = SpecialTokenStubTokenizer(
     specials: [
         ("<|begin_of_image|>", 59_256),
@@ -120,15 +101,9 @@ private let glmOcrTokenizer = SpecialTokenStubTokenizer(
     ],
     nonSpecialAdded: [("<|image|>", 59_280)])
 
-/// Attachment labels are app-supplied strings that get interpolated into the
-/// message text and then tokenized, so a label containing a tokenizer special
-/// token would contribute that token to the prompt instead of its characters.
-/// These tests run entirely on stub tokenizers: no weights, no Metal.
 @Suite("Attachment label validation")
 struct AttachmentLabelValidatorTests {
 
-    /// One labeled attachment, paired with the prompt entry that carried it, built
-    /// the way the adapter builds it.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func labeled(_ labels: String...) -> [TranscriptConverter.LabeledAttachment] {
         let segments = labels.map { label in
@@ -177,8 +152,6 @@ struct AttachmentLabelValidatorTests {
         try AttachmentLabelValidator.default.validate(attachments, with: mistralTokenizer)
     }
 
-    /// A generator writes the label next to a real placeholder, so a part of a marker
-    /// is enough: a stray `<|` can complete one.
     @Test("A marker character in a label is refused on every model")
     func markerCharactersAreRefused() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -212,8 +185,6 @@ struct AttachmentLabelValidatorTests {
         let error = Self.validationError(
             for: "receipt <|image_pad|> tail", with: qwenTokenizer)
         let description = try #require(error?.debugDescription)
-        // The whole label is quoted so the developer can find it, and the token is
-        // named separately so they know which part is the problem.
         #expect(description.contains("\"receipt <|image_pad|> tail\""))
         #expect(description.contains("`<|image_pad|>`"))
     }
@@ -221,8 +192,8 @@ struct AttachmentLabelValidatorTests {
     @Test("Rejection names the prompt entry the label came from")
     func rejectionNamesTheOffendingEntry() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        // Built once and validated directly: every `Transcript.Prompt` gets a fresh
-        // id, so an entry built twice is not the same entry.
+        // Build the entry once. Each `Transcript.Prompt` gets a new id, so two builds of
+        // the same prompt are not equal.
         let attachments = Self.labeled("<|image_pad|>")
         do {
             try AttachmentLabelValidator.default.validate(attachments, with: qwenTokenizer)
@@ -248,7 +219,6 @@ struct AttachmentLabelValidatorTests {
         #expect(!description.contains("invoice"))
     }
 
-    /// `IMG` renders as `[IMG]`, an image token on Mistral and text elsewhere.
     @Test("Rejection of a delimiter-free label follows the loaded tokenizer, per model")
     func rejectionIsPerModel() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -262,46 +232,26 @@ struct AttachmentLabelValidatorTests {
         try AttachmentLabelValidator.default.validate(img, with: glmOcrTokenizer)
     }
 
-    /// The validator has to check the label as the renderer writes it, brackets
-    /// included, because the brackets are part of what reaches the tokenizer. A
-    /// label of `IMG` renders as `[IMG]`, which is a real image placeholder on
-    /// Mistral-family models, so checking the bare label would let exactly the
-    /// hazard this validator exists to stop walk straight through.
     @Test("A label whose bracketed form is a special token is rejected")
     func bracketedRenderedFormIsRejected() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let error = Self.validationError(for: "IMG", with: mistralTokenizer)
         let description = try #require(error?.debugDescription)
-        // The label is quoted as the app wrote it and the token is named as the
-        // tokenizer sees it, so the two together show why an innocent-looking
-        // label is a problem.
         #expect(description.contains("\"IMG\""))
         #expect(description.contains("`[IMG]`"))
 
-        // A second, distinct special token on the same tokenizer is caught too,
-        // so this is not a check pinned to one string.
         let endError = Self.validationError(for: "IMG_END", with: mistralTokenizer)
         let endDescription = try #require(endError?.debugDescription)
         #expect(endDescription.contains("\"IMG_END\""))
         #expect(endDescription.contains("`[IMG_END]`"))
 
-        // `IMG2` renders as `[IMG2]`, which this tokenizer does not treat as a
-        // token, so it must pass. An ordinary label like `Photo_A1B2C3` only
-        // shows that the check does not reject everything; `IMG2`, being one
-        // character away from the dangerous `[IMG]`, also shows the check is not
-        // matching on a prefix or a substring of a token string, which is the
-        // mistake a sloppier version of this idea would make.
         try AttachmentLabelValidator.default.validate(
             Self.labeled("IMG2"), with: mistralTokenizer)
 
-        // The same label is ordinary text everywhere the brackets are not a token.
         try AttachmentLabelValidator.default.validate(
             Self.labeled("IMG"), with: qwenTokenizer)
     }
 
-    /// The rule is "no special tokens", not "no image placeholders": the tokenizer
-    /// protocol cannot tell the two apart, and a label injecting a turn boundary
-    /// deserves rejection anyway.
     @Test("A chat-structure token in a label is rejected too")
     func chatStructureTokenIsRejected() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -318,7 +268,6 @@ struct AttachmentLabelValidatorTests {
         #expect(description.contains("\"<|image|>\""))
     }
 
-    /// FastVLM keeps `<image>` out of its vocabulary, so no tokenizer check sees it.
     @Test("A label carrying a marker the tokenizer does not know is rejected")
     func markerUnknownToTheTokenizerIsRejected() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

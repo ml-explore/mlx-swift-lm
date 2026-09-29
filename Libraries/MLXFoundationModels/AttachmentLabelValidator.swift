@@ -7,28 +7,17 @@ import Foundation
 import FoundationModels
 import MLXLMCommon
 
-/// Refuses an attachment label that a model would read as a picture marker.
-///
-/// A label that holds a marker character is always refused. A label whose rendered
-/// `[label]` form encodes to a special token is refused on the models where it does.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct AttachmentLabelValidator {
 
-    /// The validator used by ``MLXLanguageModel``.
     static let `default` = AttachmentLabelValidator()
 
-    /// Refuses each label that would reach the model as a picture marker.
-    ///
-    /// - Parameters:
-    ///   - attachments: The labels to check. Each one carries the entry it came from.
-    ///   - tokenizer: The tokenizer that encodes the prompt.
-    /// - Throws: `LanguageModelError.unsupportedTranscriptContent`.
     func validate(
         _ attachments: [TranscriptConverter.LabeledAttachment],
         with tokenizer: any MLXLMCommon.Tokenizer
     ) throws {
         for attachment in attachments {
-            // Check the tokenizer first. It names the token, which is a better error.
+            // Run the tokenizer check first, because its error names the special token.
             if let names = tokenizer.specialTokenNames(inImageLabel: attachment.label) {
                 let named =
                     names.isEmpty

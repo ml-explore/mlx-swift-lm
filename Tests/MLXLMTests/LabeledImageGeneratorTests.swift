@@ -5,9 +5,6 @@ import MLXLMCommon
 import MLXVLM
 import Testing
 
-/// Each generator names a labeled image immediately before that image, and keeps
-/// the arrangement it had: GlmOcr puts its text first, and three of the six emit
-/// video parts.
 @Suite("Labeled image generators")
 struct LabeledImageGeneratorTests {
 
@@ -21,7 +18,6 @@ struct LabeledImageGeneratorTests {
         try #require(raw["content"] as? [[String: String]])
     }
 
-    /// Images first, then the caller's text, with nothing between the parts.
     private var imagesThenText: [[String: String]] {
         [
             ["type": "text", "text": "[A]"],

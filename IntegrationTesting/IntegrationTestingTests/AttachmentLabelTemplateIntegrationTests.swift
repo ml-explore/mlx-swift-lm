@@ -19,10 +19,6 @@ import FoundationModels
 private let templateDownloader: any Downloader = #hubDownloader()
 private let templateTokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
 
-/// One model family's rendered-prompt contract for labeled images.
-///
-/// `placeholder` is the text the family's chat template emits for one image
-/// part, before a processor expands it into per-patch tokens.
 struct LabeledPromptFamily: Sendable, CustomStringConvertible {
     let family: String
     let modelID: String
@@ -33,12 +29,8 @@ struct LabeledPromptFamily: Sendable, CustomStringConvertible {
     var description: String { family }
 }
 
-/// Ten families at pinned revisions. Six generator types serve all ten, because
-/// `Qwen2VLMessageGenerator` is shared by Qwen25VL, Gemma3, LFM2VL and
-/// MuseGlimmer. SmolVLM2 also shares it and is deliberately absent: its template
-/// concatenates content as a string, so an array reaches it as a dumped
-/// dictionary list whenever an image is present, which is broken independently
-/// of labels and filed separately.
+/// SmolVLM2 is left out. Its chat template writes the content as one string. A message
+/// with an image then renders as a printed list of dictionaries, with or without labels.
 let labeledPromptFamilies: [LabeledPromptFamily] = [
     .init(
         family: "Qwen2VL", modelID: "mlx-community/Qwen2-VL-2B-Instruct-4bit",
@@ -87,9 +79,6 @@ let labeledPromptFamilies: [LabeledPromptFamily] = [
         generator: Qwen2VLMessageGenerator(), placeholder: "<|patch|>"),
 ]
 
-/// Applies each family's real chat template to a two-image labeled message and
-/// asserts on the rendered prompt. Weights are never downloaded: a template
-/// needs the tokenizer only, so this costs a few megabytes of JSON per family.
 @Suite(.serialized)
 struct AttachmentLabelTemplateIntegrationTests {
 
@@ -162,7 +151,6 @@ struct AttachmentLabelTemplateIntegrationTests {
             "\(family): a zero width space reached the prompt; got: \(prompt)")
     }
 
-    /// A label emitted after its image would still pass a check for `[A]` alone.
     @Test(arguments: labeledPromptFamilies)
     func noLabelTrailsItsImage(family: LabeledPromptFamily) async throws {
         let message = Chat.Message.user(
@@ -180,8 +168,8 @@ struct AttachmentLabelTemplateIntegrationTests {
             "\(family): the first label must not follow a placeholder; got: \(prompt)")
     }
 
-    /// David's repro through the real processor. The label `IMG` renders as `[IMG]`, and
-    /// `Mistral3VLMProcessor` splits the decoded prompt on that text.
+    /// The label `IMG` renders as `[IMG]`, and `Mistral3VLMProcessor` splits the decoded
+    /// prompt on that text.
     @Test func mistral3LabelDoesNotAddAnImageBlock() async throws {
         let directory = try await templateDownloader.download(
             id: "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
@@ -217,9 +205,6 @@ struct AttachmentLabelTemplateIntegrationTests {
 
     #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-    /// The label check against each family's real tokenizer, which keeps the unit
-    /// tests honest: their stubs assume every placeholder is a special token, and
-    /// GLM-OCR's is not.
     @Test(arguments: labeledPromptFamilies)
     func theFamilysOwnPlaceholderIsRefusedAsALabel(family: LabeledPromptFamily) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -229,8 +214,8 @@ struct AttachmentLabelTemplateIntegrationTests {
                 segments: [.text(Transcript.TextSegment(content: Self.prose))],
                 responseFormat: nil))
 
-        // Each token separately, so a three-token block is checked on its middle
-        // token, which is the one GLM-OCR does not flag special.
+        // Check each token alone, so the middle token of a three-token placeholder gets
+        // its own check. GLM-OCR does not flag that token as special.
         for marker in family.placeholder.markerTokens {
             let attachment = TranscriptConverter.LabeledAttachment(label: marker, entry: entry)
             #expect(throws: LanguageModelError.self) {
@@ -243,7 +228,6 @@ struct AttachmentLabelTemplateIntegrationTests {
 }
 
 extension String {
-    /// The separate markers in a placeholder, so a three-token block yields three.
     fileprivate var markerTokens: [String] {
         var tokens: [String] = []
         var current = ""
