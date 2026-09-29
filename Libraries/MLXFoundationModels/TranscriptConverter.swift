@@ -25,7 +25,7 @@ struct TranscriptConverter {
         try entries.compactMap { entry -> Chat.Message? in
             switch entry {
             case .instructions(let instructions):
-                // Drop instruction attachments, as FoundationModels does (rdar://163210652).
+                // Drop instruction attachments, as FoundationModels does.
                 // Some chat templates, such as Qwen3-VL's, write no image placeholder for a
                 // system message. The processor would then get pixels without a placeholder.
                 let text = extractText(from: instructions.segments)
