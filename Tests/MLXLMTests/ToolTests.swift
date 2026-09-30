@@ -2,6 +2,10 @@ import Foundation
 import MLXLMCommon
 import Testing
 
+extension Tag {
+    @Tag static var toolParser: Self
+}
+
 struct ToolTests {
     private func toolSchemas(_ names: String...) -> [[String: any Sendable]] {
         names.map { name in
@@ -1610,6 +1614,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.miniCPM5.rawValue == "minicpm5")
         #expect(ToolCallFormat.atem.rawValue == "atem")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
         #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
@@ -1753,5 +1758,71 @@ struct ToolTests {
         let second = processor.toolCalls[1]
         #expect(second.function.name == "get_time")
         #expect(second.function.arguments["timezone"] == .string("UTC"))
+    }
+}
+
+@Suite(.tags(.toolParser))
+struct MiniCPM5ToolCallParserTests {
+    @Test("Test MiniCPM5 Tool Call Parser")
+    func testMiniCPM5Parser() throws {
+        let parser = MiniCPM5ToolCallParser()
+        let content =
+            #"<function name="calculator"><param name="expression">90/432*2134</param></function>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "calculator")
+        #expect(toolCall.function.arguments["expression"] == .string("90/432*2134"))
+    }
+
+    @Test("Test MiniCPM5 Tool Call Parser with multiple parameters")
+    func testMiniCPM5ParserMultipleParameters() throws {
+        let parser = MiniCPM5ToolCallParser()
+        let content =
+            #"<function name="get_weather"><param name="location">Tokyo</param><param name="unit">celsius</param></function>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test MiniCPM5 Tool Call Parser unwraps CDATA-wrapped values")
+    func testMiniCPM5ParserCDATA() throws {
+        let parser = MiniCPM5ToolCallParser()
+        let content = """
+            <function name="run"><param name="code"><![CDATA[if x < 1 && y > 2:\n    pass]]></param></function>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "run")
+        #expect(toolCall.function.arguments["code"] == .string("if x < 1 && y > 2:\n    pass"))
+    }
+
+    @Test("Test MiniCPM5 Tool Call Parser rejects a malformed param")
+    func testMiniCPM5ParserRejectsMalformedParam() throws {
+        let parser = MiniCPM5ToolCallParser()
+        // The second param's `</param>` close tag is missing.
+        let content = #"""
+            <function name="get_weather"><param name="location">Tokyo</param><param name="unit">celsius</function>
+            """#
+
+        #expect(parser.parse(content: content, tools: nil) == nil)
+    }
+
+    @Test("Test MiniCPM5 Format via ToolCallProcessor")
+    func testMiniCPM5FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .miniCPM5)
+        let content =
+            #"<function name="calculator"><param name="expression">90/432*2134</param></function>"#
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "calculator")
+        #expect(toolCall.function.arguments["expression"] == .string("90/432*2134"))
     }
 }

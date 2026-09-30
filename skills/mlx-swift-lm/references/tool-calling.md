@@ -36,6 +36,7 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | `.gemma` | Gemma | `call:name{key:value}` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
+| `.miniCPM5` | MiniCPM5 | `<function name="f"><param name="k">v</param></function>` |
 
 ## Defining Tools
 
