@@ -203,7 +203,7 @@ struct TurboQuantMSECodecTests {
         let codec = MSECodec(dim: 128, bits: 3, seed: 42)
         #expect(codec.useWHT, "dim=128 should use WHT")
 
-        let product = matmul(codec.rotation, codec.rotationT)
+        let product = matmul(codec.rotation, codec.rotationT, stream: .cpu)
         let identity = MLXArray.identity(128)
         let diff = MLX.abs(product - identity).max().item(Float.self)
         // TF32 matmuls (neural accelerators) leave ~2e-4 here; see MatmulPrecision.
