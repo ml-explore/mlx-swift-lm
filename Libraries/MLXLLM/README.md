@@ -72,6 +72,7 @@ See [llm-tool](../../Tools/llm-tool)
 Using LLMs and VLMs from MLXLMCommon is as easy as:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace

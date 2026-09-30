@@ -157,13 +157,13 @@ let container = try await LLMModelFactory.shared.loadContainer(
 )
 
 // Specific revision
-let config = ModelConfiguration(
+let revisionConfig = ModelConfiguration(
     id: "mlx-community/Model",
     revision: "v1.0"
 )
 
 // Local model
-let config = ModelConfiguration(
+let localConfig = ModelConfiguration(
     directory: URL(filePath: "/path/to/model")
 )
 ```
@@ -218,7 +218,7 @@ let config = ModelConfiguration(
 )
 
 // From a local tokenizer directory
-let config = ModelConfiguration(
+let localTokenizerConfig = ModelConfiguration(
     id: "model-without-tokenizer",
     tokenizerSource: .directory(URL(filePath: "/path/to/tokenizer"))
 )

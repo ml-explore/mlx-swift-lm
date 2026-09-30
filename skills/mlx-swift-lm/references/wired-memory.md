@@ -69,7 +69,7 @@ let context = try await LLMModelFactory.shared.load(
     using: #huggingFaceTokenizerLoader(),
     configuration: config
 )
-let parameters = GenerateParameters(maxTokens: 128, prefillStepSize: 512)
+let parameters = GenerateParameters(maxTokens: 128, prefill: .init(stepSize: 512))
 
 let measurement = try await WiredMemoryUtils.tune(
     context: context,

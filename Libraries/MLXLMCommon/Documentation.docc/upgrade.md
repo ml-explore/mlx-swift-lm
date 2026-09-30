@@ -40,6 +40,7 @@ let model = try await loadModelContainer(configuration: modelConfiguration)
 you would convert that like this:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -59,6 +60,7 @@ If you want a little more control over the downloader or the tokenizer loader, t
 expands to this:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -93,6 +95,7 @@ let model = try await loadModelContainer(configuration: modelConfiguration)
 becomes:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -134,6 +137,7 @@ now, using the <doc:#Using-MLXHuggingFace-Macros> (see
 packages):
 
 ```swift
+import Foundation
 import MLXEmbedders
 import MLXLMCommon
 import MLXHuggingFace
@@ -151,7 +155,7 @@ let loader = #huggingFaceTokenizerLoader()
 let container = try await EmbedderModelFactory.shared.loadContainer(
     from: hub,
     using: loader,
-    configuration: configuration
+    configuration: defaultModelConfiguration
 )
 
 // use it ...
@@ -188,7 +192,12 @@ let container = try await loadModelContainer(
 )
 
 // After (3.x) – Using HuggingFace integration macros
+import Foundation
+import MLXLLM
+import MLXLMCommon
 import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
 let model = try await #huggingFaceLoadModelContainer(
     configuration: LLMRegistry.gemma3_1B_qat_4bit
@@ -204,7 +213,10 @@ Loading from a local directory:
 let container = try await loadModelContainer(directory: modelDirectory)
 
 // After (3.x)
-let container = try await loadModelContainer(from: modelDirectory)
+let container = try await loadModelContainer(
+    from: modelDirectory,
+    using: #huggingFaceTokenizerLoader()
+)
 ```
 
 Loading with a model factory:
@@ -220,13 +232,17 @@ let container = try await LLMModelFactory.shared.loadContainer(
 Loading an embedder:
 
 ```swift
+import Foundation
 import MLXEmbedders
+import MLXLMCommon
 import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
-let container = try await EmbedderModelFactory.load(
+let container = try await EmbedderModelFactory.shared.loadContainer(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
-    configuration: .configuration(id: "sentence-transformers/all-MiniLM-L6-v2")
+    configuration: EmbedderRegistry.minilm_l6
 )
 ```
 
@@ -260,9 +276,9 @@ Users who were passing a custom `HubApi` instance should create a `HuggingFace.H
 
 ### Tokenizer loading
 
-`loadTokenizer(configuration:hub:)` has been removed. Tokenizer loading now uses `AutoTokenizer.from(directory:)` from Swift Tokenizers directly.
+`loadTokenizer(configuration:hub:)` has been removed. Tokenizer loading is now done by the `TokenizerLoader` passed to the load functions. `#huggingFaceTokenizerLoader()` uses `AutoTokenizer.from(modelFolder:)` from Swift Transformers.
 
-`replacementTokenizers` (the `TokenizerReplacementRegistry`) has been removed. Use `AutoTokenizer.register(_:for:)` from Swift Tokenizers instead.
+`replacementTokenizers` (the `TokenizerReplacementRegistry`) has been removed. To load a tokenizer class that `AutoTokenizer` does not support, pass your own `TokenizerLoader`.
 
 ### `defaultHubApi`
 
@@ -271,7 +287,7 @@ The `defaultHubApi` global has been removed. Hugging Face Hub access is now prov
 ### Low-level APIs
 
 - `downloadModel(hub:configuration:progressHandler:)` → `Downloader.download(id:revision:matching:useLatest:progressHandler:)`
-- `loadTokenizerConfig(configuration:hub:)` → `AutoTokenizer.from(directory:)`
+- `loadTokenizerConfig(configuration:hub:)` → `TokenizerLoader.load(from:)`
 - `ModelFactory._load(hub:configuration:progressHandler:)` → `_load(configuration: ResolvedModelConfiguration)`
 - `ModelFactory._loadContainer`: removed (base `loadContainer` now builds the container from `_load`)
 

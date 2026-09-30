@@ -39,7 +39,7 @@ let tokenizer = await container.tokenizer
 
 Tokenizer loading is handled by the `TokenizerLoader` protocol. The `MLXHuggingFace`
 `#huggingFaceTokenizerLoader()` macro provides a concrete loader backed by Swift
-Tokenizers' `AutoTokenizer`:
+Transformers' `AutoTokenizer`:
 
 ```swift
 let loader = #huggingFaceTokenizerLoader()
@@ -283,27 +283,30 @@ entirely to the `TokenizerLoader` you pass to the factory, so there is no
 mlx-swift-lm-side override table.
 
 `#huggingFaceTokenizerLoader()` delegates to `Tokenizers.AutoTokenizer`, which maps the
-`tokenizer_class` from `tokenizer_config.json` onto its own built-in implementations and
-falls back to a BPE tokenizer for unknown classes. If that is not what you want, write
-your own `TokenizerLoader`:
+`tokenizer_class` from `tokenizer_config.json` onto its own built-in implementations. For
+an unknown class it throws `TokenizerError.unsupportedTokenizer`. It falls back to a BPE
+tokenizer only when called with `strict: false`. To load such a model, write your own
+`TokenizerLoader`. This one falls back to BPE:
 
 ```swift
+import Foundation
+import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
+import HuggingFace
 import Tokenizers
 
-struct PatchedTokenizerLoader: TokenizerLoader {
+struct BPEFallbackTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        // e.g. rewrite tokenizer_config.json into a temp directory with a
-        // tokenizer_class AutoTokenizer understands, then:
-        let upstream = try await AutoTokenizer.from(modelFolder: directory)
+        // strict: false falls back to BPE for unknown tokenizer classes
+        let upstream = try await AutoTokenizer.from(modelFolder: directory, strict: false)
         return #adaptHuggingFaceTokenizer(upstream)
     }
 }
 
 let container = try await LLMModelFactory.shared.loadContainer(
     from: #hubDownloader(),
-    using: PatchedTokenizerLoader(),
+    using: BPEFallbackTokenizerLoader(),
     configuration: config
 )
 ```

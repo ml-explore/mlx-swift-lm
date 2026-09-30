@@ -63,6 +63,7 @@ MLXEmbedders    - Embedding models and pooling utilities
 ### LLM Chat (Simplest API)
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
@@ -88,6 +89,7 @@ for try await chunk in session.streamResponse(to: "Explain structured concurrenc
 ### VLM with Image
 
 ```swift
+import Foundation
 import MLXVLM
 import MLXLMCommon
 import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
@@ -113,6 +115,8 @@ let response = try await session.respond(
 ### Embeddings
 
 ```swift
+import Foundation
+import MLX
 import MLXEmbedders
 import MLXLMCommon
 import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
