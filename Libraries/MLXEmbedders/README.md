@@ -5,7 +5,10 @@ This directory contains ports of popular Encoders / Embedding Models.
 ## Usage Example
 
 ```swift
+import Foundation
+import MLX
 import MLXEmbedders
+import MLXLMCommon
 import MLXHuggingFace
 import HuggingFace
 import Tokenizers
@@ -55,7 +58,9 @@ let resultEmbeddings = await modelContainer.perform { context -> [[Float]] in
 Load from a local directory:
 
 ```swift
+import Foundation
 import MLXEmbedders
+import MLXLMCommon
 import MLXHuggingFace
 import Tokenizers
 
@@ -69,7 +74,9 @@ let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
 Use a custom Hugging Face client:
 
 ```swift
+import Foundation
 import MLXEmbedders
+import MLXLMCommon
 import MLXHuggingFace
 import HuggingFace
 import Tokenizers
@@ -86,6 +93,7 @@ let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
 Use a custom downloader:
 
 ```swift
+import Foundation
 import MLXEmbedders
 import MLXLMCommon
 import MLXHuggingFace

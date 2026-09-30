@@ -51,6 +51,8 @@ The Embedders library provides text embedding models for semantic search, RAG, c
 ### Using Pre-registered Configuration
 
 ```swift
+import Foundation
+import MLX
 import MLXEmbedders
 import MLXLMCommon
 import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
@@ -301,7 +303,7 @@ Pre-registered embedders live on `EmbedderRegistry`; lookups go through
 let config = EmbedderRegistry.bge_small
 
 // Get a registered model by id
-let config = EmbedderRegistry.shared.configuration(id: "BAAI/bge-small-en-v1.5")
+let configByID = EmbedderRegistry.shared.configuration(id: "BAAI/bge-small-en-v1.5")
 
 // List all models
 let models = EmbedderRegistry.shared.models

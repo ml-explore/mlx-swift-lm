@@ -5,6 +5,7 @@ The simplified LLM/VLM API allows you to load a model and evaluate prompts with 
 For example, this loads a model and asks a question and a follow-on question:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader

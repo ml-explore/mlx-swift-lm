@@ -12,6 +12,7 @@
 Using LLMs and VLMs from MLXLMCommon is as easy as:
 
 ```swift
+import Foundation
 import MLXVLM
 import MLXLMCommon
 import MLXHuggingFace

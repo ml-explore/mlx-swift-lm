@@ -15,6 +15,7 @@ which defaults to conservative recovery and permissive argument validation.
 Using LLMs and VLMs is as easy as:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -36,7 +37,9 @@ print(try await session.respond(to: "How about a great place to eat?"))
 Load from a local directory:
 
 ```swift
+import Foundation
 import MLXLLM
+import MLXLMCommon
 import MLXHuggingFace
 import Tokenizers
 
@@ -50,7 +53,9 @@ let container = try await loadModelContainer(
 Use a custom Hugging Face client:
 
 ```swift
+import Foundation
 import MLXLLM
+import MLXLMCommon
 import MLXHuggingFace
 import HuggingFace
 import Tokenizers
@@ -67,6 +72,7 @@ let container = try await loadModelContainer(
 Use a custom downloader:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -112,6 +118,7 @@ of language models, from LLMs to VLMs:
 A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`:
 
 ```swift
+import Foundation
 import MLXLMCommon
 import MLXHuggingFace
 import HuggingFace

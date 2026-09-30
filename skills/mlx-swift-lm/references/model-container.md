@@ -33,14 +33,14 @@ let container = try await LLMModelFactory.shared.loadContainer(
 // With a custom hub client (auth token, custom endpoint, custom cache).
 // HubClient comes from the HuggingFace module; wrap it with #hubDownloader(_:).
 let hub = HubClient(host: HubClient.defaultHost, bearerToken: "hf_...")
-let container = try await LLMModelFactory.shared.loadContainer(
+let privateContainer = try await LLMModelFactory.shared.loadContainer(
     from: #hubDownloader(hub),
     using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "private/model")
 )
 
 // With progress tracking
-let container = try await LLMModelFactory.shared.loadContainer(
+let trackedContainer = try await LLMModelFactory.shared.loadContainer(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
     configuration: config,
@@ -83,10 +83,12 @@ let lmInput = try await container.prepare(input: userInput)
 // Generate with streaming
 let stream = try await container.generate(input: lmInput, parameters: params)
 
-// Generate with wired-memory coordination
+// Generate with wired-memory coordination. generate() consumes its LMInput,
+// so prepare a new one for each call.
+let ticketInput = try await container.prepare(input: UserInput(prompt: "Hello"))
 let ticket = WiredSumPolicy().ticket(size: estimatedBytes, kind: .active)
 let streamWithTicket = try await container.generate(
-    input: lmInput,
+    input: ticketInput,
     parameters: params,
     wiredMemoryTicket: ticket
 )
@@ -95,8 +97,9 @@ let streamWithTicket = try await container.generate(
 let tokens = await container.encode("Hello world")
 let text = await container.decode(tokenIds: [1, 2, 3])
 
-// Apply chat template
-let tokens = try await container.applyChatTemplate(messages: [
+// Apply chat template (on the tokenizer; the container method is deprecated)
+let tokenizer = await container.tokenizer
+let promptTokens = try tokenizer.applyChatTemplate(messages: [
     ["role": "user", "content": "Hello"]
 ])
 ```
