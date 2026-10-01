@@ -509,6 +509,12 @@ public enum Qwen35Language {
         private let fusedInputProjection = FusedQuantizedLinearProjectionCache()
         var fusedInputProjectionEnabled = qwen35FourGDNEnabled
 
+        private struct ProjectionTrace {
+            weak var value: (any CompiledTraceInvalidating)?
+        }
+        // Submodule updates must also drop traces owned by parent decoders.
+        private var fusedProjectionTraces: [ObjectIdentifier: ProjectionTrace] = [:]
+
         @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
         @ParameterInfo(key: "A_log") var aLog: MLXArray
 
@@ -569,7 +575,7 @@ public enum Qwen35Language {
             }
             defer {
                 if replacesInputProjection {
-                    fusedInputProjection.invalidate()
+                    invalidateFusedInputProjection()
                 }
             }
             return try super.update(
@@ -582,13 +588,25 @@ public enum Qwen35Language {
                 || key == "in_proj_b" || key == "in_proj_a"
             defer {
                 if replacesInputProjection {
-                    fusedInputProjection.invalidate()
+                    invalidateFusedInputProjection()
                 }
             }
             try super.updateModule(key: key, value)
         }
 
         var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
+
+        fileprivate func registerFusedProjectionTrace(_ trace: any CompiledTraceInvalidating) {
+            fusedProjectionTraces[ObjectIdentifier(trace)] = ProjectionTrace(value: trace)
+        }
+
+        private func invalidateFusedInputProjection() {
+            fusedInputProjection.invalidate()
+            for trace in fusedProjectionTraces.values {
+                trace.value?.invalidate()
+            }
+            fusedProjectionTraces.removeAll()
+        }
 
         /// The fused projection as compile state for a trace that runs this
         /// layer. It is not a registered child because the four source
@@ -951,8 +969,11 @@ public enum Qwen35Language {
                     postAttentionLayerNorm(h), allowCompiledDecode: canCompile)
         }
 
-        private let compiledLinearLayer = CompiledTrace<DecoderLayer>(
-            state: { [$0] + ($0.linearAttn?.fusedProjectionTraceState ?? []) },
+        private let compiledLinearLayer: CompiledTrace<DecoderLayer> = CompiledTrace(
+            state: { layer in
+                layer.linearAttn?.registerFusedProjectionTrace(layer.compiledLinearLayer)
+                return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+            },
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
                     x: arguments[0], convState: arguments[1], recState: arguments[2])
@@ -1081,23 +1102,6 @@ public enum Qwen35Language {
             super.init()
         }
 
-        @discardableResult
-        open override func update(
-            parameters: ModuleParameters, verify: VerifyUpdate,
-            path: [String] = [], modulePath: [String] = []
-        ) throws -> Self {
-            let replacesPreparedFusion = layers.contains {
-                $0.linearAttn?.hasFusedInputProjection == true
-            }
-            defer {
-                if replacesPreparedFusion {
-                    invalidateCompiledTraces()
-                }
-            }
-            return try super.update(
-                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
-        }
-
         open func callAsFunction(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
@@ -1213,6 +1217,7 @@ public enum Qwen35Language {
         private func traceState(forLayers indices: [Int]) -> [Module] {
             indices.flatMap { index in
                 let layer = layers[index]
+                layer.linearAttn?.registerFusedProjectionTrace(compiledSegments)
                 return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
             }
         }
