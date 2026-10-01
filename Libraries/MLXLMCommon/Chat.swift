@@ -18,6 +18,9 @@ public enum Chat {
         /// The content of the message.
         public var content: String
 
+        // Records an opening reasoning delimiter supplied by the generation prompt.
+        package var prefilledReasoningStartDelimiter: String? = nil
+
         /// Array of image data associated with the message.
         public var images: [UserInput.Image]
 
