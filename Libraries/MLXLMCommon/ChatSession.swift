@@ -1097,7 +1097,7 @@ public final class ChatSession {
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
                             prefilledReasoningStartDelimiter =
-                                Self.prefilledReasoningStartDelimiter(
+                                ChatSession.prefilledReasoningStartDelimiter(
                                     in: promptTokenIds, config: modelConfiguration.reasoningConfig,
                                     tokenizer: tokenizer)
                             let cachedTokenIds = currentConversation.cachedTokens
