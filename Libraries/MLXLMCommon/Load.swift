@@ -246,6 +246,17 @@ public enum WeightFileSelection: Sendable, Equatable {
     /// is loaded silently rather than reported, so prefer a model that declares its own
     /// extra files (see ``AdditionalWeightFilesProviding``) where that is possible.
     case allFilesPresent
+
+    /// Load only the files that `model.safetensors.index.json` maps a weight whose name starts
+    /// with `prefix` to.
+    ///
+    /// For a module that lives in its own shard of a larger checkpoint -- a multi-token
+    /// prediction head keeps its `mtp.*` tensors in `model-mtp-head.safetensors` beside the
+    /// target's shards -- this reads that shard alone instead of the whole checkpoint, whose
+    /// other tensors the module's `sanitize(weights:)` would drop after they were read. When
+    /// there is no usable index, or the index maps no weight with the prefix, the selection
+    /// falls back to ``automatic``.
+    case indexedKeyPrefix(String)
 }
 
 /// The safetensors files in `modelDirectory` that hold the model's weights.
@@ -288,6 +299,11 @@ package func safetensorWeightURLs(
         selected = present
     case .automatic:
         selected = try indexedWeightURLs(in: modelDirectory) ?? conventionalWeightURLs(in: present)
+    case .indexedKeyPrefix(let prefix):
+        selected =
+            try indexedWeightURLs(in: modelDirectory, keyPrefix: prefix)
+            ?? indexedWeightURLs(in: modelDirectory)
+            ?? conventionalWeightURLs(in: present)
     }
 
     var seen = Set(selected.map(\.standardizedFileURL.path))
@@ -307,10 +323,13 @@ package func safetensorWeightURLs(
 /// The files named by `model.safetensors.index.json`, or `nil` when there is no index or it
 /// names a file the directory does not contain.
 ///
+/// With `keyPrefix`, only the files the index maps a weight with that name prefix to; `nil`
+/// when it maps none.
+///
 /// Existence is checked against the file system rather than the top-level listing: an index may
 /// legitimately map weights into a subdirectory, and that is a deliberate statement about where
 /// this model's weights live rather than an unrelated file that happens to be nearby.
-private func indexedWeightURLs(in modelDirectory: URL) throws -> [URL]? {
+private func indexedWeightURLs(in modelDirectory: URL, keyPrefix: String? = nil) throws -> [URL]? {
     let indexURL = modelDirectory.appendingPathComponent("model.safetensors.index.json")
     guard FileManager.default.fileExists(atPath: indexURL.path) else {
         return nil
@@ -318,7 +337,10 @@ private func indexedWeightURLs(in modelDirectory: URL) throws -> [URL]? {
 
     let data = try Data(contentsOf: indexURL)
     let index = try JSONDecoder().decode(SafetensorsIndex.self, from: data)
-    let urls = Set(index.weightMap.values)
+    let files = index.weightMap
+        .filter { key, _ in keyPrefix.map { key.hasPrefix($0) } ?? true }
+        .values
+    let urls = Set(files)
         .sorted()
         .map { modelDirectory.appendingPathComponent($0) }
 
