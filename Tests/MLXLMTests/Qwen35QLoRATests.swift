@@ -100,6 +100,35 @@ final class Qwen35QLoRATests: XCTestCase {
         XCTAssertEqual(decode.shape, [1, 1, 32])
     }
 
+    func testQwen35QLoRATrainingProducesFiniteAdapterGradients() throws {
+        let model = Qwen35TextModel(try configuration())
+        model.update(parameters: model.parameters().mapValues { $0.asType(.bfloat16) })
+        quantize(model: model, groupSize: 32, bits: 4)
+        _ = try LoRAContainer.from(
+            model: model,
+            configuration: .init(
+                numLayers: 2,
+                loraParameters: .init(rank: 4, scale: 1.0)))
+        model.train(true)
+        let tokens = MLXArray((0 ..< 33).map { Int32($0 % 32) }).reshaped(1, 33)
+        let valueAndGradient = valueAndGrad(model: model) { model, inputs in
+            [model(inputs[0], cache: nil).asType(.float32).square().mean()]
+        }
+        let (values, gradients) = valueAndGradient(model, [tokens])
+        eval(values, gradients)
+        XCTAssertTrue(values[0].item(Float.self).isFinite)
+        let flattened = gradients.flattened()
+        XCTAssertFalse(flattened.isEmpty)
+        for (key, gradient) in flattened {
+            XCTAssertTrue(gradient.asType(.float32).sum().item(Float.self).isFinite, key)
+        }
+        XCTAssertTrue(
+            flattened.contains {
+                $0.0.contains("linear_attn") && $0.0.hasSuffix("lora_b")
+                    && abs($0.1.asType(.float32)).max().item(Float.self) > 0
+            })
+    }
+
     private func fp16Adapter(_ shape: [Int]) -> MLXArray {
         MLXArray.full(shape, values: MLXArray(0.001), dtype: .float16)
     }
