@@ -736,6 +736,16 @@ public struct TokenIterator: TokenIteratorProtocol {
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
 
+    /// The cache and model state partway through the prompt, where the initializer's
+    /// `checkpointAt` asked for them; `nil` if it did not ask, or the cache could not be
+    /// checkpointed.
+    package private(set) var promptCheckpoint: PromptCheckpoint?
+
+    package struct PromptCheckpoint {
+        package let storage: KVCacheStorage.Checkpoint
+        package let state: LMOutput.State?
+    }
+
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:state:parameters:components:)``.
     ///
@@ -786,12 +796,15 @@ public struct TokenIterator: TokenIteratorProtocol {
             state: state, parameters: parameters, components: components)
     }
 
+    /// - Parameter checkpointAt: a position in `input` at which to save ``promptCheckpoint``
+    ///   on the way through the prompt. Only a text-only, unmasked input is split there.
     package init(
         input: LMInput, model: any LanguageModel,
         cacheStorage: KVCacheStorage,
         state: LMOutput.State? = nil,
         parameters: GenerateParameters,
-        components: GenerationComponents = .init()
+        components: GenerationComponents = .init(),
+        checkpointAt: Int? = nil
     ) throws {
         let kvCachePlan = cacheStorage.plan
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
@@ -807,7 +820,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.maxTokens = parameters.maxTokens
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, prefill: parameters.prefill)
+            try prepare(input: input, prefill: parameters.prefill, checkpointAt: checkpointAt)
         }
     }
 
@@ -863,8 +876,33 @@ public struct TokenIterator: TokenIteratorProtocol {
             prefill: .init(stepSize: prefillStepSize), maxTokens: maxTokens)
     }
 
-    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
+    mutating func prepare(
+        input: LMInput, prefill: PrefillParameters = .init(), checkpointAt: Int? = nil
+    ) throws {
         processor?.prompt(input.text.tokens)
+        var input = input
+        var prefill = prefill
+
+        // Read the prompt in two parts and checkpoint between them. Progress is reported
+        // against the whole prompt, so a caller sees one prefill rather than two.
+        let promptLength = input.text.cacheSequenceLength
+        if let position = checkpointAt, position > 0, position < promptLength,
+            input.image == nil, input.video == nil, input.audio == nil, input.text.mask == nil
+        {
+            var head = prefill
+            if let report = prefill.progress {
+                head.progress = { done, _ in report(done, promptLength) }
+                prefill.progress = { done, _ in report(position + done, promptLength) }
+            }
+            try prefillWithoutSampling(input.text[text: .ellipsis, ..<position], prefill: head)
+            eval(cache)
+            promptCheckpoint = cacheStorage.checkpoint().map {
+                PromptCheckpoint(storage: $0, state: state)
+            }
+
+            input = LMInput(text: input.text[text: .ellipsis, position...])
+        }
+
         let inputLength = input.text.cacheSequenceLength
 
         switch try model.prepare(input, cache: cache, state: state, prefill: prefill) {
@@ -897,6 +935,36 @@ public struct TokenIterator: TokenIteratorProtocol {
         }
 
         try kvCachePlan.applyAndValidate(to: cacheStorage)
+    }
+
+    /// Read `text` into the cache and discard the logits: the first part of a prompt that
+    /// is checkpointed partway through.
+    private mutating func prefillWithoutSampling(
+        _ text: LMInput.Text, prefill: PrefillParameters
+    ) throws {
+        let length = text.cacheSequenceLength
+        switch try model.prepare(LMInput(text: text), cache: cache, state: state, prefill: prefill)
+        {
+        case .tokens(let remainder):
+            let remainingLength = remainder.cacheSequenceLength
+            precondition(
+                remainingLength <= length,
+                "LanguageModel.prepare returned more tokens than it received")
+            cacheStorage.commitProcessedTokens(length - remainingLength)
+            if remainingLength > 0 {
+                let result = withPreparedCache(cache, lengths: remainder.sequenceLengths) {
+                    model(
+                        remainder[text: .newAxis], cache: cache.isEmpty ? nil : cache,
+                        state: state)
+                }
+                cacheStorage.commitProcessedTokens(remainingLength)
+                self.state = result.state
+            }
+
+        case .logits(let result):
+            cacheStorage.commitProcessedTokens(length)
+            self.state = result.state
+        }
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {
@@ -1448,7 +1516,7 @@ private struct SynchronousGenerationLoopResult {
     let stopReason: GenerateStopReason
 }
 
-private func buildStopTokenIds(
+func buildStopTokenIds(
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer
 ) -> Set<Int> {

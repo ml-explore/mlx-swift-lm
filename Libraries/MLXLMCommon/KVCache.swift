@@ -1578,14 +1578,22 @@ public class ArraysCache: BaseKVCache {
 
 /// Simple cache for Mamba-style state space models
 public class MambaCache: ArraysCache {
-    private struct SpeculativeCheckpoint {
-        var state: [MLXArray?]
-        var offset: Int
-        var leftPadding: MLXArray?
-        var lengths: MLXArray?
+    /// The recurrent state at one position, as ``restore(_:)`` puts it back.
+    ///
+    /// The slots are held as they are, empty ones included: ``state`` drops
+    /// empty slots, and setting it back would resize the cache.
+    ///
+    /// They are references, not copies. The models replace a slot's array on
+    /// every step rather than writing into it, so a saved array keeps
+    /// describing the position it was saved at.
+    package struct SavedState {
+        fileprivate var slots: [MLXArray?]
+        fileprivate var offset: Int
+        fileprivate var leftPadding: MLXArray?
+        fileprivate var lengths: MLXArray?
     }
 
-    private var speculativeCheckpoint: SpeculativeCheckpoint?
+    private var speculativeCheckpoint: SavedState?
 
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
@@ -1598,8 +1606,8 @@ public class MambaCache: ArraysCache {
         recurrentState: MLXArray,
         advancedBy tokenCount: Int
     ) {
-        speculativeCheckpoint = SpeculativeCheckpoint(
-            state: [convState, recurrentState],
+        speculativeCheckpoint = SavedState(
+            slots: [convState, recurrentState],
             offset: offset,
             leftPadding: leftPadding.map { $0 - tokenCount },
             lengths: lengths.map { $0 - tokenCount })
@@ -1612,12 +1620,22 @@ public class MambaCache: ArraysCache {
     @discardableResult
     package func restoreSpeculativeCheckpoint() -> Bool {
         guard let checkpoint = speculativeCheckpoint else { return false }
-        cache = checkpoint.state
-        offset = checkpoint.offset
-        leftPadding = checkpoint.leftPadding
-        lengths = checkpoint.lengths
+        restore(checkpoint)
         speculativeCheckpoint = nil
         return true
+    }
+
+    /// The state as it is now, for ``restore(_:)`` to put back later.
+    package func savedState() -> SavedState {
+        SavedState(slots: cache, offset: offset, leftPadding: leftPadding, lengths: lengths)
+    }
+
+    /// Put back a state from ``savedState()`` or a speculative checkpoint.
+    package func restore(_ saved: SavedState) {
+        cache = saved.slots
+        offset = saved.offset
+        leftPadding = saved.leftPadding
+        lengths = saved.lengths
     }
 
     package func discardSpeculativeCheckpoint() {

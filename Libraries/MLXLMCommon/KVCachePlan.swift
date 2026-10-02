@@ -367,6 +367,86 @@ package final class KVCacheStorage {
         return copy
     }
 
+    /// Where every entry stood at one position, for ``restore(_:)`` to put them back there.
+    ///
+    /// This is how a prompt resumes on a model whose recurrent state cannot be trimmed: the
+    /// state is put back to a position saved earlier rather than rewound to an arbitrary one.
+    package struct Checkpoint {
+        fileprivate enum Entry {
+            /// Undone by a trim back to this offset.
+            case trimmable(offset: Int)
+            case recurrent(MambaCache.SavedState)
+        }
+
+        /// The entries it was taken from, by identity: a replaced entry is not the one saved.
+        fileprivate let caches: [AnyObject]
+        fileprivate let entries: [Entry]
+
+        /// The timeline position it restores to.
+        package let processedTokenCount: Int
+    }
+
+    /// The entries as they are now, or `nil` when one of them could not be put back exactly.
+    ///
+    /// An entry is saved if a trim can undo whatever is appended to it, or if it is a
+    /// ``MambaCache``, whose state is saved whole. Anything else is refused, a composite
+    /// ``CacheList`` included, as is a storage with a staged round open.
+    package func checkpoint() -> Checkpoint? {
+        guard !roundIsOpen else { return nil }
+        var entries = [Checkpoint.Entry]()
+        entries.reserveCapacity(cache.count)
+        for entry in cache {
+            if entry.isTrimmable {
+                entries.append(.trimmable(offset: entry.offset))
+            } else if let recurrent = entry as? MambaCache {
+                entries.append(.recurrent(recurrent.savedState()))
+            } else {
+                return nil
+            }
+        }
+        return Checkpoint(
+            caches: cache.map { $0 as AnyObject }, entries: entries,
+            processedTokenCount: processedTokenCount)
+    }
+
+    /// Put every entry and the timeline back to `checkpoint`.
+    ///
+    /// All or nothing: every entry is checked before any is touched, and `false` leaves the
+    /// storage as it was. It fails if an entry was replaced since the checkpoint (dynamic
+    /// quantization does that), or can no longer be trimmed back to where it stood.
+    @discardableResult
+    package func restore(_ checkpoint: Checkpoint) -> Bool {
+        guard !roundIsOpen, checkpoint.caches.count == cache.count else { return false }
+        for (index, entry) in cache.enumerated() {
+            guard checkpoint.caches[index] === (entry as AnyObject) else { return false }
+            switch checkpoint.entries[index] {
+            case .trimmable(let offset):
+                guard entry.isTrimmable, entry.offset >= offset else { return false }
+            case .recurrent:
+                guard entry is MambaCache else { return false }
+            }
+        }
+
+        for (entry, saved) in zip(cache, checkpoint.entries) {
+            switch saved {
+            case .trimmable(let offset):
+                let count = entry.offset - offset
+                let trimmed = entry.trim(count)
+                precondition(
+                    trimmed == count, "an entry took back \(trimmed) of \(count) positions")
+            case .recurrent(let state):
+                (entry as? MambaCache)?.restore(state)
+            }
+        }
+        processedTokenCount = checkpoint.processedTokenCount
+        lastRound = nil
+
+        assert(
+            nativeAttentionOffsetsAreAligned,
+            "restoring a checkpoint left the leaves and the timeline out of step")
+        return true
+    }
+
     /// Debug-only consistency audit for native attention offsets. Recurrent
     /// entries intentionally do not participate in the shared timeline.
     package var nativeAttentionOffsetsAreAligned: Bool {

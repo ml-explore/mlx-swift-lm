@@ -1,5 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
+import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
@@ -30,6 +31,13 @@ final class TokenIteratorClearCacheTests: XCTestCase {
         do {
             let buffer = MLXArray.zeros([seeded], dtype: .uint8) + 1
             eval(buffer)
+        }
+        // A freed buffer reaches the cache when the GPU has finished with it, which happens
+        // on another thread. Checking straight away races that, and loses when earlier tests
+        // have left the device busier.
+        let deadline = Date().addingTimeInterval(1)
+        while Memory.cacheMemory < seeded, Date() < deadline {
+            usleep(1000)
         }
         XCTAssertGreaterThanOrEqual(Memory.cacheMemory, seeded)
 
