@@ -666,9 +666,14 @@ public struct LFM2VLProcessor: UserInputProcessor {
     private let config: LFM2VLProcessorConfiguration
     private let tokenizer: any Tokenizer
 
+    /// The image placeholder id in this checkpoint's vocabulary, or `nil` when the
+    /// tokenizer has no such token.
+    private let imageTokenId: Int?
+
     public init(_ config: LFM2VLProcessorConfiguration, tokenizer: any Tokenizer) {
         self.config = config
         self.tokenizer = tokenizer
+        self.imageTokenId = tokenizer.convertTokenToId(config.imageToken)
     }
 
     /// Preprocess a single image
@@ -784,14 +789,16 @@ public struct LFM2VLProcessor: UserInputProcessor {
 
         // Replace image placeholder tokens with the correct count.
         //
-        // The id is per-model, not per-family: 396 is LFM2-VL's, while
-        // LFM2.5-VL-3B declares 124907. Hardcoding it meant the expansion below
-        // scanned for a token the template never emitted, left the single
-        // placeholder in place, and the model then aborted the process in
-        // `mergeInputIdsWithImageFeatures` with "tokens: 1, features 1536".
-        // The vocabulary is the authority; the old constant stays as the
-        // fallback for a tokenizer with no `<image>` entry.
-        let imageTokenId = tokenizer.convertTokenToId("<image>") ?? 396
+        // The id is per-checkpoint: 396 on LFM2-VL, 124907 on LFM2.5-VL-3B. The
+        // vocabulary is the only authority the chat template and this processor
+        // share, and there is deliberately no numeric fallback: 396 is the
+        // ordinary BPE token "ab" in the LFM2.5 vocabulary, so a wrong guess
+        // would silently match prose instead of failing.
+        guard let imageTokenId else {
+            throw VLMError.processing(
+                "The tokenizer has no '\(config.imageToken)' token, so the image placeholder cannot be expanded."
+            )
+        }
         var newPromptTokens = [Int]()
         var imageIdx = 0
         var i = 0
@@ -964,9 +971,9 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         let nImageFeatures = imageFeatures.dim(0)
-        if imageIndices.count != nImageFeatures {
+        guard imageIndices.count == nImageFeatures else {
             throw VLMError.processing(
-                "Image features and image tokens do not match: tokens: \(imageIndices.count), features \(nImageFeatures)"
+                "Image features and image tokens do not match: tokens \(imageIndices.count), features \(nImageFeatures). The processor expanded the placeholder with the tokenizer's id while the model scans for image_token_id \(imageTokenIndex)."
             )
         }
 
@@ -1226,7 +1233,11 @@ public struct LFM2VLConfiguration: Codable, Sendable {
     private let _downsampleFactor: Int?
     public var downsampleFactor: Int { _downsampleFactor ?? 2 }
     private let _imageTokenId: Int?
-    public var imageTokenIndex: Int { _imageTokenId ?? 396 }
+    public var imageTokenIndex: Int { _imageTokenId ?? Self.defaultImageTokenId }
+
+    /// LFM2-VL's image placeholder id, used when `config.json` omits `image_token_id`.
+    public static let defaultImageTokenId = 396
+
     private let _projectorBias: Bool?
     public var projectorBias: Bool { _projectorBias ?? true }
     private let _projectorHiddenSize: Int?
@@ -1277,6 +1288,13 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
     private let _encoderPatchSize: Int?
     private let _maxTiles: Int?
     private let _downsampleFactor: Int?
+    private let _imageToken: String?
+
+    /// The placeholder text the chat template emits for an image.
+    public var imageToken: String { _imageToken ?? Self.defaultImageToken }
+
+    /// The image placeholder used by the released LFM2-VL chat templates.
+    public static let defaultImageToken = "<image>"
 
     // Default values matching LFM2 VL models
     public var imageMean: [CGFloat] {
@@ -1304,6 +1322,7 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
         case _encoderPatchSize = "encoder_patch_size"
         case _maxTiles = "max_tiles"
         case _downsampleFactor = "downsample_factor"
+        case _imageToken = "image_token"
     }
 }
 

@@ -44,6 +44,14 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// probability-ratio acceptance sampler is available.
     var requiresGreedySampling: Bool { get }
 
+    /// Target decoder-layer outputs required by the drafter.
+    ///
+    /// Layer indices use the target model's zero-based decoder-layer numbering.
+    /// `nil` means the drafter consumes the target model's ordinary final hidden
+    /// representation. DFlash/DSpark-style drafters return the exact feature
+    /// taps recorded in their checkpoint configuration.
+    var targetLayerIds: [Int]? { get }
+
     /// K-step drafting from a constant position.
     ///
     /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
@@ -89,6 +97,7 @@ extension MTPDrafterModel {
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
+    public var targetLayerIds: [Int]? { nil }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
@@ -296,6 +305,13 @@ public let mtpPositionDeltasKey =
 /// ``mtpLastHiddenStatesKey`` and ``mtpSharedKVStatesKey``. An absent key
 /// reads as `false` (no emit), so non-MTP callers are unaffected.
 public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
+
+/// Decoder-layer outputs the target should concatenate into
+/// ``mtpLastHiddenStatesKey`` while emitting drafter state.
+///
+/// This is used by DFlash/DSpark-style drafters. An absent value preserves
+/// the target's ordinary MTP hidden-state behavior.
+public let mtpTargetLayerIdsKey = LMOutput.Key<[Int]>("mtp.targetLayerIds")
 
 /// Requests a recurrent-cache checkpoint after this many verification input
 /// tokens. Hybrid Qwen models use `1` for MTP-1 so a rejected draft restores
