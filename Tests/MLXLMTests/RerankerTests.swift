@@ -134,9 +134,9 @@ struct RerankerTests {
         let reranker = makeConstantReranker(
             scoreKind: .normalizedRelevance, scores: [0.5])
         let task = Task {
-            try await reranker.scores(query: "q", documents: ["d"])
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await reranker.scores(query: "q", documents: ["d"])
         }
-        task.cancel()
 
         await #expect(throws: CancellationError.self) {
             try await task.value
