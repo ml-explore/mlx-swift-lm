@@ -132,8 +132,11 @@ case .ignored: break               // attention exists but stayed unbounded
 
 for layer in status.layers {
     print(layer.path, layer.kind, layer.capacitySource as Any,
-          layer.state, layer.resolvedStrategy as Any)
+          layer.state, layer.resolvedStrategy as Any, layer.memoryBytes)
 }
+
+// Allocated bytes across all layers (zero until generation fills the cache)
+print(status.memoryBytes)
 ```
 
 Hybrid attention / state-space models (Qwen3.5, Jamba, LFM2, Falcon-H1, …)

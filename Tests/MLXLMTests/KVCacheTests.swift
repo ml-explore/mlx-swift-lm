@@ -1566,6 +1566,19 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(relativeRMSError(cachedValues, values) < 0.5)
     }
 
+    @Test func testVarianceNormalizedKVCacheInnerStateHoldsTheStoredSlabs() throws {
+        let cache = VarianceNormalizedKVCache(
+            tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+        let keys = MLXRandom.normal([1, 1, 8 * 32 + 5, 32]).asType(.float16)
+        let values = MLXRandom.normal([1, 1, 8 * 32 + 5, 32]).asType(.float16)
+        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        eval(cachedKeys, cachedValues)
+
+        let stateBytes = cache.state.reduce(0) { $0 + $1.nbytes }
+        #expect(KVCacheStatus(cache: [cache]).memoryBytes == stateBytes)
+        #expect(cache.innerState().count < cache.state.count)
+    }
+
     @Test func testVarianceNormalizedKVCacheSerializationRoundTrip() throws {
         let cache = VarianceNormalizedKVCache(
             tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)

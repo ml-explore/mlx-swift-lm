@@ -155,6 +155,11 @@ public struct KVCacheStatus: Sendable, Hashable {
         layers.count { $0.state == .skipped }
     }
 
+    /// Bytes allocated across all layers.
+    public var memoryBytes: Int {
+        layers.reduce(0) { $0 + $1.memoryBytes }
+    }
+
     /// Inspect a raw cache array using a typed request.
     public init(
         cache: [KVCache],

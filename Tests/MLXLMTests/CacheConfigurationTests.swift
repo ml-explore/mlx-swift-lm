@@ -123,6 +123,29 @@ private func legacyStatus(cache: [KVCache], maxKVSize: Int) throws -> KVCacheSta
     #expect(status.layers[4].path == [3, 1])
 }
 
+@Test func cacheStatusReportsAllocatedMemory() {
+    func attention() -> KVCacheSimple {
+        let cache = KVCacheSimple()
+        let tokens = MLXArray.zeros([1, 2, 3, 8])
+        _ = cache.update(keys: tokens, values: tokens)
+        return cache
+    }
+    let recurrent = MambaCache()
+    recurrent[0] = MLXArray.zeros([1, 3, 16])
+    recurrent[1] = MLXArray.zeros([1, 2, 4, 8])
+
+    let status = KVCacheStatus(
+        cache: [attention(), KVCacheSimple(), CacheList(recurrent, attention())])
+
+    // Three tokens reserve a whole step of rows for keys and for values.
+    let attentionBytes = 2 * (2 * KVCacheSimple().step * 8) * 4
+    let recurrentBytes = (3 * 16 + 2 * 4 * 8) * 4
+    #expect(
+        status.layers.map(\.memoryBytes)
+            == [attentionBytes, 0, recurrentBytes, attentionBytes])
+    #expect(status.memoryBytes == 2 * attentionBytes + recurrentBytes)
+}
+
 // MARK: - Default LanguageModel path
 
 @Test func defaultLanguageModelHonorsMaxKVSize() throws {

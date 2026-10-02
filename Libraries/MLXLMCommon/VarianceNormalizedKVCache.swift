@@ -154,7 +154,12 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
     }
 
     public override func innerState() -> [MLXArray] {
-        state
+        (tileSlabs.map(\.records) + pendingTiles).flatMap {
+            [
+                $0.keyWeight, $0.keyScales, $0.keyBiases, $0.keyColumnScales,
+                $0.valueWeight, $0.valueScales, $0.valueBiases, $0.valueColumnScales,
+            ]
+        } + [tailKeys, tailValues].compactMap { $0 }
     }
 
     private func rotate(_ x: MLXArray) -> MLXArray {

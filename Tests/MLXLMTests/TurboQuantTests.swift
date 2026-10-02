@@ -396,6 +396,38 @@ struct TurboQuantKVCacheTests {
             "State should have 2 or 4 arrays, got \(state.count)")
     }
 
+    /// Regression test: the cache inherited an empty `innerState()`, so `eval(cache)`
+    /// skipped its buffers and `KVCacheStatus` counted zero bytes for it.
+    @Test func cacheInnerStateHoldsRawAndCompressedStorage() {
+        let cache = TurboQuantKVCache(bits: 4)
+        let B = 1
+        let H = 2
+        let D = 128
+
+        let keys = MLXRandom.normal([B, H, 4, D])
+        let values = MLXRandom.normal([B, H, 4, D])
+        eval(keys, values)
+        _ = cache.update(keys: keys, values: values)
+
+        // Prefill keeps raw keys and values in 256-row steps.
+        let rawBytes = 2 * (B * H * 256 * D) * 4
+        #expect(KVCacheStatus(cache: [cache]).memoryBytes == rawBytes)
+
+        let newKey = MLXRandom.normal([B, H, 1, D])
+        let newValue = MLXRandom.normal([B, H, 1, D])
+        let queries = MLXRandom.normal([B, H * 2, 1, D])
+        eval(newKey, newValue, queries)
+        eval(
+            cache.compressedAttention(
+                queries: queries, keys: newKey, values: newValue,
+                scale: 1.0 / sqrt(Float(D))))
+
+        #expect(cache.isCompressed)
+        let compressedBytes = KVCacheStatus(cache: [cache]).memoryBytes
+        #expect(compressedBytes == cache.memoryBytes)
+        #expect(compressedBytes > 0 && compressedBytes < rawBytes)
+    }
+
     @Test func cacheIsTrimmable() {
         let cache = TurboQuantKVCache(bits: 4)
         #expect(cache.isTrimmable == true)
