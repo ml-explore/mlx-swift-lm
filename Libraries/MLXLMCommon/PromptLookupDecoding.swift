@@ -29,7 +29,7 @@ public struct PromptLookupConfiguration: Sendable, Equatable {
     public var adaptive: Bool
 
     public init(
-        maxDraftTokens: Int = 8, maxNGramLength: Int = 4, minNGramLength: Int = 1,
+        maxDraftTokens: Int = 4, maxNGramLength: Int = 4, minNGramLength: Int = 1,
         contextSize: Int = 16_384, minimumOccurrences: Int = 1,
         minimumConfidence: Float = 0.5, adaptive: Bool = true
     ) {
