@@ -212,6 +212,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// `LMOutput.state`.
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
+        prefill.prefix?(mainCacheStorage.processedTokenCount)
         let inputLength = input.text.cacheSequenceLength
 
         var prefillState = LMOutput.State()

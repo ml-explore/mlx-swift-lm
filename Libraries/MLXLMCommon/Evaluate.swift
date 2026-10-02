@@ -865,6 +865,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
+        prefill.prefix?(cacheStorage.processedTokenCount)
         let inputLength = input.text.cacheSequenceLength
 
         switch try model.prepare(input, cache: cache, state: state, prefill: prefill) {
@@ -1132,6 +1133,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     /// Prefill both main and draft models with the prompt, priming caches for generation
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
+        prefill.prefix?(mainCacheStorage.processedTokenCount)
         let inputLength = input.text.cacheSequenceLength
 
         // Prefill main model

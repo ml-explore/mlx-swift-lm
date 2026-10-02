@@ -861,6 +861,39 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertLessThan(completionInfo?.promptTokenCount ?? .max, fullSecondPromptLength)
     }
 
+    /// A template that re-renders the cached tail rewinds the cache before the
+    /// turn is prefilled, so the prefix announced up front is what remains: the
+    /// figure the turn's completion info attributes to the cache once it ends.
+    func testPrefillPrefixAnnouncesTheReusedCache() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+        let (prefixes, prefixContinuation) = AsyncStream<Int>.makeStream()
+        var prefixIterator = prefixes.makeAsyncIterator()
+        session.generateParameters.prefill.prefix = { prefixContinuation.yield($0) }
+
+        let first = try await collectGeneration(session.streamDetails(to: "first"))
+        let firstPrefix = await prefixIterator.next()
+        let firstRenderedLength = await lengthIterator.next()
+
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondPrefix = await prefixIterator.next()
+
+        XCTAssertEqual(firstPrefix, 0)
+        XCTAssertEqual(firstPrefix, first.info.cachedPromptTokenCount)
+        XCTAssertEqual(secondPrefix, try XCTUnwrap(firstRenderedLength) - 1)
+        XCTAssertEqual(secondPrefix, second.info.cachedPromptTokenCount)
+    }
+
     func testHistoricalMediaReusesSuffixButNewMediaRebuildsCache() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
         var lengthIterator = renderedLengths.makeAsyncIterator()
