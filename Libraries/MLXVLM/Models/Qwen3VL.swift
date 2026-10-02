@@ -10,6 +10,7 @@ import MLXNN
 
 private enum Qwen3VLError: Error {
     case featureTokenMismatch(expected: Int, actual: Int)
+    case invalidEmbeddingInput
 }
 
 private let ropeDeltasKey = LMOutput.Key<MLXArray>("qwen35vl.ropeDeltas")
@@ -1803,6 +1804,31 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         return result
+    }
+
+    /// Returns final normalized hidden states before vocabulary projection for one unpadded input.
+    public func hiddenStates(_ input: LMInput) throws -> MLXArray {
+        let tokens = input.text.tokens
+        guard tokens.ndim == 2, tokens.dim(0) == 1, tokens.dim(1) > 0,
+            input.text.mask == nil
+                || (input.text.mask?.shape == tokens.shape
+                    && (input.text.mask?.all().item(Bool.self) ?? false))
+        else {
+            throw Qwen3VLError.invalidEmbeddingInput
+        }
+        let vision = try visionInputs(input)
+        let (positions, _) = Qwen3VLLanguage.getRopeIndex(
+            inputIds: tokens,
+            imageGridTHW: vision.imageFrames,
+            videoGridTHW: vision.videoFrames,
+            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            visionStartTokenId: config.visionStartTokenId)
+        return languageModel.model(
+            tokens, cache: nil, inputEmbeddings: vision.inputEmbeddings,
+            mask: nil, positionIds: positions, visualIndices: vision.visualIndices,
+            deepstackEmbeds: vision.deepstackEmbeds)
     }
 
     public func prepare(
