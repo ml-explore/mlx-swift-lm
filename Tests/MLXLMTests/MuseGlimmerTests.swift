@@ -3,6 +3,7 @@
 import CoreImage
 import Foundation
 import MLX
+import MLXNN
 import Testing
 
 @testable import MLXLMCommon
@@ -1016,8 +1017,123 @@ struct MuseGlimmerImageBudgetTests {
     }
 }
 
+@Suite("MuseGlimmer text-only prepare")
+struct MuseGlimmerTextOnlyPrepareTests {
+
+    /// A text-only turn must not carry an attention mask: a batch of one has nothing to pad, the
+    /// model never reads `LMInput.text.mask`, and `ChatSession` treats a masked input as
+    /// non-resumable, vetoing prompt-cache reuse on every agentic turn.
+    @Test("text-only input carries no attention mask")
+    func noMaskWithoutImages() async throws {
+        let processor = MuseGlimmerProcessor(
+            MuseGlimmerProcessorConfiguration(),
+            tokenizer: MuseGlimmerStubTokenizer())
+        let input = try await processor.prepare(input: UserInput(prompt: "hello"))
+        #expect(input.text.mask == nil)
+        #expect(input.text.tokens.shape == [1, 4])
+    }
+}
+
+@Suite("MuseGlimmer detached vision")
+struct MuseGlimmerDetachedVisionTests {
+
+    private static func isVisionKey(_ key: String) -> Bool {
+        matchesWeightPrefixes(
+            key, prefixes: ["vision_tower.", "vision_adapter.", "vision_projection."])
+    }
+
+    /// One image token over a 2x2 patch grid.
+    private static func imageInput() -> LMInput {
+        let tokens = MLXArray([1, 2, 7, 3, 4] as [Int32]).expandedDimensions(axis: 0)
+        return LMInput(
+            text: .init(tokens: tokens),
+            image: .init(
+                pixels: MLXArray.zeros([4, 2 * 3 * 14 * 14], dtype: .float32),
+                frames: [THW(1, 2, 2)]))
+    }
+
+    private static func imageLogits(_ model: MuseGlimmer) throws -> MLXArray {
+        let result = try model.prepare(
+            imageInput(), cache: try model.newCache(parameters: nil), state: nil,
+            prefill: PrefillParameters())
+        guard case .logits(let output) = result else {
+            throw VLMError.processing("expected logits")
+        }
+        return output.logits
+    }
+
+    @Test("detaching removes every vision weight and nothing else")
+    func detachRemovesVisionWeights() throws {
+        let model = try MuseGlimmerForwardTests.model()
+        let attached = Set(model.parameters().flattened().map(\.0))
+        #expect(attached.contains(where: Self.isVisionKey))
+        #expect(model.mediaModulesAreAttached)
+
+        try model.detachMediaModules()
+
+        #expect(!model.mediaModulesAreAttached)
+        let detached = Set(model.parameters().flattened().map(\.0))
+        #expect(detached == attached.filter { !Self.isVisionKey($0) })
+    }
+
+    @Test("new media modules rebuild the tree the initializer builds")
+    func newModulesRebuildTheSameTree() throws {
+        let model = try MuseGlimmerForwardTests.model()
+        let attached = Set(model.parameters().flattened().map(\.0))
+        #expect(Set(model.makeMediaModules().keys) == Set(model.mediaModuleKeys))
+
+        try model.detachMediaModules()
+        try model.attach(model.makeMediaModules())
+
+        #expect(Set(model.parameters().flattened().map(\.0)) == attached)
+    }
+
+    @Test("an image on a model without a vision tower throws")
+    func imageWithoutAVisionTowerThrows() throws {
+        let model = try MuseGlimmerForwardTests.model()
+        try model.detachMediaModules()
+
+        #expect(throws: VLMError.self) { _ = try Self.imageLogits(model) }
+    }
+
+    /// The checkpoint mirrors `Muse-Glimmer-30B-4bit`: the tower is bf16 while the adapter and
+    /// the top-level projection are quantized. The first image loads the stack, and its logits
+    /// match an eagerly loaded model bit for bit.
+    @Test("the first image loads the vision stack and matches an eager load")
+    func firstImageLoadsTheVisionStack() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MuseGlimmerDetached-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let quantization = BaseConfiguration.Quantization(groupSize: 32, bits: 4)
+        let source = try MuseGlimmerForwardTests.model()
+        quantize(
+            model: source, groupSize: 32, bits: 4,
+            filter: { path, _ in path.hasPrefix("vision_adapter") || path == "vision_projection" })
+        try save(
+            arrays: Dictionary(uniqueKeysWithValues: source.parameters().flattened()),
+            url: directory.appendingPathComponent("model.safetensors"))
+
+        let eager = try MuseGlimmerForwardTests.model()
+        try loadWeights(modelDirectory: directory, model: eager, quantization: quantization)
+
+        let reloaded = try MuseGlimmerForwardTests.model()
+        try reloaded.detachMediaModules(
+            loadingFrom: MediaWeightSource(modelDirectory: directory, quantization: quantization))
+        try loadWeights(modelDirectory: directory, model: reloaded, quantization: quantization)
+        #expect(!reloaded.mediaModulesAreAttached)
+
+        let logits = try Self.imageLogits(reloaded)
+
+        #expect(reloaded.mediaModulesAreAttached)
+        #expect(reloaded.parameters().flattened().contains { $0.0 == "vision_projection.scales" })
+        #expect(arrayEqual(logits, try Self.imageLogits(eager)).item(Bool.self))
+    }
+}
+
 /// Minimal tokenizer: the budget tests only exercise `preprocess`, which never
-/// touches it.
+/// touches it, and the text-only prepare test only needs a fixed template.
 private struct MuseGlimmerStubTokenizer: Tokenizer {
     func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
@@ -1030,7 +1146,7 @@ private struct MuseGlimmerStubTokenizer: Tokenizer {
         messages: [[String: any Sendable]],
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
-    ) throws -> [Int] { [] }
+    ) throws -> [Int] { [1, 2, 3, 4] }
 }
 
 @Suite("MuseGlimmer agentic protocol")

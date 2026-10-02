@@ -236,6 +236,11 @@ public func convert(
         throw ModelConversionError.sourceAlreadyQuantized(modelDirectory)
     }
     try validateModelConversionCalibration(options.quantization)
+    // Conversion saves every weight, so media modules a factory detached load with the rest. This
+    // runs before the decisions below capture module instances.
+    if let model = model as? any DetachableMediaModel, !model.mediaModulesAreAttached {
+        try model.attach(model.makeMediaModules())
+    }
     // Resolved once, before any filesystem mutation, and reused below. Re-running the
     // predicate after the output exists would let a stateful one pass preflight and then
     // fail with a half-written model on disk.

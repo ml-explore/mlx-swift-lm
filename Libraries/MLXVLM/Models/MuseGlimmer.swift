@@ -17,8 +17,9 @@ import MLXNN
 //   - Full-attention layers get *no* positional encoding (`layer_rope_theta` is
 //     0 for them), while sliding layers use theta 500000.
 //   - Attention output is gated: `output * sigmoid(gate_proj(x))`.
-//   - Queries are multiplied by `qk_scale_factor` (3.87) *in addition to* the
-//     usual `1/sqrt(head_dim)` softmax scale.
+//   - Attention applies `qk_scale_factor` (3.87) *in addition to* the usual
+//     `1/sqrt(head_dim)` softmax scale (folded into the SDPA scale here; the
+//     reference multiplies it into the queries — same expression).
 //   - The ViT does window attention by permuting tokens into contiguous windows
 //     and running chunked SDPA — no banded mask is ever materialized.
 
@@ -253,6 +254,55 @@ public struct MuseGlimmerConfiguration: Codable, Sendable {
     }
 }
 
+// MARK: - Compiled fusions
+
+// Muse-Glimmer's block norms run 4× per layer × 52 layers per decoded token; eagerly each
+// `MuseCenteredRMSNorm` is ~7 tiny kernel launches and dispatch dominates decode time.
+// `compile` collapses the elementwise regions while running the *same operations in the same
+// order and dtypes* as the eager reference, so outputs are bit-for-bit identical (verified on
+// the eager path and by greedy tokens on the 30B checkpoint). As in `Gemma4Text.swift`.
+
+/// Exact fusion of the `MuseCenteredRMSNorm` body. `eps` arrives as a scalar
+/// fp32 array so the two eps values in play (`rms_norm_eps` for the pre-norms,
+/// `post_norm_eps` for the post-norms) share one compiled function.
+private let _centeredRMSNorm: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { x, weight, eps in
+        let dtype = x.dtype
+        let f = x.asType(.float32)
+        let variance = mean(f * f, axis: -1, keepDims: true)
+        var out = f * rsqrt(variance + eps)
+        out = out * (1.0 + weight.asType(.float32))
+        return out.asType(dtype)
+    }
+
+/// `residual + centeredRMSNorm(x)` — the post-attention / post-MLP pattern in
+/// `MuseGlimmerDecoderLayer`. Args: `[residual, x, weight, eps]`.
+private let _addCenteredRMSNorm: @Sendable ([MLXArray]) -> [MLXArray] =
+    compile(shapeless: true) { args in
+        let (residual, x, weight, eps) = (args[0], args[1], args[2], args[3])
+        let dtype = x.dtype
+        let f = x.asType(.float32)
+        let variance = mean(f * f, axis: -1, keepDims: true)
+        var out = f * rsqrt(variance + eps)
+        out = out * (1.0 + weight.asType(.float32))
+        return [residual + out.asType(dtype)]
+    }
+
+/// `output * sigmoid(gate)` — the attention output gate.
+private let _sigmoidGate: @Sendable (MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { output, gate in
+        output * sigmoid(gate)
+    }
+
+/// Hides a constant `MLXArray` from `Module` parameter reflection. The block
+/// norms keep their `eps` as a prebuilt scalar array for the compiled calls;
+/// storing it as a bare `MLXArray` property would make weight verification
+/// expect a matching checkpoint key.
+private final class ConstantBox {
+    let value: MLXArray
+    init(_ value: MLXArray) { self.value = value }
+}
+
 // MARK: - Norms
 
 /// RMS norm with no learnable scale — `mx.fast.rms_norm(x, None, eps)`.
@@ -274,30 +324,33 @@ private class MuseRMSNormNoScale: Module, UnaryLayer {
     }
 }
 
-/// RMS norm whose checkpoint scale is centered at zero, so the effective scale
-/// is `1 + weight`.
+/// RMS norm whose checkpoint scale is centered at zero, so the effective scale is
+/// `1 + weight`.
 ///
-/// Not the same as `MLXNN.RMSNorm` (which uses `weight` directly) and not
-/// mean-subtracting despite the name. The fp32 cast ordering follows the
-/// reference exactly — folding `1 + weight` in bf16 instead drifts enough to
-/// change decode choices.
+/// Not `MLXNN.RMSNorm` (which uses `weight` directly) and not mean-subtracting despite the
+/// name. Neither folding `1 + weight` in bf16 nor `MLXFast.rmsNorm(x, weight: 1 + w_f32,
+/// eps:)` is equivalent: the first drifts enough to change decode choices, the second by
+/// 1 bf16 ulp on ~every call (measured). The forward therefore runs the exact reference
+/// arithmetic through `_centeredRMSNorm` / `_addCenteredRMSNorm`, which only fuse kernels.
 private class MuseCenteredRMSNorm: Module, UnaryLayer {
     @ModuleInfo var weight: MLXArray
     let eps: Float
+    private let epsArray: ConstantBox
 
     init(dimensions: Int, eps: Float) {
         self._weight.wrappedValue = MLXArray.zeros([dimensions])
         self.eps = eps
+        self.epsArray = ConstantBox(MLXArray(eps))
         super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let dtype = x.dtype
-        let f = x.asType(.float32)
-        let variance = mean(f * f, axis: -1, keepDims: true)
-        var out = f * rsqrt(variance + eps)
-        out = out * (1.0 + weight.asType(.float32))
-        return out.asType(dtype)
+        _centeredRMSNorm(x, weight, epsArray.value)
+    }
+
+    /// `residual + self(x)` as one compiled graph.
+    func addedTo(_ residual: MLXArray, _ x: MLXArray) -> MLXArray {
+        _addCenteredRMSNorm([residual, x, weight, epsArray.value])[0]
     }
 }
 
@@ -318,7 +371,8 @@ private class MuseGlimmerTextMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        // Compiled `silu(gate) * up` — identical arithmetic, one kernel.
+        downProj(compiledSiluProduct(gateProj(x), upProj(x)))
     }
 }
 
@@ -395,7 +449,11 @@ private class MuseGlimmerTextAttention: Module {
         var keys = keyProj(x).reshaped(batch, length, kvHeads, headDimensions)
         var values = valueProj(x).reshaped(batch, length, kvHeads, headDimensions)
 
-        queries = (qkNorm(queries) * qkScaleFactor).transposed(0, 2, 1, 3)
+        // `qkScaleFactor` is folded into the SDPA softmax scale rather than
+        // multiplied into the bf16 queries: same expression, but it skips one
+        // elementwise kernel per layer and applies the factor in the kernel's
+        // fp32 accumulation. Greedy-token identical to the reference ordering.
+        queries = qkNorm(queries).transposed(0, 2, 1, 3)
         keys = qkNorm(keys).transposed(0, 2, 1, 3)
         values = values.transposed(0, 2, 1, 3)
 
@@ -410,13 +468,13 @@ private class MuseGlimmerTextAttention: Module {
             keys: keys,
             values: values,
             cache: cache,
-            scale: scale,
+            scale: scale * qkScaleFactor,
             mask: mask
         )
         output = output.transposed(0, 2, 1, 3).reshaped(batch, length, -1)
 
         // Gate is computed from the layer input, not the attention output.
-        output = output * sigmoid(gateProj(x))
+        output = _sigmoidGate(output, gateProj(x))
         return outputProj(output)
     }
 }
@@ -457,11 +515,9 @@ private class MuseGlimmerDecoderLayer: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?
     ) -> MLXArray {
-        var h =
-            x
-            + postAttentionLayerNorm(
-                selfAttention(inputLayerNorm(x), mask: mask, cache: cache))
-        h = h + postFeedforwardLayerNorm(mlp(preFeedforwardLayerNorm(h)))
+        var h = postAttentionLayerNorm.addedTo(
+            x, selfAttention(inputLayerNorm(x), mask: mask, cache: cache))
+        h = postFeedforwardLayerNorm.addedTo(h, mlp(preFeedforwardLayerNorm(h)))
         return h
     }
 }
@@ -1043,16 +1099,31 @@ private class MuseGlimmerVisionAdapter: Module, UnaryLayer {
 
 // MARK: - Model
 
+/// Builds the vision stack for `init` and `makeMediaModules()`.
+private func makeMuseGlimmerMediaModules(_ config: MuseGlimmerConfiguration) -> (
+    tower: MuseGlimmerVisionModel, adapter: MuseGlimmerVisionAdapter, projection: Linear
+) {
+    (
+        MuseGlimmerVisionModel(config.visionConfiguration),
+        MuseGlimmerVisionAdapter(config),
+        Linear(
+            config.projectorHiddenSize, config.textConfiguration.hiddenSize, bias: false)
+    )
+}
+
 public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
     @ModuleInfo(key: "language_model") private var languageModel: MuseGlimmerLanguageModel
-    @ModuleInfo(key: "vision_tower") private var visionTower: MuseGlimmerVisionModel
-    @ModuleInfo(key: "vision_adapter") private var visionAdapter: MuseGlimmerVisionAdapter
-    @ModuleInfo(key: "vision_projection") private var visionProjection: Linear
+    @ModuleInfo(key: "vision_tower") private var visionTower: MuseGlimmerVisionModel?
+    @ModuleInfo(key: "vision_adapter") private var visionAdapter: MuseGlimmerVisionAdapter?
+    @ModuleInfo(key: "vision_projection") private var visionProjection: Linear?
 
     /// Parameterless, so it carries no checkpoint weights.
     @ModuleInfo(key: "perception_emb_norm") private var perceptionEmbNorm: MuseRMSNormNoScale
 
     public let config: MuseGlimmerConfiguration
+
+    /// Set by the model factory, which loads the vision stack on the first image.
+    public var mediaWeightSource: MediaWeightSource?
 
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
@@ -1066,10 +1137,10 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
     public init(_ config: MuseGlimmerConfiguration) {
         self.config = config
         self._languageModel.wrappedValue = MuseGlimmerLanguageModel(config.textConfiguration)
-        self._visionTower.wrappedValue = MuseGlimmerVisionModel(config.visionConfiguration)
-        self._visionAdapter.wrappedValue = MuseGlimmerVisionAdapter(config)
-        self._visionProjection.wrappedValue = Linear(
-            config.projectorHiddenSize, config.textConfiguration.hiddenSize, bias: false)
+        let media = makeMuseGlimmerMediaModules(config)
+        self._visionTower.wrappedValue = media.tower
+        self._visionAdapter.wrappedValue = media.adapter
+        self._visionProjection.wrappedValue = media.projection
         self._perceptionEmbNorm.wrappedValue = MuseRMSNormNoScale(
             eps: config.textConfiguration.rmsNormEps)
         super.init()
@@ -1079,7 +1150,11 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
         try languageModel.newCache(parameters: parameters)
     }
 
-    private func encodeImage(_ pixelValues: MLXArray, grid: [THW]) -> MLXArray {
+    private func encodeImage(_ pixelValues: MLXArray, grid: [THW]) throws -> MLXArray {
+        guard let visionTower, let visionAdapter, let visionProjection else {
+            throw VLMError.processing(
+                "Vision inputs were provided, but the vision tower is detached.")
+        }
         let dtype = visionTower.patchEmbedder.patchEmbedding.weight.dtype
         var features = visionTower(pixelValues.asType(dtype), grid: grid)
         features = visionAdapter(features)
@@ -1107,7 +1182,7 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
 
         // Image features are already normalized by `perception_emb_norm`; they
         // deliberately do not go through `embed_norm`.
-        let imageFeatures = encodeImage(pixelValues, grid: grid).asType(embeddings.dtype)
+        let imageFeatures = try encodeImage(pixelValues, grid: grid).asType(embeddings.dtype)
 
         let imageTokenId = config.imageTokenId
         let videoTokenId = config.videoTokenId
@@ -1133,6 +1208,10 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
         _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
         prefill: PrefillParameters
     ) throws -> PrepareResult {
+        if input.image != nil {
+            try loadMediaModules()
+        }
+
         let convertedCache = cache.compactMap { $0 as KVCache }
 
         var tokens = input.text.tokens
@@ -1188,6 +1267,7 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
             }
             result[key] = value
         }
+
         return result
     }
 }
@@ -1195,6 +1275,23 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
 extension MuseGlimmer: LoRAModel {
     public var loraLayers: [Module] {
         languageModel.model.layers
+    }
+}
+
+extension MuseGlimmer: DetachableMediaModel {
+    // The vision stack is ~3.7 GB of bf16 that text-only sessions never read. Resident, it
+    // pushes the 4-bit model past the wired limit of a 24 GB Mac.
+    public var mediaModuleKeys: [String] {
+        ["vision_tower", "vision_adapter", "vision_projection"]
+    }
+
+    public func makeMediaModules() -> [String: Module] {
+        let media = makeMuseGlimmerMediaModules(config)
+        return [
+            "vision_tower": media.tower,
+            "vision_adapter": media.adapter,
+            "vision_projection": media.projection,
+        ]
     }
 }
 
@@ -1423,9 +1520,12 @@ public struct MuseGlimmerProcessor: UserInputProcessor {
             messages: messages, tools: input.tools, additionalContext: input.additionalContext)
 
         guard !input.images.isEmpty else {
+            // No attention mask: a batch of one has nothing to pad, the language model never
+            // reads `LMInput.text.mask` (its layer masks come from the KV caches), and a
+            // non-nil mask makes `ChatSession` treat the turn as non-resumable, vetoing
+            // prompt-cache reuse and re-prefilling the conversation on every agentic turn.
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray).asType(.int8)
-            return LMInput(text: .init(tokens: promptArray, mask: mask))
+            return LMInput(text: .init(tokens: promptArray))
         }
 
         let processed = try input.images.map {

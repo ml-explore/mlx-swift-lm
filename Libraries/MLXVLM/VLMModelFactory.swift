@@ -399,6 +399,14 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // Media modules load on first use, so loading the weights skips them.
+        try detachMediaModulesIfSupported(
+            of: model,
+            loadingFrom: MediaWeightSource(
+                modelDirectory: modelDirectory,
+                weightFileSelection: configuration.weightFileSelection,
+                perLayerQuantization: baseConfig.perLayerQuantization))
+
         // Load EOS token IDs from config.json, with optional override from generation_config.json
         var eosTokenIds = baseConfig.effectiveEOSTokenIds
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")

@@ -314,6 +314,8 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// Implementations may materialize arrays or replace storage-sharing
     /// module views. The library invokes this lifecycle hook while it has
     /// exclusive access to the model; inference calls must remain read-only.
+    /// A ``DetachableMediaModel`` is the one exception: it attaches its media
+    /// modules during prefill, under that same exclusive access.
     func prepare() throws
 
     /// Prepare the cache state and consume the ``LMInput``.
