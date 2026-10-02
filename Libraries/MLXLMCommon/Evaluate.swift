@@ -915,7 +915,8 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Evaluate the next token and return the new token (y), updating cache state
     mutating func step(previous: LMInput.Text) -> MLXArray {
         let result = withPreparedCache(cache, lengths: previous.sequenceLengths) {
-            model(previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+            model.nextTokenLogits(
+                previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
         }
         cacheStorage.commitProcessedTokens(previous.cacheSequenceLength)
         self.state = result.state

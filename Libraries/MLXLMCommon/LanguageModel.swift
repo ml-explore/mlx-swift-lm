@@ -346,6 +346,14 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
 
+    /// Evaluate all input positions when only the final position's logits are needed.
+    ///
+    /// Implementations may omit earlier logit rows, but must preserve cache updates and
+    /// output state. The default uses the regular forward. Scoring and speculative
+    /// verification must use the regular forward when they need multiple positions.
+    func nextTokenLogits(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+        -> LMOutput
+
     /// Models may implement this simplified interface if they do not produce any ``LMOutput/State``
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
 
@@ -375,6 +383,12 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
 }
 
 extension LanguageModel {
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        callAsFunction(input, cache: cache, state: state)
+    }
+
     /// Most language models have no derived inference state to prepare.
     public func prepare() throws {}
 
