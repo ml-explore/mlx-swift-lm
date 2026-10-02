@@ -203,7 +203,7 @@ Beyond that, chose one of the 3 integration methods and add either the adapter p
 In your Package.swift add a reference to mlx-swift-lm, chosing either the `main` branch or something that tracks versions:
 
 ```swift
-.package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMajor(from: "3.31.3")),
+.package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")),
 ```
 
 Beyond that, chose one of the 3 integration methods and add either the adapter packages OR the implementation packages if using macros/local implemenentation.  See <doc#Integration-Packages>.
