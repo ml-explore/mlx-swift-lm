@@ -609,6 +609,14 @@ struct RerankerTests {
         #expect(scores.count == 3)
         #expect(model.callCount == 2)
         #expect(scores.allSatisfy { $0 >= 0 && $0 <= 1 })
+
+        let singletonScores = try await container.causalRerankerScores(
+            query: "q",
+            documents: ["a", "bbbb", "cc"],
+            instruction: nil,
+            maxInputTokens: 8_192,
+            options: .init(maxBatchSize: 1, maxBatchTokens: 4_096))
+        #expect(scores == singletonScores)
     }
 
     @Test func causalTokenBudgetTruncatesOversizedSingleton() async throws {
@@ -661,7 +669,9 @@ struct RerankerTests {
                 let full = model(tokens, cache: nil)
                 let expected = stacked(
                     lengths.enumerated().map { row, length in full[row, length - 1] })
-                let actual = model.lastTokenLogits(tokens, sequenceLengths: lengths)
+                let hidden = model.hiddenStates(tokens, cache: nil)
+                let actual = model.projectLogits(
+                    stacked(lengths.enumerated().map { row, length in hidden[row, length - 1] }))
 
                 #expect(actual.shape == [lengths.count, 128])
                 let tolerance: Float = dtype == .float16 ? 0.02 : 0.0001
@@ -670,10 +680,10 @@ struct RerankerTests {
         }
     }
 
-    @Test func causalScoringUsesFinalTokenCapabilityAndKeepsSingletonPrefill() async throws {
+    @Test func causalScoringProjectsFinalTokensAndKeepsSingletonPrefill() async throws {
         let tokenizer = ByteRerankerTokenizer()
         let container = makeModelContainer(
-            model: TestFinalTokenRerankerModel(tokenizer: tokenizer), tokenizer: tokenizer)
+            model: TestHiddenStateRerankerModel(tokenizer: tokenizer), tokenizer: tokenizer)
         let reference = makeModelContainer(
             model: TestCausalRerankerModel(
                 trueTokenID: tokenizer.trueTokenID, falseTokenID: tokenizer.falseTokenID),
@@ -688,15 +698,14 @@ struct RerankerTests {
             query: "q", documents: documents, instruction: nil,
             maxInputTokens: 512, options: options)
         let calls = try await container.perform { context in
-            let model = try #require(context.model as? TestFinalTokenRerankerModel)
-            return (model.projectedLengths, model.fullForwardShapes)
+            let model = try #require(context.model as? TestHiddenStateRerankerModel)
+            return (model.hiddenStateShapes, model.projectedShapes, model.fullForwardShapes)
         }
 
         #expect(actual == expected)
-        #expect(calls.0.count == 1)
-        #expect(calls.0.first?.count == 2)
-        #expect(calls.0.first?.first != calls.0.first?.last)
-        #expect(calls.1 == [[1, 512]])
+        #expect(calls.0.map(\.first) == [2])
+        #expect(calls.1 == [[2, 128]])
+        #expect(calls.2 == [[1, 512]])
     }
 
     @Test func jinaFactoryRegistrationUsesArchitecture() async throws {
@@ -1052,9 +1061,11 @@ private final class TestEncoderRerankerModel: Module, RerankerModel, @unchecked 
     }
 }
 
-private final class TestFinalTokenRerankerModel: Module, CausalRerankerModel {
+/// Uses the reference logits as hidden states, so projection is the identity.
+private final class TestHiddenStateRerankerModel: Module, HiddenStateLanguageModel {
     private let base: TestCausalRerankerModel
-    private(set) var projectedLengths = [[Int]]()
+    private(set) var hiddenStateShapes = [[Int]]()
+    private(set) var projectedShapes = [[Int]]()
     private(set) var fullForwardShapes = [[Int]]()
 
     init(tokenizer: ByteRerankerTokenizer) {
@@ -1062,10 +1073,15 @@ private final class TestFinalTokenRerankerModel: Module, CausalRerankerModel {
             trueTokenID: tokenizer.trueTokenID, falseTokenID: tokenizer.falseTokenID)
     }
 
-    func lastTokenLogits(_ inputs: MLXArray, sequenceLengths: [Int]) -> MLXArray {
-        projectedLengths.append(sequenceLengths)
-        let full = base(.init(tokens: inputs), cache: nil, state: nil).logits
-        return stacked(sequenceLengths.enumerated().map { row, length in full[row, length - 1] })
+    func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let hidden = base(.init(tokens: inputs), cache: cache, state: nil).logits
+        hiddenStateShapes.append(hidden.shape)
+        return hidden
+    }
+
+    func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+        projectedShapes.append(hiddenStates.shape)
+        return hiddenStates
     }
 
     func prepare(
@@ -1128,7 +1144,7 @@ private final class TestCausalRerankerModel: Module, LanguageModel, ListwiseRera
         for row in 0 ..< batchSize {
             var runningTotal = 0
             for column in 0 ..< sequenceLength {
-                runningTotal += tokenValues[row * sequenceLength + column]
+                runningTotal += tokenValues[row * sequenceLength + column] + 1
                 let offset = (row * sequenceLength + column) * vocabularySize
                 values[offset + trueTokenID] = Float(runningTotal % 100) / 20
                 values[offset + falseTokenID] = 0

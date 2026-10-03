@@ -435,3 +435,20 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
     // a kvHeads-based default would mis-report those layouts. The base
     // ``LanguageModel`` implementation classifies the caches ``newCache`` builds.
 }
+
+/// Optional capability for language models whose forward pass is a final-hidden-state
+/// stack followed by a vocabulary projection.
+///
+/// Callers can select positions before projecting, for example to score only the last
+/// token of each row. The model keeps ownership of normalization, masking, and the cache;
+/// pass ragged batches through ``withPreparedCache(_:lengths:_:)`` as for any forward pass.
+package protocol HiddenStateLanguageModel: LanguageModel {
+    /// Returns final, normalized hidden states `[batch, sequence, hidden]`.
+    func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray
+
+    /// Projects hidden states `[..., hidden]` to vocabulary logits `[..., vocabulary]`.
+    ///
+    /// Include any logit scaling or soft-capping, so that projecting all positions gives the
+    /// same logits as ``LanguageModel/callAsFunction(_:cache:)``.
+    func projectLogits(_ hiddenStates: MLXArray) -> MLXArray
+}
