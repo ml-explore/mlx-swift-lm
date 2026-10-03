@@ -365,6 +365,170 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
         XCTAssertFalse(cache.isPrepared)
     }
 
+    private func assertVLMCompiledDecodeReleasesFusedProjection(
+        cache makeCache: () -> [KVCache?],
+        usesSegments: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let base = settledActiveMemory()
+        try autoreleasepool {
+            let model = Qwen35Language.Model(try vlmConfiguration())
+            model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
+            let layers = model.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }
+            XCTAssertFalse(layers.isEmpty, file: file, line: line)
+            for layer in layers {
+                try quantize(layer)
+                XCTAssertTrue(try layer.prepareFusedInputProjection(), file: file, line: line)
+            }
+            model.train(false)
+
+            let cache = makeCache()
+            for token: Int32 in [1, 2, 3] {
+                let output = model(MLXArray([token]).reshaped(1, 1), cache: cache)
+                eval(output)
+            }
+            if usesSegments {
+                XCTAssertGreaterThan(
+                    model.compiledDecodeSegmentCount, 0, file: file, line: line)
+            } else {
+                XCTAssertEqual(model.compiledDecodeSegmentCount, 0, file: file, line: line)
+                XCTAssertGreaterThan(model.compiledGDNTraceCount, 0, file: file, line: line)
+            }
+            eval(cache.compactMap { $0 }.flatMap(\.state))
+        }
+
+        let retained = settledActiveMemory() - base
+        XCTAssertLessThan(
+            retained, 64, "\(retained) bytes stayed allocated after the model was dropped",
+            file: file, line: line)
+    }
+
+    func testVLMWholeStepTraceReleasesFusedProjectionWithTheModel() throws {
+        try assertVLMCompiledDecodeReleasesFusedProjection(
+            cache: { [MambaCache(), KVCacheSimple()] }, usesSegments: true)
+    }
+
+    func testVLMFallbackTraceReleasesFusedProjectionWithTheModel() throws {
+        try assertVLMCompiledDecodeReleasesFusedProjection(
+            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            usesSegments: false)
+    }
+
+    private func assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+        cache makeCache: () -> [KVCache?],
+        usesSegments: Bool,
+        updateModule: (Qwen35Language.Model) throws -> Module,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let configuration = try vlmConfiguration()
+        let (warm, reference) = withRandomState(MLXRandom.RandomState(seed: 83)) {
+            let warm = Qwen35Language.Model(configuration)
+            let reference = Qwen35Language.Model(configuration)
+            warm.update(parameters: warm.parameters().mapValues { $0.asType(.float16) })
+            reference.update(parameters: warm.parameters())
+            return (warm, reference)
+        }
+
+        for model in [warm, reference] {
+            let layers = model.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }
+            for layer in layers {
+                try quantize(layer)
+                XCTAssertTrue(try layer.prepareFusedInputProjection(), file: file, line: line)
+            }
+            model.train(false)
+        }
+
+        func decode(_ model: Qwen35Language.Model) -> [MLXArray] {
+            let cache = makeCache()
+            return [Int32(1), 2, 3].map { token in
+                let output = model(MLXArray([token]).reshaped(1, 1), cache: cache)
+                eval(output)
+                return output
+            }
+        }
+
+        let baseline = decode(warm)
+        if usesSegments {
+            XCTAssertGreaterThan(warm.compiledDecodeSegmentCount, 0, file: file, line: line)
+        } else {
+            XCTAssertEqual(warm.compiledDecodeSegmentCount, 0, file: file, line: line)
+            XCTAssertGreaterThan(warm.compiledGDNTraceCount, 0, file: file, line: line)
+        }
+
+        let warmModule = try updateModule(warm)
+        let referenceModule = try updateModule(reference)
+        let parameters = warmModule.parameters().flattened()
+        let (scaleKey, scale) = try XCTUnwrap(
+            parameters.first { key, _ in
+                key.hasSuffix("in_proj_qkv.scales")
+            })
+        let update = ModuleParameters.unflattened([scaleKey: scale * 1.25])
+        warmModule.update(parameters: update)
+        referenceModule.update(parameters: update)
+
+        XCTAssertEqual(warm.compiledDecodeSegmentCount, 0, file: file, line: line)
+        XCTAssertEqual(warm.compiledGDNTraceCount, 0, file: file, line: line)
+        XCTAssertFalse(
+            warm.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }
+                .contains(where: \.hasFusedInputProjection), file: file, line: line)
+
+        let actual = decode(warm)
+        let expected = decode(reference)
+        XCTAssertNotEqual(
+            actual.last?.asType(.float32).asArray(Float.self),
+            baseline.last?.asType(.float32).asArray(Float.self), file: file, line: line)
+        for (index, (actual, expected)) in zip(actual, expected).enumerated() {
+            assertBitIdentical(
+                actual, expected, "updated VLM token \(index)", file: file, line: line)
+        }
+    }
+
+    func testVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate() throws {
+        try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+            cache: { [MambaCache(), KVCacheSimple()] }, usesSegments: true,
+            updateModule: { $0 })
+    }
+
+    func testVLMWholeStepTraceObservesDecoderParameterUpdate() throws {
+        try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+            cache: { [MambaCache(), KVCacheSimple()] }, usesSegments: true,
+            updateModule: { model in
+                try XCTUnwrap(
+                    model.modules().first { ($0 as? Qwen35Language.DecoderLayer)?.isLinear == true }
+                )
+            })
+    }
+
+    func testVLMFallbackTraceObservesDecoderParameterUpdate() throws {
+        try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            usesSegments: false,
+            updateModule: { model in
+                try XCTUnwrap(
+                    model.modules().first { ($0 as? Qwen35Language.DecoderLayer)?.isLinear == true }
+                )
+            })
+    }
+
+    func testVLMWholeStepTraceObservesGDNParameterUpdate() throws {
+        try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+            cache: { [MambaCache(), KVCacheSimple()] }, usesSegments: true,
+            updateModule: { model in
+                try XCTUnwrap(model.modules().first { $0 is Qwen35Language.GatedDeltaNet })
+            })
+    }
+
+    func testVLMFallbackTraceObservesGDNParameterUpdate() throws {
+        try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
+            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            usesSegments: false,
+            updateModule: { model in
+                try XCTUnwrap(model.modules().first { $0 is Qwen35Language.GatedDeltaNet })
+            })
+    }
+
     /// Opt-in paired benchmark for a local Qwen 3.5 checkpoint.
     ///
     /// The same model and materialized weights are used for both paths, with
