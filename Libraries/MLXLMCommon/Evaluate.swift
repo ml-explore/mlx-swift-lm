@@ -802,7 +802,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.cacheStorage = cacheStorage
 
         try components.validate(parameters: parameters)
-        self.processor = components.logitProcessor(parameters: parameters)
+        self.processor = components.logitProcessor(parameters: parameters, model: model)
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
 
@@ -1119,7 +1119,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.sampler = parameters.sampler()
         try components.validate(parameters: parameters)
-        self.processor = components.logitProcessor(parameters: parameters)
+        self.processor = components.logitProcessor(parameters: parameters, model: mainModel)
 
         self.maxTokens = parameters.maxTokens
         self.numDraftTokens = numDraftTokens
