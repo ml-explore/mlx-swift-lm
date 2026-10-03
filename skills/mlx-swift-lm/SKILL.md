@@ -289,6 +289,15 @@ let history: [Chat.Message] = [
 let session = ChatSession(modelContainer, history: history)
 ```
 
+To start another conversation over the same instructions and tools, fork a session that
+has responded. The fork copies its cache and prefills only the tokens the cache does not
+already hold. Pass no history to branch the current conversation instead.
+
+```swift
+let next = await session.fork(history: [])
+let reply = try await next.respond(to: "What is the weather like?")
+```
+
 ## 5. Secondary Workflow: VLM Inference
 
 ### Image Input Types

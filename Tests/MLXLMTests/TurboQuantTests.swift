@@ -381,6 +381,47 @@ struct TurboQuantKVCacheTests {
         #expect(cache.offset == 5)
     }
 
+    @Test func cacheCopyIsIndependentOfItsSource() throws {
+        let (b, hq, hkv, d) = (1, 4, 2, 64)
+        let scale = 1 / Float(d).squareRoot()
+        func decode(_ cache: TurboQuantKVCache, key: UInt64) -> MLXArray {
+            let k = MLXRandom.normal([b, hkv, 1, d], key: MLXRandom.key(key)) * 0.3
+            let v = MLXRandom.normal([b, hkv, 1, d], key: MLXRandom.key(key + 1)) * 0.3
+            let q = MLXRandom.normal([b, hq, 1, d], key: MLXRandom.key(key + 2)) * 0.3
+            return cache.compressedAttention(queries: q, keys: k, values: v, scale: scale)
+        }
+
+        let cache = TurboQuantKVCache(bits: 4, keyBits: 4, valueBits: 2, seed: 123)
+        let keys = MLXRandom.normal([b, hkv, 16, d], key: MLXRandom.key(1)) * 0.3
+        let values = MLXRandom.normal([b, hkv, 16, d], key: MLXRandom.key(2)) * 0.3
+        _ = cache.update(keys: keys, values: values)
+        eval(decode(cache, key: 10))
+        #expect(cache.isCompressed)
+        let state = cache.state
+        eval(state)
+
+        // Rewind the copy and write over rows the source still holds.
+        let copy = try #require(cache.copy() as? TurboQuantKVCache)
+        #expect(copy.isCompressed)
+        #expect(copy.metaState == cache.metaState)
+        copy.trim(4)
+        for step in 0 ..< 6 {
+            eval(decode(copy, key: 20 + UInt64(step) * 3))
+        }
+
+        #expect(cache.offset == 17)
+        let stateAfterCopy = cache.state
+        #expect(stateAfterCopy.count == state.count)
+        for (before, after) in zip(state, stateAfterCopy) {
+            #expect(before.shape == after.shape)
+            #expect(arrayEqual(before, after).item(Bool.self))
+        }
+
+        // A copy carries everything the source decodes with.
+        let twin = try #require(cache.copy() as? TurboQuantKVCache)
+        #expect(arrayEqual(decode(cache, key: 40), decode(twin, key: 40)).item(Bool.self))
+    }
+
     @Test func cacheState() {
         let cache = TurboQuantKVCache(bits: 4)
         let keys = MLXRandom.normal([1, 2, 4, 32])

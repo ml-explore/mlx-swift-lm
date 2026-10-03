@@ -262,6 +262,64 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    /// Counts `KVCache.copy()` calls across every cache a model creates.
+    private final class CopyCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.withLock { count += 1 }
+        }
+
+        var value: Int {
+            lock.withLock { count }
+        }
+    }
+
+    private final class CopyCountingCache: KVCacheSimple {
+        let copies: CopyCounter
+
+        init(copies: CopyCounter) {
+            self.copies = copies
+            super.init()
+        }
+
+        override func copy() -> any KVCache {
+            copies.increment()
+            return super.copy()
+        }
+    }
+
+    /// Serves `base` over caches that count their copies.
+    private final class CopyCountingLanguageModel: Module, LanguageModel {
+        let base: any LanguageModel
+        let copies: CopyCounter
+
+        init(_ base: any LanguageModel, copies: CopyCounter) {
+            self.base = base
+            self.copies = copies
+            super.init()
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            try base.prepare(input, cache: cache, state: state, prefill: prefill)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters).map { _ in
+                CopyCountingCache(copies: copies)
+            }
+        }
+    }
+
     private struct EmptyChatTemplateTokenizer: Tokenizer {
         var bosToken: String? = nil
         var eosToken: String? = nil
@@ -480,6 +538,11 @@ public class ChatSessionTests: XCTestCase {
             }
         }
         return (text, try XCTUnwrap(completionInfo))
+    }
+
+    /// The values a realized cache holds, read out so they can leave the session.
+    private static func cachedValues(_ cache: [KVCache]?) -> [[Float]] {
+        (cache ?? []).flatMap(\.state).map { $0.asType(.float32).asArray(Float.self) }
     }
 
     private let generationParameters = GenerateParameters(maxTokens: 50)
@@ -2137,6 +2200,119 @@ public class ChatSessionTests: XCTestCase {
             context, promptCache: snapshot, generateParameters: generationParameters)
         let result = try await restored.respond(to: "hello again")
         XCTAssertGreaterThan(result.count, targetLength, result)
+    }
+
+    func testForkContinuesTheConversationOfItsSource() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        let branch = await session.fork()
+        let branchReply = try await collectGeneration(branch.streamDetails(to: "second"))
+        let sourceReply = try await collectGeneration(session.streamDetails(to: "third"))
+
+        // Both continue from the first prompt and the tokens it generated.
+        XCTAssertEqual(branchReply.info.cachedPromptTokenCount, firstPromptLength + 3)
+        XCTAssertEqual(sourceReply.info.cachedPromptTokenCount, firstPromptLength + 3)
+    }
+
+    func testForkWithHistoryPrefillsOnlyWhatItsCacheDoesNotHold() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let instructions = "shared instructions"
+        let session = ChatSession(
+            model(processor: processor),
+            instructions: instructions,
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+        let sourceState = await session.withCache(Self.cachedValues)
+
+        let fork = await session.fork(history: [])
+        let forkReply = try await collectGeneration(fork.streamDetails(to: "second"))
+        let forkRenderedLength = await lengthIterator.next()
+        let forkPromptLength = try XCTUnwrap(forkRenderedLength)
+
+        // The system marker, the instructions, their end marker and the user marker.
+        let sharedPrefixLength = instructions.unicodeScalars.count + 3
+        XCTAssertEqual(forkReply.info.cachedPromptTokenCount, sharedPrefixLength)
+        XCTAssertEqual(forkReply.info.promptTokenCount, forkPromptLength - sharedPrefixLength)
+
+        // The fork rewrote rows the source holds, and the source did not see it.
+        let stateAfterFork = await session.withCache(Self.cachedValues)
+        XCTAssertEqual(stateAfterFork, sourceState)
+        let sourceReply = try await collectGeneration(session.streamDetails(to: "third"))
+        XCTAssertEqual(sourceReply.info.cachedPromptTokenCount, firstPromptLength + 3)
+    }
+
+    func testForkStartsColdWhenTheTranscriptCarriesMedia() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        let answer = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+
+        // The source's tokens exactly, over a different image.
+        let fork = await session.fork(history: [
+            .user("inspect this", images: [.array(MLXArray([Float(1)]))]),
+            .assistant(answer),
+        ])
+        let reply = try await collectGeneration(fork.streamDetails(to: "describe it"))
+
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, 0)
+
+        // A branch keeps the transcript its cache was built from, media included.
+        let branch = await session.fork()
+        let branchReply = try await collectGeneration(branch.streamDetails(to: "describe it"))
+        XCTAssertGreaterThan(branchReply.info.cachedPromptTokenCount, 0)
+    }
+
+    func testForkStartingColdCopiesNoCache() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let copies = CopyCounter()
+        var context = Self.makeModel(
+            processor: processor,
+            configuration: processor.configuration,
+            tokenizer: processor.tokenizer)
+        context.model = CopyCountingLanguageModel(context.model, copies: copies)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+
+        _ = await session.fork(history: [
+            .user("inspect this", images: [.array(MLXArray([Float(0)]))])
+        ])
+        XCTAssertEqual(copies.value, 0)
+
+        // A text transcript reuses the cache, so the same session copies every layer.
+        _ = await session.fork(history: [])
+        let layerCount = await session.withCache { $0?.count ?? 0 }
+        XCTAssertEqual(copies.value, layerCount)
     }
 
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {

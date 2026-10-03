@@ -1601,6 +1601,31 @@ public class TurboQuantKVCache: BaseKVCache {
         }
         return trimCount
     }
+
+    override public func copy() -> any KVCache {
+        let new = TurboQuantKVCache(
+            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed,
+            keyGroupSize: keyGroupSize)
+        new.offset = offset
+        new.keyMSECodec = keyMSECodec
+        new.valueMSECodec = valueMSECodec
+        // A full-range slice is a new array object, so a write to either cache
+        // rebinds only its own arrays.
+        new.affKeyW = affKeyW?[.ellipsis]
+        new.affKeyScales = affKeyScales?[.ellipsis]
+        new.affKeyBiases = affKeyBiases?[.ellipsis]
+        new.rawKeys = rawKeys?[.ellipsis]
+        new.rawValues = rawValues?[.ellipsis]
+        new.rawAllocSteps = rawAllocSteps
+        new.keyPackedMSE = keyPackedMSE?[.ellipsis]
+        new.keyNorms = keyNorms?[.ellipsis]
+        new.valPackedMSE = valPackedMSE?[.ellipsis]
+        new.valNorms = valNorms?[.ellipsis]
+        new.compressedAllocSteps = compressedAllocSteps
+        new.keyCalibScale = keyCalibScale?[.ellipsis]
+        new.isCompressed = isCompressed
+        return new
+    }
 }
 
 // MARK: - kvScheme routing

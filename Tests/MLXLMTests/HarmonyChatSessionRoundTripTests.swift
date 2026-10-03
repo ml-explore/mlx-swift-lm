@@ -343,6 +343,70 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
         XCTAssertTrue(restart.contains { ($0["role"] as? String) == "tool" })
     }
 
+    /// A fork's transcript can end in a call its cache never generated, so the
+    /// tool result must not be spliced onto that cache as a resumed call.
+    func testForkDoesNotResumeAToolCallItsCacheDidNotGenerate() async throws {
+        let fragments = [
+            "assistant",
+            "analysis",
+            "commentary to=functions.get_weather",
+            "final",
+            "Need weather.",
+            #"{"city":"Paris"}"#,
+            "Sunny in Rome.",
+        ]
+        func t(_ s: String) -> Int { Harmony.firstText + fragments.firstIndex(of: s)! }
+
+        let scripts: [[Int]] = [
+            [
+                Harmony.channel, t("analysis"), Harmony.message,
+                t("Need weather."), Harmony.end,
+                Harmony.start, t("assistant"), Harmony.channel,
+                t("commentary to=functions.get_weather"), Harmony.message,
+                t(#"{"city":"Paris"}"#), Harmony.call,
+            ],
+            [
+                Harmony.channel, t("final"), Harmony.message,
+                t("Sunny in Rome."), Harmony.return,
+            ],
+        ]
+
+        let tokenizer = HarmonyTokenizer(fragments: fragments, rendered: RenderLog())
+        let model = ScriptedModel(scripts: scripts, vocabularySize: tokenizer.vocabularySize)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "gpt-oss-test", toolCallFormat: .gptOSS),
+            messageGenerator: GPTOSSMessageGenerator())
+        let context = ModelContext(
+            configuration: processor.configuration,
+            model: model,
+            processor: processor,
+            tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: 32, temperature: 0),
+            tools: [Self.weatherTool])
+
+        for try await _ in session.streamDetails(to: "Weather in Paris?") {}
+        model.beginPass()
+
+        let call = ToolCall(
+            function: .init(name: "get_weather", arguments: ["city": .string("Rome")]), id: "rome")
+        let fork = await session.fork(history: [
+            .user("Weather in Rome?"),
+            .assistant("", toolCalls: [call]),
+        ])
+        let reply = try await fork.respond(to: [
+            .tool(#"{"forecast":"rain"}"#, id: "rome", name: "get_weather")
+        ])
+
+        XCTAssertTrue(reply.contains("Sunny in Rome."))
+        // The cold render shares only its first token with the cache, so the fork
+        // rewinds to it and prefills the rest instead of splicing onto the Paris call.
+        XCTAssertEqual(model.prefillOffsets.last, 1)
+        XCTAssertEqual(model.prefillTokenCounts.last, 5)
+    }
+
     func testSpeculativeFinalCallTokenResumesFromTheLiveMainCache() async throws {
         let fragments = [
             "assistant",
