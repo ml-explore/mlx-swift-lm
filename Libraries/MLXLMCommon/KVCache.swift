@@ -2582,9 +2582,11 @@ public func quantizedScaledDotProductAttention(
         mode: mode
     )
 
-    // Reshape output for GQA
+    // Reshape output for GQA. The head dim follows the values, which MLA-style
+    // caches keep narrower than the keys and queries.
     if nRepeats > 1 {
-        output = output.reshaped([B, nQHeads, L, D])
+        let vHeadDim = output.dim(-1)
+        output = output.reshaped([B, nQHeads, L, vHeadDim])
     }
 
     return output

@@ -1293,6 +1293,38 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         }
     }
 
+    // MARK: - Quantized attention head dims
+    // Regression for #652: MLA caches store [kvLatent, kPe] as keys and only kvLatent as
+    // values, so the GQA output reshape must follow the value head dim, not the query one.
+
+    @Test("quantizedScaledDotProductAttention supports values narrower than keys")
+    func quantizedAttentionSupportsMLAStyleHeadDims() throws {
+        withRandomState(MLXRandom.RandomState(seed: 0)) {
+            let (B, nKVHeads, nRepeats, L) = (1, 1, 4, 3)
+            let (kHeadDim, vHeadDim) = (192, 128)
+            let scale = 1.0 / Float(kHeadDim).squareRoot()
+
+            let q = MLXRandom.normal([B, nKVHeads * nRepeats, L, kHeadDim])
+            let k = MLXRandom.normal([B, nKVHeads, L, kHeadDim])
+            let v = MLXRandom.normal([B, nKVHeads, L, vHeadDim])
+
+            let reference = MLXFast.scaledDotProductAttention(
+                queries: q, keys: k, values: v, scale: scale, mask: .causal)
+
+            let cache = QuantizedKVCache(groupSize: 64, bits: 8)
+            let (qK, qV) = cache.updateQuantized(keys: k, values: v)
+            let out = quantizedScaledDotProductAttention(
+                queries: q, quantizedKeys: qK, quantizedValues: qV,
+                scale: scale, mask: .causal,
+                groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+
+            #expect(out.shape == reference.shape)
+            #expect(
+                allClose(out, reference, rtol: 0.05, atol: 0.1).item(Bool.self),
+                "quantized MLA attention diverges from full precision")
+        }
+    }
+
     // MARK: - ropeOffset overridability
 
     /// A `BaseKVCache` subclass reporting a per-row RoPE offset, as a batched cache does.
