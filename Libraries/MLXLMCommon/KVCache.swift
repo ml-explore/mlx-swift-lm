@@ -62,6 +62,12 @@ public protocol KVCache: Evaluatable {
     /// get/set metadata state as string array for serialization
     var metaState: [String] { get set }
 
+    /// Approximate number of bytes held by this cache's allocated buffers.
+    ///
+    /// The basis is the *allocated* (step-rounded) buffers returned by
+    /// `innerState()`, not the offset-sliced ``state``.
+    var nbytes: Int { get }
+
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
@@ -117,6 +123,11 @@ extension KVCache {
     public func prepare(lengths: MLXArray?) {}
 
     public func finalize() {}
+
+    /// Sum of the allocated buffers from `innerState()`.
+    public var nbytes: Int {
+        innerState().reduce(0) { $0 + $1.nbytes }
+    }
 }
 
 public func withPreparedCache<Result>(
@@ -228,6 +239,11 @@ open class BaseKVCache: KVCache {
                 fatalError("This cache has no meta_state but a meta_state was set.")
             }
         }
+    }
+
+    /// Sum of the allocated buffers from `innerState()`.
+    open var nbytes: Int {
+        innerState().reduce(0) { $0 + $1.nbytes }
     }
 
     open var isTrimmable: Bool { false }

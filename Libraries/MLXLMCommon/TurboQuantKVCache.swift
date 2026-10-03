@@ -1468,6 +1468,8 @@ public class TurboQuantKVCache: BaseKVCache {
         return total
     }
 
+    override public var nbytes: Int { memoryBytes }
+
     // MARK: - State / Trim
 
     override public var state: [MLXArray] {
