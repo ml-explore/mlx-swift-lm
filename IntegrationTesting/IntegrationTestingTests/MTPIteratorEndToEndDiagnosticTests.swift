@@ -150,7 +150,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
             switch event {
             case .chunk(let chunk):
                 text += chunk
-            case .toolCall, .rejectedToolCall:
+            case .toolCall, .rejectedToolCall, .reasoning:
                 break
             case .info(let completionInfo):
                 info = completionInfo
@@ -370,7 +370,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in mtpStream {
             switch event {
             case .chunk(let chunk): mtpText += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let i): mtpInfo = i
             }
         }
@@ -494,7 +494,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in mtpStream {
             switch event {
             case .chunk(let chunk): mtpText += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let i): mtpInfo = i
             }
         }
@@ -510,7 +510,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in baselineStream {
             switch event {
             case .chunk(let chunk): baselineText += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let i): baselineInfo = i
             }
         }
@@ -691,7 +691,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in stream {
             switch event {
             case .chunk(let chunk): text += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let completionInfo): info = completionInfo
             }
         }
@@ -924,7 +924,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in mtpStream {
             switch event {
             case .chunk(let chunk): mtpText += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let i): mtpInfo = i
             }
         }
@@ -1002,7 +1002,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         for await event in stream {
             switch event {
             case .chunk(let chunk): text += chunk
-            case .toolCall, .rejectedToolCall: break
+            case .toolCall, .rejectedToolCall, .reasoning: break
             case .info(let completionInfo): info = completionInfo
             }
         }

@@ -195,6 +195,9 @@ public final class ChatSession {
                 uncommittedTokens.removeAll()
             }
 
+            // A turn that produced only reasoning appends an empty assistant message.
+            // That is deliberate: it keeps user/assistant alternation for strict
+            // templates and keeps the user's turn in the transcript.
             messages.append(
                 .assistant(
                     assistant.content,
@@ -219,8 +222,16 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
+        /// Whether any `.reasoning` arrived, even though none of it is kept.
+        ///
+        /// Reasoning stays out of ``content`` because these families' templates drop it
+        /// from replayed history. It is tracked anyway so a turn that produced only
+        /// thinking, such as one that hit `maxTokens` mid-thought, is not mistaken for
+        /// an empty generation and rolled back along with the user's message.
+        var producedReasoning = false
+
         var shouldRecord: Bool {
-            (!content.isEmpty || !toolCalls.isEmpty)
+            (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
@@ -229,6 +240,9 @@ public final class ChatSession {
         mutating func consume(_ item: Generation) {
             if let chunk = item.chunk {
                 content += chunk
+            }
+            if item.reasoning != nil {
+                producedReasoning = true
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -1246,7 +1260,10 @@ public final class ChatSession {
                                     tokenizer: tokenizer,
                                     iterator: iterator,
                                     tools: toolValidationSchemas,
-                                    toolCallPolicy: generateParameters.toolCallPolicy)
+                                    toolCallPolicy: generateParameters.toolCallPolicy,
+                                    reasoningPrimedInside: promptPrimesReasoning(
+                                        input: input, modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer))
                             )
                         }
 
@@ -1370,7 +1387,11 @@ public final class ChatSession {
                                             tokenizer: tokenizer,
                                             iterator: iterator,
                                             tools: toolValidationSchemas,
-                                            toolCallPolicy: generateParameters.toolCallPolicy))
+                                            toolCallPolicy: generateParameters.toolCallPolicy,
+                                            reasoningPrimedInside: promptPrimesReasoning(
+                                                input: input,
+                                                modelConfiguration: modelConfiguration,
+                                                tokenizer: tokenizer)))
                                 }
                             }
                         } else {
