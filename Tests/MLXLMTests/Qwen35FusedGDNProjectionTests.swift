@@ -365,13 +365,6 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
         XCTAssertFalse(cache.isPrepared)
     }
 
-    private func settledActiveMemory() -> Int {
-        Stream.gpu.synchronize()
-        usleep(150_000)
-        Memory.clearCache()
-        return Memory.activeMemory
-    }
-
     private func assertVLMCompiledDecodeReleasesFusedProjection(
         cache makeCache: () -> [KVCache?],
         usesSegments: Bool,
