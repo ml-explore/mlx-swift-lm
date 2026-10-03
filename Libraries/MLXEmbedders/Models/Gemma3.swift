@@ -65,6 +65,10 @@ public struct Gemma3Configuration: Codable, Sendable {
     /// Optional scaling configuration for RoPE.
     public let ropeScaling: [String: StringOrNumber]?
 
+    /// Whether attention is bidirectional, as in EmbeddingGemma. When `true`, sliding layers see
+    /// `slidingWindow / 2` tokens on each side; when `false`, the layers are causal.
+    public let useBidirectionalAttention: Bool
+
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case hiddenSize = "hidden_size"
@@ -83,6 +87,7 @@ public struct Gemma3Configuration: Codable, Sendable {
         case slidingWindowPattern = "sliding_window_pattern"
         case maxPositionEmbeddings = "max_position_embeddings"
         case ropeScaling = "rope_scaling"
+        case useBidirectionalAttention = "use_bidirectional_attention"
     }
 
     enum VLMCodingKeys: String, CodingKey {
@@ -127,6 +132,8 @@ public struct Gemma3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
         ropeScaling = try container.decodeIfPresent(
             [String: StringOrNumber].self, forKey: .ropeScaling)
+        useBidirectionalAttention =
+            try container.decodeIfPresent(Bool.self, forKey: .useBidirectionalAttention) ?? false
     }
 }
 
@@ -365,20 +372,48 @@ public class Gemma3ModelBackbone: Module {
 
     /// Processes input tokens through the model backbone.
     ///
-    /// - Parameter inputs: Array of token IDs of shape `[Batch, Length]`.
+    /// - Parameters:
+    ///   - inputs: Array of token IDs of shape `[Batch, Length]`.
+    ///   - attentionMask: Optional padding mask of shape `[Batch, Length]`, nonzero for real
+    ///     tokens. Used only when `useBidirectionalAttention` is `true`.
     /// - Returns: Final hidden states of shape `[Batch, Length, HiddenSize]`.
-    public func callAsFunction(_ inputs: MLXArray) -> MLXArray {
+    public func callAsFunction(_ inputs: MLXArray, attentionMask: MLXArray? = nil) -> MLXArray {
         var h = embedTokens(inputs)
         let scale = MLXArray(sqrt(Float(config.hiddenSize)), dtype: .bfloat16)
         h = h * scale.asType(h.dtype)
 
-        let globalMask = createAttentionMask(h: h, cache: nil as KVCache?)
-        let slidingWindowMask =
-            if config.slidingWindowPattern > 1 {
-                createAttentionMask(h: h, cache: nil as KVCache?, windowSize: config.slidingWindow)
-            } else {
-                MLXFast.ScaledDotProductAttentionMaskMode.none
+        let globalMask: MLXFast.ScaledDotProductAttentionMaskMode
+        let slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode
+        if config.useBidirectionalAttention {
+            if let attentionMask {
+                precondition(
+                    attentionMask.shape == inputs.shape,
+                    "attentionMask shape \(attentionMask.shape) must match inputs \(inputs.shape)")
             }
+            // transformers 5.17 stores sliding_window // 2 + 1 and tests |i - j| < it
+            // (configuration_gemma3.py:106, modeling_gemma3.py:479): |i - j| <= sliding_window / 2.
+            let halfWindow = config.slidingWindow / 2
+            // Padding hides key columns on every layer (masking_utils.py:169-178, 505-506).
+            globalMask = createBidirectionalAttentionMask(
+                length: h.dim(1), halfWindow: nil, paddingMask: attentionMask)
+            // Symmetric band on sliding layers (modeling_gemma3.py:471-481, 547-549).
+            slidingWindowMask =
+                if config.slidingWindowPattern > 1 {
+                    createBidirectionalAttentionMask(
+                        length: h.dim(1), halfWindow: halfWindow, paddingMask: attentionMask)
+                } else {
+                    MLXFast.ScaledDotProductAttentionMaskMode.none
+                }
+        } else {
+            globalMask = createAttentionMask(h: h, cache: nil as KVCache?)
+            slidingWindowMask =
+                if config.slidingWindowPattern > 1 {
+                    createAttentionMask(
+                        h: h, cache: nil as KVCache?, windowSize: config.slidingWindow)
+                } else {
+                    MLXFast.ScaledDotProductAttentionMaskMode.none
+                }
+        }
 
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
@@ -422,7 +457,9 @@ public class EmbeddingGemma: Module, EmbeddingModel {
     ///   - inputs: Input token indices of shape `[Batch, Length]`.
     ///   - positionIds: Optional indices for positional information.
     ///   - tokenTypeIds: Optional indices for segment/type information.
-    ///   - attentionMask: Optional mask for padding tokens.
+    ///   - attentionMask: Optional mask for padding tokens, `[Batch, Length]` or `[Length]`,
+    ///     nonzero for real tokens. Pooling always uses it; attention uses it to hide padded keys
+    ///     when `useBidirectionalAttention` is `true`. Padded batches require `attentionMask`.
     /// - Returns: An `EmbeddingModelOutput` containing the full hidden states and the pooled sentence embedding.
     public func callAsFunction(
         _ inputs: MLXArray, positionIds: MLXArray?, tokenTypeIds: MLXArray?,
@@ -433,7 +470,12 @@ public class EmbeddingGemma: Module, EmbeddingModel {
             inp = inp.reshaped(1, -1)
         }
 
-        let hiddenStates = backbone(inp)
+        // A 1-D mask goes with the 1-D input reshape above.
+        var mask = attentionMask
+        if let m = mask, m.ndim == 1 {
+            mask = m.reshaped(1, -1)
+        }
+        let hiddenStates = backbone(inp, attentionMask: mask)
 
         // mean pooling: average all non-padding tokens
         let notPadding = (attentionMask ?? (inp .!= 0))
