@@ -1379,6 +1379,14 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(encodedPositions(short.0) == [17, 18, 19], "a short tail took the wrong end")
     }
 
+    @Test func testRotatingKVCacheReportsEvictedTokensThroughKVCache() {
+        let rotating = RotatingKVCache(maxSize: 8, keep: 2)
+        fillOneAtATime(rotating, positions: 0 ..< 20)
+
+        let cache: any KVCache = rotating
+        #expect(cache.evictedTokenCount == 12)
+    }
+
     @Test func testRotatingLogicalViewClampsTailToWhatTheCacheHolds() throws {
         let cache = RotatingKVCache(maxSize: 8, keep: 0)
         fillOneAtATime(cache, positions: 0 ..< 5)

@@ -27,6 +27,9 @@ final class GenerationExecutionTests: XCTestCase {
         var maxTokens: Int? = 1
         var tokenCount = 0
         var promptPrefillTime: TimeInterval { 0 }
+        var lastLogProbabilities: GenerateTokenLogProbabilities?
+        var evictedTokenCount = 0
+        var reasoningTokenCount: Int?
         var onNext: @Sendable () -> Void = {}
         var onFinalize: @Sendable () -> Void = {}
 
@@ -273,6 +276,38 @@ final class GenerationExecutionTests: XCTestCase {
         XCTAssertEqual(completion?.stopReason, .length)
         XCTAssertEqual(completion?.generationTokenCount, 0)
         await fulfillment(of: [finalized], timeout: 0)
+    }
+
+    func testGenerationReportsCompletionObservability() async {
+        let logProbabilities = GenerateTokenLogProbabilities(
+            chosen: .init(token: 42, logProbability: -0.25),
+            topLogProbabilities: [
+                .init(token: 42, logProbability: -0.25),
+                .init(token: 7, logProbability: -1.5),
+            ])
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 3,
+            modelConfiguration: .init(id: "test"),
+            tokenizer: TestTokenizer(),
+            iterator: Iterator(
+                maxTokens: 2,
+                lastLogProbabilities: logProbabilities,
+                evictedTokenCount: 4,
+                reasoningTokenCount: 1))
+
+        var completion: GenerateCompletionInfo?
+        for await event in stream {
+            switch event {
+            case .info(let info): completion = info
+            case .chunk, .toolCall, .rejectedToolCall: break
+            }
+        }
+
+        _ = await task.value
+        XCTAssertEqual(completion?.evictedTokenCount, 4)
+        XCTAssertEqual(completion?.reasoningTokenCount, 1)
+        XCTAssertEqual(completion?.answerTokenCount, 1)
+        XCTAssertTrue(completion?.summary().contains("4 context tokens dropped") == true)
     }
 
     func testTaskContextAndRecordedTokensSurviveExecutionHop() async {

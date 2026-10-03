@@ -65,6 +65,36 @@ final class ThinkingBudgetTests: XCTestCase {
         }
     }
 
+    func testCountsEmittedReasoningTokensAfterFinalization() throws {
+        var processor = try ThinkingBudgetProcessor(
+            configuration: ThinkingBudgetConfiguration(maximumTokenCount: 32),
+            reasoning: reasoning,
+            tokenizer: tokenizer)
+        processor.prompt(tokens("assistant\n<think>\n"))
+
+        for token in tokenizer.encode(text: "plan</think>answer", addSpecialTokens: false) {
+            processor.didEmit(token: token)
+        }
+        processor.finalizeGeneration()
+
+        XCTAssertEqual(processor.generationReasoningTokenCount, 4)
+    }
+
+    func testCountsIncompleteEmittedReasoningAtFinalization() throws {
+        var processor = try ThinkingBudgetProcessor(
+            configuration: ThinkingBudgetConfiguration(maximumTokenCount: 32),
+            reasoning: reasoning,
+            tokenizer: tokenizer)
+        processor.prompt(tokens("assistant\n<think>\n"))
+
+        for token in tokenizer.encode(text: "plan", addSpecialTokens: false) {
+            processor.didEmit(token: token)
+        }
+        processor.finalizeGeneration()
+
+        XCTAssertEqual(processor.generationReasoningTokenCount, 4)
+    }
+
     func testPartialNaturalCloseAtBudgetBoundaryIsNotDoubleClosed() throws {
         var processor = try ThinkingBudgetProcessor(
             configuration: ThinkingBudgetConfiguration(maximumTokenCount: 2),

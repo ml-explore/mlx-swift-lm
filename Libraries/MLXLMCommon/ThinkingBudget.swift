@@ -171,8 +171,11 @@ public struct ThinkingBudgetProcessor: LogitProcessor {
     private let plan: ThinkingBudgetPlan
 
     private var boundaries: ReasoningBoundaryTracker
+    private var emittedBoundaries: ReasoningBoundaryTracker
     private var detokenizer: NaiveStreamingDetokenizer
     private var reasoningTokenCount = 0
+    private var emittedReasoningTokenCount = 0
+    private var finalizedEmittedTokens = false
     private var state: State = .observing
     private let diagnosticHandler: (@Sendable (ThinkingBudgetDiagnostic) -> Void)?
 
@@ -231,14 +234,20 @@ public struct ThinkingBudgetProcessor: LogitProcessor {
         self.diagnosticHandler = diagnosticHandler
         self.boundaries = ReasoningBoundaryTracker(
             start: plan.startTokenIDs, ends: plan.endTokenSequences)
+        self.emittedBoundaries = ReasoningBoundaryTracker(
+            start: plan.startTokenIDs, ends: plan.endTokenSequences)
         self.detokenizer = NaiveStreamingDetokenizer(tokenizer: plan.tokenizer)
     }
 
     public mutating func prompt(_ prompt: MLXArray) {
-        boundaries.reset(with: prompt.asArray(Int.self))
+        let promptTokens = prompt.asArray(Int.self)
+        boundaries.reset(with: promptTokens)
+        emittedBoundaries.reset(with: promptTokens)
         detokenizer = NaiveStreamingDetokenizer(tokenizer: plan.tokenizer)
         deferredTokens.removeAll(keepingCapacity: true)
         reasoningTokenCount = 0
+        emittedReasoningTokenCount = 0
+        finalizedEmittedTokens = false
         state =
             boundaries.isInsideReasoning && plan.configuration.maximumTokenCount == 0
             ? .forcing(index: 0)
@@ -289,6 +298,17 @@ public struct ThinkingBudgetProcessor: LogitProcessor {
                 return
             }
         }
+    }
+
+    public mutating func didEmit(token: Int) {
+        guard !finalizedEmittedTokens else { return }
+        emittedReasoningTokenCount += emittedBoundaries.observe(token).committedReasoningTokenCount
+    }
+
+    public mutating func finalizeGeneration() {
+        guard !finalizedEmittedTokens else { return }
+        emittedReasoningTokenCount += emittedBoundaries.finish()
+        finalizedEmittedTokens = true
     }
 
     /// Whether the state machine must see every sampled token immediately.
@@ -463,6 +483,10 @@ public struct ThinkingBudgetProcessor: LogitProcessor {
     }
 }
 
+extension ThinkingBudgetProcessor: GenerationReasoningTokenCounting {
+    package var generationReasoningTokenCount: Int? { emittedReasoningTokenCount }
+}
+
 extension GenerationComponents {
     /// Return a copy that enforces a reasoning-token budget for every generation.
     ///
@@ -633,6 +657,11 @@ private struct ReasoningBoundaryTracker: Sendable {
         }
 
         return observation
+    }
+
+    mutating func finish() -> Int {
+        defer { pending.removeAll(keepingCapacity: true) }
+        return isInsideReasoning ? pending.count : 0
     }
 
     /// When a possible natural end consumes the remaining budget, constrain
