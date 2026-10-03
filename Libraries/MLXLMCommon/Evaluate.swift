@@ -188,6 +188,10 @@ public struct GenerateParameters: Sendable {
     /// Recovery and validation rules for generated tool calls.
     public var toolCallPolicy: ToolCallPolicy
 
+    /// Optional model-free speculation for streaming generation and ``ChatSession``.
+    /// An explicitly supplied iterator or auxiliary draft model takes precedence.
+    public var promptLookup: PromptLookupConfiguration?
+
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -208,7 +212,8 @@ public struct GenerateParameters: Sendable {
         frequencyContextSize: Int = 20,
         prefill: PrefillParameters = .init(),
         seed: UInt64? = nil,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        promptLookup: PromptLookupConfiguration? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -230,6 +235,7 @@ public struct GenerateParameters: Sendable {
         self.prefill = prefill
         self.seed = seed
         self.toolCallPolicy = toolCallPolicy
+        self.promptLookup = promptLookup
     }
 
     @available(
@@ -1761,7 +1767,7 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
-    let iterator = try TokenIterator(
+    let iterator = try makeTokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
     let (stream, _) = generateTask(
@@ -1989,7 +1995,7 @@ public func generateTokens(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
-    let iterator = try TokenIterator(
+    let iterator = try makeTokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
     let (stream, _) = generateTokenTask(
@@ -2204,7 +2210,7 @@ public func generateTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
-    let iterator = try TokenIterator(
+    let iterator = try makeTokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
     return generateTokenTask(
@@ -2231,7 +2237,7 @@ package func generateProtocolTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
-    let iterator = try TokenIterator(
+    let iterator = try makeTokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
     return generateLoopTask(
@@ -2262,11 +2268,11 @@ package func generateProtocolTokensTask(
 ///     concurrent tasks. This is opt-in and only applied on GPU devices that support wired
 ///     memory control (macOS 15 / iOS 18 / tvOS 18 or newer).
 /// - Returns: An `AsyncStream` that emits token IDs and a final `.info`, plus a `Task`.
-public func generateTokenTask(
+public func generateTokenTask<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
-    iterator: consuming TokenIterator,
+    iterator: consuming TOKEN,
     includeStopToken: Bool = false,
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {

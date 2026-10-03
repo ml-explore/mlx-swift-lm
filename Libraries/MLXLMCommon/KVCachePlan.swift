@@ -346,6 +346,11 @@ package final class KVCacheStorage {
         return rewound
     }
 
+    /// Drop the record ``rewindLastRound(_:)`` needs, once nothing will rewind the last commit.
+    package func discardLastRound() {
+        lastRound = nil
+    }
+
     /// How much of the emitted sequence the given leaf can still describe, outside a round.
     ///
     /// The whole stream for a global layer; the trailing window for a sliding one. This is the
