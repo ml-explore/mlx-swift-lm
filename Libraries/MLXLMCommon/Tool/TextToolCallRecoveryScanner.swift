@@ -235,6 +235,8 @@ struct TextToolCallRecoveryScanner: Sendable {
     }
 
     mutating func process(_ chunk: String) -> [Output] {
+        let appendedByteCount = chunk.utf8.count
+        var enteredNativeFrameThisCall = false
         if let pendingCandidate {
             buffer += chunk
             if buffer.utf8.count <= maximumBufferedByteCount,
@@ -340,10 +342,20 @@ struct TextToolCallRecoveryScanner: Sendable {
                 break scanLoop
 
             case .nativeFrame(let endMarker):
-                let frameEnd =
-                    endMarker == ToolCallFrameScanner.endTag
-                    ? ToolCallFrameScanner.frameEnd(in: buffer)
-                    : buffer.range(of: endMarker).map(\.upperBound)
+                // Only the bytes this call appended can complete the end
+                // marker; scanning the whole frame on every chunk is
+                // quadratic in its length. The call that opened the frame
+                // scans it whole.
+                let markerMayHaveArrived =
+                    enteredNativeFrameThisCall
+                    || ToolCallFrameScanner.marker(
+                        endMarker, mayHaveArrivedIn: buffer, appendedByteCount: appendedByteCount)
+                let frameEnd: String.Index? =
+                    !markerMayHaveArrived
+                    ? nil
+                    : endMarker == ToolCallFrameScanner.endTag
+                        ? ToolCallFrameScanner.frameEnd(in: buffer)
+                        : buffer.range(of: endMarker).map(\.upperBound)
                 if let frameEnd {
                     let raw = String(buffer[..<frameEnd])
                     buffer = String(buffer[frameEnd...])
@@ -423,6 +435,7 @@ struct TextToolCallRecoveryScanner: Sendable {
                     // Keep the whole frame buffered; it is emitted verbatim
                     // once its structural close arrives.
                     context = .nativeFrame(endMarker: endMarker)
+                    enteredNativeFrameThisCall = true
 
                 case .nativeUntilEOS:
                     context = .nativeUntilEOS

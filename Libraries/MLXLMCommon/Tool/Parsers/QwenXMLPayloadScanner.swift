@@ -249,6 +249,24 @@ enum ToolCallFrameScanner {
     static let startTag = "<tool_call>"
     static let endTag = "</tool_call>"
 
+    /// Whether the last `appendedByteCount` bytes of `text` can have completed
+    /// an occurrence of `marker`.
+    ///
+    /// A streaming scanner that keeps a growing buffer and looks for its close
+    /// marker on every chunk does work quadratic in the buffered length. Only
+    /// the bytes a chunk appends can complete the marker, though — an
+    /// occurrence that ended earlier was in the buffer when the previous chunk
+    /// was scanned — so checking the appended bytes plus the marker's overlap
+    /// with what preceded them keeps the scan linear, and a full scan is only
+    /// paid when this returns `true`.
+    static func marker(_ marker: String, mayHaveArrivedIn text: String, appendedByteCount: Int)
+        -> Bool
+    {
+        let window = appendedByteCount + marker.utf8.count - 1
+        guard window < text.utf8.count else { return text.contains(marker) }
+        return Substring(text.utf8.suffix(window)).contains(marker)
+    }
+
     /// The index just past the frame's structural close, or `nil` when the
     /// buffer does not yet contain a complete frame. `text` must begin with
     /// `<tool_call>`.
