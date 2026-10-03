@@ -149,9 +149,10 @@ public enum GuidedGenerationLoop {
 
         try kvCachePlan.applyAndValidate(to: cacheStorage)
 
-        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var tokenCount = 0
         var grammarStopped = false
+        var consumerStopped = false
         var whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
 
         // Pre-compute bias arrays used in the zone policy.
@@ -321,7 +322,10 @@ public enum GuidedGenerationLoop {
             detokenizer.append(token: tokenId)
             if let text = detokenizer.next() {
                 accumulatedText += text
-                if !emit(text) { break }
+                if !emit(text) {
+                    consumerStopped = true
+                    break
+                }
             }
             tokenCount += 1
 
@@ -371,6 +375,7 @@ public enum GuidedGenerationLoop {
                     if let text = detokenizer.next() {
                         accumulatedText += text
                         if !emit(text) {
+                            consumerStopped = true
                             shouldStopAfterFF = true
                             break
                         }
@@ -443,6 +448,11 @@ public enum GuidedGenerationLoop {
                 // Wait for GPU to finish (may already be done)
                 eval(logits)
             }
+        }
+
+        if !consumerStopped, let text = detokenizer.finish(), !text.isEmpty {
+            accumulatedText += text
+            _ = emit(text)
         }
 
         // Log final generation stats

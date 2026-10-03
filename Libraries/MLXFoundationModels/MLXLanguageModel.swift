@@ -1219,7 +1219,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 tokenizer: context.tokenizer,
                 tools: toolSpecs,
                 stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var result = AllowedToolGenerationResult()
             let (stream, task) = try generateProtocolTokensTask(
                 input: input,
@@ -1296,7 +1296,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 protocolDecoder = decoder
                 finalReasoningText = reasoningText
             } else {
-                let chunks = consumeAllowedEvents(router.finish(), result: &result)
+                let pending = detokenizer.finish().map { router.process($0) } ?? []
+                let chunks = consumeAllowedEvents(pending + router.finish(), result: &result)
                 finalReasoningText = chunks.joined()
                 result.endedInsideReasoning = router.isInsideReasoning
             }
@@ -1570,7 +1571,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Routes thinking delimited by the model's reasoning markers to
         /// `.reasoning` events and the rest to `.response`, using a raw
         /// protocol-neutral token decoder when the format owns framing, or a
-        /// self-owned `NaiveStreamingDetokenizer` for ordinary formats. The loop
+        /// self-owned `StreamingDetokenizer` for ordinary formats. The loop
         /// sees real token IDs for an accurate reasoning token count.
         private func runReasoning(
             input: LMInput,
@@ -1597,7 +1598,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 tokenizer: context.tokenizer,
                 tools: nil,
                 stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
             let (stream, task) = try generateProtocolTokensTask(
@@ -1691,7 +1692,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
                 protocolDecoder = decoder
             } else {
-                for segment in emitter.finalize() {
+                let pending = detokenizer.finish().map { emitter.process($0) } ?? []
+                for segment in pending + emitter.finalize() {
                     await Self.send(
                         segment, responseEntryID: responseEntryID,
                         reasoningEntryID: reasoningEntryID, channel: channel)

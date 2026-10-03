@@ -57,7 +57,7 @@ extension TokenStreamDecoder {
 
 /// Decoder for ordinary detokenized tool-call syntaxes.
 struct StandardTokenStreamDecoder: TokenStreamDecoder {
-    private var detokenizer: NaiveStreamingDetokenizer
+    private var detokenizer: any StreamingDetokenizer
     private let toolCallProcessor: ToolCallProcessor
     private var stopStringFilter: StopStringFilter
 
@@ -68,7 +68,7 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
         stopStrings: Set<String>,
         toolCallPolicy: ToolCallPolicy = .init()
     ) {
-        self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        self.detokenizer = tokenizer.makeStreamingDetokenizer()
         self.toolCallProcessor = ToolCallProcessor(
             format: format, tools: tools, toolCallPolicy: toolCallPolicy)
         self.stopStringFilter = StopStringFilter(stopStrings: stopStrings)
@@ -95,6 +95,15 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     }
 
     mutating func finish(emit: (TokenStreamEvent) -> Bool) -> Bool {
+        if let chunk = detokenizer.finish() {
+            let result = stopStringFilter.process(chunk)
+            if let text = result.text,
+                !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
+            {
+                return false
+            }
+            if result.stopped, !emit(.stop) { return false }
+        }
         if let text = stopStringFilter.finish(),
             !emitOutputs(toolCallProcessor.processChunkOutputs(text), emit: emit)
         {
