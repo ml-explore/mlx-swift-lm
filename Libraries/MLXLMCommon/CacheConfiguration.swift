@@ -290,7 +290,8 @@ public func attentionCacheKind(parameters: GenerateParameters?) throws -> CacheL
 /// - Throws: ``KVCacheConfigurationError`` when the request is invalid.
 public func makeAttentionKVCache(parameters: GenerateParameters?) throws -> KVCache {
     if let capacity = try parameters?.effectiveKVCacheCapacity() {
-        return capacity.makeRotatingCache()
+        return capacity.makeRotatingCache(
+            rewindCapacity: parameters?.kvCache?.rewind?.maxTokens ?? 0)
     }
     return KVCacheSimple()
 }
@@ -313,7 +314,10 @@ public func slidingWindowCacheKind(
 public func makeSlidingWindowKVCache(parameters: GenerateParameters?, window: Int) throws
     -> KVCache
 {
-    RotatingKVCache(maxSize: try effectiveSlidingWindow(parameters: parameters, window: window))
+    let window = try effectiveSlidingWindow(parameters: parameters, window: window)
+    return RotatingKVCache(
+        maxSize: window,
+        rewindCapacity: parameters?.kvCache?.rewind?.maxTokens ?? 0)
 }
 
 /// Full-attention kind if the layer is not sliding-window; otherwise the
@@ -357,8 +361,7 @@ private func effectiveSlidingWindow(parameters: GenerateParameters?, window: Int
     // Validate the whole request, including conflicts and compression fields,
     // before a cache constructor can observe unchecked legacy values.
     _ = try parameters?.kvCachePlan()
-    if let maxKVSize = parameters?.maxKVSize {
-        return min(window, maxKVSize)
-    }
-    return window
+    let effectiveWindow = parameters?.maxKVSize.map { min(window, $0) } ?? window
+    try parameters?.kvCache?.rewind?.validate(window: effectiveWindow)
+    return effectiveWindow
 }

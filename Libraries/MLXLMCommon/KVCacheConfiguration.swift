@@ -10,22 +10,47 @@ public struct KVCacheConfiguration: Sendable, Hashable {
     public var capacity: Capacity?
     public var strategy: Strategy
     public var compatibility: CompatibilityPolicy
+    public var rewind: Rewind?
 
     public init(
         capacity: Capacity? = nil,
         strategy: Strategy = .fullPrecision,
-        compatibility: CompatibilityPolicy = .requireAtLeastOneLayer
+        compatibility: CompatibilityPolicy = .requireAtLeastOneLayer,
+        rewind: Rewind? = nil
     ) {
         self.capacity = capacity
         self.strategy = strategy
         self.compatibility = compatibility
+        self.rewind = rewind
     }
 
-    /// Maximum resident size for caches whose capacity is caller-configurable.
+    /// Extra historical rows retained by rotating caches for exact prefix rewinds.
+    ///
+    /// This adds storage beyond each attention window without widening attention.
+    /// Rewinds beyond the available history still require rebuilding the cache.
+    public struct Rewind: Sendable, Hashable {
+        public let maxTokens: Int
+
+        public init(maxTokens: Int) throws {
+            guard maxTokens > 0 else {
+                throw KVCacheConfigurationError.invalidRewindCapacity(maxTokens)
+            }
+            self.maxTokens = maxTokens
+        }
+
+        package func validate(window: Int) throws {
+            guard window <= Int.max - maxTokens else {
+                throw KVCacheConfigurationError.invalidRewindCapacity(maxTokens)
+            }
+        }
+    }
+
+    /// Attention window for caches whose capacity is caller-configurable.
     ///
     /// Model-native sliding-window layers retain their architecture-defined
     /// window and prefix behavior. This value bounds the remaining attention
     /// layers created by the model's `newCache(parameters:)` implementation.
+    /// A configured ``Rewind`` reserve adds storage beyond this window.
     public struct Capacity: Sendable, Hashable {
         public let maxTokens: Int
         public let preservedPrefixTokens: Int
@@ -340,6 +365,8 @@ public struct VarianceNormalizedKVCacheConfiguration: Sendable, Hashable {
 public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedError {
     case conflictingLegacyConfiguration
     case invalidCapacity(Int)
+    case invalidRewindCapacity(Int)
+    case incompatibleRewindCapacity(expected: Int, count: Int)
     case invalidSlidingWindow(Int)
     case invalidPreservedPrefix(Int, capacity: Int)
     case invalidAffineBits(Int)
@@ -358,6 +385,10 @@ public enum KVCacheConfigurationError: Error, Sendable, Equatable, LocalizedErro
             "Set either GenerateParameters.kvCache or the legacy KV-cache fields, not both."
         case .invalidCapacity(let value):
             "KV-cache capacity must be positive; received \(value)."
+        case .invalidRewindCapacity(let value):
+            "Rewind capacity must be positive and fit alongside the attention window; received \(value)."
+        case .incompatibleRewindCapacity(let expected, let count):
+            "Rewind capacity \(expected) is not realized by \(count) rotating layer(s)."
         case .invalidSlidingWindow(let value):
             "Model sliding-window size must be positive; received \(value)."
         case .invalidPreservedPrefix(let value, let capacity):

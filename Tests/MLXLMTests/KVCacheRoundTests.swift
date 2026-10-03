@@ -829,12 +829,11 @@ func testRewindBelowTheWrapMatchesEmittedOnlyReplay(rewinding: Int) throws {
     expectStoragesEquivalent(live, oracle, "mixed-width rewind")
 }
 
-/// Dynamic compression can replace an entry between a commit and a rewind. The record refers to a
-/// cache slot, not to the object the commit happened to hold, so a replacement invalidates it and
-/// the rewind falls back to the plain trim rather than restoring into a leaf the storage no longer
-/// owns.
-@Test func testRewindIsRefusedAfterTheCacheIsReplaced() throws {
-    let original = RotatingKVCache(maxSize: 8, keep: 0)
+/// Replacing a leaf discards its round snapshot. Only history in the replacement
+/// may be used by the exact-trim fallback.
+@Test(arguments: [false, true])
+func testRewindAfterReplacementUsesOnlyRetainedHistory(retainPrefillHistory: Bool) throws {
+    let original = RotatingKVCache(maxSize: 8)
     let live = KVCacheStorage([original], plan: .disabled)
     let (k, v) = positionedKV(0 ..< 20)
     _ = original.update(keys: k, values: v)
@@ -843,17 +842,30 @@ func testRewindBelowTheWrapMatchesEmittedOnlyReplay(rewinding: Int) throws {
     let staged = try #require(StagedRound(live, width: 4))
     stageRound(staged, 20 ..< 24)
     staged.commit(accepted: 4)
-    #expect(live.processedTokenCount == 24)
 
-    // Stand in for a compression pass: an equivalent leaf, a different object.
-    let replacement = try #require(original.copy() as? RotatingKVCache)
-    let replacementBefore = RingSnapshot(replacement)
+    let replacement: RotatingKVCache
+    if retainPrefillHistory {
+        replacement = try #require(original.copy() as? RotatingKVCache)
+    } else {
+        replacement = RotatingKVCache(maxSize: 8)
+        for position in 0 ..< 24 {
+            let (keys, values) = positionedKV(position ..< (position + 1))
+            _ = replacement.update(keys: keys, values: values)
+        }
+    }
+    // Mark the replacement so restoring the old snapshot cannot pass unnoticed.
+    replacement.state = replacement.state.map { $0 + 1000 }
+    let before = RingSnapshot(replacement)
     live.replace(with: [replacement])
 
-    // The ring has wrapped, so the fallback trim takes nothing back rather than restoring a
-    // snapshot into a cache that is no longer the one at this slot.
-    #expect(live.rewindLastRound(2) == 0)
-    #expect(live.processedTokenCount == 24)
+    #expect(live.rewindLastRound(2) == (retainPrefillHistory ? 2 : 0))
+    #expect(live.processedTokenCount == (retainPrefillHistory ? 22 : 24))
     #expect(live.nativeAttentionOffsetsAreAligned)
-    replacementBefore.expectUnchanged(replacement, "after a rewind against a replaced entry")
+    if retainPrefillHistory {
+        let view = try #require(replacement.logicalView(tail: Int.max))
+        #expect(encodedPositions(view.0) == Array(13 ..< 22).map { $0 + 1000 })
+        #expect(encodedPositions(view.1) == Array(13 ..< 22).map { -$0 + 1000 })
+    } else {
+        before.expectUnchanged(replacement, "replacement has no rewind history")
+    }
 }
