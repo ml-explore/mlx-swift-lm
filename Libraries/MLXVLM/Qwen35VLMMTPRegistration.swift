@@ -3,47 +3,42 @@
 import Foundation
 import MLXLMCommon
 
-/// Registers Qwen3.5/Qwen3.6 VLM MTP drafter model types.
+/// Registers Qwen3.5-family multimodal MTP drafter model types.
 ///
-/// Callers should invoke this once before loading a Qwen VLM drafter through
-/// `MTPDrafterModelFactory`. The `"qwen3_5"` names overlap with the text
-/// registration; config-shape predicates keep both registrations usable in
-/// the same process.
+/// These creators live in the target-specific `visionLanguage` registry so a
+/// standalone MTP config with an empty `vision_config` still selects the
+/// M-RoPE-aware drafter deterministically.
 public enum Qwen35VLMMTPRegistration {
     public static func register() async {
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5",
-            matches: qwen35VLMMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35VLMNextNDraftModel(config)
-            }
-        )
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5_mtp",
-            matches: qwen35VLMMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35VLMNextNDraftModel(config, preconvertedNorms: true)
-            }
-        )
-        await MTPDrafterTypeRegistry.shared.registerModelType(
-            "qwen3_5_moe",
-            matches: qwen35VLMMTPConfiguration,
-            creator: { data in
-                let config = try JSONDecoder.json5().decode(
-                    Qwen35Configuration.self, from: data)
-                return Qwen35VLMNextNDraftModel(config)
-            }
-        )
+        let registry = MTPDrafterTypeRegistry.visionLanguage
+
+        for modelType in ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"] {
+            await registry.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder.json5().decode(
+                        Qwen35MTPTextConfiguration.self, from: data)
+                    return Qwen35VLMNextNDraftModel(config.textConfiguration)
+                })
+        }
+
+        for modelType in ["qwen3_5_mtp", "qwen3_8_mtp"] {
+            await registry.registerModelType(
+                modelType,
+                creator: { data in
+                    let config = try JSONDecoder.json5().decode(
+                        Qwen35MTPTextConfiguration.self, from: data)
+                    return Qwen35VLMNextNDraftModel(
+                        config.textConfiguration, preconvertedNorms: true)
+                })
+        }
     }
 }
 
-private func qwen35VLMMTPConfiguration(_ data: Data) -> Bool {
-    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-        let vision = root["vision_config"] as? [String: Any]
-    else { return false }
-    return !vision.isEmpty
+private struct Qwen35MTPTextConfiguration: Decodable {
+    let textConfiguration: Qwen35Configuration.TextConfiguration
+
+    enum CodingKeys: String, CodingKey {
+        case textConfiguration = "text_config"
+    }
 }
