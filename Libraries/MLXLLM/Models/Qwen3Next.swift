@@ -307,12 +307,15 @@ public final class Qwen3NextGatedDeltaNet: Module {
         let vOut = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
         let invScale = pow(Float(headKDim), -0.5)
+        // rmsNorm adds eps to mean(x^2). The reference l2norm adds 1e-6 to
+        // sum(x^2), so divide the eps by the head dim.
+        let qkEps = 1e-6 / Float(headKDim)
         qOut =
             MLXArray(invScale * invScale).asType(dtype)
-            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: 1e-6)
+            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: qkEps)
         kOut =
             MLXArray(invScale).asType(dtype)
-            * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: 1e-6)
+            * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: qkEps)
 
         let (out, newState) = gatedDeltaUpdate(
             q: qOut,
