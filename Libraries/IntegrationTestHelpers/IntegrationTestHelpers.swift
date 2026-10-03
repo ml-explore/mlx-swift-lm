@@ -1237,7 +1237,10 @@ public enum ToolCallTests {
                 // flaky — the model may emit no tool call or malformed arguments on
                 // some runs (matches the temperature: 0 used by the coherence/MTP tests).
                 parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
-                context: context
+                context: context,
+                // Declared tools drive name authorization and, for markerless
+                // dialects such as GLM-4-0414, the schema-anchored detection.
+                tools: input.tools
             )
             var text = ""
             var toolCalls: [ToolCall] = []

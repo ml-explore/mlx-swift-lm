@@ -19,6 +19,8 @@ struct ToolCallRecoveryRegressionTests {
                 "<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>",
                 ""
             ),
+            (.glm4, "weather\n{\"city\":\"Paris\"}", ""),
+            (.glm4, "Checking.\nweather \n{\"city\":\"Paris\"}", "Checking.\n"),
             (.llama3, #"{"name":"weather","parameters":{"city":"Paris"}}"#, ""),
             (.json, "The 12\" model. " + call, "The 12\" model. "),
             (.json, "„Ready\". " + call, "„Ready\". "),
