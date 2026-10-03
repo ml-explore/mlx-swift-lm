@@ -122,10 +122,17 @@ let result = try await modelContainer.perform { [input] context in
 Given that `input` we can call `generate()` to produce a stream
 of tokens. In this example we use a `NaiveStreamingDetokenizer`
 to assist in converting a stream of tokens into text and print it.
-The stream is stopped after we hit a maximum number of tokens:
+The stream is stopped after we hit a maximum number of tokens.
+Call `finish()` on a manually managed detokenizer when generation ends to flush remaining text:
 
 ```
     var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+    defer {
+        if let text = detokenizer.finish() {
+            print(text, terminator: "")
+            fflush(stdout)
+        }
+    }
 
     return try MLXLMCommon.generate(
         input: input, parameters: generateParameters, context: context

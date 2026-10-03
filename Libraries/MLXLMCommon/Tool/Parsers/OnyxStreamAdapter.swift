@@ -197,6 +197,8 @@ private struct OnyxProtocolDecoder {
         case .consumed:
             isInsideReasoning = false
         case .opened(let header):
+            reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+            responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
             isInsideReasoning = header.recipient == .reasoning
         case .payload(let header, let token):
             switch header.recipient {
@@ -220,9 +222,13 @@ private struct OnyxProtocolDecoder {
             isInsideReasoning = false
             switch header.recipient {
             case .reasoning:
+                let text = reasoningDetokenizer.finish()
                 reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                return text.map(TokenStreamEvent.reasoning)
             case .user:
+                let text = responseDetokenizer.finish()
                 responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                return text.map(TokenStreamEvent.response)
             case .tool(let recipient):
                 let text = tokenizer.decode(tokenIds: payload, skipSpecialTokens: false)
                 guard var call = toolParser.parse(content: text, tools: tools),

@@ -91,24 +91,27 @@ package struct HarmonyOutputRouter {
 
         case .closed(let frame):
             if frame.header.channel == .analysis {
+                let text = reasoningDetokenizer.finish()
                 reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-                return []
+                return text.map { [.reasoning($0)] } ?? []
             }
             // Reset the response detokenizer between frames so a later final
             // frame starts clean after a tool turn.
             if isPublicResponse(frame.header) {
+                let text = responseDetokenizer.finish()
                 responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-                return []
+                return text.map { [.response($0)] } ?? []
             }
             return routeClosedFrame(frame)
         }
     }
 
-    /// Flushes any open response detokenizer state. Currently a no-op because
-    /// public payload tokens are already streamed; kept for symmetry with the
-    /// parser's ``HarmonyFrameParser/finish()``.
+    /// Flushes any text held by the open frame's detokenizer.
     package mutating func finish() -> [Event] {
-        []
+        var events: [Event] = []
+        if let text = reasoningDetokenizer.finish() { events.append(.reasoning(text)) }
+        if let text = responseDetokenizer.finish() { events.append(.response(text)) }
+        return events
     }
 
     // MARK: - Frame → tool call

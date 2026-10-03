@@ -262,6 +262,9 @@ for token in tokenIterator {
         print(chunk, terminator: "")
     }
 }
+if let chunk = detokenizer.finish() {
+    print(chunk, terminator: "")
+}
 ```
 
 ### Handling Incomplete Unicode

@@ -94,6 +94,22 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
     }
 
     public mutating func next() -> String? {
+        next(isFinal: false)
+    }
+
+    /// Flushes remaining text, including replacement characters for incomplete bytes.
+    /// Repeated calls return nil. Create a new detokenizer for the next sequence.
+    public mutating func finish() -> String? {
+        guard !segmentTokens.isEmpty else { return nil }
+        defer {
+            segmentTokens.removeAll()
+            segment = ""
+        }
+        guard let text = next(isFinal: true), !text.isEmpty else { return nil }
+        return text
+    }
+
+    private mutating func next(isFinal: Bool) -> String? {
         let newSegment = tokenizer.decode(tokenIds: segmentTokens)
 
         // Emit the part of `newSegment` beyond its common prefix with the text
@@ -131,7 +147,7 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
 
         // if the new segment ends with REPLACEMENT CHARACTER this means
         // that the token didn't produce a complete unicode character
-        if new.last == "\u{fffd}" {
+        if !isFinal, new.last == "\u{fffd}" {
             return nil
         }
 

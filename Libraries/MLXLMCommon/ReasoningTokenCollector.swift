@@ -61,6 +61,7 @@ public struct ReasoningTokenCollector {
     /// Flush any held-back text at end of generation. If the stream ended
     /// mid-reasoning (no close ever arrived), the leftover routes as `.reasoning`.
     public mutating func finalize() -> [ReasoningEventEmitter.Segment] {
-        emitter.finalize()
+        let pending = detokenizer.finish().map { emitter.process($0) } ?? []
+        return pending + emitter.finalize()
     }
 }

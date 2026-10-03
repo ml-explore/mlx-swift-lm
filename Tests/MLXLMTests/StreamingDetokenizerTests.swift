@@ -109,7 +109,62 @@ final class StreamingDetokenizerTests: XCTestCase {
             det.append(token: id)
             if let text = det.next() { out += text }
         }
+        if let text = det.finish() { out += text }
         return out
+    }
+
+    func testFinishFlushesIncompleteMultibyteTextExactlyOnce() {
+        let tokenizer = SplitMultibyteTokenizer()
+        for tokens in [[50], [65, 50], [65, 50, 51], [65, 50, 51, 66, 50]] {
+            var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+            var output = ""
+            for token in tokens {
+                det.append(token: token)
+                if let text = det.next() { output += text }
+            }
+            if let text = det.finish() { output += text }
+            XCTAssertEqual(output, tokenizer.decode(tokenIds: tokens))
+            XCTAssertNil(det.finish())
+        }
+    }
+
+    func testFinishPreservesLiteralReplacementCharacterAndHeldPrefix() {
+        let tokenizer = AppendOnlyTokenizer(pieces: [1: "valid prefix\u{fffd}"])
+        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        det.append(token: 1)
+        XCTAssertNil(det.next())
+        XCTAssertEqual(det.finish(), "valid prefix\u{fffd}")
+        XCTAssertNil(det.finish())
+    }
+
+    func testFinishFlushesUnreadTokens() {
+        let tokenizer = AppendOnlyTokenizer(pieces: [1: "done", 2: "."])
+        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        det.append(token: 1)
+        det.append(token: 2)
+        XCTAssertEqual(det.finish(), "done.")
+        XCTAssertNil(det.finish())
+    }
+
+    func testFinishAfterNewlineDoesNotRepeatThePreviousSegment() {
+        let tokenizer = AppendOnlyTokenizer(pieces: [1: "line\n", 2: "tail\u{fffd}"])
+        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        det.append(token: 1)
+        XCTAssertEqual(det.next(), "line\n")
+        det.append(token: 2)
+        XCTAssertNil(det.next())
+        XCTAssertEqual(det.finish(), "tail\u{fffd}")
+        XCTAssertNil(det.finish())
+    }
+
+    func testFinishWithNoPendingTextReturnsNil() {
+        let tokenizer = AppendOnlyTokenizer(pieces: [1: "done"])
+        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        XCTAssertNil(det.finish())
+        det.append(token: 1)
+        XCTAssertEqual(det.next(), "done")
+        XCTAssertNil(det.finish())
+        XCTAssertNil(det.finish())
     }
 
     /// Regression for the guided-generation "dropped required property" bug:

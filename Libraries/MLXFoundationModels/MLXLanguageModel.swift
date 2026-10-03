@@ -1296,7 +1296,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 protocolDecoder = decoder
                 finalReasoningText = reasoningText
             } else {
-                let chunks = consumeAllowedEvents(router.finish(), result: &result)
+                let pending = detokenizer.finish().map { router.process($0) } ?? []
+                let chunks = consumeAllowedEvents(pending + router.finish(), result: &result)
                 finalReasoningText = chunks.joined()
                 result.endedInsideReasoning = router.isInsideReasoning
             }
@@ -1691,7 +1692,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
                 protocolDecoder = decoder
             } else {
-                for segment in emitter.finalize() {
+                let pending = detokenizer.finish().map { emitter.process($0) } ?? []
+                for segment in pending + emitter.finalize() {
                     await Self.send(
                         segment, responseEntryID: responseEntryID,
                         reasoningEntryID: reasoningEntryID, channel: channel)
