@@ -33,6 +33,7 @@ final class TokenIteratorClearCacheTests: XCTestCase {
             // Wait for Metal completion handlers to release temporary buffers.
             Stream.defaultStream.synchronize()
         }
+        Stream.defaultStream.synchronize()
         XCTAssertGreaterThanOrEqual(Memory.cacheMemory, seeded)
 
         _ = iterator.next()

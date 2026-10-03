@@ -2033,10 +2033,35 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        var message = message
+        var reasoning: String?
+        if message.role == .assistant {
+            let reasoningProtocol = QwenReasoningProtocol.tagged
+            let startDelimiter = reasoningProtocol.startDelimiter
+            let endDelimiter = reasoningProtocol.endDelimiter
+            let reasoningAndContent: Substring?
+            if message.prefilledReasoningStartDelimiter == startDelimiter {
+                reasoningAndContent = message.content[...]
+            } else if message.content.hasPrefix(startDelimiter) {
+                reasoningAndContent = message.content.dropFirst(startDelimiter.count)
+            } else {
+                reasoningAndContent = nil
+            }
+            if let reasoningAndContent,
+                let end = reasoningAndContent.range(of: endDelimiter)
+            {
+                reasoning = String(reasoningAndContent[..<end.lowerBound])
+                message.content = String(reasoningAndContent[end.upperBound...])
+            }
+        }
+
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": contentParts(for: message, layout: .imagesThenVideosThenText),
         ]
+        if let reasoning {
+            dictionary["reasoning_content"] = reasoning
+        }
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
     }
