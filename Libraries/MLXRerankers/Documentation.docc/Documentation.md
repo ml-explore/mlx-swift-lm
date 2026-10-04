@@ -3,8 +3,9 @@
 Load and run local text rerankers with one architecture-neutral API.
 
 `RerankerModelFactory` inspects the checkpoint configuration and selects the matching
-encoder, causal classifier, or listwise implementation. The initial model support covers
-BGE v2 sequence classifiers, Qwen3 causal rerankers, and Jina reranker v3 MLX checkpoints.
+encoder, causal classifier, or listwise implementation. Supported families include BGE v2
+sequence classifiers, official Qwen3 causal rerankers, Zerank-2, ContextualAI v2 multilingual
+1B, and Jina reranker v3 and v3.5 checkpoints.
 
 ## Loading A Reranker
 
@@ -31,9 +32,10 @@ The downloader is provider-neutral. Applications can pass an internal implementa
 `Downloader` for private registries or managed caches, or resolve a model themselves and use
 the local-directory overload.
 
-Automatic loading accepts checkpoints whose identifier declares that they are rerankers and
-Jina checkpoints with the explicit `JinaForRanking` architecture. A trusted private checkpoint
-with an opaque identifier can opt in explicitly:
+Automatic loading selects a supported prompt protocol from the model family in its identifier,
+then validates the checkpoint configuration. Sharing the Qwen3 backbone or having `rerank` in
+the name does not establish protocol compatibility. A trusted private checkpoint with an opaque
+identifier can opt in to the official Qwen3-Reranker protocol (or Jina v3 for `JinaForRanking`):
 
 ```swift
 let reranker = try await RerankerModelFactory.shared.loadContainer(
@@ -46,6 +48,7 @@ let reranker = try await RerankerModelFactory.shared.loadContainer(
 
 Do not enable this option for an arbitrary language or sequence-classification model. Those
 architectures can produce valid tensors without having been trained for relevance ranking.
+This option does not bypass malformed or incompatible scoring metadata.
 
 ## Reranking Documents
 
@@ -98,10 +101,11 @@ for result in response.results {
 Document identifiers must be unique within a request. Metadata is carried through unchanged
 and does not affect scoring.
 
-Each response declares its score semantics through `scoreKind`. Qwen and single-logit BGE
-rerankers return model-specific relevance scores normalized to `0...1`, while Jina reranker
-v3 returns cosine similarities. A normalized relevance score is not necessarily a calibrated
-probability. Do not compare scores or reuse thresholds across models, revisions, quantizations,
+Each response declares its score semantics through `scoreKind`. Official Qwen3 and single-logit
+BGE rerankers return model-specific relevance scores normalized to `0...1`. Zerank-2 and
+ContextualAI return raw logits (`.logit`); Jina v3 and v3.5 return cosine similarities.
+A normalized relevance score is not necessarily a calibrated probability. Do not compare
+scores or reuse thresholds across models, revisions, quantizations,
 prompts, or instructions without application-level evaluation.
 
 ## Execution Limits
@@ -126,8 +130,14 @@ let response = try await reranker.rerank(
 ```
 
 Jina reranker v3 accepts at most 64 documents in one listwise request. Pairwise BGE and
-Qwen rerankers use token-budgeted micro-batches and check task cancellation between input
+causal rerankers use token-budgeted micro-batches and check task cancellation between input
 encoding and model batches.
+
+Jina v3.5 uses dual query markers, interleaved sliding attention, and weighted query fusion
+across blocks of at most 125 documents. Its reference token limits are 1,984 query tokens,
+8,191 tokens per document, and 131,072 tokens per block. To use the reference block budget,
+pass `RerankExecutionOptions(maxBatchTokens: 131_072)`. Smaller budgets can change block
+membership and scores; `.error` rejects content that requires truncation.
 
 Qwen3 projects only each row's final valid hidden state when scoring a batch, avoiding
 vocabulary logits for the other input tokens. Singleton requests retain cached prefill.
@@ -137,11 +147,19 @@ vocabulary logits for the other input tokens. Singleton requests retain cached p
 Single-logit encoder rerankers use a sigmoid-normalized relevance score. Multi-label encoder checkpoints
 must provide `id2label` or `label2id` metadata that identifies a positive class such as
 `relevant`, `positive`, `yes`, or `LABEL_1`; ambiguous classifier heads are rejected. Qwen3
-rerankers use the official yes/no logit margin, and Jina reranker v3 uses its listwise marker
-representations and cosine similarity.
+rerankers use the official yes/no logit margin. Zerank-2 renders a query/document chat and
+reads the raw `Yes` logit; ContextualAI renders its document/query prompt and reads the raw
+bfloat16 logit at token 0. Jina rerankers use listwise marker representations and cosine similarity.
+For Zerank-2, include any instructions in the query; its published chat template ignores
+separate system instructions.
+
+When present, `1_LogitScore/config.json` supplies the classifier token IDs. Its score shape,
+input name, and token IDs must match the selected protocol. Unknown causal reranker families
+are rejected rather than silently receiving the official Qwen3 prompt.
 
 The integration test project contains revision-pinned checkpoint checks for BGE v2 M3, Qwen3
-Reranker 0.6B, and Jina reranker v3. They download large model weights and therefore do not
+Reranker 0.6B, Zerank-2, ContextualAI, and Jina v3 and v3.5. The v3.5 checks include a prompt
+longer than its sliding window. They download large model weights and therefore do not
 run as part of the package's normal CI suite.
 
 ## Topics

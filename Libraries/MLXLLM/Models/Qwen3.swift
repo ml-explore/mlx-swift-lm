@@ -136,6 +136,8 @@ public class Qwen3ModelInner: Module {
 
     fileprivate let layers: [Qwen3TransformerBlock]
     let norm: RMSNorm
+    private let layerTypes: [Qwen3AttentionType]
+    private let slidingWindow: Int?
 
     public init(_ args: Qwen3Configuration) {
         precondition(args.vocabularySize > 0)
@@ -148,14 +150,23 @@ public class Qwen3ModelInner: Module {
                 Qwen3TransformerBlock(args)
             }
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        self.layerTypes = args.layerTypes
+        self.slidingWindow = args.slidingWindow
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let mask = createAttentionMask(h: h, cache: cache?.first)
+        let fullIndex = layerTypes.firstIndex(of: .fullAttention)
+        let slidingIndex = layerTypes.firstIndex(of: .slidingAttention)
+        let fullMask = createAttentionMask(h: h, cache: fullIndex.flatMap { cache?[$0] })
+        let slidingMask =
+            slidingIndex.map {
+                createAttentionMask(h: h, cache: cache?[$0], windowSize: slidingWindow)
+            } ?? fullMask
 
         for (i, layer) in layers.enumerated() {
+            let mask = layerTypes[i] == .slidingAttention ? slidingMask : fullMask
             h = layer(h, mask: mask, cache: cache?[i])
         }
 
@@ -205,6 +216,10 @@ public class Qwen3Model: Module, LLMModel, KVCacheDimensionProvider {
 
         return weights
     }
+
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try configuration.makeCache(parameters: parameters)
+    }
 }
 
 extension Qwen3Model: HiddenStateLanguageModel {
@@ -215,6 +230,11 @@ extension Qwen3Model: HiddenStateLanguageModel {
     package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
         lmHead?(hiddenStates) ?? model.embedTokens.asLinear(hiddenStates)
     }
+}
+
+package enum Qwen3AttentionType: String, Codable, Sendable {
+    case fullAttention = "full_attention"
+    case slidingAttention = "sliding_attention"
 }
 
 public struct Qwen3Configuration: Codable, Sendable {
@@ -230,6 +250,8 @@ public struct Qwen3Configuration: Codable, Sendable {
     var ropeScaling: [String: StringOrNumber]? = nil
     var tieWordEmbeddings = false
     var maxPositionEmbeddings: Int = 32768
+    package var layerTypes: [Qwen3AttentionType]
+    package var slidingWindow: Int?
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -244,6 +266,13 @@ public struct Qwen3Configuration: Codable, Sendable {
         case ropeScaling = "rope_scaling"
         case tieWordEmbeddings = "tie_word_embeddings"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case layerTypes = "layer_types"
+        case slidingWindow = "sliding_window"
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case useSlidingWindow = "use_sliding_window"
+        case maxWindowLayers = "max_window_layers"
     }
 
     public init(from decoder: Decoder) throws {
@@ -277,12 +306,44 @@ public struct Qwen3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         self.maxPositionEmbeddings =
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
+        self.slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow)
+        if let layerTypes = try container.decodeIfPresent(
+            [Qwen3AttentionType].self, forKey: .layerTypes)
+        {
+            self.layerTypes = layerTypes
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let useSlidingWindow =
+                try legacy.decodeIfPresent(Bool.self, forKey: .useSlidingWindow) ?? false
+            let maxWindowLayers =
+                try legacy.decodeIfPresent(Int.self, forKey: .maxWindowLayers) ?? hiddenLayers
+            self.layerTypes = (0 ..< hiddenLayers).map {
+                useSlidingWindow && $0 < maxWindowLayers ? .slidingAttention : .fullAttention
+            }
+        }
+        try validateModelConfiguration()
+    }
+
+    package func makeCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try layerTypes.map {
+            try makeHybridAttentionKVCache(
+                parameters: parameters, slidingWindow: slidingWindow,
+                usesSlidingWindow: $0 == .slidingAttention)
+        }
     }
 }
 
 extension Qwen3Configuration: ModelConfigurationValidating {
     public func validateModelConfiguration() throws {
         try validateRoPEConfiguration(ropeScaling, context: "Qwen3Configuration.rope_scaling")
+        guard layerTypes.count == hiddenLayers else {
+            throw ModelFactoryError.invalidConfiguration(
+                "Qwen3 layer_types must contain one entry per hidden layer.")
+        }
+        if layerTypes.contains(.slidingAttention), slidingWindow.map({ $0 > 0 }) != true {
+            throw ModelFactoryError.invalidConfiguration(
+                "Qwen3 sliding_attention requires a positive sliding_window.")
+        }
     }
 }
 

@@ -19,21 +19,23 @@ private final class JinaRerankerProjector: Module {
     }
 }
 
-/// Jina reranker v3 listwise model.
+/// Jina reranker v3 and v3.5 listwise model.
 ///
 /// The checkpoint declares `model_type: qwen3` but `architectures: ["JinaForRanking"]`.
 /// It uses Qwen3 hidden states at `<|embed_token|>` and `<|rerank_token|>` positions,
 /// projects them with `projector.safetensors`, then scores documents by cosine similarity.
 public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionProvider,
-    ListwiseRerankerModel, AdditionalWeightFilesProviding
+    JinaRerankerEmbeddingModel, AdditionalWeightFilesProviding
 {
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    private let configuration: Qwen3Configuration
 
     @ModuleInfo(key: "model") var model: Qwen3ModelInner
     @ModuleInfo(key: "projector") private var projector: JinaRerankerProjector
 
     public init(_ configuration: Qwen3Configuration) {
+        self.configuration = configuration
         self.vocabularySize = configuration.vocabularySize
         self.kvHeads = (0 ..< configuration.hiddenLayers).map { _ in configuration.kvHeads }
         _model.wrappedValue = Qwen3ModelInner(configuration)
@@ -60,6 +62,14 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
     }
 
     package func score(input: RerankerInput, documentCount: Int) throws -> [Double] {
+        let embeddings = try embeddings(input: input, documentCount: documentCount)
+        return jinaCosineSimilarity(embeddings.documents, embeddings.query).asArray(Float.self).map(
+            Double.init)
+    }
+
+    package func embeddings(input: RerankerInput, documentCount: Int) throws
+        -> JinaRerankerEmbeddings
+    {
         guard !input.tokenIds.isEmpty else {
             throw RerankerError.emptyPrompt
         }
@@ -75,12 +85,13 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
             input.tokenIds[$0] == markerTokenIds.document
         }
 
-        guard let queryPosition = queryPositions.first else {
+        guard let queryPosition = queryPositions.last else {
             throw RerankerError.missingSpecialToken("<|rerank_token|>")
         }
-        guard queryPositions.count == 1 else {
+        guard queryPositions.count == markerTokenIds.queryCount else {
             throw RerankerError.unsupportedModel(
-                "Expected exactly one <|rerank_token|>, found \(queryPositions.count).")
+                "Expected \(markerTokenIds.queryCount) <|rerank_token|> markers, found \(queryPositions.count)."
+            )
         }
         guard documentPositions.count == documentCount else {
             throw RerankerError.missingSpecialToken("<|embed_token|>")
@@ -95,10 +106,15 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
         let queryEmbedding = projector(queryHidden)
         let documentEmbeddings = projector(documentHidden)
 
-        let scores = jinaCosineSimilarity(documentEmbeddings, queryEmbedding)
+        let embeddings = (
+            documents: documentEmbeddings.asType(.float32), query: queryEmbedding.asType(.float32)
+        )
+        eval(embeddings.documents, embeddings.query)
+        return embeddings
+    }
 
-        scores.eval()
-        return scores.asArray(Float.self).map(Double.init)
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try configuration.makeCache(parameters: parameters)
     }
 
     /// `jinaai/jina-reranker-v3-mlx` keeps the projector in `projector.safetensors`, which
@@ -128,18 +144,4 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
             result[Self.projectorKeys[item.key] ?? item.key] = item.value
         }
     }
-}
-
-func jinaCosineSimilarity(_ documents: MLXArray, _ query: MLXArray) -> MLXArray {
-    // The reference reranker computes final cosine scores from float32 embeddings.
-    let documents = documents.asType(.float32)
-    let query = query.asType(.float32)
-    let numerator = MLX.sum(documents * query, axis: -1)
-    let documentNorm = MLX.sqrt(MLX.sum(documents * documents, axis: -1))
-    let queryNorm = MLX.sqrt(MLX.sum(query * query, axis: -1))
-    let denominator = documentNorm * queryNorm
-    return MLX.clip(
-        numerator / MLX.maximum(denominator, MLXArray(1e-12)),
-        min: -1,
-        max: 1)
 }

@@ -27,8 +27,9 @@ public final class RerankerModelFactory: Sendable {
     ///   - id: Model identifier, such as `mlx-community/Qwen3-Reranker-0.6B-4bit`.
     ///   - revision: Model revision to download.
     ///   - useLatest: Whether to check for a newer cached revision.
-    ///   - allowUnverifiedModel: Allow a custom checkpoint whose identifier does not declare
-    ///     that it is a reranker. Keep this `false` for downloaded third-party models.
+    ///   - allowUnverifiedModel: Assert that a trusted custom checkpoint uses the official
+    ///     Qwen3-Reranker protocol, or Jina v3 for `JinaForRanking`. This does not bypass
+    ///     incompatible scoring metadata. Keep this `false` for third-party models.
     ///   - progressHandler: Callback that receives model download progress.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
@@ -56,8 +57,9 @@ public final class RerankerModelFactory: Sendable {
     ///   - tokenizerLoader: Loader used to construct the model tokenizer.
     ///   - configuration: Model and tokenizer source configuration.
     ///   - useLatest: Whether to check for a newer cached revision.
-    ///   - allowUnverifiedModel: Allow a custom checkpoint whose identifier does not declare
-    ///     that it is a reranker. Keep this `false` for downloaded third-party models.
+    ///   - allowUnverifiedModel: Assert that a trusted custom checkpoint uses the official
+    ///     Qwen3-Reranker protocol, or Jina v3 for `JinaForRanking`. This does not bypass
+    ///     incompatible scoring metadata. Keep this `false` for third-party models.
     ///   - progressHandler: Callback that receives model download progress.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
@@ -85,8 +87,8 @@ public final class RerankerModelFactory: Sendable {
     /// - Parameters:
     ///   - directory: Directory containing the model configuration, tokenizer, and weights.
     ///   - tokenizerLoader: Loader used to construct the model tokenizer.
-    ///   - allowUnverifiedModel: Allow a custom checkpoint whose directory name does not
-    ///     declare that it is a reranker.
+    ///   - allowUnverifiedModel: Assert the official Qwen3-Reranker or Jina v3 protocol for
+    ///     a trusted custom checkpoint with an opaque directory name.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
         from directory: URL,
@@ -112,7 +114,7 @@ public final class RerankerModelFactory: Sendable {
             modelID: modelID, allowUnverifiedModel: allowUnverifiedModel)
 
         switch architecture {
-        case .jina:
+        case .jina(let version):
             let context = try await LLMModelFactory.shared._load(
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
@@ -126,7 +128,8 @@ public final class RerankerModelFactory: Sendable {
                     documents: documents,
                     instruction: instruction,
                     maxInputTokens: descriptor.maxPositionEmbeddings ?? 131_072,
-                    maximumDocuments: 64,
+                    maximumDocuments: version == .v3 ? 64 : nil,
+                    version: version,
                     options: options)
             }
         case .encoder:
@@ -144,19 +147,36 @@ public final class RerankerModelFactory: Sendable {
                 try await container.rerankerScores(
                     query: query, documents: documents, options: options)
             }
-        case .qwen3:
+        case .causal(let causalProtocol):
+            let metadata = try loadCausalMetadata(from: resolved.modelDirectory)
+            if let metadata {
+                let policy = try metadata.scorePolicy(for: causalProtocol)
+                if let vocabularySize = descriptor.vocabularySize {
+                    try policy.validate(vocabularySize: vocabularySize)
+                }
+            }
             let context = try await LLMModelFactory.shared._load(
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
+            guard let model = context.model as? MLXLLM.Qwen3Model else {
+                throw RerankerError.unsupportedModel(
+                    "The causal reranker requires a Qwen3 backbone.")
+            }
+            let configuration = try causalProtocol.configuration(
+                tokenizer: context.tokenizer, vocabularySize: model.vocabularySize,
+                metadata: metadata)
             return RerankerContainer(
-                modelID: modelID, scoreKind: .normalizedRelevance, memoryReporter: container
+                modelID: modelID, scoreKind: causalProtocol.scoreKind, memoryReporter: container
             ) {
                 query, documents, instruction, options in
                 try await container.causalRerankerScores(
                     query: query,
                     documents: documents,
                     instruction: instruction,
-                    maxInputTokens: min(descriptor.maxPositionEmbeddings ?? 8_192, 8_192),
+                    maxInputTokens: min(
+                        descriptor.maxPositionEmbeddings ?? causalProtocol.maxInputTokens,
+                        causalProtocol.maxInputTokens),
+                    configuration: configuration,
                     options: options)
             }
         case nil:
@@ -166,19 +186,32 @@ public final class RerankerModelFactory: Sendable {
         }
     }
 
+    private func loadCausalMetadata(from directory: URL) throws -> CausalRerankerMetadata? {
+        let file = "1_LogitScore/config.json"
+        guard FileManager.default.fileExists(atPath: directory.appending(path: file).path) else {
+            return nil
+        }
+        return try decode(CausalRerankerMetadata.self, file: file, from: directory)
+    }
+
     private func loadDescriptor(from directory: URL) throws -> RerankerDescriptor {
-        let url = directory.appending(component: "config.json")
+        try decode(RerankerDescriptor.self, file: "config.json", from: directory)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, file: String, from directory: URL) throws -> T
+    {
+        let url = directory.appending(path: file)
         do {
             return try JSONDecoder.json5().decode(
-                RerankerDescriptor.self, from: Data(contentsOf: url))
+                type, from: Data(contentsOf: url))
         } catch let error as DecodingError {
             throw ModelFactoryError.configurationDecodingError(
-                url.lastPathComponent,
+                file,
                 directory.lastPathComponent,
                 error)
         } catch {
             throw ModelFactoryError.configurationFileError(
-                url.lastPathComponent,
+                file,
                 directory.lastPathComponent,
                 error)
         }
@@ -187,21 +220,31 @@ public final class RerankerModelFactory: Sendable {
 
 package enum RerankerArchitecture: Sendable, Equatable {
     case encoder
-    case qwen3
-    case jina
+    case causal(CausalRerankerProtocol)
+    case jina(JinaRerankerVersion)
 }
 
 package struct RerankerDescriptor: Decodable, Sendable {
     var modelType: String
     var architectures: [String]
     var maxPositionEmbeddings: Int?
+    var vocabularySize: Int?
 
     package func architecture(
         modelID: String,
         allowUnverifiedModel: Bool = false
     ) throws -> RerankerArchitecture? {
-        if architectures.contains("JinaForRanking") {
-            return .jina
+        let name = modelID.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        func matches(_ family: String) -> Bool {
+            name == family || name.hasPrefix("\(family)-")
+        }
+        if modelType == "qwen3", architectures.contains("JinaForRanking") {
+            if matches("jina-reranker-v3.5") { return .jina(.v35) }
+            if matches("jina-reranker-v3") || allowUnverifiedModel {
+                return .jina(.v3)
+            }
+            throw RerankerError.unsupportedModel(
+                "Unknown Jina reranking protocol for '\(modelID)'.")
         }
         let declaresReranker = modelID.localizedCaseInsensitiveContains("rerank")
         let verified = allowUnverifiedModel || declaresReranker
@@ -216,12 +259,17 @@ package struct RerankerDescriptor: Decodable, Sendable {
             return .encoder
         }
         if modelType == "qwen3", architectures.contains("Qwen3ForCausalLM") {
-            guard verified else {
+            if name.hasPrefix("qwen3-reranker-") { return .causal(.qwen3) }
+            if matches("zerank-2") { return .causal(.zerank2) }
+            if matches("ctxl-rerank-v2-instruct-multilingual-1b") {
+                return .causal(.contextual)
+            }
+            guard allowUnverifiedModel else {
                 throw RerankerError.unsupportedModel(
-                    "Qwen3 checkpoint '\(modelID)' is not identified as a reranker. Set allowUnverifiedModel only for a trusted custom reranker."
+                    "Unknown causal reranking protocol for '\(modelID)'. Only opt in for a custom checkpoint using the official Qwen3-Reranker protocol."
                 )
             }
-            return .qwen3
+            return .causal(.qwen3)
         }
         return nil
     }
@@ -230,6 +278,7 @@ package struct RerankerDescriptor: Decodable, Sendable {
         case modelType = "model_type"
         case architectures
         case maxPositionEmbeddings = "max_position_embeddings"
+        case vocabularySize = "vocab_size"
     }
 
     package init(from decoder: Decoder) throws {
@@ -238,5 +287,6 @@ package struct RerankerDescriptor: Decodable, Sendable {
         architectures = try container.decodeIfPresent([String].self, forKey: .architectures) ?? []
         maxPositionEmbeddings = try container.decodeIfPresent(
             Int.self, forKey: .maxPositionEmbeddings)
+        vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize)
     }
 }
