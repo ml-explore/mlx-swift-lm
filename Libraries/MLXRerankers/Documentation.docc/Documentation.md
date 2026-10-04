@@ -34,21 +34,27 @@ the local-directory overload.
 
 Automatic loading selects a supported prompt protocol from the model family in its identifier,
 then validates the checkpoint configuration. Sharing the Qwen3 backbone or having `rerank` in
-the name does not establish protocol compatibility. A trusted private checkpoint with an opaque
-identifier can opt in to the official Qwen3-Reranker protocol (or Jina v3 for `JinaForRanking`):
+the name does not establish protocol compatibility. Conversions keep their source name as a
+prefix, so `mlx-community/zerank-2-4bit` resolves to Zerank-2.
+
+A renamed or fine-tuned checkpoint that keeps its base model's protocol declares it with
+``RerankerFamily``. The family must match the checkpoint architecture:
 
 ```swift
 let reranker = try await RerankerModelFactory.shared.loadContainer(
     from: downloader,
     using: tokenizerLoader,
     id: "lampo/private-ranking-model",
-    allowUnverifiedModel: true
+    family: .zerank2
 )
 ```
 
-Do not enable this option for an arbitrary language or sequence-classification model. Those
-architectures can produce valid tensors without having been trained for relevance ranking.
-This option does not bypass malformed or incompatible scoring metadata.
+`allowUnverifiedModel: true` opts a trusted custom checkpoint in to the official
+Qwen3-Reranker protocol, or for `JinaForRanking` to v3 or v3.5 depending on whether its
+configuration enables sliding-window attention. Do not enable this option for an arbitrary
+language or sequence-classification model. Those architectures can produce valid tensors
+without having been trained for relevance ranking. Neither option bypasses malformed or
+incompatible scoring metadata.
 
 ## Reranking Documents
 
@@ -112,8 +118,8 @@ prompts, or instructions without application-level evaluation.
 
 `RerankExecutionOptions` bounds batch size and token allocation. Pairwise inputs are sorted
 by encoded length, micro-batched under both limits, then restored to their original order.
-`maxBatchTokens` is a hard forward-pass ceiling: it limits padded pairwise batches and the
-complete prompt of a listwise model.
+`maxBatchTokens` is a hard forward-pass ceiling: it limits padded pairwise batches, the
+complete Jina v3 prompt, and each Jina prefill step.
 Choose `.error` truncation when silently shortening a candidate is not acceptable:
 
 ```swift
@@ -135,9 +141,10 @@ encoding and model batches.
 
 Jina v3.5 uses dual query markers, interleaved sliding attention, and weighted query fusion
 across blocks of at most 125 documents. Its reference token limits are 1,984 query tokens,
-8,191 tokens per document, and 131,072 tokens per block. To use the reference block budget,
-pass `RerankExecutionOptions(maxBatchTokens: 131_072)`. Smaller budgets can change block
-membership and scores; `.error` rejects content that requires truncation.
+8,191 tokens per document, and the model context (131,072 tokens) per block. Blocks follow
+this reference geometry regardless of execution options, so scores do not depend on
+`maxBatchTokens`; each block is prefilled in steps of at most `prefillStepSize` and
+`maxBatchTokens` tokens. `.error` rejects content that requires truncation.
 
 Qwen3 projects only each row's final valid hidden state when scoring a batch, avoiding
 vocabulary logits for the other input tokens. Singleton requests retain cached prefill.
@@ -167,3 +174,4 @@ run as part of the package's normal CI suite.
 ### Model Loading
 
 - ``RerankerModelFactory``
+- ``RerankerFamily``

@@ -252,6 +252,7 @@ public struct Qwen3Configuration: Codable, Sendable {
     var maxPositionEmbeddings: Int = 32768
     package var layerTypes: [Qwen3AttentionType]
     package var slidingWindow: Int?
+    package var useSlidingWindow = false
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -268,10 +269,10 @@ public struct Qwen3Configuration: Codable, Sendable {
         case maxPositionEmbeddings = "max_position_embeddings"
         case layerTypes = "layer_types"
         case slidingWindow = "sliding_window"
+        case useSlidingWindow = "use_sliding_window"
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
-        case useSlidingWindow = "use_sliding_window"
         case maxWindowLayers = "max_window_layers"
     }
 
@@ -306,21 +307,26 @@ public struct Qwen3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         self.maxPositionEmbeddings =
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 32768
-        self.slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow)
+        let slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow)
+        self.slidingWindow = slidingWindow
+        self.useSlidingWindow =
+            try container.decodeIfPresent(Bool.self, forKey: .useSlidingWindow) ?? false
+        // Transformers semantics: `max_window_layers` counts the bottom full-attention layers,
+        // and `use_sliding_window: false` disables the window on every layer.
+        let declared: [Qwen3AttentionType]
         if let layerTypes = try container.decodeIfPresent(
             [Qwen3AttentionType].self, forKey: .layerTypes)
         {
-            self.layerTypes = layerTypes
+            declared = layerTypes
         } else {
             let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
-            let useSlidingWindow =
-                try legacy.decodeIfPresent(Bool.self, forKey: .useSlidingWindow) ?? false
             let maxWindowLayers =
-                try legacy.decodeIfPresent(Int.self, forKey: .maxWindowLayers) ?? hiddenLayers
-            self.layerTypes = (0 ..< hiddenLayers).map {
-                useSlidingWindow && $0 < maxWindowLayers ? .slidingAttention : .fullAttention
+                try legacy.decodeIfPresent(Int.self, forKey: .maxWindowLayers) ?? 28
+            declared = (0 ..< hiddenLayers).map {
+                slidingWindow != nil && $0 >= maxWindowLayers ? .slidingAttention : .fullAttention
             }
         }
+        self.layerTypes = useSlidingWindow ? declared : declared.map { _ in .fullAttention }
         try validateModelConfiguration()
     }
 

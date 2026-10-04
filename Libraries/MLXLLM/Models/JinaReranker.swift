@@ -61,13 +61,7 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
         model.embedTokens.asLinear(model(inputs, cache: cache))
     }
 
-    package func score(input: RerankerInput, documentCount: Int) throws -> [Double] {
-        let embeddings = try embeddings(input: input, documentCount: documentCount)
-        return jinaCosineSimilarity(embeddings.documents, embeddings.query).asArray(Float.self).map(
-            Double.init)
-    }
-
-    package func embeddings(input: RerankerInput, documentCount: Int) throws
+    package func embeddings(input: RerankerInput, documentCount: Int, stepSize: Int) throws
         -> JinaRerankerEmbeddings
     {
         guard !input.tokenIds.isEmpty else {
@@ -93,22 +87,33 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
                 "Expected \(markerTokenIds.queryCount) <|rerank_token|> markers, found \(queryPositions.count)."
             )
         }
-        guard documentPositions.count == documentCount else {
+        guard documentPositions.count == documentCount,
+            documentPositions.allSatisfy({ $0 < queryPosition })
+        else {
             throw RerankerError.missingSpecialToken("<|embed_token|>")
         }
 
-        let inputIds = MLXArray(input.tokenIds).reshaped(1, -1)
-        let hiddenStates = model(inputIds, cache: nil)[0]
+        // Attention is causal, so tokens after the final query marker cannot change its state.
+        let length = queryPosition + 1
+        let tokens = MLXArray(input.tokenIds[..<length]).reshaped(1, -1)
+        let cache = try newCache(parameters: nil)
+        var pending = (documentPositions + [queryPosition])[...]
+        var states = [MLXArray]()
+        for start in stride(from: 0, to: length, by: stepSize) {
+            let end = min(start + stepSize, length)
+            let hidden = model(tokens[0..., start ..< end], cache: cache)[0]
+            let positions = pending.prefix { $0 < end }
+            pending.removeFirst(positions.count)
+            if !positions.isEmpty {
+                states.append(hidden.take(MLXArray(positions.map { Int32($0 - start) }), axis: 0))
+            }
+            eval(cache)
+            eval(states)
+        }
 
-        let queryHidden = hiddenStates[queryPosition][.newAxis, 0...]
-        let documentHidden = stacked(documentPositions.map { hiddenStates[$0] })
-
-        let queryEmbedding = projector(queryHidden)
-        let documentEmbeddings = projector(documentHidden)
-
-        let embeddings = (
-            documents: documentEmbeddings.asType(.float32), query: queryEmbedding.asType(.float32)
-        )
+        let projected = projector(concatenated(states, axis: 0)).asType(.float32)
+        let embeddings = JinaRerankerEmbeddings(
+            documents: projected[..<documentCount], query: projected[documentCount...])
         eval(embeddings.documents, embeddings.query)
         return embeddings
     }

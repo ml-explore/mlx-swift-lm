@@ -890,8 +890,7 @@ public enum RerankerIntegrationTests {
         ]
         for testCase in cases {
             let response = try await reranker.scores(
-                query: "What is the capital of China?", documents: testCase.documents,
-                options: .init(maxBatchTokens: 131_072))
+                query: "What is the capital of China?", documents: testCase.documents)
             try check(response.scoreKind == .cosineSimilarity, "Jina v3.5 must return cosines")
             try check(response.results.count == testCase.expected.count, "Unexpected score count")
             for index in testCase.expected.indices {

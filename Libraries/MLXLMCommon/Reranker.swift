@@ -45,8 +45,9 @@ public struct RerankExecutionOptions: Sendable {
 
     /// Maximum number of token slots in one model forward pass.
     ///
-    /// For pairwise models this bounds `batchSize * paddedSequenceLength`. For listwise
-    /// models it bounds the complete query-and-document prompt.
+    /// For pairwise models this bounds `batchSize * paddedSequenceLength`. For Jina v3 it
+    /// bounds the complete query-and-document prompt. Jina v3.5 blocks follow the checkpoint's
+    /// reference geometry, and this bounds each of their prefill steps.
     public var maxBatchTokens: Int
 
     /// Preferred number of tokens processed by each cached causal-model prefill step.
@@ -488,11 +489,6 @@ package protocol ListwiseRerankerInputProcessor: Sendable {
     ) throws -> RerankerInput
 }
 
-/// Models that score a full document list from one reranker prompt.
-package protocol ListwiseRerankerModel: BaseLanguageModel {
-    func score(input: RerankerInput, documentCount: Int) throws -> [Double]
-}
-
 /// Applies a final scalar transform to a reranker logit or logit margin.
 ///
 /// Use ``identity`` when the model already returns calibrated scores, probabilities, or
@@ -763,7 +759,7 @@ package struct BERTRerankerInputProcessor: RerankerInputProcessor {
     }
 }
 
-/// Jina reranker v3 and v3.5 listwise prompt processing.
+/// Jina reranker listwise prompt processing.
 ///
 /// This processor builds a single prompt containing all candidate passages. It appends
 /// the configured document marker token to each passage and the query marker token to the
@@ -772,18 +768,18 @@ package struct JinaRerankerInputProcessor: ListwiseRerankerInputProcessor {
     package var instruction: String?
     package var queryEmbedToken: String
     package var documentEmbedToken: String
-    package var version: JinaRerankerVersion
+    package var family: JinaRerankerFamily
 
     package init(
         instruction: String? = nil,
         queryEmbedToken: String = "<|rerank_token|>",
         documentEmbedToken: String = "<|embed_token|>",
-        version: JinaRerankerVersion = .v3
+        family: JinaRerankerFamily = .v3
     ) {
         self.instruction = instruction
         self.queryEmbedToken = queryEmbedToken
         self.documentEmbedToken = documentEmbedToken
-        self.version = version
+        self.family = family
     }
 
     package func encode(
@@ -796,9 +792,8 @@ package struct JinaRerankerInputProcessor: ListwiseRerankerInputProcessor {
         let markerTokenIds = RerankerMarkerTokenIds(
             query: try resolveSpecialToken(queryEmbedToken, tokenizer: tokenizer),
             document: try resolveSpecialToken(documentEmbedToken, tokenizer: tokenizer),
-            queryCount: version == .v35 ? 2 : 1)
-        let specialTokens =
-            [queryEmbedToken, documentEmbedToken] + (version == .v35 ? ["<|score_token|>"] : [])
+            queryCount: family.marksQueryInHeader ? 2 : 1)
+        let specialTokens = [queryEmbedToken, documentEmbedToken] + family.reservedTokens
         let sanitizedQuery = sanitize(query, removing: specialTokens)
         let sanitizedDocuments = documents.map { sanitize($0, removing: specialTokens) }
 
@@ -890,7 +885,7 @@ package struct JinaRerankerInputProcessor: ListwiseRerankerInputProcessor {
     }
 
     private func renderPromptPrefix(query: String, documentCount: Int) -> String {
-        let headerQuery = query + (version == .v35 ? queryEmbedToken : "")
+        let headerQuery = query + (family.marksQueryInHeader ? queryEmbedToken : "")
         var prompt =
             """
             <|im_start|>system
@@ -926,10 +921,7 @@ package struct JinaRerankerInputProcessor: ListwiseRerankerInputProcessor {
     }
 
     private func renderQuerySuffix() -> String {
-        let rankingInstruction =
-            version == .v35
-            ? "\nPlease provide the ranking of all passages based on their relevance to the search query, in descending order of relevance, with each label enclosed in square brackets (e.g., [2] > [1] > [3] > [0])."
-            : ""
+        let rankingInstruction = family.rankingInstruction.map { "\n" + $0 } ?? ""
         return
             "\n</query>\(rankingInstruction)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     }
@@ -948,7 +940,8 @@ extension ModelContainer {
         documents: [String],
         instruction: String?,
         maxInputTokens: Int,
-        configuration: CausalRerankerConfiguration,
+        family: CausalRerankerFamily,
+        scorePolicy: CausalRerankerScorePolicy,
         options: RerankExecutionOptions
     ) async throws -> [Double] {
         guard !documents.isEmpty else { return [] }
@@ -958,8 +951,8 @@ extension ModelContainer {
             let (query, documents, instruction, maxInputTokens, options) = values
             let scorer = CausalLMReranker(
                 tokenizer: context.tokenizer,
-                inputProcessor: configuration.inputProcessor(instruction: instruction),
-                scorePolicy: configuration.scorePolicy,
+                inputProcessor: family.inputProcessor(instruction: instruction),
+                scorePolicy: scorePolicy,
                 maxInputTokens: maxInputTokens,
                 options: options)
 
@@ -998,46 +991,6 @@ extension ModelContainer {
             }
         }
     }
-
-    /// Score listwise rerankers in document order.
-    package func listwiseRerankerScores(
-        query: String,
-        documents: [String],
-        instruction: String?,
-        maxInputTokens: Int,
-        maximumDocuments: Int?,
-        version: JinaRerankerVersion = .v3,
-        options: RerankExecutionOptions
-    ) async throws -> [Double] {
-        guard !documents.isEmpty else { return [] }
-        if version == .v3, let maximumDocuments, documents.count > maximumDocuments {
-            throw RerankerError.tooManyDocuments(
-                actual: documents.count, maximum: maximumDocuments)
-        }
-
-        return try await perform(
-            values: (query, documents, instruction, maxInputTokens, options)
-        ) { context, values in
-            try Task.checkCancellation()
-            let (query, documents, instruction, maxInputTokens, options) = values
-            if version == .v35 {
-                return try jinaV35RerankerScores(
-                    context: context, query: query, documents: documents,
-                    instruction: instruction, maxInputTokens: maxInputTokens, options: options)
-            }
-            guard let model = context.model as? any ListwiseRerankerModel else {
-                throw RerankerError.unsupportedModel(
-                    "\(type(of: context.model)) does not expose listwise reranker scores.")
-            }
-            let input = try JinaRerankerInputProcessor(instruction: instruction).encode(
-                query: query,
-                documents: documents,
-                tokenizer: context.tokenizer,
-                maxInputTokens: min(maxInputTokens, options.maxBatchTokens),
-                truncation: options.truncation)
-            return try model.score(input: input, documentCount: documents.count)
-        }
-    }
 }
 
 private struct CausalLMReranker {
@@ -1068,7 +1021,7 @@ private struct CausalLMReranker {
             let cache = try model.newCache(parameters: nil)
             let output = try nextTokenLogits(input: lmInput, model: model, cache: cache)
             let logits = output[0..., -1, 0...]
-            return [scorePolicy(logits)]
+            return scorePolicy(logits)
         }
 
         let maxLength = batch.map(\.input.tokenIds.count).max() ?? 0
@@ -1091,10 +1044,7 @@ private struct CausalLMReranker {
                     model(LMInput.Text(tokens: tokens), cache: nil, state: nil).logits,
                     lengths: lengths)
             }
-        MLX.eval(logits)
-        return batch.indices.map { row in
-            scorePolicy(logits[row])
-        }
+        return scorePolicy(logits)
     }
 
     private func nextTokenLogits(
