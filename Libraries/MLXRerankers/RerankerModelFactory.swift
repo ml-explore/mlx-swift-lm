@@ -27,9 +27,11 @@ public final class RerankerModelFactory: Sendable {
     ///   - id: Model identifier, such as `mlx-community/Qwen3-Reranker-0.6B-4bit`.
     ///   - revision: Model revision to download.
     ///   - useLatest: Whether to check for a newer cached revision.
+    ///   - family: The reranking protocol of a renamed or fine-tuned checkpoint. When `nil`, the
+    ///     factory identifies the family from the checkpoint.
     ///   - allowUnverifiedModel: Assert that a trusted custom checkpoint uses the official
-    ///     Qwen3-Reranker protocol, or Jina v3 for `JinaForRanking`. This does not bypass
-    ///     incompatible scoring metadata. Keep this `false` for third-party models.
+    ///     Qwen3-Reranker protocol, or the Jina protocol its configuration declares. This does
+    ///     not bypass incompatible scoring metadata. Keep this `false` for third-party models.
     ///   - progressHandler: Callback that receives model download progress.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
@@ -38,6 +40,7 @@ public final class RerankerModelFactory: Sendable {
         id: String,
         revision: String = "main",
         useLatest: Bool = false,
+        family: RerankerFamily? = nil,
         allowUnverifiedModel: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> RerankerContainer {
@@ -46,6 +49,7 @@ public final class RerankerModelFactory: Sendable {
             using: tokenizerLoader,
             configuration: ModelConfiguration(id: id, revision: revision),
             useLatest: useLatest,
+            family: family,
             allowUnverifiedModel: allowUnverifiedModel,
             progressHandler: progressHandler)
     }
@@ -57,9 +61,11 @@ public final class RerankerModelFactory: Sendable {
     ///   - tokenizerLoader: Loader used to construct the model tokenizer.
     ///   - configuration: Model and tokenizer source configuration.
     ///   - useLatest: Whether to check for a newer cached revision.
+    ///   - family: The reranking protocol of a renamed or fine-tuned checkpoint. When `nil`, the
+    ///     factory identifies the family from the checkpoint.
     ///   - allowUnverifiedModel: Assert that a trusted custom checkpoint uses the official
-    ///     Qwen3-Reranker protocol, or Jina v3 for `JinaForRanking`. This does not bypass
-    ///     incompatible scoring metadata. Keep this `false` for third-party models.
+    ///     Qwen3-Reranker protocol, or the Jina protocol its configuration declares. This does
+    ///     not bypass incompatible scoring metadata. Keep this `false` for third-party models.
     ///   - progressHandler: Callback that receives model download progress.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
@@ -67,6 +73,7 @@ public final class RerankerModelFactory: Sendable {
         using tokenizerLoader: any TokenizerLoader,
         configuration: ModelConfiguration,
         useLatest: Bool = false,
+        family: RerankerFamily? = nil,
         allowUnverifiedModel: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> RerankerContainer {
@@ -78,6 +85,7 @@ public final class RerankerModelFactory: Sendable {
         return try await loadContainer(
             resolved: resolved,
             modelID: configuration.name,
+            family: family,
             allowUnverifiedModel: allowUnverifiedModel,
             using: tokenizerLoader)
     }
@@ -87,18 +95,21 @@ public final class RerankerModelFactory: Sendable {
     /// - Parameters:
     ///   - directory: Directory containing the model configuration, tokenizer, and weights.
     ///   - tokenizerLoader: Loader used to construct the model tokenizer.
-    ///   - allowUnverifiedModel: Assert the official Qwen3-Reranker or Jina v3 protocol for
-    ///     a trusted custom checkpoint with an opaque directory name.
+    ///   - family: The reranking protocol of a checkpoint with an opaque directory name.
+    ///   - allowUnverifiedModel: Assert the official Qwen3-Reranker protocol, or the Jina
+    ///     protocol its configuration declares, for a trusted custom checkpoint.
     /// - Returns: An architecture-neutral reranker container.
     public func loadContainer(
         from directory: URL,
         using tokenizerLoader: any TokenizerLoader,
+        family: RerankerFamily? = nil,
         allowUnverifiedModel: Bool = false
     ) async throws -> RerankerContainer {
         let resolved = ResolvedModelConfiguration(directory: directory)
         return try await loadContainer(
             resolved: resolved,
             modelID: resolved.name,
+            family: family,
             allowUnverifiedModel: allowUnverifiedModel,
             using: tokenizerLoader)
     }
@@ -106,15 +117,16 @@ public final class RerankerModelFactory: Sendable {
     private func loadContainer(
         resolved: ResolvedModelConfiguration,
         modelID: String,
+        family: RerankerFamily?,
         allowUnverifiedModel: Bool,
         using tokenizerLoader: any TokenizerLoader
     ) async throws -> RerankerContainer {
         let descriptor = try loadDescriptor(from: resolved.modelDirectory)
         let architecture = try descriptor.architecture(
-            modelID: modelID, allowUnverifiedModel: allowUnverifiedModel)
+            modelID: modelID, family: family, allowUnverifiedModel: allowUnverifiedModel)
 
         switch architecture {
-        case .jina(let version):
+        case .jina(let family):
             let context = try await LLMModelFactory.shared._load(
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
@@ -128,8 +140,7 @@ public final class RerankerModelFactory: Sendable {
                     documents: documents,
                     instruction: instruction,
                     maxInputTokens: descriptor.maxPositionEmbeddings ?? 131_072,
-                    maximumDocuments: version == .v3 ? 64 : nil,
-                    version: version,
+                    family: family,
                     options: options)
             }
         case .encoder:
@@ -147,36 +158,30 @@ public final class RerankerModelFactory: Sendable {
                 try await container.rerankerScores(
                     query: query, documents: documents, options: options)
             }
-        case .causal(let causalProtocol):
+        case .causal(let family):
             let metadata = try loadCausalMetadata(from: resolved.modelDirectory)
-            if let metadata {
-                let policy = try metadata.scorePolicy(for: causalProtocol)
-                if let vocabularySize = descriptor.vocabularySize {
-                    try policy.validate(vocabularySize: vocabularySize)
-                }
-            }
+            // Reject contradictory metadata before loading weights.
+            try family.declaredScorePolicy(metadata)?.validate(
+                vocabularySize: descriptor.vocabularySize)
             let context = try await LLMModelFactory.shared._load(
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
-            guard let model = context.model as? MLXLLM.Qwen3Model else {
-                throw RerankerError.unsupportedModel(
-                    "The causal reranker requires a Qwen3 backbone.")
-            }
-            let configuration = try causalProtocol.configuration(
-                tokenizer: context.tokenizer, vocabularySize: model.vocabularySize,
-                metadata: metadata)
+            let scorePolicy = try family.scorePolicy(
+                metadata: metadata, tokenizer: context.tokenizer,
+                vocabularySize: descriptor.vocabularySize)
+            let maxInputTokens = min(
+                descriptor.maxPositionEmbeddings ?? family.maxInputTokens, family.maxInputTokens)
             return RerankerContainer(
-                modelID: modelID, scoreKind: causalProtocol.scoreKind, memoryReporter: container
+                modelID: modelID, scoreKind: family.scoreKind, memoryReporter: container
             ) {
                 query, documents, instruction, options in
                 try await container.causalRerankerScores(
                     query: query,
                     documents: documents,
                     instruction: instruction,
-                    maxInputTokens: min(
-                        descriptor.maxPositionEmbeddings ?? causalProtocol.maxInputTokens,
-                        causalProtocol.maxInputTokens),
-                    configuration: configuration,
+                    maxInputTokens: maxInputTokens,
+                    family: family,
+                    scorePolicy: scorePolicy,
                     options: options)
             }
         case nil:
@@ -220,8 +225,8 @@ public final class RerankerModelFactory: Sendable {
 
 package enum RerankerArchitecture: Sendable, Equatable {
     case encoder
-    case causal(CausalRerankerProtocol)
-    case jina(JinaRerankerVersion)
+    case causal(CausalRerankerFamily)
+    case jina(JinaRerankerFamily)
 }
 
 package struct RerankerDescriptor: Decodable, Sendable {
@@ -229,44 +234,58 @@ package struct RerankerDescriptor: Decodable, Sendable {
     var architectures: [String]
     var maxPositionEmbeddings: Int?
     var vocabularySize: Int?
+    var usesSlidingWindow: Bool
 
     package func architecture(
         modelID: String,
+        family: RerankerFamily? = nil,
         allowUnverifiedModel: Bool = false
     ) throws -> RerankerArchitecture? {
-        let name = modelID.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
-        func matches(_ family: String) -> Bool {
-            name == family || name.hasPrefix("\(family)-")
-        }
-        if modelType == "qwen3", architectures.contains("JinaForRanking") {
-            if matches("jina-reranker-v3.5") { return .jina(.v35) }
-            if matches("jina-reranker-v3") || allowUnverifiedModel {
-                return .jina(.v3)
+        let isQwen3 = modelType == "qwen3"
+        let isJina = isQwen3 && architectures.contains("JinaForRanking")
+        let isCausal = isQwen3 && architectures.contains("Qwen3ForCausalLM")
+        let isEncoder =
+            ["bert", "roberta", "xlm-roberta"].contains(modelType)
+            && architectures.contains(where: { $0.contains("ForSequenceClassification") })
+
+        if let family {
+            switch family.architecture {
+            case .jina where isJina, .causal where isCausal:
+                return family.architecture
+            default:
+                throw RerankerError.unsupportedModel(
+                    "\(family) does not match '\(modelType)' with architectures \(architectures)."
+                )
             }
-            throw RerankerError.unsupportedModel(
-                "Unknown Jina reranking protocol for '\(modelID)'.")
         }
-        let declaresReranker = modelID.localizedCaseInsensitiveContains("rerank")
-        let verified = allowUnverifiedModel || declaresReranker
-        if ["bert", "roberta", "xlm-roberta"].contains(modelType),
-            architectures.contains(where: { $0.contains("ForSequenceClassification") })
-        {
-            guard verified else {
+
+        let identified = RerankerFamily(checkpointName: modelID)
+        if isJina {
+            if let identified, case .jina = identified.architecture {
+                return identified.architecture
+            }
+            guard allowUnverifiedModel else {
+                throw RerankerError.unsupportedModel(
+                    "Unknown Jina reranking protocol for '\(modelID)'. Pass its family to opt in.")
+            }
+            // Only v3.5 interleaves sliding-window layers.
+            return .jina(usesSlidingWindow ? .v35 : .v3)
+        }
+        if isEncoder {
+            guard allowUnverifiedModel || modelID.localizedCaseInsensitiveContains("rerank") else {
                 throw RerankerError.unsupportedModel(
                     "Sequence-classification checkpoint '\(modelID)' is not identified as a reranker. Set allowUnverifiedModel only for a trusted custom reranker."
                 )
             }
             return .encoder
         }
-        if modelType == "qwen3", architectures.contains("Qwen3ForCausalLM") {
-            if name.hasPrefix("qwen3-reranker-") { return .causal(.qwen3) }
-            if matches("zerank-2") { return .causal(.zerank2) }
-            if matches("ctxl-rerank-v2-instruct-multilingual-1b") {
-                return .causal(.contextual)
+        if isCausal {
+            if let identified, case .causal = identified.architecture {
+                return identified.architecture
             }
             guard allowUnverifiedModel else {
                 throw RerankerError.unsupportedModel(
-                    "Unknown causal reranking protocol for '\(modelID)'. Only opt in for a custom checkpoint using the official Qwen3-Reranker protocol."
+                    "Unknown causal reranking protocol for '\(modelID)'. Pass its family to opt in, or set allowUnverifiedModel for a custom checkpoint using the official Qwen3-Reranker protocol."
                 )
             }
             return .causal(.qwen3)
@@ -279,6 +298,7 @@ package struct RerankerDescriptor: Decodable, Sendable {
         case architectures
         case maxPositionEmbeddings = "max_position_embeddings"
         case vocabularySize = "vocab_size"
+        case useSlidingWindow = "use_sliding_window"
     }
 
     package init(from decoder: Decoder) throws {
@@ -288,5 +308,7 @@ package struct RerankerDescriptor: Decodable, Sendable {
         maxPositionEmbeddings = try container.decodeIfPresent(
             Int.self, forKey: .maxPositionEmbeddings)
         vocabularySize = try container.decodeIfPresent(Int.self, forKey: .vocabularySize)
+        usesSlidingWindow =
+            try container.decodeIfPresent(Bool.self, forKey: .useSlidingWindow) ?? false
     }
 }
