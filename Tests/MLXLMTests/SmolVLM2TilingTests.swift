@@ -10,6 +10,7 @@ import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXScriptedLM
 import XCTest
 
 @testable import MLXVLM
@@ -31,7 +32,7 @@ final class SmolVLM2TilingTests: XCTestCase {
         let config = try JSONDecoder().decode(
             SmolVLMProcessorConfiguration.self,
             from: Data(json.utf8))
-        return SmolVLMProcessor(config, tokenizer: TestTokenizer())
+        return SmolVLMProcessor(config, tokenizer: PseudoWordTokenizer())
     }
 
     private func makeImage(width: CGFloat, height: CGFloat) -> CIImage {

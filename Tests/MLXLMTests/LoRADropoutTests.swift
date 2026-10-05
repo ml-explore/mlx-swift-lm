@@ -6,6 +6,7 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
+import MLXScriptedLM
 import XCTest
 
 final class LoRADropoutTests: XCTestCase {
@@ -285,7 +286,7 @@ final class LoRADropoutTests: XCTestCase {
                 observedTraining = model.training
                 return (MLXArray(0.0), MLXArray(1))
             },
-            tokenizer: TestTokenizer(),
+            tokenizer: PseudoWordTokenizer(),
             batchSize: 1,
             batchCount: 1)
 
@@ -308,7 +309,7 @@ final class LoRADropoutTests: XCTestCase {
                 let prediction = (model as! Linear)(MLXArray.ones([1, 1]))
                 return ((prediction * prediction).mean(), MLXArray(1))
             },
-            tokenizer: TestTokenizer(),
+            tokenizer: PseudoWordTokenizer(),
             parameters: .init(
                 batchSize: 1, iterations: 1, stepsPerReport: 1, stepsPerEval: 1,
                 validationBatches: 1),
@@ -334,7 +335,7 @@ final class LoRADropoutTests: XCTestCase {
                 let prediction = (model as! Linear)(MLXArray.ones([1, 1]))
                 return ((prediction * prediction).mean(), MLXArray(1))
             },
-            tokenizer: TestTokenizer(),
+            tokenizer: PseudoWordTokenizer(),
             parameters: .init(
                 batchSize: 1, iterations: 4, stepsPerReport: 1, stepsPerEval: 100,
                 validationBatches: 1, completedIterations: 2),

@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXNN
+import MLXScriptedLM
 import Testing
 
 @testable import MLXLMCommon
@@ -75,7 +76,7 @@ struct SpeculativeDecodingTests {
         withLogitProcessor: Bool
     ) async throws {
         let vocabularySize = 100
-        let tokenizer = TestTokenizer(vocabularySize: vocabularySize)
+        let tokenizer = PseudoWordTokenizer(vocabularySize: vocabularySize)
         let processor = TestInputProcessor(
             tokenizer: tokenizer,
             configuration: ModelConfiguration(id: "stable-transition-test"),

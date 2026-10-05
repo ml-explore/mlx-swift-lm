@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import MLXScriptedLM
 import XCTest
 
 @_spi(GemmaEncoder) @testable import MLXLLM
@@ -140,7 +141,7 @@ public class TranslateGemmaTests: XCTestCase {
     func testGemma3TextModelKeepsDefaultMessageGenerator() {
         let model = Gemma3TextModel(Self.tinyConfig())
 
-        let generator = model.messageGenerator(tokenizer: TestTokenizer())
+        let generator = model.messageGenerator(tokenizer: PseudoWordTokenizer())
 
         XCTAssertFalse(generator is TranslateGemma3MessageGenerator)
         XCTAssertTrue(generator is DefaultMessageGenerator)

@@ -6,6 +6,7 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
+import MLXScriptedLM
 import XCTest
 
 public class EvalTests: XCTestCase {
@@ -435,10 +436,10 @@ public class EvalTests: XCTestCase {
 
         let optimizer = Adam(learningRate: 1e-5)
 
-        let train = ["a", "b", "c"]
-        let valid = ["x", "y", "z"]
+        let train = ["the quick brown fox", "jumps over the", "lazy sleeping dog"]
+        let valid = ["a cat sat", "on the mat", "in the sun"]
 
-        let tokenizer = TestTokenizer()
+        let tokenizer = PseudoWordTokenizer()
         let parameters = LoRATrain.Parameters(iterations: 5)
 
         try LoRATrain.train(
