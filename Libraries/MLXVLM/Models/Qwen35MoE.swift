@@ -10,7 +10,7 @@
 import MLX
 
 public final class Qwen35MoE: Qwen35 {
-    public override func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+    public override func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
         var remapped = [String: MLXArray]()
         remapped.reserveCapacity(weights.count)
         for (key, value) in weights {
@@ -42,6 +42,6 @@ public final class Qwen35MoE: Qwen35 {
             }
         }
 
-        return super.sanitize(weights: remapped)
+        return try super.sanitize(weights: remapped)
     }
 }

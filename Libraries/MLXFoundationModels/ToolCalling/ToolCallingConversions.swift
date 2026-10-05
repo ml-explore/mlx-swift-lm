@@ -37,10 +37,8 @@ enum ToolCallingConversions {
     {
         let schema: GenerationSchema = tool.parameters
         let paramsData = try JSONEncoder().encode(schema)
-        guard
-            let paramsAny = try JSONSerialization.jsonObject(with: paramsData)
-                as? [String: any Sendable]
-        else {
+        let paramsObject = try JSONSerialization.jsonObject(with: paramsData)
+        guard let paramsAny = unboxingBooleans(in: paramsObject) as? [String: any Sendable] else {
             throw ToolCallingConversionError.invalidParameterSchema
         }
 
@@ -52,6 +50,22 @@ enum ToolCallingConversions {
                 "parameters": paramsAny,
             ] as [String: any Sendable],
         ]
+    }
+
+    /// swift-jinja's `Value(any:)` matches `Int` before `Bool`, so it converts a
+    /// `false` that `JSONSerialization` boxed in an `NSNumber` to `0`.
+    private static func unboxingBooleans(in value: Any) -> Any {
+        // Keep the type ID check. A boxed `0` or `1` also passes `as? Bool`.
+        if let number = value as? NSNumber {
+            return CFGetTypeID(number) == CFBooleanGetTypeID() ? number.boolValue : number
+        }
+        if let array = value as? [Any] {
+            return array.map(unboxingBooleans(in:))
+        }
+        if let object = value as? [String: Any] {
+            return object.mapValues(unboxingBooleans(in:))
+        }
+        return value
     }
 
     /// Converts an array of tool definitions, preserving order. Throws on the

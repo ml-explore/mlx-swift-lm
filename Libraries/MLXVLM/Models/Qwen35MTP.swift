@@ -81,16 +81,27 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
     public let requiresGreedySampling = true
-    private let preconvertedNorms: Bool
+    private let checkpointPolicy: Qwen35CheckpointPolicy
 
     @ModuleInfo(key: "mtp") var mtp: Qwen35VLMNextNPredictor
 
-    public init(
+    public convenience init(
         _ configuration: Qwen35Configuration.TextConfiguration,
         preconvertedNorms: Bool = false
     ) {
+        self.init(
+            configuration,
+            checkpointPolicy: .init(
+                layout: configuration.modelType == "qwen3_5_mtp" ? .standalone : .embedded,
+                preconvertedNorms: preconvertedNorms))
+    }
+
+    private init(
+        _ configuration: Qwen35Configuration.TextConfiguration,
+        checkpointPolicy: Qwen35CheckpointPolicy
+    ) {
         self.configuration = configuration
-        self.preconvertedNorms = preconvertedNorms
+        self.checkpointPolicy = checkpointPolicy
         _mtp.wrappedValue = Qwen35VLMNextNPredictor(configuration)
         super.init()
     }
@@ -101,7 +112,9 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
     ) {
         self.init(
             configuration.textConfiguration,
-            preconvertedNorms: preconvertedNorms)
+            checkpointPolicy: .init(
+                layout: configuration.modelType == "qwen3_5_mtp" ? .standalone : .embedded,
+                preconvertedNorms: preconvertedNorms))
     }
 
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
@@ -258,14 +271,22 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         state.proposalAppended = 0
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        qwenMTPSanitizeWeights(
-            weights: weights,
-            mtpNumHiddenLayers: configuration.mtpNumHiddenLayers,
-            numExperts: configuration.numExperts,
-            shiftNormWeights: !preconvertedNorms
-        )
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        try checkpointPolicy.prepare(
+            checkpoint, mtpNumHiddenLayers: configuration.mtpNumHiddenLayers,
+            numExperts: configuration.numExperts)
     }
+
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        try sanitize(weights: weights, metadata: [:])
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws -> [String:
+        MLXArray]
+    {
+        try prepareCheckpoint(.init(weights: weights, metadata: metadata)).weights
+    }
+
 }
 
 func qwen35MTPPositionIds(
@@ -290,4 +311,10 @@ func qwen35MTPPositionIds(
         base = base + delta[0..., .newAxis]
     }
     return tiled(base[.newAxis, 0..., 0...], repetitions: [3, 1, 1])
+}
+
+extension Qwen35VLMNextNDraftModel: ModelConversionMetadataProvider {
+    public var modelConversionMetadata: [String: String] {
+        [Qwen35CheckpointPolicy.normMetadataKey: "scale"]
+    }
 }

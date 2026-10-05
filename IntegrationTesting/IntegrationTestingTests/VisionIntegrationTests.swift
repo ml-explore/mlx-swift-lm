@@ -10,21 +10,21 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-/// Opt-in end-to-end VLM test: drives a real `Qwen3-VL-4B-Instruct-4bit` through
-/// the FoundationModels adapter with a labeled image attachment and `.vision`
-/// declared, proving the labeled-attachment path reaches the already
-/// multimodal MLX pipeline.
-///
-/// The input is a synthetic solid-color square built in-memory (no binary
-/// fixture); the test is parameterized over two colors and asserts the model
-/// names the matching color as a whole word. Two colors give an implicit
-/// negative control — a model that always answers "red" fails the blue case —
-/// and word-level matching keeps "colored"/"coloured" from satisfying a color
-/// name. This keeps the adapter end-to-end coverage while removing the
-/// photographic fixture.
-///
+let labeledVisionModels = [
+    "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "mlx-community/gemma-4-e4b-it-4bit",
+]
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+struct ColorReport {
+    var image: ImageReference
+    var color: String
+}
+
 /// Skipped unless `MLX_RUN_VLM_INTEGRATION=1`, so default CI never downloads
 /// multi-GB weights; run on Apple silicon on demand.
+/// If you run `xcodebuild`, prefix the variable with `TEST_RUNNER_`, or every test is skipped.
 ///
 /// The OS gate is an in-body `guard #available` rather than an `@available`
 /// on the suite: the swift-testing `@Suite`/`@Test` macros reject an
@@ -50,11 +50,13 @@ struct VisionIntegrationTests {
     func namesImageColor(color: TestColor) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(
-            "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
             capabilities: [.vision])
         let session = LanguageModelSession(model: model, tools: [], instructions: nil)
         let image = VisionTestImages.solidColor(color.ciColor)
-        let response = try await session.respond {
+        let response = try await session.respond(
+            options: GenerationOptions(samplingMode: .greedy)
+        ) {
             "What color is this image? Reply with just the color name."
             Attachment(image).label("color")
         }
@@ -67,6 +69,77 @@ struct VisionIntegrationTests {
         #expect(
             words.contains(color.rawValue),
             "expected the model to name the color \(color.rawValue); got: \(response.content)")
+    }
+
+    @Test(arguments: labeledVisionModels)
+    func namesTheLabelOfTheRequestedImage(modelID: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(modelID, capabilities: [.vision])
+        let session = LanguageModelSession(model: model, tools: [], instructions: nil)
+
+        let response = try await session.respond(
+            options: GenerationOptions(samplingMode: .greedy)
+        ) {
+            "Which label goes with the blue image? Reply with only the label."
+            Attachment(VisionTestImages.solidColor(.red)).label("Photo_A1B2C3")
+            Attachment(VisionTestImages.solidColor(.blue)).label("Photo_D4E5F6")
+        }
+        let text = response.content
+        #expect(
+            text.contains("D4E5F6"),
+            "expected the blue image's label; got: \(text)")
+        #expect(
+            !text.contains("A1B2C3"),
+            "expected only the blue image's label; got: \(text)")
+    }
+
+    @Test(arguments: labeledVisionModels)
+    func namesTheLabelOfTheMiddleOfThreeImages(modelID: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(modelID, capabilities: [.vision])
+        let session = LanguageModelSession(model: model, tools: [], instructions: nil)
+
+        let response = try await session.respond(
+            options: GenerationOptions(samplingMode: .greedy)
+        ) {
+            "Which label goes with the blue image? Reply with only the label."
+            Attachment(VisionTestImages.solidColor(.red)).label("Photo_A1B2C3")
+            Attachment(VisionTestImages.solidColor(.blue)).label("Photo_D4E5F6")
+            Attachment(VisionTestImages.solidColor(.green)).label("Photo_G7H8I9")
+        }
+        let text = response.content
+        #expect(
+            text.contains("D4E5F6"),
+            "expected the blue image's label; got: \(text)")
+        #expect(
+            !text.contains("A1B2C3") && !text.contains("G7H8I9"),
+            "expected only the blue image's label; got: \(text)")
+    }
+
+    @Test(arguments: labeledVisionModels)
+    func generatedImageReferenceResolvesBackToTheAttachment(modelID: String) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(
+            modelID, capabilities: [.vision, .guidedGeneration])
+        let session = LanguageModelSession(model: model, tools: [], instructions: nil)
+
+        let response = try await session.respond(
+            generating: ColorReport.self,
+            options: GenerationOptions(samplingMode: .greedy)
+        ) {
+            "Report which label goes with the blue image, and name its color."
+            Attachment(VisionTestImages.solidColor(.red)).label("Aurora")
+            Attachment(VisionTestImages.solidColor(.blue)).label("Beacon")
+        }
+
+        // A model may write `[Beacon]`, and the SDK resolves that form too, so do not
+        // require an exact match.
+        let label = response.content.image.attachmentLabel
+        #expect(
+            label.contains("Beacon"),
+            "expected the blue image's name; got: \(label)")
+        let resolved = response.content.image.resolved(in: session.transcript)
+        #expect(resolved != nil, "expected the reference to resolve to an attachment")
     }
 }
 

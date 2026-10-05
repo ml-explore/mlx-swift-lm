@@ -22,10 +22,16 @@ Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
 ## Decoded Text/Tool Streaming
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
+import MLXHuggingFace  // macros: #hubDownloader / #huggingFaceTokenizerLoader
+import HuggingFace
+import Tokenizers
 
 let context = try await LLMModelFactory.shared.load(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: .init(id: "mlx-community/Qwen3-4B-4bit")
 )
 
@@ -40,6 +46,8 @@ for await event in stream {
         print(text, terminator: "")
     case .toolCall(let call):
         print("\nTool requested: \(call.function.name)")
+    case .rejectedToolCall(let rejected):
+        print("\nRejected tool call: \(rejected.reason)")
     case .info(let info):
         print("\nstop=\(info.stopReason) tok/s=\(info.tokensPerSecond)")
     }

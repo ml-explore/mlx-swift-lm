@@ -162,7 +162,7 @@ struct FastForwardTokenizationDisagreementTests {
         }
 
         try await qwenContainer.perform { qwenContext in
-            let xgTokenizer = try GrammarTokenizer(
+            let grammarTokenizer = try GrammarTokenizer(
                 vocab: seeds.vocab,
                 vocabType: seeds.vocabType,
                 eosTokenId: seeds.eosTokenId
@@ -173,7 +173,7 @@ struct FastForwardTokenizationDisagreementTests {
             // Gemma-bound matcher does not have in its current mask.
             let grammar = "root ::= \"\(Self.forcedPayload)\"\n"
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 grammar: grammar,
                 fastForward: true,
                 hostTokenizer: qwenContext.tokenizer

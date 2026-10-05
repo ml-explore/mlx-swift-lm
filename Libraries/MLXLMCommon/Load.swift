@@ -129,18 +129,21 @@ private final class ConcurrentLoadState: @unchecked Sendable {
         if firstError == nil { firstError = error }
     }
 
-    /// Weights merged in file order (a later file overwrites a duplicate name, matching the
-    /// serial loader) and the first file's metadata.
-    func result() throws -> (weights: [String: MLXArray], metadata: [String: String]) {
+    /// Preserve file order and tensor metadata, including later-file-wins duplicates.
+    func result() throws -> ModelCheckpoint {
         lock.lock()
         defer { lock.unlock() }
         if let firstError { throw firstError }
         var weights = [String: MLXArray]()
-        for fileWeights in perFile {
+        var weightMetadata = [String: [String: String]]()
+        for (index, fileWeights) in perFile.enumerated() {
             weights.merge(fileWeights) { _, new in new }
+            for name in fileWeights.keys {
+                weightMetadata[name] = perFileMetadata[index]
+            }
         }
         let metadata = perFileMetadata.first { !$0.isEmpty } ?? [:]
-        return (weights, metadata)
+        return ModelCheckpoint(weights: weights, metadata: metadata, weightMetadata: weightMetadata)
     }
 }
 
@@ -154,6 +157,11 @@ private final class ConcurrentLoadState: @unchecked Sendable {
 func loadWeightArrays(urls: [URL]) throws -> (
     weights: [String: MLXArray], metadata: [String: String]
 ) {
+    let checkpoint = try loadModelCheckpoint(urls: urls)
+    return (checkpoint.weights, checkpoint.metadata)
+}
+
+func loadModelCheckpoint(urls: [URL]) throws -> ModelCheckpoint {
     struct WorkItem {
         let file: Int
         let url: URL
@@ -356,7 +364,7 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 ///
 /// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
-/// calls ``BaseLanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
+/// calls ``BaseLanguageModel/prepareCheckpoint(_:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
 /// updates the model with the weights. Derived inference-only state is prepared after the
 /// checkpoint update and before the model is evaluated and returned to callers.
@@ -371,28 +379,23 @@ public func loadWeights(
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
     weightFileSelection: WeightFileSelection = .automatic
 ) throws {
-    // load the weights and collect metadata from the first safetensor file
-    var weights = [String: MLXArray]()
-    var metadata = [String: String]()
     let additionalFiles = (model as? any AdditionalWeightFilesProviding)?.additionalWeightFiles
     let weightURLs = try safetensorWeightURLs(
         in: modelDirectory,
         selection: weightFileSelection,
         additionalFiles: additionalFiles ?? [])
-    (weights, metadata) = try loadWeightArrays(urls: weightURLs)
-
-    // per-model cleanup (models can inspect metadata to customize behavior)
-    weights = model.sanitize(weights: weights, metadata: metadata)
+    var checkpoint = try loadModelCheckpoint(urls: weightURLs)
+    checkpoint.perLayerQuantization =
+        perLayerQuantization
+        ?? quantization.map { .init(quantization: $0, perLayerQuantization: [:]) }
+    checkpoint = try model.prepareCheckpoint(checkpoint)
+    let weights = checkpoint.weights
 
     // quantize if needed
-    if quantization != nil || perLayerQuantization != nil {
+    if let perLayerQuantization = checkpoint.perLayerQuantization {
         quantize(model: model) { path, module in
             if weights["\(path).scales"] != nil {
-                if let perLayerQuantization {
-                    return perLayerQuantization.quantization(layer: path)?.asTuple
-                } else {
-                    return quantization?.asTuple
-                }
+                return perLayerQuantization.quantization(layer: path)?.asTuple
             } else {
                 return nil
             }

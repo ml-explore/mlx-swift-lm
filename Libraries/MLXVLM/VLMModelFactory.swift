@@ -478,7 +478,7 @@ public final class VLMModelFactory: GenericModelFactory {
         let processor: any UserInputProcessor
         if let messageGenerator = mutableConfiguration.messageGenerator {
             processor = MessageGeneratorUserInputProcessor(
-                processor: baseProcessor, messageGenerator: messageGenerator)
+                processor: baseProcessor, messageGenerator: messageGenerator, tokenizer: tokenizer)
         } else {
             processor = baseProcessor
         }

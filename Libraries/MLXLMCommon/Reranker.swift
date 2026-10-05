@@ -1012,6 +1012,12 @@ extension ModelContainer {
     }
 }
 
+/// Causal rerankers that can project only the final valid token of each right-padded row.
+package protocol CausalRerankerModel: LanguageModel {
+    /// Returns `[batch, vocabulary]` logits for nonempty rows with the given valid lengths.
+    func lastTokenLogits(_ inputs: MLXArray, sequenceLengths: [Int]) -> MLXArray
+}
+
 private struct CausalLMReranker {
     let tokenizer: any Tokenizer
     let inputProcessor: any RerankerInputProcessor
@@ -1053,6 +1059,13 @@ private struct CausalLMReranker {
                 count: maxLength - document.input.tokenIds.count)
         }
         let tokens = MLXArray(inputIDs).reshaped(batch.count, maxLength)
+        if let model = model as? any CausalRerankerModel {
+            let logits = model.lastTokenLogits(
+                tokens, sequenceLengths: batch.map(\.input.tokenIds.count))
+            return batch.indices.map { row in
+                probability(logits: logits[row], tokens: classifierTokens)
+            }
+        }
         let logits = model(LMInput.Text(tokens: tokens), cache: nil, state: nil).logits
         let scores = batch.enumerated().map { row, document in
             probability(

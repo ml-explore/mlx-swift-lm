@@ -26,6 +26,21 @@ struct AllowedToolOutputRouterTests {
         return rejection.reason
     }
 
+    /// The text of `events`, or `nil` if any of them is not a response.
+    ///
+    /// The router flushes the text before a possible marker and only later decides whether the
+    /// marker was real so ordinary tag-like text can arrive as more than one response event.
+    /// Where a test is about text surviving intact rather than about where the stream was cut,
+    /// join the events and compare that
+    private func responseText(_ events: [AllowedToolOutputRouter.Event]) -> String? {
+        var text = ""
+        for event in events {
+            guard case .response(let chunk) = event else { return nil }
+            text += chunk
+        }
+        return text
+    }
+
     @Test func plainTextRemainsAResponse() {
         var router = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(router.process("Hello") == [.response("Hello")])
@@ -271,10 +286,10 @@ struct AllowedToolOutputRouterTests {
     @Test func ordinaryTagLikeTextRemainsAResponse() {
         var jsonRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(
-            jsonRouter.process("Use <table> for layout") == [.response("Use <table> for layout")])
+            responseText(jsonRouter.process("Use <table> for layout")) == "Use <table> for layout")
 
         var mistralRouter = AllowedToolOutputRouter(format: .mistral, tools: tools)
-        #expect(mistralRouter.process("[Today] is sunny") == [.response("[Today] is sunny")])
+        #expect(responseText(mistralRouter.process("[Today] is sunny")) == "[Today] is sunny")
     }
 
     @Test func malformedProtocolSuppressesOnlyTheMarkerSpan() {
@@ -366,8 +381,8 @@ struct AllowedToolOutputRouterTests {
     @Test func nearProtocolMarkersSuppressWithoutStrippingOrdinaryTags() {
         var ordinaryRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(
-            ordinaryRouter.process("Use <toolbar> and <tool> labels")
-                == [.response("Use <toolbar> and <tool> labels")])
+            responseText(ordinaryRouter.process("Use <toolbar> and <tool> labels"))
+                == "Use <toolbar> and <tool> labels")
 
         var partialRouter = AllowedToolOutputRouter(format: .json, tools: tools)
         #expect(partialRouter.process("before <tool_cal") == [.response("before ")])

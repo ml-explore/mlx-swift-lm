@@ -1405,16 +1405,26 @@ public class Qwen35: Module, VLMModel {
         return result
     }
 
-    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
+            checkpoint, layout: .vision,
+            tiedWordEmbeddings: config.textConfiguration.tieWordEmbeddings)
+        checkpoint.weights = try sanitize(
+            weights: checkpoint.weights, metadata: checkpoint.metadata)
+        return checkpoint
+    }
+
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws -> [String:
         MLXArray]
     {
         if metadata["format"]?.lowercased() == "mlx" {
-            return weights
+            // Converted checkpoints can keep the MTP head; the drafter loads it, not this model.
+            return Qwen35CheckpointPolicy.targetWeights(weights)
         }
-        return sanitize(weights: weights)
+        return try sanitize(weights: weights)
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
         // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
         // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
         // so the VLM and text paths agree: a pre-converted MLX checkpoint
@@ -1431,11 +1441,10 @@ public class Qwen35: Module, VLMModel {
         // layout is the reliable signal on its own.
         let shouldShiftNormWeights = hasUnsanitizedConv1d
 
-        var weights = weights.filter { !$0.key.contains("mtp.") }
-
-        weights = filterLMHeadWeights(
-            from: weights,
+        let checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
+            .init(weights: weights), layout: .vision,
             tiedWordEmbeddings: config.textConfiguration.tieWordEmbeddings)
+        let weights = checkpoint.weights
 
         var sanitized: [String: MLXArray] = [:]
         sanitized.reserveCapacity(weights.count)
@@ -1449,24 +1458,7 @@ public class Qwen35: Module, VLMModel {
         ]
 
         for (key, originalValue) in weights {
-            var key = key
             var value = originalValue
-
-            if key.contains("model") {
-                if key.contains("model.language_model") {
-                    key = key.replacingOccurrences(
-                        of: "model.language_model", with: "language_model.model")
-                } else if key.contains("model.visual") {
-                    key = key.replacingOccurrences(of: "model.visual", with: "vision_tower")
-                } else if key.hasPrefix("model.") {
-                    // Unified Qwen 3.5 checkpoints (e.g. Qwen3.5-0.8B-MLX-4bit) ship
-                    // language model tensors at bare `model.*` paths instead of
-                    // `model.language_model.*`. Mirror the LLM-side fallback.
-                    key = "language_model." + key
-                }
-            } else if key.contains("lm_head") {
-                key = key.replacingOccurrences(of: "lm_head", with: "language_model.lm_head")
-            }
 
             if key.contains("conv1d.weight") && value.dim(-1) != 1 {
                 value = value.movedAxis(source: 2, destination: 1)

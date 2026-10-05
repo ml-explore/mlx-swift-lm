@@ -489,4 +489,45 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
                 Double(referenceTokens.count) / fusedDecodeMedian,
                 checksum))
     }
+
+    // MARK: - Memory
+
+    /// Active MLX memory once the GPU is idle and Metal's completion handlers
+    /// have released their temporaries.
+    private func settledActiveMemory() -> Int {
+        Stream.gpu.synchronize()
+        usleep(150_000)
+        Memory.clearCache()
+        return Memory.activeMemory
+    }
+
+    /// The fused projection is not a registered child, so a decode trace that
+    /// read it as a tape constant would keep its arrays alive after the model
+    /// is gone (MLX does not release every constant of an erased trace).
+    func testCompiledDecodeReleasesFusedProjectionWithTheModel() throws {
+        let base = settledActiveMemory()
+        try autoreleasepool {
+            let model = Qwen35TextModel(try llmConfiguration())
+            let layers = model.modules().compactMap { $0 as? Qwen35GatedDeltaNet }
+            XCTAssertFalse(layers.isEmpty)
+            for layer in layers {
+                try quantize(layer)
+            }
+            try model.prepare()
+            XCTAssertTrue(layers.allSatisfy(\.hasFusedInputProjection))
+
+            let cache = try model.newCache(parameters: nil)
+            for token: Int32 in [1, 2, 3] {
+                let logits = model(MLXArray([token]).reshaped(1, 1), cache: cache)
+                eval(logits)
+            }
+            XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
+            eval(cache.flatMap(\.state))
+        }
+        // MLX keeps one scalar constant of an erased trace alive (the kernel's
+        // step count); anything weight-sized is the projection.
+        let retained = settledActiveMemory() - base
+        XCTAssertLessThan(
+            retained, 64, "\(retained) bytes stayed allocated after the model was dropped")
+    }
 }

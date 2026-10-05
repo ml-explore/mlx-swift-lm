@@ -165,6 +165,54 @@ extension FoundationModelsCacheTests {
             let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
             #expect(lastError == nil, "a superseded load must not re-populate cache state")
         }
+
+        @Test(
+            "evict() cancels the model's registered load task",
+            .timeLimit(.minutes(1)))
+        func evictCancelsRegisteredLoad() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let probe = CancellationProbe()
+            let model = MLXLanguageModel(
+                configuration: ModelConfiguration(id: "org/cancel-evict-\(UUID().uuidString)"),
+                capabilities: [],
+                weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
+                load: makeCancellationProbingLoader(probe: probe))
+
+            let loadTask = Task { try await model.preload() }
+            await probe.waitUntilParked()
+
+            await model.evict()
+
+            await #expect(throws: CancellationError.self) {
+                try await loadTask.value
+            }
+            #expect(await probe.wasCancelled)
+        }
+
+        @Test(
+            "evictAll() cancels every registered load task",
+            .timeLimit(.minutes(1)))
+        func evictAllCancelsRegisteredLoads() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let probe = CancellationProbe()
+            let model = MLXLanguageModel(
+                configuration: ModelConfiguration(id: "org/cancel-evictall-\(UUID().uuidString)"),
+                capabilities: [],
+                weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
+                load: makeCancellationProbingLoader(probe: probe))
+
+            let loadTask = Task { try await model.preload() }
+            await probe.waitUntilParked()
+
+            await MLXLanguageModel.evictAll()
+
+            await #expect(throws: CancellationError.self) {
+                try await loadTask.value
+            }
+            #expect(await probe.wasCancelled)
+        }
     }
 }
 
@@ -172,6 +220,62 @@ extension FoundationModelsCacheTests {
 //
 // Hoisted to file scope so the eviction tests above share one definition. Kept
 // file-`private` so they don't collide with AvailabilityTests.swift's own stubs.
+
+/// Builds a container loader that parks until the cache cancels its load task.
+/// The loader never produces a container: the test awaits its failure, so the
+/// probe reads back without any timing assumption.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private func makeCancellationProbingLoader(
+    probe: CancellationProbe
+) -> MLXLanguageModel.ContainerLoader {
+    { _, _ in
+        await withTaskCancellationHandler {
+            await probe.parkUntilCancelled()
+        } onCancel: {
+            // A cancellation handler cannot await, so hop onto the probe actor to
+            // record the cancellation and resume the parked continuation.
+            Task { await probe.recordCancellation() }
+        }
+        try Task.checkCancellation()
+        throw ParkedLoaderResumedWithoutCancellation()
+    }
+}
+
+/// Records the cancellation of a registered load task, and parks the loader until
+/// that cancellation arrives.
+private actor CancellationProbe {
+    private(set) var wasCancelled = false
+    private var isParked = false
+    private var parkContinuation: CheckedContinuation<Void, Never>?
+    private var parkedWaiter: CheckedContinuation<Void, Never>?
+
+    /// Suspends the loader until ``recordCancellation()`` runs.
+    func parkUntilCancelled() async {
+        if wasCancelled { return }
+        isParked = true
+        parkedWaiter?.resume()
+        parkedWaiter = nil
+        await withCheckedContinuation { parkContinuation = $0 }
+    }
+
+    /// Suspends until the loader parks, so a test evicts only after the cache has
+    /// registered the load task.
+    func waitUntilParked() async {
+        if isParked { return }
+        await withCheckedContinuation { parkedWaiter = $0 }
+    }
+
+    func recordCancellation() {
+        wasCancelled = true
+        parkContinuation?.resume()
+        parkContinuation = nil
+    }
+}
+
+/// Thrown if the parked loader resumes without a cancellation. Only
+/// `CancellationProbe.recordCancellation()` resumes it, so this error means the
+/// probe misbehaved rather than the cache.
+private struct ParkedLoaderResumedWithoutCancellation: Error {}
 
 /// Coordinates the in-flight window: the downloader signals when a load has entered
 /// (so the load task is registered), then parks until the test releases it.

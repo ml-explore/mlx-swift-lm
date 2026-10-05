@@ -35,6 +35,50 @@ A repository is a good candidate when the following are true:
 - The model fits the target machine's memory budget, including weights, KV
   cache, processor tensors, and prompt context.
 
+## Checkpoint Components And Name Mappings
+
+``BaseLanguageModel/prepareCheckpoint(_:)`` runs before quantization and strict
+parameter validation. Its ``ModelCheckpoint`` value keeps tensor names, per-file
+metadata, and per-layer quantization settings together. The loading sequence is:
+
+1. Read tensors with the metadata of the file that supplied each tensor.
+2. Select the requested component and normalize its names and tensor layout.
+3. Quantize runtime modules using the normalized layer settings.
+4. Update the model with strict parameter validation, then prepare it for inference.
+
+``CheckpointComponent`` declares accepted serialized namespaces, a runtime
+destination, and known sibling namespaces to exclude. It resolves exactly one
+embedded component. A root component requires an explicit standalone declaration
+from the model's configuration. Unknown paths remain for strict validation;
+missing or competing components fail before quantization.
+
+``CheckpointNameMapping`` applies ordered prefix replacements and module
+exclusions at complete path boundaries. Use ``ModelCheckpoint/mapNames(using:)``
+to apply these rules to tensors, source metadata, and layer settings together.
+``ModelCheckpoint/mapNames(_:)`` supports custom mappings with the same collision
+checks. Aliases cannot overwrite a tensor or a precision declaration.
+
+The shared loader has no architecture-specific namespace or conversion rules.
+Models describe their layouts through these value types and implement numeric
+transformations in ``BaseLanguageModel/prepareCheckpoint(_:)``. Gemma3n uses the
+same mapping API to remove its serialized wrapper while preserving layer
+precision. Qwen uses component selection for its MTP predictor. Existing models
+still use their sanitizer through the default implementation; migrate renaming
+sanitizers to the checkpoint hook so their precision declarations follow renames.
+
+Qwen3.5 targets exclude the MTP component. Drafters accept embedded `mtp.*` and
+converted `language_model.mtp.*` components, and unprefixed heads declared as
+`qwen3_5_mtp`. An ordinary target without MTP weights is not a standalone head.
+Unknown tensors and missing parameters still fail strict loading.
+
+New Swift MTP conversions write `mlx_swift_lm.qwen_mtp.norm_convention=scale`.
+`offset` declares upstream zero-centered RMSNorm weights that require adding one;
+`scale` declares the runtime multiplicative weights. Explicit declarations take
+precedence. For existing exports, standalone heads and `language_model.mtp.*`
+use scales; `mtp.*` uses offsets unless its own file declares `format=mlx` or the
+caller sets `preconvertedNorms`. Metadata from a target shard does not classify
+a separate MTP shard. Conflicting norm declarations fail before model update.
+
 ## Finding The Source Of Truth
 
 The model factories and registries are the authoritative compatibility list.

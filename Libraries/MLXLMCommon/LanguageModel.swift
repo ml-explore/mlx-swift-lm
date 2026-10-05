@@ -6,15 +6,21 @@ import MLXNN
 
 /// Abstract form of a model that processes language.
 public protocol BaseLanguageModel: Module {
+    /// Normalize tensor names, values, and layer settings before loading the checkpoint.
+    /// The default implementation calls ``sanitize(weights:metadata:)``.
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint
+
     /// Optionally preprocess the weights and modify / remove values as needed.
-    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray]
+    /// Errors propagate to the checkpoint loader.
+    func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray]
 
     /// Optionally preprocess the weights with access to safetensor metadata.
     ///
     /// The default implementation forwards to ``sanitize(weights:)``.
     /// Models can override this to inspect metadata (e.g. check `metadata["format"] == "mlx"`)
     /// and skip or customize sanitization accordingly.
-    func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
+    func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws -> [String:
+        MLXArray]
 }
 
 /// Weight files a model needs that no naming convention or `model.safetensors.index.json`
@@ -46,14 +52,21 @@ public protocol ModelConversionMetadataProvider {
 }
 
 extension BaseLanguageModel {
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = checkpoint
+        checkpoint.weights = try sanitize(
+            weights: checkpoint.weights, metadata: checkpoint.metadata)
+        return checkpoint
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights
     }
 
-    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String:
+    public func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws -> [String:
         MLXArray]
     {
-        sanitize(weights: weights)
+        try sanitize(weights: weights)
     }
 }
 

@@ -707,9 +707,15 @@ public func loadParoQuantModel<T: LanguageModel>(
     // derivation — stays live code on every load.
     let preSanitizeWeights = weights
 
-    // 7. Model-specific sanitization
-    weights = model.sanitize(weights: weights)
-    markPhase("sanitize")
+    // 7. Model-specific checkpoint preparation
+    let checkpoint = try model.prepareCheckpoint(
+        .init(
+            weights: weights,
+            perLayerQuantization: .init(
+                quantization: .init(groupSize: paroConfig.groupSize, bits: paroConfig.bits),
+                perLayerQuantization: [:])))
+    weights = checkpoint.weights
+    markPhase("prepareCheckpoint")
 
     // 8a. Swap SwitchGLU → RotateSwitchGLU where shared rotation keys exist.
     //     Must precede the dense `.theta` scan in patchRotationLayers (the
@@ -733,7 +739,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         guard isCheckpointQuantizedLayer(path: path, weights: weights) else {
             return nil
         }
-        return (paroConfig.groupSize, paroConfig.bits, .affine)
+        return checkpoint.perLayerQuantization?.quantization(layer: path)?.asTuple
     }
     markPhase("quantize")
 
@@ -765,7 +771,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         guard isParoQuantIOLayer(path: path, module: module) else {
             return nil
         }
-        return (paroConfig.groupSize, paroConfig.bits, .affine)
+        return checkpoint.perLayerQuantization?.quantization(layer: path)?.asTuple
     }
     markPhase("quantizeIO")
 

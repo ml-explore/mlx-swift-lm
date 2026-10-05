@@ -4,9 +4,15 @@ import MLX
 import MLXLLM
 import Testing
 
+/// Compare two float32 results that differ only in how the work was split.
+///
+/// The tolerances are wider on machines whose float32 matmuls run as TF32 — see
+/// ``MatmulPrecision``. The message reports the worst element so a failure says how far off it
+/// was, not just that it was.
 private func expectAllClose(
-    _ actual: MLXArray, _ expected: MLXArray, label: String, rtol: Double = 1e-4,
-    atol: Double = 1e-5
+    _ actual: MLXArray, _ expected: MLXArray, label: String,
+    rtol: Double = MatmulPrecision.tolerance(float32: 1e-4, reduced: 5e-3),
+    atol: Double = MatmulPrecision.tolerance(float32: 1e-5, reduced: 5e-4)
 ) {
     guard actual.shape == expected.shape else {
         Issue.record("\(label) shape \(actual.shape) != \(expected.shape)")
@@ -14,7 +20,7 @@ private func expectAllClose(
     }
     #expect(
         allClose(actual, expected, rtol: rtol, atol: atol).item(Bool.self),
-        "\(label) values differ")
+        "\(label) values differ by up to \(MLX.abs(actual - expected).max().item(Float.self))")
 }
 
 @Test func testSSMAttnChunkedMatchesUnchunkedValuesAndGradients() {
@@ -81,7 +87,8 @@ private func expectAllClose(
             for (index, pair) in zip(chunkedGradients, referenceGradients).enumerated() {
                 expectAllClose(
                     pair.0, pair.1, label: "\(gradientLabels[index]) gradient (step \(step))",
-                    rtol: 5e-4, atol: 5e-5)
+                    rtol: MatmulPrecision.tolerance(float32: 5e-4, reduced: 5e-3),
+                    atol: MatmulPrecision.tolerance(float32: 5e-5, reduced: 5e-4))
             }
         }
     }

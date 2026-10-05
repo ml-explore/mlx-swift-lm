@@ -16,6 +16,13 @@ do development _in_ mlx-swift-lm.
 
 ## Porting Models from MLX in Python
 
+Checkpoint namespaces can differ from runtime module paths. Implement
+``BaseLanguageModel/prepareCheckpoint(_:)`` with ``CheckpointNameMapping`` for
+renames and exclusions, or ``CheckpointComponent`` to select a component from a
+larger checkpoint. These operations preserve source metadata and per-layer
+precision. Keep architecture-specific numeric conversions in the model's hook.
+See <doc:model-compatibility> for the loading contract and validation rules.
+
 Let's consider a concrete example, [gemma.py](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma.py). For reference, here is the current port [Gemma.swift](https://github.com/ml-explore/mlx-swift-lm/blob/main/Libraries/MLXLLM/Models/Gemma.swift).
 
 ### Imports
@@ -600,11 +607,12 @@ Now we can load the model using `llm-tool` or the `LLMEval` example application,
 ```swift
 let modelConfiguration = ModelConfiguration(id: "mlx-community/quantized-gemma-2b-it")
 
-// e.g. TokenizersLoader() from MLXLMTokenizers
+// e.g. #huggingFaceTokenizerLoader() from MLXHuggingFace
 let tokenizerLoader: any TokenizerLoader
 
 // This will download the weights and load the model
-let container = try await MLXModelFactory.shared.loadContainer(
+let container = try await LLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
     using: tokenizerLoader,
     configuration: modelConfiguration
 )
@@ -613,23 +621,14 @@ let container = try await MLXModelFactory.shared.loadContainer(
 let generateParameters = GenerateParameters()
 let input = UserInput(prompt: "Are cherries sweet?")
 
-// Run inference
-let result = try await modelContainer.perform { [input] context in
-    // Convert the UserInput into LMInput
-    let input = try context.processor.prepare(input: input)
-
-    return generate(input: input, parameters: generateParameters, context: context) { tokens in
-        // This could potentially use NaiveStreamingDetokenizer and print
-        // text as it was generated
-        if tokens.count >= 20 {
-            return .stop
-        } else {
-            return .more
-        }
+// Convert the UserInput into LMInput and run inference
+let lmInput = try await container.prepare(input: input)
+let stream = try await container.generate(input: lmInput, parameters: generateParameters)
+for await generation in stream {
+    if let chunk = generation.chunk {
+        print(chunk, terminator: "")
     }
 }
-
-print(result.output)
 ```
 
 ## Notes

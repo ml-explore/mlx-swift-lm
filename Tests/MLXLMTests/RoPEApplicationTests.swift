@@ -47,13 +47,18 @@ struct RoPEApplicationTests {
             eval(outputSeq)
 
             // With correct RoPE these would match.  The buggy code would use
-            // different offsets for keys/queries.
-            let match = allClose(outputBatch, outputSeq, atol: 1e-4)
+            // different offsets for keys/queries.  The tolerance is wider on
+            // machines whose float32 matmuls run as TF32; see MatmulPrecision.
+            let match = allClose(
+                outputBatch, outputSeq,
+                atol: MatmulPrecision.tolerance(float32: 1e-4, reduced: 5e-3))
             eval(match)
-            print(outputBatch)
-            print(outputSeq)
-            print(abs(outputSeq - outputBatch))
-            #expect(match.item(Bool.self))
+            #expect(
+                match.item(Bool.self),
+                """
+                batch and sequential attention differ by up to \
+                \(abs(outputSeq - outputBatch).max().item(Float.self))
+                """)
         }
     }
 }

@@ -203,10 +203,12 @@ struct TurboQuantMSECodecTests {
         let codec = MSECodec(dim: 128, bits: 3, seed: 42)
         #expect(codec.useWHT, "dim=128 should use WHT")
 
-        let product = matmul(codec.rotation, codec.rotationT)
+        let product = matmul(codec.rotation, codec.rotationT, stream: .cpu)
         let identity = MLXArray.identity(128)
         let diff = MLX.abs(product - identity).max().item(Float.self)
-        #expect(diff < 1e-4, "WHT rotation should be orthogonal, max diff: \(diff)")
+        // TF32 matmuls (neural accelerators) leave ~2e-4 here; see MatmulPrecision.
+        let tolerance: Float = MatmulPrecision.tolerance(float32: 1e-4, reduced: 1e-3)
+        #expect(diff < tolerance, "WHT rotation should be orthogonal, max diff: \(diff)")
     }
 
     @Test func whtEncodeDecodeRoundTrip() {
@@ -392,6 +394,38 @@ struct TurboQuantKVCacheTests {
         #expect(
             state.count == 2 || state.count == 4,
             "State should have 2 or 4 arrays, got \(state.count)")
+    }
+
+    /// Regression test: the cache inherited an empty `innerState()`, so `eval(cache)`
+    /// skipped its buffers and `KVCacheStatus` counted zero bytes for it.
+    @Test func cacheInnerStateHoldsRawAndCompressedStorage() {
+        let cache = TurboQuantKVCache(bits: 4)
+        let B = 1
+        let H = 2
+        let D = 128
+
+        let keys = MLXRandom.normal([B, H, 4, D])
+        let values = MLXRandom.normal([B, H, 4, D])
+        eval(keys, values)
+        _ = cache.update(keys: keys, values: values)
+
+        // Prefill keeps raw keys and values in 256-row steps.
+        let rawBytes = 2 * (B * H * 256 * D) * 4
+        #expect(KVCacheStatus(cache: [cache]).memoryBytes == rawBytes)
+
+        let newKey = MLXRandom.normal([B, H, 1, D])
+        let newValue = MLXRandom.normal([B, H, 1, D])
+        let queries = MLXRandom.normal([B, H * 2, 1, D])
+        eval(newKey, newValue, queries)
+        eval(
+            cache.compressedAttention(
+                queries: queries, keys: newKey, values: newValue,
+                scale: 1.0 / sqrt(Float(D))))
+
+        #expect(cache.isCompressed)
+        let compressedBytes = KVCacheStatus(cache: [cache]).memoryBytes
+        #expect(compressedBytes == cache.memoryBytes)
+        #expect(compressedBytes > 0 && compressedBytes < rawBytes)
     }
 
     @Test func cacheIsTrimmable() {

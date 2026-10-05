@@ -72,13 +72,16 @@ See [llm-tool](../../Tools/llm-tool)
 Using LLMs and VLMs from MLXLMCommon is as easy as:
 
 ```swift
+import Foundation
 import MLXLLM
 import MLXLMCommon
-import MLXLMHuggingFace
-import MLXLMTokenizers
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
 let model = try await loadModel(
-    using: TokenizersLoader(),
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     id: "mlx-community/Qwen3-4B-4bit"
 )
 let session = ChatSession(model)

@@ -217,7 +217,7 @@ final class NanbeigeTests: XCTestCase {
         let logitsW = try prefillLogits(model, t2, cache: cacheW)
 
         XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
+            maxAbsDiff(logitsW, logitsF), MatmulPrecision.splitTolerance,
             "warm continuation diverged from cold full prefill")
     }
 

@@ -1,5 +1,15 @@
 // Copyright © 2025 Apple Inc.
 
+import MLX
+
+private let messageContentLogger = MLXLogger(label: "MessageContent")
+
+package enum MessageContentLayout: Sendable {
+    case imagesThenVideosThenText
+    case imagesThenText
+    case textThenImages
+}
+
 public enum Chat {
     public struct Message {
         /// The role of the message sender.
@@ -174,6 +184,44 @@ extension MessageGenerator {
         }
     }
 
+    package func contentParts(
+        for message: Chat.Message, layout: MessageContentLayout
+    ) -> [[String: String]] {
+        var parts: [[String: String]] = []
+
+        func appendText(_ text: String) {
+            parts.append(["type": "text", "text": text])
+        }
+
+        func appendImages() {
+            for image in message.images {
+                if let marker = image.labelMarkerCharacter {
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt: it holds `\(marker)`, which vision models build their image placeholders from"
+                    )
+                } else if let label = image.label {
+                    appendText(UserInput.Image.promptText(forLabel: label))
+                }
+                parts.append(["type": "image"])
+            }
+        }
+
+        switch layout {
+        case .imagesThenVideosThenText:
+            appendImages()
+            parts.append(contentsOf: message.videos.map { _ in ["type": "video"] })
+            appendText(message.content)
+        case .imagesThenText:
+            appendImages()
+            appendText(message.content)
+        case .textThenImages:
+            appendText(message.content)
+            appendImages()
+        }
+
+        return parts
+    }
+
     public func generate(messages: [Chat.Message]) -> [Message] {
         var rawMessages: [Message] = []
 
@@ -226,5 +274,33 @@ public struct NoSystemMessageGenerator: MessageGenerator {
         messages
             .filter { $0.role != .system }
             .map { generate(message: $0) }
+    }
+}
+
+extension UserInput {
+
+    /// Returns the input unchanged if its prompt is not `.chat`. Call this method before a
+    /// message generator turns the prompt into `.messages`.
+    package func removingSpecialTokenLabels(using tokenizer: any Tokenizer) -> UserInput {
+        guard case .chat(let messages) = prompt else { return self }
+        var screened = self
+        screened.prompt = .chat(
+            messages.map { message in
+                var message = message
+                message.images = message.images.map { image in
+                    guard let label = image.label,
+                        let names = tokenizer.specialTokenNames(inImageLabel: label)
+                    else { return image }
+                    let named = names.isEmpty ? "a special token" : names.joined(separator: ", ")
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt, because this model's tokenizer reads it as \(named)"
+                    )
+                    var image = image
+                    image.label = nil
+                    return image
+                }
+                return message
+            })
+        return screened
     }
 }

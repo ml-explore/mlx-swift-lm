@@ -28,8 +28,8 @@ Tokenizers are loaded automatically by model factories:
 
 ```swift
 let container = try await LLMModelFactory.shared.loadContainer(
-    from: HubClient.default,
-    using: TokenizersLoader(),  // TokenizersLoader() from MLXLMTokenizers (swift-tokenizers-mlx)
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
     configuration: config
 )
 let tokenizer = await container.tokenizer
@@ -37,12 +37,12 @@ let tokenizer = await container.tokenizer
 
 ### Manual Loading
 
-Tokenizer loading is handled by the `TokenizerLoader` protocol. Each integration
-package provides a concrete loader:
+Tokenizer loading is handled by the `TokenizerLoader` protocol. The `MLXHuggingFace`
+`#huggingFaceTokenizerLoader()` macro provides a concrete loader backed by Swift
+Transformers' `AutoTokenizer`:
 
 ```swift
-// Using TokenizersLoader from MLXLMTokenizers (swift-tokenizers-mlx)
-let loader = TokenizersLoader()
+let loader = #huggingFaceTokenizerLoader()
 let tokenizer = try await loader.load(from: modelDirectory)
 ```
 
@@ -55,7 +55,7 @@ let tokenizer = try await loader.load(from: modelDirectory)
 let tokens: [Int] = tokenizer.encode(text: "Hello, world!")
 
 // Decode tokens to text
-let text: String = tokenizer.decode(tokens: tokens)
+let text: String = tokenizer.decode(tokenIds: tokens)
 ```
 
 ### Chat Template
@@ -276,19 +276,42 @@ if let chunk = detokenizer.next() {
 // nil means waiting for more tokens
 ```
 
-## Tokenizer Replacement Registry
+## Unrecognized Tokenizer Classes
 
-Override tokenizer classes for compatibility:
+The `replacementTokenizers` dictionary is gone. Tokenizer construction now belongs
+entirely to the `TokenizerLoader` you pass to the factory, so there is no
+mlx-swift-lm-side override table.
+
+`#huggingFaceTokenizerLoader()` delegates to `Tokenizers.AutoTokenizer`, which maps the
+`tokenizer_class` from `tokenizer_config.json` onto its own built-in implementations. For
+an unknown class it throws `TokenizerError.unsupportedTokenizer`. It falls back to a BPE
+tokenizer only when called with `strict: false`. To load such a model, write your own
+`TokenizerLoader`. This one falls back to BPE:
 
 ```swift
-// Built-in replacements
-// "Qwen2Tokenizer" -> "PreTrainedTokenizer"
-// "InternLM2Tokenizer" -> "PreTrainedTokenizer"
-// etc.
+import Foundation
+import MLXLLM
+import MLXLMCommon
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
-// Add custom replacement
-replacementTokenizers["CustomTokenizer"] = "PreTrainedTokenizer"
+struct BPEFallbackTokenizerLoader: TokenizerLoader {
+    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+        // strict: false falls back to BPE for unknown tokenizer classes
+        let upstream = try await AutoTokenizer.from(modelFolder: directory, strict: false)
+        return #adaptHuggingFaceTokenizer(upstream)
+    }
+}
+
+let container = try await LLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: BPEFallbackTokenizerLoader(),
+    configuration: config
+)
 ```
+
+The same hook lets you plug in a completely different tokenizer implementation.
 
 ## Deprecated Patterns
 

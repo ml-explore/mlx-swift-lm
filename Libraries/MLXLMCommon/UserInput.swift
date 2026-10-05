@@ -76,13 +76,36 @@ public struct UserInput {
     }
 
     /// Representation of a video resource.
-    public enum Video {
+    public struct Video {
+
+        public enum Source {
+            #if canImport(AVFoundation)
+            case avAsset(AVAsset)
+            #endif
+            case url(URL)
+            /// Useful for decoded frames held in memory
+            case frames([VideoFrame])
+        }
+
+        public var source: Source
+
+        public init(source: Source) {
+            self.source = source
+        }
+
         #if canImport(AVFoundation)
-        case avAsset(AVAsset)
+        public static func avAsset(_ asset: AVAsset) -> Self {
+            Self(source: .avAsset(asset))
+        }
         #endif
-        case url(URL)
-        /// Useful for decoded frames held in memory
-        case frames([VideoFrame])
+
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        public static func frames(_ frames: [VideoFrame]) -> Self {
+            Self(source: .frames(frames))
+        }
 
         #if canImport(AVFoundation)
         @available(
@@ -90,7 +113,7 @@ public struct UserInput {
             message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
         )
         public func asAVAsset() -> AVAsset {
-            switch self {
+            switch source {
             case .avAsset(let asset):
                 return asset
             case .url(let url):
@@ -105,16 +128,75 @@ public struct UserInput {
     }
 
     /// Representation of an image resource.
-    public enum Image {
+    public struct Image {
+
+        public enum Source {
+            #if canImport(CoreImage)
+            case ciImage(CIImage)
+            #endif
+            case url(URL)
+            case array(MLXArray)
+        }
+
+        public var source: Source
+
+        /// Text that a vision message generator writes into the prompt as `[label]`,
+        /// immediately before this image. The generator leaves out and logs a label that
+        /// contains `<`, `>`, `|`, `[` or `]`. A vision processor also leaves out a label
+        /// whose `[label]` form contains a special token, such as `IMG` on Mistral3.
+        public var label: String?
+
+        /// The characters that delimit image placeholders, such as `<|image_pad|>` and `[IMG]`.
+        package static let markerCharacters: Set<Character> = ["<", ">", "|", "[", "]"]
+
+        package var labelMarkerCharacter: Character? {
+            label?.first(where: Self.markerCharacters.contains)
+        }
+
+        package static func promptText(forLabel label: String) -> String {
+            "[\(label)]"
+        }
+
+        public init(source: Source, label: String? = nil) {
+            self.source = source
+            self.label = label
+        }
+
         #if canImport(CoreImage)
-        case ciImage(CIImage)
+        public static func ciImage(_ image: CIImage, label: String? = nil) -> Self {
+            Self(source: .ciImage(image), label: label)
+        }
+
+        /// Makes `images.map(UserInput.Image.ciImage)` compile, because a function value
+        /// cannot use the default `label`.
+        public static func ciImage(_ image: CIImage) -> Self {
+            Self(source: .ciImage(image))
+        }
         #endif
-        case url(URL)
-        case array(MLXArray)
+
+        public static func url(_ url: URL, label: String? = nil) -> Self {
+            Self(source: .url(url), label: label)
+        }
+
+        /// Makes `urls.map(UserInput.Image.url)` compile, because a function value cannot
+        /// use the default `label`.
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        public static func array(_ array: MLXArray, label: String? = nil) -> Self {
+            Self(source: .array(array), label: label)
+        }
+
+        /// Makes `arrays.map(UserInput.Image.array)` compile, because a function value
+        /// cannot use the default `label`.
+        public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array))
+        }
 
         #if canImport(CoreImage)
         public func asCIImage() throws -> CIImage {
-            switch self {
+            switch source {
             case .ciImage(let image):
                 return image
 
@@ -173,9 +255,26 @@ public struct UserInput {
     }
 
     /// Representation of an audio resource.
-    public enum Audio {
-        case url(URL)
-        case array(MLXArray)
+    public struct Audio {
+
+        public enum Source {
+            case url(URL)
+            case array(MLXArray)
+        }
+
+        public var source: Source
+
+        public init(source: Source) {
+            self.source = source
+        }
+
+        public static func url(_ url: URL) -> Self {
+            Self(source: .url(url))
+        }
+
+        public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array))
+        }
 
         // See also UserInput+Audio
     }
@@ -532,6 +631,7 @@ public protocol UserInputProcessor: Sendable {
 public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
     private let processor: any UserInputProcessor
     private let messageGenerator: any MessageGenerator
+    private let tokenizer: (any Tokenizer)?
 
     public init(
         processor: any UserInputProcessor,
@@ -539,10 +639,21 @@ public struct MessageGeneratorUserInputProcessor: UserInputProcessor {
     ) {
         self.processor = processor
         self.messageGenerator = messageGenerator
+        self.tokenizer = nil
+    }
+
+    package init(
+        processor: any UserInputProcessor,
+        messageGenerator: any MessageGenerator,
+        tokenizer: any Tokenizer
+    ) {
+        self.processor = processor
+        self.messageGenerator = messageGenerator
+        self.tokenizer = tokenizer
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        var input = input
+        var input = tokenizer.map { input.removingSpecialTokenLabels(using: $0) } ?? input
         input.prompt = .messages(messageGenerator.generate(from: input))
         return try await processor.prepare(input: input)
     }
@@ -574,5 +685,38 @@ public struct StandInUserInputProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) throws -> LMInput {
         throw UserInputError.notImplemented
+    }
+}
+
+extension Tokenizer {
+
+    /// The special tokens that `[label]` encodes to, or `nil` if it encodes to none.
+    /// An empty array still means that `[label]` contains a special token.
+    package func specialTokenNames(inImageLabel label: String) -> [String]? {
+        // Special tokens that `encode` adds, such as BOS, would otherwise flag every label.
+        let ids = encode(
+            text: UserInput.Image.promptText(forLabel: label), addSpecialTokens: false)
+        guard containsSpecialToken(ids) else { return nil }
+        return specialTokenNames(inIDs: ids)
+    }
+
+    /// The `Tokenizer` protocol cannot list special tokens, so this function compares a
+    /// decode with and without `skipSpecialTokens`. An added token without the special
+    /// flag passes, so callers must refuse the marker characters too.
+    private func containsSpecialToken(_ ids: [Int]) -> Bool {
+        decode(tokenIds: ids, skipSpecialTokens: false)
+            != decode(tokenIds: ids, skipSpecialTokens: true)
+    }
+
+    /// Each name comes from `convertIdToToken`, because decoding one id can change the
+    /// token's text.
+    private func specialTokenNames(inIDs ids: [Int]) -> [String] {
+        var names: [String] = []
+        var seen = Set<Int>()
+        for id in ids where containsSpecialToken([id]) {
+            guard seen.insert(id).inserted else { continue }
+            names.append(convertIdToToken(id) ?? "token \(id)")
+        }
+        return names
     }
 }

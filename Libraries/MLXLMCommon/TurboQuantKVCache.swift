@@ -1452,23 +1452,17 @@ public class TurboQuantKVCache: BaseKVCache {
     /// Does NOT include codec overhead (rotation matrices, codebooks) which is shared across layers.
     /// In rawKeyMode: rawKeys is always present (FP16 keys), no keyPackedMSE/keyNorms.
     public var memoryBytes: Int {
-        var total = 0
-        // Raw FP16 buffers (always present in rawKeyMode for keys, or during prefill)
-        if let rk = rawKeys { total += rk.shape.reduce(1, *) * rk.dtype.bytesPerElement }
-        if let rv = rawValues { total += rv.shape.reduce(1, *) * rv.dtype.bytesPerElement }
-        // Compressed storage (K only present when NOT rawKeyMode)
-        if let kw = affKeyW { total += kw.shape.reduce(1, *) * kw.dtype.bytesPerElement }
-        if let ks = affKeyScales { total += ks.shape.reduce(1, *) * ks.dtype.bytesPerElement }
-        if let kb = affKeyBiases { total += kb.shape.reduce(1, *) * kb.dtype.bytesPerElement }
-        if let kp = keyPackedMSE { total += kp.shape.reduce(1, *) * kp.dtype.bytesPerElement }
-        if let kn = keyNorms { total += kn.shape.reduce(1, *) * kn.dtype.bytesPerElement }
-        if let vp = valPackedMSE { total += vp.shape.reduce(1, *) * vp.dtype.bytesPerElement }
-        if let vn = valNorms { total += vn.shape.reduce(1, *) * vn.dtype.bytesPerElement }
-        if let kcs = keyCalibScale { total += kcs.shape.reduce(1, *) * kcs.dtype.bytesPerElement }
-        return total
+        innerState().reduce(0) { $0 + $1.nbytes }
     }
 
     // MARK: - State / Trim
+
+    override public func innerState() -> [MLXArray] {
+        [
+            rawKeys, rawValues, affKeyW, affKeyScales, affKeyBiases,
+            keyPackedMSE, keyNorms, valPackedMSE, valNorms, keyCalibScale,
+        ].compactMap { $0 }
+    }
 
     override public var state: [MLXArray] {
         get {

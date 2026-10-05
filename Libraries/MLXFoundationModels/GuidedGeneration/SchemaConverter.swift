@@ -4,16 +4,13 @@
 #if canImport(FoundationModels, _version: 2)
 
 import Foundation
-import os
 import FoundationModels
+import MLX
 
 /// Converts FoundationModels.GenerationSchema to a JSON string for xgrammar.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum SchemaConverter {
-    private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX",
-        category: "SchemaConverter"
-    )
+    private static let logger = MLXLogger(label: "SchemaConverter")
 
     /// Encodes a GenerationSchema to a standard JSON Schema string.
     ///

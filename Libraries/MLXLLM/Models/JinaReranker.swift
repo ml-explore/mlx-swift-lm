@@ -131,6 +131,9 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
 }
 
 func jinaCosineSimilarity(_ documents: MLXArray, _ query: MLXArray) -> MLXArray {
+    // The reference reranker computes final cosine scores from float32 embeddings.
+    let documents = documents.asType(.float32)
+    let query = query.asType(.float32)
     let numerator = MLX.sum(documents * query, axis: -1)
     let documentNorm = MLX.sqrt(MLX.sum(documents * documents, axis: -1))
     let queryNorm = MLX.sqrt(MLX.sum(query * query, axis: -1))

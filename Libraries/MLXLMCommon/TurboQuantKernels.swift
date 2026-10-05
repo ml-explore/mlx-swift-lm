@@ -286,12 +286,14 @@ enum TurboQuantMetalKernels {
                 if (pos_in_block < half_block) {
                     a = shared_buf[block_id * block_size + pos_in_block];
                     b = shared_buf[block_id * block_size + pos_in_block + half_block];
-                    shared_buf[d] = a + b;
                 } else {
                     a = shared_buf[block_id * block_size + pos_in_block - half_block];
                     b = shared_buf[block_id * block_size + pos_in_block];
-                    shared_buf[d] = a - b;
                 }
+                float next = (pos_in_block < half_block) ? (a + b) : (a - b);
+                // All groups must finish reading this stage before any overwrite.
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                shared_buf[d] = next;
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
             wht_val = shared_buf[d];

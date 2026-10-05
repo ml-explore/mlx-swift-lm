@@ -64,9 +64,10 @@ before inference. A bounded compressed ring cache is not currently implemented.
 ``ChatSession/cacheStatus()`` is the unified diagnostic surface for legacy and
 typed configuration. It reports the normalized request, request source,
 planned or realized phase, flattened cache topology, per-layer capacity source,
-strategy state, skip reason, and the container-owned `processedTokenCount`.
-Aggregate compressed, pending, skipped, and capacity-application counts are
-available on the same value.
+strategy state, skip reason, allocated bytes, and the container-owned
+`processedTokenCount`. Aggregate compressed, pending, skipped, and
+capacity-application counts, and the total `memoryBytes`, are available on the
+same value.
 ``LanguageModel/cacheStatus(parameters:)`` and
 ``ModelContainer/cacheStatus(parameters:)`` provide the same shape for planned
 caches. The lower-level ``kvCacheRuntimeReport(cache:configuration:)`` remains

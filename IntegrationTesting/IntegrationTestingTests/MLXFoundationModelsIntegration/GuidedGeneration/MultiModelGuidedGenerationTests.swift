@@ -120,12 +120,12 @@ struct MultiModelGuidedGenerationTests {
             """
 
         let raw: String = try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: schema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
@@ -155,7 +155,7 @@ struct MultiModelGuidedGenerationTests {
                 context: context,
                 constraint: constraint,
                 maxTokens: 1024,
-                vocabSize: Int(xgTokenizer.vocabSize),
+                vocabSize: Int(grammarTokenizer.vocabSize),
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
@@ -246,12 +246,12 @@ struct MultiModelGuidedGenerationTests {
             """
 
         let raw: String = try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: schema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
@@ -284,7 +284,7 @@ struct MultiModelGuidedGenerationTests {
                 context: context,
                 constraint: constraint,
                 maxTokens: 4096,
-                vocabSize: Int(xgTokenizer.vocabSize),
+                vocabSize: Int(grammarTokenizer.vocabSize),
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
@@ -438,12 +438,12 @@ struct MultiModelGuidedGenerationTests {
         let modelID = Self.gemmaModelID
         let container = try await loadTestModelContainer(id: modelID)
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
             let constraint = try GrammarConstraint(
-                tokenizer: xgTokenizer,
+                tokenizer: grammarTokenizer,
                 jsonSchema: schema,
                 fastForward: true,
                 hostTokenizer: context.tokenizer
