@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXScriptedLM
 import Testing
 
 @testable import MLXLMCommon
@@ -84,7 +85,7 @@ struct ParoQuantCheckpointTests {
 
     private struct TestTokenizerLoader: TokenizerLoader {
         func load(from directory: URL) async throws -> any Tokenizer {
-            TestTokenizer()
+            PseudoWordTokenizer()
         }
     }
 
