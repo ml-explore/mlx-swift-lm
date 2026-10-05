@@ -282,7 +282,7 @@ final class GenerationExecutionTests: XCTestCase {
         let (stream, task) = generateTaskRecordingTokens(
             promptTokenCount: 3,
             modelConfiguration: .init(id: "test"),
-            tokenizer: TestTokenizer(),
+            tokenizer: PseudoWordTokenizer(),
             iterator: Iterator(
                 maxTokens: 2,
                 evictedTokenCount: 4,

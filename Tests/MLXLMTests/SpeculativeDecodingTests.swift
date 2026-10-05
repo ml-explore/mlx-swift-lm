@@ -123,7 +123,7 @@ struct SpeculativeDecodingTests {
         async throws
     {
         let vocabularySize = 100
-        let tokenizer = TestTokenizer(vocabularySize: vocabularySize)
+        let tokenizer = PseudoWordTokenizer(vocabularySize: vocabularySize)
         let processor = TestInputProcessor(
             tokenizer: tokenizer,
             configuration: ModelConfiguration(id: "log-probability-speculative-test"),
