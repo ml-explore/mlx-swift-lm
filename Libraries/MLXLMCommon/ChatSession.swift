@@ -253,6 +253,7 @@ public final class ChatSession {
         var draft: KVCacheStorage?
         var state: LMOutput.State?
         var conversation: Conversation?
+        var checkpoint: PromptCheckpoint?
 
         init(
             cache: consuming [KVCache],
@@ -271,12 +272,14 @@ public final class ChatSession {
             main: KVCacheStorage,
             draft: KVCacheStorage? = nil,
             state: LMOutput.State? = nil,
-            conversation: Conversation? = nil
+            conversation: Conversation? = nil,
+            checkpoint: PromptCheckpoint? = nil
         ) {
             self.main = main
             self.draft = draft
             self.state = state
             self.conversation = conversation
+            self.checkpoint = checkpoint
         }
 
         func requirePlan(_ requested: KVCachePlan) throws {
@@ -288,6 +291,21 @@ public final class ChatSession {
                     requested: requested.configuration)
             }
         }
+    }
+
+    /// A position the main cache can be put back to, saved at the end of a prompt's last
+    /// message so that the next turn can resume from there.
+    ///
+    /// This is what lets a model with recurrent layers (a ``MambaCache``) reuse its cache
+    /// across turns. Those layers cannot be trimmed, so when the next prompt does not extend
+    /// the cache -- a template that re-renders the previous reply sees to that -- the cache
+    /// would otherwise be rebuilt from nothing.
+    private struct PromptCheckpoint {
+        let storage: KVCacheStorage.Checkpoint
+        /// The model state at the checkpoint, which goes back with the cache.
+        let state: LMOutput.State?
+        /// The tokens the cache represents at the checkpoint.
+        let tokens: [Int]
     }
 
     private enum Cache {
@@ -947,6 +965,7 @@ public final class ChatSession {
                     // prefill and stored back at the end of the turn.
                     var lmState: LMOutput.State?
                     var conversation: Conversation?
+                    var promptCheckpoint: PromptCheckpoint?
                     switch cache {
                     case .empty:
                         kvCache = KVCacheStorage(
@@ -992,6 +1011,7 @@ public final class ChatSession {
                             draftKVCache = stored.draft
                             lmState = stored.state
                             conversation = stored.conversation
+                            promptCheckpoint = stored.checkpoint
                         }
 
                     case .history(let history):
@@ -1011,6 +1031,13 @@ public final class ChatSession {
                     let promptCachePolicy = PromptCacheReusePolicy(
                         protocolRules: modelConfiguration.toolCallFormat?
                             .promptCacheReuseRules(tokenizer: tokenizer) ?? [])
+
+                    // Where a message ends, for checkpointing a prompt on a model whose cache
+                    // cannot be trimmed.
+                    let stopTokenIds = buildStopTokenIds(
+                        modelConfiguration: modelConfiguration, tokenizer: tokenizer)
+                    let newlineTokens = tokenizer.encode(text: "\n", addSpecialTokens: false)
+                    let newlineTokenId = newlineTokens.count == 1 ? newlineTokens[0] : nil
 
                     // loop can restart on tool calls
                     restart: while !pendingMessages.isEmpty {
@@ -1068,6 +1095,9 @@ public final class ChatSession {
                         // Prompt tokens this turn does not prefill because the cache
                         // already represents them. Reported to the caller on `.info`.
                         var cachedPromptTokenCount = 0
+                        // Where to checkpoint this prompt, and what the cache will represent
+                        // there.
+                        var checkpointRequest: (position: Int, tokens: [Int])?
                         // Read off the prepared input, not `input`: the latter may be narrowed to
                         // a token-only suffix below, which would hide media the model still sees.
                         let carriesPreparedMedia =
@@ -1115,7 +1145,8 @@ public final class ChatSession {
                                 hasDraftCache: draftKVCache != nil,
                                 draftCacheIsAligned: draftCacheIsAligned,
                                 isTrimmable: canTrimPromptCache(kvCache.cache)
-                                    && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true))
+                                    && (draftKVCache.map { canTrimPromptCache($0.cache) } ?? true),
+                                checkpointTokens: promptCheckpoint?.tokens)
 
                             var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
 
@@ -1137,6 +1168,17 @@ public final class ChatSession {
                                     } ?? true
 
                                 if !(mainTrimIsAligned && draftTrimIsAligned) {
+                                    decision = .rebuild
+                                }
+                            }
+
+                            // Putting a checkpoint back can fail too, if an entry was replaced
+                            // since it was saved. It is all or nothing, so a failure leaves the
+                            // cache as it was, to be rebuilt.
+                            if case .restoreCheckpoint = decision {
+                                if let promptCheckpoint, kvCache.restore(promptCheckpoint.storage) {
+                                    lmState = promptCheckpoint.state
+                                } else {
                                     decision = .rebuild
                                 }
                             }
@@ -1196,12 +1238,48 @@ public final class ChatSession {
                                         Array(promptTokenIds.dropFirst(commonPrefixLength))))
                                 cachedPromptTokenCount = commonPrefixLength
 
+                            case .restoreCheckpoint(let position):
+                                // Restored, with its model state, above.
+                                input = LMInput(
+                                    tokens: MLXArray(Array(promptTokenIds[position...])))
+                                cachedPromptTokenCount = position
+
                             case .rebuild:
                                 kvCache = KVCacheStorage(
                                     try model.newCache(parameters: generateParameters),
                                     plan: kvCachePlan)
                                 draftKVCache = nil
                                 lmState = nil
+                                promptCheckpoint = nil
+                            }
+
+                            // Checkpoint the end of this prompt's last message, so the next
+                            // turn can come back to it. Only a cache with recurrent entries
+                            // needs one -- any other can be trimmed to the common prefix, which
+                            // is never shorter -- and only for text the model reads without a
+                            // draft.
+                            //
+                            // Not when this prompt extended the cache: the template is keeping
+                            // replies as they were generated, so the next prompt should extend
+                            // it too, and a checkpoint splits the read in two, which costs a
+                            // model call (0.12 s a turn on a 27B). An older one stays.
+                            let extendedTheCache: Bool
+                            switch decision {
+                            case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix:
+                                extendedTheCache = true
+                            case .prefillAll, .trimToCommonPrefix, .restoreCheckpoint, .rebuild:
+                                extendedTheCache = false
+                            }
+                            if !extendedTheCache, speculativeDecoding == nil,
+                                !carriesPreparedMedia,
+                                input.text.mask == nil,
+                                kvCache.cache.contains(where: { $0 is MambaCache }),
+                                let position = promptCheckpointPosition(
+                                    in: promptTokenIds, stopTokenIds: stopTokenIds,
+                                    newline: newlineTokenId),
+                                position > cachedPromptTokenCount
+                            {
+                                checkpointRequest = (position, Array(promptTokenIds[..<position]))
                             }
 
                             reusedMainCacheWithoutDraft =
@@ -1217,7 +1295,7 @@ public final class ChatSession {
                                 .appendSuffixToMain(_, let representedTokens),
                                 .appendMediaSuffix(_, let representedTokens):
                                 currentConversation.cachedTokens = representedTokens
-                            case .prefillAll, .trimToCommonPrefix, .rebuild:
+                            case .prefillAll, .trimToCommonPrefix, .restoreCheckpoint, .rebuild:
                                 currentConversation.cachedTokens = promptTokenIds
                             }
                             currentConversation.uncommittedTokens.removeAll()
@@ -1236,8 +1314,16 @@ public final class ChatSession {
                             let iterator = try TokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
-                                parameters: generateParameters, components: components)
+                                parameters: generateParameters, components: components,
+                                checkpointAt: checkpointRequest.map {
+                                    $0.position - cachedPromptTokenCount
+                                })
                             lmState = iterator.state
+                            if let checkpointRequest, let saved = iterator.promptCheckpoint {
+                                promptCheckpoint = PromptCheckpoint(
+                                    storage: saved.storage, state: saved.state,
+                                    tokens: checkpointRequest.tokens)
+                            }
 
                             return GenerationRun(
                                 MLXLMCommon.generateTaskRecordingTokens(
@@ -1446,7 +1532,8 @@ public final class ChatSession {
                                     main: kvCache,
                                     draft: draftKVCache,
                                     state: lmState,
-                                    conversation: conversation))
+                                    conversation: conversation,
+                                    checkpoint: promptCheckpoint))
                             throw RejectedToolCallError(rejection)
                         }
 
@@ -1476,7 +1563,8 @@ public final class ChatSession {
                             main: kvCache,
                             draft: draftKVCache,
                             state: lmState,
-                            conversation: conversation))
+                            conversation: conversation,
+                            checkpoint: promptCheckpoint))
 
                     continuation.finish()
                 }

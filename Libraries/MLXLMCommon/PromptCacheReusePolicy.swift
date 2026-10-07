@@ -41,6 +41,14 @@ enum PromptCacheReuseDecision: Equatable {
     /// feed `promptTokens[commonPrefixLength...]`.
     case trimToCommonPrefix(commonPrefixLength: Int, trimCount: Int)
 
+    /// Put every cache back to the saved checkpoint at `position`, then feed
+    /// `promptTokens[position...]`.
+    ///
+    /// For a cache that cannot be trimmed -- one with recurrent layers -- this is
+    /// the only way back to an earlier position. Like ``trimToCommonPrefix`` it
+    /// can fail while being applied, and must then be downgraded to ``rebuild``.
+    case restoreCheckpoint(position: Int)
+
     /// The cache cannot be reconciled with this prompt. Discard it, drop any
     /// carried model state, and feed the whole prompt.
     case rebuild
@@ -48,7 +56,8 @@ enum PromptCacheReuseDecision: Equatable {
     /// `true` when a non-empty cached prefix is carried into this turn.
     var reusesCachedPrefix: Bool {
         switch self {
-        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix:
+        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix,
+            .restoreCheckpoint:
             return true
         case .prefillAll, .rebuild:
             return false
@@ -134,6 +143,10 @@ struct PromptCacheState: Sendable {
 
     /// Every cache supports rewinding.
     var isTrimmable: Bool = false
+
+    /// The tokens represented at a saved checkpoint the main cache can be put
+    /// back to, if there is one.
+    var checkpointTokens: [Int]? = nil
 }
 
 /// One reusability rule.
@@ -156,6 +169,7 @@ struct PromptCacheReusePolicy: Sendable {
     static let standardRules: [any PromptCacheReuseRule] = [
         ExtendCachedPrefixRule(),
         AppendOnlyMediaRule(),
+        RestoreCheckpointRule(),
         RewindToCommonPrefixRule(),
     ]
 
@@ -233,6 +247,57 @@ struct AppendOnlyMediaRule: PromptCacheReuseRule {
         return .appendMediaSuffix(
             suffixStart: cache.cachedTokens.count, representedTokens: turn.promptTokens)
     }
+}
+
+/// Resumes from a saved checkpoint when the cache cannot be rewound.
+///
+/// A hybrid model's recurrent layers keep one state that only moves forward, so
+/// ``RewindToCommonPrefixRule`` rebuilds whenever a prompt does not extend the
+/// cache -- and a chat template that renders a past reply differently from how
+/// it was generated makes that every turn. A checkpoint saved at the end of the
+/// last message is a prefix the next prompt does repeat.
+///
+/// A cache that can be trimmed is left to ``RewindToCommonPrefixRule``: the
+/// common prefix is never shorter than a checkpoint.
+struct RestoreCheckpointRule: PromptCacheReuseRule {
+    func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
+        guard let saved = cache.checkpointTokens,
+            !saved.isEmpty,
+            !cache.isTrimmable,
+            !cache.hasDraftCache,
+            !turn.usesSpeculativeDecoding,
+            !turn.carriesNewMedia,
+            !turn.carriesPreparedMedia,
+            !turn.carriesAttentionMask,
+            turn.promptTokens.count > saved.count,
+            turn.promptTokens.starts(with: saved)
+        else {
+            return nil
+        }
+
+        return .restoreCheckpoint(position: saved.count)
+    }
+}
+
+/// Where to checkpoint a prompt so that the next turn can resume from it: the end of its last
+/// message, before the generation prompt.
+///
+/// Not the end of the prompt: the next turn's prompt renders this turn's reply after that
+/// point, and templates commonly render a past reply differently from how it was generated
+/// (Qwen3.5 drops the `<think>` block it was generated after). A message ends at a stop token,
+/// and at the newline after it when the template writes one, since the next prompt repeats that
+/// newline too. `nil` when no message ends before the prompt's last token.
+func promptCheckpointPosition(in tokens: [Int], stopTokenIds: Set<Int>, newline: Int?) -> Int? {
+    for index in tokens.indices.reversed() where stopTokenIds.contains(tokens[index]) {
+        var position = index + 1
+        if position < tokens.count, let newline, tokens[position] == newline {
+            position += 1
+        }
+        if position < tokens.count {
+            return position
+        }
+    }
+    return nil
 }
 
 /// Rewinds to the longest common prefix, or rebuilds when that is unsafe.
