@@ -513,6 +513,7 @@ public enum Qwen35Language {
             weak var value: (any CompiledTraceInvalidating)?
         }
         // Submodule updates must also drop traces owned by parent decoders.
+        private let fusedProjectionTracesLock = NSLock()
         private var fusedProjectionTraces: [ObjectIdentifier: ProjectionTrace] = [:]
 
         @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
@@ -596,16 +597,23 @@ public enum Qwen35Language {
 
         var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
-        fileprivate func registerFusedProjectionTrace(_ trace: any CompiledTraceInvalidating) {
-            fusedProjectionTraces[ObjectIdentifier(trace)] = ProjectionTrace(value: trace)
+        func registerFusedProjectionTrace(_ trace: any CompiledTraceInvalidating) {
+            fusedProjectionTracesLock.withLock {
+                fusedProjectionTraces[ObjectIdentifier(trace)] = ProjectionTrace(value: trace)
+            }
         }
 
         private func invalidateFusedInputProjection() {
             fusedInputProjection.invalidate()
-            for trace in fusedProjectionTraces.values {
-                trace.value?.invalidate()
+            let traces = fusedProjectionTracesLock.withLock {
+                let traces = fusedProjectionTraces.values.compactMap(\.value)
+                fusedProjectionTraces.removeAll()
+                return traces
             }
-            fusedProjectionTraces.removeAll()
+            // Trace setup takes its own lock first, so invalidate after unlocking.
+            for trace in traces {
+                trace.invalidate()
+            }
         }
 
         /// The fused projection as compile state for a trace that runs this

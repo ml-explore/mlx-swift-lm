@@ -529,6 +529,31 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
             })
     }
 
+    func testVLMConcurrentProjectionTraceRegistration() throws {
+        final class Trace: CompiledTraceInvalidating, @unchecked Sendable {
+            // Invalidations run only after the registration workers finish.
+            var invalidationCount = 0
+            func invalidate() { invalidationCount += 1 }
+        }
+
+        nonisolated(unsafe) let gdn = Qwen35Language.GatedDeltaNet(try vlmConfiguration())
+        let traces = [Trace(), Trace()]
+        let traceLocks = [NSLock(), NSLock()]
+        DispatchQueue.concurrentPerform(iterations: 4096) { index in
+            let route = index % traces.count
+            // Segment and per-layer trace setup hold different locks.
+            traceLocks[route].withLock {
+                gdn.registerFusedProjectionTrace(traces[route])
+            }
+        }
+
+        let update = ModuleParameters.unflattened(["in_proj_a.weight": gdn.inProjA.weight * 1.0])
+        gdn.update(parameters: update)
+        XCTAssertEqual(traces.map(\.invalidationCount), [1, 1])
+        gdn.update(parameters: update)
+        XCTAssertEqual(traces.map(\.invalidationCount), [1, 1], "registry was not cleared")
+    }
+
     /// Opt-in paired benchmark for a local Qwen 3.5 checkpoint.
     ///
     /// The same model and materialized weights are used for both paths, with
