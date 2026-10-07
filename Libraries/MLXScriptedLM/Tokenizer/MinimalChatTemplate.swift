@@ -18,8 +18,7 @@ import Foundation
 /// for one turn plus the generated tokens (including EOS) is a prefix of the next
 /// turn's rendering.
 ///
-/// Tool calls render as canonical JSON (sorted keys). This is a stand-in until the
-/// per-family wire formats in phase 3.
+/// Tool calls render as canonical JSON (sorted keys).
 public struct MinimalChatTemplate: ScriptedChatTemplate {
 
     public struct Markers: Sendable, Equatable {

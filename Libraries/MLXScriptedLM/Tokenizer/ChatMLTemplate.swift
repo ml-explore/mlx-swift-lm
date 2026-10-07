@@ -16,7 +16,7 @@ import Foundation
 /// turn's rendering, since the `\n` after `<|im_end|>` comes after that prefix.
 ///
 /// Plain ChatML has no tool convention, so tools and tool calls throw
-/// ``ScriptedTemplateError/unsupported(_:)``. Family variants add them in phase 3.
+/// ``ScriptedTemplateError/unsupported(_:)``.
 public struct ChatMLTemplate: ScriptedChatTemplate {
     public static let imStart = "<|im_start|>"
     public static let imEnd = "<|im_end|>"
