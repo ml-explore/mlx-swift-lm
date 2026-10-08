@@ -82,7 +82,7 @@ private func create<C: Decodable, P>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``VLMModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// Typically called via ``VLMModelFactory/load(from:using:configuration:useLatest:progress:)``.
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
