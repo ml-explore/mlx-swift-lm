@@ -46,6 +46,10 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
             .map { tokenizer.encode(text: dataset[indices[$0]]) }
         let lengths = batch.map { $0.count }
         let maxLength = lengths.max() ?? 0
+        precondition(
+            maxLength >= 2,
+            "LoRA batch has no sample of 2 or more tokens: each token is predicted from the ones before it"
+        )
 
         if maxLength > 2048 {
             print(
@@ -64,6 +68,28 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
         index = endIndex
 
         return (batchArray[0..., .stride(to: -1)], batchArray[0..., 1...], MLXArray(lengths))
+    }
+}
+
+/// Errors thrown by ``LoRATrain/train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``.
+public enum LoRATrainError: LocalizedError, Equatable {
+
+    /// Which dataset a sample came from.
+    public enum Dataset: String, Sendable {
+        case train, validate
+    }
+
+    /// A sample encodes to fewer than two tokens, so it has nothing to predict.
+    case sampleTooShort(dataset: Dataset, index: Int, tokenCount: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .sampleTooShort(let dataset, let index, let tokenCount):
+            return String(
+                localized:
+                    "LoRA \(dataset.rawValue) sample \(index) encodes to \(tokenCount) token(s); each sample needs at least 2."
+            )
+        }
     }
 }
 
@@ -216,6 +242,19 @@ public enum LoRATrain {
         return (sum(MLXArray(allLosses), stream: .cpu) / tokenCount).item(Float.self)
     }
 
+    /// Each sample must encode to at least 2 tokens: one to read and one to predict.
+    static func checkSamples(
+        _ dataset: [String], _ name: LoRATrainError.Dataset, tokenizer: Tokenizer
+    ) throws {
+        for (index, text) in dataset.enumerated() {
+            let tokenCount = tokenizer.encode(text: text).count
+            if tokenCount < 2 {
+                throw LoRATrainError.sampleTooShort(
+                    dataset: name, index: index, tokenCount: tokenCount)
+            }
+        }
+    }
+
     /// Given a model with LoRA adaptors applied, write adapter weights to a `.safetensors` file.
     ///
     /// ### See Also
@@ -285,6 +324,8 @@ public enum LoRATrain {
     ///   - tokenizer: tokenizer
     ///   - parameters: training parameters
     ///   - progress: progress callback
+    /// - Throws: ``LoRATrainError/sampleTooShort(dataset:index:tokenCount:)`` if a training or
+    ///   validation sample encodes to fewer than 2 tokens. Checked before training starts.
     ///
     /// The model is temporarily placed in training mode and its previous mode is restored before
     /// this function returns.
@@ -296,6 +337,9 @@ public enum LoRATrain {
         // def train(model, train_set, val_set, optimizer, loss, tokenizer, args)
 
         guard parameters.completedIterations < parameters.iterations else { return }
+
+        try checkSamples(train, .train, tokenizer: tokenizer)
+        try checkSamples(validate, .validate, tokenizer: tokenizer)
 
         let wasTraining = model.training
         model.train()
