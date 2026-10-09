@@ -6,6 +6,13 @@ import MLXNN
 
 /// Abstract form of a model that processes language.
 public protocol BaseLanguageModel: Module {
+    /// Serialized namespaces whose tensors this model never loads, such as the target model in
+    /// a checkpoint that a drafter shares with it. The loader does not read them.
+    ///
+    /// Namespaces match whole dot-separated prefixes of the names before
+    /// ``prepareCheckpoint(_:)``. The default is empty.
+    var excludedCheckpointNamespaces: [String] { get }
+
     /// Normalize tensor names, values, and layer settings before loading the checkpoint.
     /// The default implementation calls ``sanitize(weights:metadata:)``.
     func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint
@@ -52,6 +59,8 @@ public protocol ModelConversionMetadataProvider {
 }
 
 extension BaseLanguageModel {
+    public var excludedCheckpointNamespaces: [String] { [] }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = checkpoint
         checkpoint.weights = try sanitize(

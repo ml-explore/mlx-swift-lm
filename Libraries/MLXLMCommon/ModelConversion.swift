@@ -218,7 +218,7 @@ public enum ModelConversionError: LocalizedError, Equatable {
 /// Quantize and save an already-instantiated model from a compatible safetensors directory.
 ///
 /// The function loads safetensors weights, runs the model's sanitizer through
-/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)-6eqw7``, applies quantization,
+/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:)-858j8``, applies quantization,
 /// writes safetensors shards and an index, copies tokenizer/config sidecar files, and updates
 /// `config.json` with the requested quantization block.
 public func convert(
@@ -259,7 +259,8 @@ public func convert(
     try loadWeights(
         modelDirectory: modelDirectory,
         model: model,
-        perLayerQuantization: perLayerQuantization)
+        perLayerQuantization: perLayerQuantization,
+        componentLoading: .immediate)
 
     progressHandler(.init(stage: .quantizing))
     let quantizationResult = quantizeForModelConversion(

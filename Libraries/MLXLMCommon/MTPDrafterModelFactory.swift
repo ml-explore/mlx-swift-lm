@@ -95,7 +95,8 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         try await loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
-            weightFileSelection: configuration.weightFileSelection
+            weightFileSelection: configuration.weightFileSelection,
+            excludedComponents: configuration.excludedComponents
         )
 
         let modelConfig = ModelConfiguration(

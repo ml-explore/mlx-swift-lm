@@ -129,6 +129,14 @@ public struct ModelConfiguration: Sendable {
     /// that case before reaching for it.
     public var weightFileSelection: WeightFileSelection = .automatic
 
+    /// Components to never load, such as ``ModelComponent/vision`` for text-only use.
+    ///
+    /// Their weights are never read, and inputs that need them fail. You do not need this to
+    /// save memory: on-demand components, such as the vision encoder of some VLMs, already load
+    /// the first time an input needs them. Models that cannot load
+    /// without a component load it anyway; see ``ModelComponentsProviding``.
+    public var excludedComponents: Set<ModelComponent> = []
+
     /// Overrides the ``MessageGenerator`` the model would otherwise supply.
     ///
     /// A model class is shared by every checkpoint of its model type, so a fine-tune that
@@ -201,7 +209,8 @@ public struct ModelConfiguration: Sendable {
             toolCallFormat: toolCallFormat,
             reasoningConfig: reasoningConfig,
             messageGenerator: messageGenerator,
-            weightFileSelection: weightFileSelection)
+            weightFileSelection: weightFileSelection,
+            excludedComponents: excludedComponents)
     }
 
 }
@@ -220,6 +229,7 @@ extension ModelConfiguration: Equatable {
             && lhs.toolCallFormat == rhs.toolCallFormat
             && lhs.reasoningConfig == rhs.reasoningConfig
             && lhs.weightFileSelection == rhs.weightFileSelection
+            && lhs.excludedComponents == rhs.excludedComponents
             && sameMessageGenerator(lhs.messageGenerator, rhs.messageGenerator)
     }
 

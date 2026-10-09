@@ -31,6 +31,11 @@ package struct Qwen35CheckpointPolicy: Sendable {
         ".q_norm.weight", ".k_norm.weight",
     ]
 
+    /// Target namespaces an embedded head drops on selection, so the loader need not read them.
+    package var excludedCheckpointNamespaces: [String] {
+        layout == .embedded ? Self.mtpComponent.excludedNamespaces : []
+    }
+
     package static func targetWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         let mapping = CheckpointNameMapping(mtpComponent.namespaces.map { .excludePrefix($0) })
         return weights.filter { name, _ in mapping.mapName(name) != nil }

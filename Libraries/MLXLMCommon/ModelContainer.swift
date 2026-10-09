@@ -201,7 +201,12 @@ public final class ModelContainer: Sendable {
         wiredMemoryTicket: WiredMemoryTicket? = nil,
         tools: [[String: any Sendable]]? = nil
     ) async throws -> AsyncStream<Generation> {
+        let needed = ModelComponent.needed(by: input)
         let input = SendableBox(input)
+        let components = await context.read { context in
+            pendingOnDemandComponents(of: context.model, among: needed)
+        }
+        try await loadOnDemandComponents(components)
 
         // Note: this is only visiting the model exclusively
         // for the pre-fill time.  Beyond that there is no

@@ -271,6 +271,10 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         state.proposalAppended = 0
     }
 
+    public var excludedCheckpointNamespaces: [String] {
+        checkpointPolicy.excludedCheckpointNamespaces
+    }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         try checkpointPolicy.prepare(
             checkpoint, mtpNumHiddenLayers: configuration.mtpNumHiddenLayers,

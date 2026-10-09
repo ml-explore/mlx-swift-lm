@@ -234,7 +234,8 @@ public final class EmbedderModelFactory: GenericModelFactory {
         try await loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
-            weightFileSelection: configuration.weightFileSelection)
+            weightFileSelection: configuration.weightFileSelection,
+            excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask
 

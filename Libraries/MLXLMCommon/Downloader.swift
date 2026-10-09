@@ -84,6 +84,12 @@ public struct ResolvedModelConfiguration: Sendable {
     /// - ``ModelConfiguration/weightFileSelection``
     public var weightFileSelection: WeightFileSelection
 
+    /// Components to load the model without.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/excludedComponents``
+    public var excludedComponents: Set<ModelComponent>
+
     public init(
         modelDirectory: URL,
         tokenizerDirectory: URL,
@@ -95,7 +101,8 @@ public struct ResolvedModelConfiguration: Sendable {
         toolCallFormat: ToolCallFormat?,
         reasoningConfig: ReasoningConfig? = nil,
         messageGenerator: (any MessageGenerator)? = nil,
-        weightFileSelection: WeightFileSelection = .automatic
+        weightFileSelection: WeightFileSelection = .automatic,
+        excludedComponents: Set<ModelComponent> = []
     ) {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
@@ -108,6 +115,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
         self.weightFileSelection = weightFileSelection
+        self.excludedComponents = excludedComponents
     }
 }
 

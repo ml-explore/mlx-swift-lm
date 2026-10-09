@@ -559,6 +559,31 @@ struct Qwen35CheckpointLoadingTests {
             context.model.modules().compactMap { $0 as? QuantizedLinear }.contains { $0.bits == 4 })
     }
 
+    /// A head embedded in a target checkpoint reads only its own tensors; a standalone head
+    /// reads every tensor.
+    @Test(arguments: [false, true])
+    func drafterDoesNotReadTargetTensors(vision: Bool) async throws {
+        for standalone in [false, true] {
+            let fixture = try await makeFixture(
+                vision: vision, standalone: standalone, prefix: standalone ? "" : "mtp.")
+            defer { try? FileManager.default.removeItem(at: fixture.directory) }
+            let context = try await fixture.factory.load(
+                from: fixture.directory, using: UnusedTokenizerLoader())
+
+            let url = fixture.directory.appendingPathComponent("model.safetensors")
+            let all = try loadModelCheckpoint(urls: [url]).weights.keys
+            let read = try loadModelCheckpoint(
+                urls: [url], excludedNamespaces: context.model.excludedCheckpointNamespaces
+            ).weights.keys
+            if standalone {
+                #expect(Set(read) == Set(all))
+            } else {
+                #expect(all.contains("model.embed_tokens.weight"))
+                #expect(Set(read) == Set(all.filter { $0.hasPrefix("mtp.") }))
+            }
+        }
+    }
+
     @Test(arguments: [false, true])
     func targetLoaderExcludesConvertedMTPComponent(vision: Bool) throws {
         let data = try fixtureConfiguration(vision: vision, standalone: false, bits: nil)
