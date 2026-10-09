@@ -35,6 +35,8 @@ public enum EmbedderTypeRegistry {
 
         "nomic_bert": create(NomicBertConfiguration.self) { NomicBertModel($0, pooler: false) },
         "qwen3": create(Qwen3Configuration.self) { Qwen3Model($0) },
+        "embedding_gemma2": create(EmbeddingGemma2Configuration.self) { EmbeddingGemma2($0) },
+        "embedding_gemma2_text": create(EmbeddingGemma2Configuration.self) { EmbeddingGemma2($0) },
 
         // LFM2.5 bidirectional encoders (Embedding + ColBERT). Both share
         // `model_type: "lfm2"`; the single model branches on the `"mlx"` head.
@@ -89,6 +91,10 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let qwen3_embedding = ModelConfiguration(
         id: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
 
+    /// EmbeddingGemma 2 with text, vision, and audio weights in bfloat16.
+    public static let embeddinggemma2 = ModelConfiguration(
+        id: "mlx-community/embeddinggemma-2-bf16")
+
     /// LFM2.5 Embedding 350M — CLS-pooled 1024-d dense vectors (cosine).
     public static let lfm2_embedding_350m = ModelConfiguration(
         id: "mlx-community/LFM2.5-Embedding-350M-bf16")
@@ -126,6 +132,7 @@ public class EmbedderRegistry: AbstractModelRegistry, @unchecked Sendable {
             bge_reranker_v2_m3,
             mixedbread_large,
             qwen3_embedding,
+            embeddinggemma2,
             lfm2_embedding_350m,
             lfm2_embedding_350m_4bit,
             lfm2_embedding_350m_8bit,

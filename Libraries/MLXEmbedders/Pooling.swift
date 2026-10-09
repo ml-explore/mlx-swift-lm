@@ -62,6 +62,8 @@ public struct PoolingConfiguration: Codable {
 /// - Parameter model: The loaded embedding model.
 /// - Returns: An initialized `Pooling` module.
 func loadPooling(modelDirectory: URL, model: EmbeddingModel) -> Pooling {
+    // EmbeddingGemma 2 performs masked pooling and projection inside the model.
+    if model is EmbeddingGemma2 { return Pooling(strategy: .none) }
     let configurationURL = modelDirectory.appending(components: "1_Pooling", "config.json")
     if let poolingConfig = try? JSONDecoder.json5().decode(
         PoolingConfiguration.self, from: Data(contentsOf: configurationURL))
