@@ -1364,7 +1364,32 @@ public final class ChatSession {
                             requiresMainOnlyContinuation = true
                         }
 
-                        if speculativeDecoding != nil, requiresMainOnlyContinuation {
+                        // Block-diffusion models denoise a canvas of tokens against the
+                        // encoded prompt; they cannot run the autoregressive or
+                        // speculative iterators.
+                        if let diffusionModel = model as? any BlockDiffusionLanguageModel {
+                            guard speculativeDecoding == nil else {
+                                throw GenerateError.unsupportedSpeculativeDecoding(
+                                    String(describing: type(of: model)))
+                            }
+
+                            let iterator = try BlockDiffusionTokenIterator(
+                                input: input,
+                                model: diffusionModel,
+                                cacheStorage: kvCache,
+                                parameters: generateParameters,
+                                components: components)
+
+                            generation = GenerationRun(
+                                MLXLMCommon.generateTaskRecordingTokens(
+                                    promptTokenCount: input.text.tokens.size,
+                                    modelConfiguration: modelConfiguration,
+                                    tokenizer: tokenizer,
+                                    iterator: iterator,
+                                    tools: toolValidationSchemas,
+                                    toolCallPolicy: generateParameters.toolCallPolicy)
+                            )
+                        } else if speculativeDecoding != nil, requiresMainOnlyContinuation {
                             generation = try defaultGeneration()
                         } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
@@ -1393,6 +1418,12 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
+
+                                guard !draftModel.capabilities.contains(.blockDiffusion) else {
+                                    throw GenerateError.unsupportedSpeculativeDecoding(
+                                        String(describing: type(of: draftModel)))
+                                }
+
                                 let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
                                     mainModel: model,
                                     draftModel: draftModel)
