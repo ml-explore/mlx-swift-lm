@@ -908,9 +908,8 @@ public struct Qwen2VLProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: processedImage,
             video: processedVideo)
     }
@@ -1109,6 +1108,19 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
         )
     }
 
+}
+
+extension Qwen2VL: ModelStateRewinding {
+
+    public func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+    ) -> LMOutput.State? {
+        QwenVL.rewoundState(
+            state, keeping: prefix, dropping: dropped,
+            imageTokenId: config.baseConfiguration.imageTokenId,
+            videoTokenId: config.baseConfiguration.videoTokenId,
+            key: ropeDeltasKey)
+    }
 }
 
 // MARK: - Configuration

@@ -427,8 +427,48 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
-    private static func makeStateProducingModel() -> ModelContext {
-        let base = makeModel()
+    /// A state-producing model that takes its anchor back to a shorter prefix,
+    /// or declines to, the way a Qwen VL model declines a prefix holding media.
+    private final class StateRewindingModel: Module, LanguageModel, ModelStateRewinding {
+        let base: any LanguageModel
+        let declinesToRewind: Bool
+
+        init(_ base: any LanguageModel, declinesToRewind: Bool) {
+            self.base = base
+            self.declinesToRewind = declinesToRewind
+            super.init()
+        }
+
+        func rewoundState(
+            _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+        ) -> LMOutput.State? {
+            guard !declinesToRewind else { return nil }
+            var rewound = LMOutput.State()
+            rewound[StateProducingModel.anchorKey] = MLXArray([Int32(0)])
+            return rewound
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            try base.prepare(input, cache: cache, state: state, prefill: prefill)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
+        }
+    }
+
+    private static func makeStateProducingModel(
+        processor: TestInputProcessor = TestInputProcessor()
+    ) -> ModelContext {
+        let base = makeModel(processor: processor)
         guard let inner = base.model as? Gemma3TextModel else {
             fatalError("expected the test model to be a Gemma3TextModel")
         }
@@ -1465,12 +1505,11 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
     }
 
-    /// Splitting is offered only where the transcript is *extended*. When the
-    /// template rewrites an already-cached tail the turn needs a rewind, and media
-    /// still forces a rebuild there -- the guard PR #472 added is untouched.
-    func testLongestCommonPrefixTrimmingStillFallsBackForMediaWhenModelCanSplit()
-        async throws
-    {
+    /// A rewind whose prompt carries media goes through the model's split: the
+    /// common prefix is kept, and only what it does not hold is prefilled. The
+    /// split's tokens are verified against the boundary, so a wrong carve still
+    /// rebuilds -- the guard PR #472 added lives in the verification now.
+    func testLongestCommonPrefixTrimmingSplitsTheMediaPromptWhenModelCanSplit() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
         var lengthIterator = renderedLengths.makeAsyncIterator()
         let tokenizer = PrefixPreservingTokenizer(
@@ -1479,6 +1518,42 @@ public class ChatSessionTests: XCTestCase {
         let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
         let session = ChatSession(
             model(processor: processor, splitting: true),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        let firstPromptLengthValue = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstPromptLengthValue)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "describe it") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+        let fullSecondPromptLengthValue = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+
+        let commonPrefixLength = firstPromptLength - 1
+        XCTAssertEqual(
+            completionInfo?.cachedPromptTokenCount, commonPrefixLength)
+        XCTAssertEqual(
+            completionInfo?.promptTokenCount,
+            fullSecondPromptLength - commonPrefixLength)
+    }
+
+    /// A model without a split still cannot feed media through a token slice, so
+    /// the same turn rebuilds rather than prefilling a payload-less prompt.
+    func testLongestCommonPrefixTrimmingStillFallsBackForMediaWithoutASplit() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor, splitting: false),
             generateParameters: GenerateParameters(maxTokens: 3))
 
         _ = try await session.respond(
@@ -1494,6 +1569,8 @@ public class ChatSessionTests: XCTestCase {
         }
         let fullSecondPromptLengthValue = await lengthIterator.next()
         let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+
+        XCTAssertEqual(completionInfo?.cachedPromptTokenCount, 0)
         XCTAssertEqual(completionInfo?.promptTokenCount, fullSecondPromptLength)
     }
 
@@ -2111,6 +2188,50 @@ public class ChatSessionTests: XCTestCase {
     }
 
     // MARK: - Carrying model state
+
+    /// The second turn of a session whose template rewrites the cached tail, so
+    /// the cache must rewind to the longest common prefix while carrying state.
+    private func rewindingTurn(declinesToRewind: Bool) async throws -> (
+        info: GenerateCompletionInfo, firstPrompt: Int, secondPrompt: Int
+    ) {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        var context = Self.makeStateProducingModel(processor: processor)
+        context.model = StateRewindingModel(context.model, declinesToRewind: declinesToRewind)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstPrompt = await lengthIterator.next()
+        let reply = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondPrompt = await lengthIterator.next()
+        return (reply.info, try XCTUnwrap(firstPrompt), try XCTUnwrap(secondPrompt))
+    }
+
+    /// Carried state no longer costs a stateful model its cache: the state
+    /// follows the cache back, and only what the prefix does not hold is prefilled.
+    func testCarriedStateRewindsWithTheCacheToTheLongestCommonPrefix() async throws {
+        let turn = try await rewindingTurn(declinesToRewind: false)
+
+        let commonPrefixLength = turn.firstPrompt - 1
+        XCTAssertEqual(turn.info.cachedPromptTokenCount, commonPrefixLength)
+        XCTAssertEqual(turn.info.promptTokenCount, turn.secondPrompt - commonPrefixLength)
+    }
+
+    /// A model that cannot derive its state for the prefix gets a rebuild, never
+    /// a rewound cache paired with state describing the dropped tokens.
+    func testStateTheModelCannotRewindRebuildsTheCache() async throws {
+        let turn = try await rewindingTurn(declinesToRewind: true)
+
+        XCTAssertEqual(turn.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(turn.info.promptTokenCount, turn.secondPrompt)
+    }
 
     /// Stateful continuation models cannot safely rewind arbitrary model state
     /// when speculative proposals are rejected, so the session must use normal

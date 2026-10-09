@@ -236,8 +236,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
                 messages: messages, tools: input.tools,
                 additionalContext: input.additionalContext)
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: tokensArray)
-            return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
+            return LMInput(text: .init(tokens: tokensArray), image: nil)
         } else if input.images.count > 0 && input.videos.isEmpty {
             // Single image scenario
             guard input.images.count == 1 else {
@@ -282,10 +281,9 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
 
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: pixels)
             )
         } else {
@@ -367,9 +365,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: transposedFrames, frames: thwFrames)
             )
         }

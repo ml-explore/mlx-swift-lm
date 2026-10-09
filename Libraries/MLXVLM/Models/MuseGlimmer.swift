@@ -1424,8 +1424,7 @@ public struct MuseGlimmerProcessor: UserInputProcessor {
 
         guard !input.images.isEmpty else {
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray).asType(.int8)
-            return LMInput(text: .init(tokens: promptArray, mask: mask))
+            return LMInput(text: .init(tokens: promptArray))
         }
 
         let processed = try input.images.map {
@@ -1467,9 +1466,8 @@ public struct MuseGlimmerProcessor: UserInputProcessor {
         promptTokens = expanded
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: .init(pixels: pixels, frames: frames)
         )
     }

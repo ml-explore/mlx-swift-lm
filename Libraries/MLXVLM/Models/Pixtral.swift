@@ -1057,8 +1057,7 @@ public struct PixtralProcessor: UserInputProcessor {
         if input.images.isEmpty {
             let tokens = tokenizer.encode(text: prompt)
             let tokensArray = MLXArray(tokens).expandedDimensions(axis: 0)
-            let mask = ones(like: tokensArray)
-            return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
+            return LMInput(text: .init(tokens: tokensArray), image: nil)
         } else {
             guard input.images.count == 1 else {
                 throw VLMError.singleImageAllowed
@@ -1135,7 +1134,6 @@ public struct PixtralProcessor: UserInputProcessor {
             promptTokens.insert(contentsOf: imageTokens, at: insertIndex)
 
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
 
             // Convert to BCHW format for vision model
             if pixels.dim(-1) == 3 {
@@ -1143,7 +1141,7 @@ public struct PixtralProcessor: UserInputProcessor {
             }
 
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: pixels, frames: [THW(1, paddedHeight, paddedWidth)])
             )
         }
