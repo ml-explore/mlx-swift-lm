@@ -1157,11 +1157,13 @@ public class ChatSessionTests: XCTestCase {
             super.init()
         }
 
-        func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+        func rewoundState(
+            _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+        ) -> LMOutput.State? {
             guard !declinesToRewind else { return nil }
-            var state = LMOutput.State()
-            state[StateProducingModel.anchorKey] = MLXArray([Int32(0)])
-            return state
+            var rewound = LMOutput.State()
+            rewound[StateProducingModel.anchorKey] = MLXArray([Int32(0)])
+            return rewound
         }
 
         func prepare(
@@ -2657,12 +2659,11 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(newMediaInfo?.promptTokenCount, thirdRenderedLength)
     }
 
-    /// Splitting is offered only where the transcript is *extended*. When the
-    /// template rewrites an already-cached tail the turn needs a rewind, and media
-    /// still forces a rebuild there -- the guard PR #472 added is untouched.
-    func testLongestCommonPrefixTrimmingStillFallsBackForMediaWhenModelCanSplit()
-        async throws
-    {
+    /// A rewind whose prompt carries media goes through the model's split: the
+    /// common prefix is kept, and only what it does not hold is prefilled. The
+    /// split's tokens are verified against the boundary, so a wrong carve still
+    /// rebuilds -- the guard PR #472 added lives in the verification now.
+    func testLongestCommonPrefixTrimmingSplitsTheMediaPromptWhenModelCanSplit() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
         var lengthIterator = renderedLengths.makeAsyncIterator()
         let tokenizer = PrefixPreservingTokenizer(
@@ -2671,6 +2672,42 @@ public class ChatSessionTests: XCTestCase {
         let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
         let session = ChatSession(
             model(processor: processor, splitting: true),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        let firstPromptLengthValue = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstPromptLengthValue)
+
+        var completionInfo: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: "describe it") {
+            if let info = item.info {
+                completionInfo = info
+            }
+        }
+        let fullSecondPromptLengthValue = await lengthIterator.next()
+        let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+
+        let commonPrefixLength = firstPromptLength - 1
+        XCTAssertEqual(
+            completionInfo?.cachedPromptTokenCount, commonPrefixLength)
+        XCTAssertEqual(
+            completionInfo?.promptTokenCount,
+            fullSecondPromptLength - commonPrefixLength)
+    }
+
+    /// A model without a split still cannot feed media through a token slice, so
+    /// the same turn rebuilds rather than prefilling a payload-less prompt.
+    func testLongestCommonPrefixTrimmingStillFallsBackForMediaWithoutASplit() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor, splitting: false),
             generateParameters: GenerateParameters(maxTokens: 3))
 
         _ = try await session.respond(
@@ -2686,6 +2723,8 @@ public class ChatSessionTests: XCTestCase {
         }
         let fullSecondPromptLengthValue = await lengthIterator.next()
         let fullSecondPromptLength = try XCTUnwrap(fullSecondPromptLengthValue)
+
+        XCTAssertEqual(completionInfo?.cachedPromptTokenCount, 0)
         XCTAssertEqual(completionInfo?.promptTokenCount, fullSecondPromptLength)
     }
 

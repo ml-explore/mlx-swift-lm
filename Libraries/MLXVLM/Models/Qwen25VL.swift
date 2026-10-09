@@ -1297,9 +1297,11 @@ extension Qwen25VL: PreparedInputSplitting {
 
 extension Qwen25VL: ModelStateRewinding {
 
-    public func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+    public func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+    ) -> LMOutput.State? {
         QwenVL.rewoundState(
-            forPrefix: prefix,
+            state, keeping: prefix, dropping: dropped,
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,
             key: ropeDeltasKey)

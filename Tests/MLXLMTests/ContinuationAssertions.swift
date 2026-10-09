@@ -256,16 +256,22 @@ struct ContinuationAssertions {
 
             func resumed(rewinding: Bool) throws -> MLXArray {
                 let cache = try model.newCache(parameters: nil)
-                let (_, carried) = try prefill(
-                    model, concatenated([prefix, dropped], axis: 1), image: image, cache: cache)
+                let carried = try XCTUnwrap(
+                    try prefill(
+                        model, concatenated([prefix, dropped], axis: 1), image: image, cache: cache
+                    ).1,
+                    "the media prefill carried no state", file: file, line: line)
                 XCTAssertEqual(
                     trimPromptCache(cache, numTokens: dropped.dim(1)), dropped.dim(1),
                     file: file, line: line)
                 let state =
                     rewinding
                     ? try XCTUnwrap(
-                        model.rewoundState(forPrefix: prefix.asArray(Int.self)),
-                        "refused to rewind a media-free prefix", file: file, line: line)
+                        model.rewoundState(
+                            carried,
+                            keeping: prefix.asArray(Int.self),
+                            dropping: dropped.asArray(Int.self)),
+                        "refused to rewind past media", file: file, line: line)
                     : carried
                 return try prefill(model, suffix, cache: cache, state: state).0
             }
@@ -276,10 +282,54 @@ struct ContinuationAssertions {
             XCTAssertGreaterThan(
                 maxAbsDiff(try resumed(rewinding: false), logitsF), MatmulPrecision.splitTolerance,
                 "the stale state matched too, so the rewind went untested", file: file, line: line)
+        }
+    }
+
+    /// The rewind the media split exists for: the image stays in the kept prefix and only text
+    /// is dropped, so the carried delta already describes the prefix and the model must keep it.
+    /// Media on both sides of the cut cannot be derived from tokens alone and must be refused.
+    func assertRewoundStateKeepsThePrefixMediaDelta<M: LanguageModel & ModelStateRewinding>(
+        _ model: M, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        try withRandomState(MLXRandom.RandomState(seed: 13)) {
+            let image = image()
+            let kept = concatenated(
+                [textTokens(8), imageRun(), textTokens(6, seed: 5)], axis: 1)
+            let dropped = textTokens(8, seed: 3)
+            let suffix = textTokens(6, seed: 7)
+
+            let cacheF = try model.newCache(parameters: nil)
+            let (logitsF, _) = try prefill(
+                model, concatenated([kept, suffix], axis: 1), image: image, cache: cacheF)
+
+            let cache = try model.newCache(parameters: nil)
+            let carried = try XCTUnwrap(
+                try prefill(
+                    model, concatenated([kept, dropped], axis: 1), image: image, cache: cache
+                ).1,
+                "the media prefill carried no state", file: file, line: line)
+            XCTAssertEqual(
+                trimPromptCache(cache, numTokens: dropped.dim(1)), dropped.dim(1),
+                file: file, line: line)
+
+            let rewound = try XCTUnwrap(
+                model.rewoundState(
+                    carried, keeping: kept.asArray(Int.self),
+                    dropping: dropped.asArray(Int.self)),
+                "refused a rewind that drops only text", file: file, line: line)
+
+            let (logitsW, _) = try prefill(model, suffix, cache: cache, state: rewound)
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(logitsW, logitsF), MatmulPrecision.splitTolerance,
+                "the kept prefix's media delta positioned the next turn wrong",
+                file: file, line: line)
+
+            let later = imageRun()
             XCTAssertNil(
                 model.rewoundState(
-                    forPrefix: concatenated([prefix, dropped], axis: 1).asArray(Int.self)),
-                "a prefix holding media cannot be rewound from its tokens", file: file, line: line)
+                    carried, keeping: kept.asArray(Int.self),
+                    dropping: concatenated([dropped, later], axis: 1).asArray(Int.self)),
+                "media on both sides of the cut must be refused", file: file, line: line)
         }
     }
 

@@ -17,12 +17,17 @@ public protocol ModelStateRewinding {
 
     /// Return the state a cache holding exactly `prefix` resumes from.
     ///
-    /// Returning `nil` means the state cannot be derived for this prefix and the
+    /// Returning `nil` means the state cannot be derived for this rewind and the
     /// caller must rebuild the cache. Implementations should return `nil` rather
-    /// than guess -- in particular when the state depends on media in `prefix`
-    /// that the tokens alone do not describe.
+    /// than guess -- in particular when the state depends on media the tokens
+    /// alone do not describe.
     ///
-    /// - Parameter prefix: the tokens the cache holds after the rewind
+    /// - Parameters:
+    ///   - state: the state carried with the cache before the rewind
+    ///   - prefix: the tokens the cache holds after the rewind
+    ///   - dropped: the tokens the rewind removes from the end of the cache
     /// - Returns: the state to resume from, or `nil` if it cannot be derived.
-    func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State?
+    func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+    ) -> LMOutput.State?
 }

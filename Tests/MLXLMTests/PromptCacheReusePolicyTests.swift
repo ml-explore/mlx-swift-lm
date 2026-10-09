@@ -272,6 +272,14 @@ struct PromptCacheReusePolicyTests {
         #expect(decision == .rebuild)
     }
 
+    @Test func `prepared media rewinds through the model's split when it has one`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], preparedMedia: true, canSplitMedia: true),
+            cache: alignedCache([1, 2, 3, 4, 5]))
+
+        #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
+    }
+
     @Test func `model state rewinds with the cache when the model can rewind it`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 9, 9], modelState: true, canRewindState: true),

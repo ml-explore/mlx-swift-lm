@@ -70,8 +70,8 @@ struct PromptCacheTurn: Sendable {
     /// no longer a valid prefix of the model's actual input.
     var carriesNewMedia: Bool = false
 
-    /// The prepared input contains image/video/audio tensors, which the rewind
-    /// path cannot account for.
+    /// The prepared input contains image/video/audio tensors, which a rewind can
+    /// only feed through the model's own split.
     var carriesPreparedMedia: Bool = false
 
     /// The prepared input carries an explicit attention mask; a partial prefill
@@ -107,7 +107,8 @@ struct PromptCacheTurn: Sendable {
     var usesSpeculativeDecoding: Bool = false
 
     /// The model can split a prepared input into a media-carrying suffix, so an
-    /// append-only media turn has a way to reuse the cached prefix. The session
+    /// append-only media turn, or a rewind whose prompt carries media, has a way
+    /// to reuse the cached prefix. The session
     /// reports the capability here rather than the policy inspecting the model,
     /// which keeps the decision table free of MLX and session types.
     ///
@@ -307,7 +308,7 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && cache.mainCacheIsAligned
             && trimCount <= cache.maxTrimCount
             && !turn.carriesNewMedia
-            && !turn.carriesPreparedMedia
+            && (!turn.carriesPreparedMedia || turn.canSplitPreparedMedia)
             && !turn.carriesAttentionMask
             && (!turn.carriesModelState || turn.canRewindModelState)
 

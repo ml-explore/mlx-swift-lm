@@ -183,4 +183,9 @@ final class Qwen3VLMoEContinuationTests: XCTestCase {
     func testRewoundStateContinuationMatchesFullPrefill() throws {
         try continuation.assertRewoundStateContinuation(try makeTinyModel())
     }
+
+    /// A cache trimmed back past text, keeping its image, must keep the delta it carried.
+    func testRewoundStateKeepsThePrefixMediaDelta() throws {
+        try continuation.assertRewoundStateKeepsThePrefixMediaDelta(try makeTinyModel())
+    }
 }

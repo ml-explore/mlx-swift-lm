@@ -269,6 +269,11 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertRewoundStateContinuation(try makeTinyModel())
     }
 
+    /// A cache trimmed back past text, keeping its image, must keep the delta it carried.
+    func testRewoundStateKeepsThePrefixMediaDelta() throws {
+        try continuation.assertRewoundStateKeepsThePrefixMediaDelta(try makeTinyModel())
+    }
+
     // MARK: - Windowed prefill
 
     /// Windowed (chunked) prefill must produce the same first-token logits as

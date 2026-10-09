@@ -126,9 +126,12 @@ the tokens already represented by the session's KV cache, only the new suffix
 is prefilled. Both the string-and-role overloads and the structured-message
 overloads use this same retained-conversation and cache-reuse path. If a
 template rewrites an earlier part of the prompt, the session rewinds to a
-verified common prefix when the cache and input can be trimmed safely.
-Otherwise, it rebuilds the cache rather than combining stale model state with a
-mismatched prompt.
+verified common prefix when the cache and input can be trimmed safely: a
+media-carrying prompt is carved by the model's own ``PreparedInputSplitting``
+split, and state a model carries across turns is rewound through its
+``ModelStateRewinding`` conformance when it declares one. Otherwise, it
+rebuilds the cache rather than combining stale model state with a mismatched
+prompt.
 
 The low-level initializers that accept an existing raw KV cache cannot recover
 the messages used to create it. Those initializers preserve fragment-based

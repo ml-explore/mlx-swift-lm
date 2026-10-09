@@ -825,9 +825,11 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
 
 extension Qwen3VLMoE: ModelStateRewinding {
 
-    public func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+    public func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+    ) -> LMOutput.State? {
         QwenVL.rewoundState(
-            forPrefix: prefix,
+            state, keeping: prefix, dropping: dropped,
             imageTokenId: config.imageTokenIndex,
             videoTokenId: config.videoTokenIndex,
             key: qwen3VLMoERopeDeltasKey)
