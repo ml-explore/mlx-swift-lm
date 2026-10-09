@@ -33,6 +33,8 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
         super.init()
     }
 
+    func isCompatible(with target: any LanguageModel) -> Bool { true }
+
     func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: [CountingKVCache()])
     }

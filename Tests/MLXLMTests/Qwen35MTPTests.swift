@@ -426,7 +426,7 @@ struct Qwen35MTPRegistrationTests {
             modelType: "qwen3_5")
         #expect(wrappedTextModel is MLXLLM.Qwen35MTPDraftModel)
 
-        let vlmModel = try await MTPDrafterTypeRegistry.shared.createModel(
+        let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)
@@ -439,14 +439,33 @@ struct Qwen35MTPRegistrationTests {
         #expect(standalone.requiresPromptPrefill)
         #expect(!standalone.requiresSharedTargetKV)
         #expect(standalone.requiresGreedySampling)
+
+        let standaloneVLM = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
+            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8),
+            modelType: "qwen3_5_mtp")
+        #expect(standaloneVLM is MLXVLM.Qwen35VLMNextNDraftModel)
+
+        let textConfig = try JSONDecoder.json5().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let vlmConfig = try JSONDecoder.json5().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+        let textTarget = MLXLLM.Qwen35TextModel(textConfig)
+        let vlmTarget = MLXVLM.Qwen35(vlmConfig)
+
+        #expect(standalone.isCompatible(with: textTarget))
+        #expect(!standalone.isCompatible(with: vlmTarget))
+        #expect(standaloneVLM.isCompatible(with: vlmTarget))
+        #expect(!standaloneVLM.isCompatible(with: textTarget))
     }
 
     @Test
-    func registrationsAreOrderIndependentForSharedModelTypes() async throws {
+    func registrationsAreIsolatedByTargetArchitecture() async throws {
         await MLXVLM.Qwen35VLMMTPRegistration.register()
         await MLXLLM.Qwen35TextMTPRegistration.register()
 
-        let vlmModel = try await MTPDrafterTypeRegistry.shared.createModel(
+        let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)
@@ -658,6 +677,41 @@ struct Qwen35CheckpointLoadingTests {
         #expect(projections.contains { $0.bits == bits })
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func registeredFactoriesLoadQwen38Components(vision: Bool, standalone: Bool) async throws {
+        await Qwen35TextMTPRegistration.register()
+        await Qwen35VLMMTPRegistration.register()
+        let fixture = try await makeFixture(
+            vision: vision, standalone: standalone,
+            prefix: standalone ? "" : "language_model.mtp.", bits: 4, family: "qwen3_8")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let factory = vision ? MTPDrafterModelFactory.visionLanguage : .shared
+        let context = try await factory.load(
+            from: fixture.directory, using: UnusedTokenizerLoader())
+        let parameters = context.model.parameters().flattened()
+        #expect(parameters.count == 31)
+        let norm = try #require(parameters.first { $0.0 == "mtp.norm.weight" }?.1)
+        #expect(norm.asArray(Float.self) == Array(repeating: 1, count: 64))
+        let fc = try #require(
+            (context.model as? MLXLLM.Qwen35MTPDraftModel)?.mtp.fc as? QuantizedLinear
+                ?? (context.model as? MLXVLM.Qwen35VLMNextNDraftModel)?.mtp.fc as? QuantizedLinear)
+        #expect(fc.bits == 8)
+        #expect(
+            context.model.modules().compactMap { $0 as? QuantizedLinear }.contains { $0.bits == 4 })
+    }
+
+    @Test(arguments: ["qwen3_5", "qwen3_8"])
+    func standaloneVLMRegistrationUsesOuterModelType(family: String) async throws {
+        await Qwen35VLMMTPRegistration.register()
+        let fixture = try await makeFixture(
+            vision: true, standalone: true, bits: 4, family: family)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let context = try await MTPDrafterModelFactory.visionLanguage.load(
+            from: fixture.directory, using: UnusedTokenizerLoader())
+        #expect(context.model is MLXVLM.Qwen35VLMNextNDraftModel)
+        #expect(context.model.parameters().flattened().count == 31)
+    }
+
     @Test(arguments: [false, true], ["mtp.", "language_model.mtp."])
     func embeddedFactoryLoadsComponentWithoutTargetWeights(vision: Bool, prefix: String)
         async throws
@@ -761,10 +815,10 @@ struct Qwen35CheckpointLoadingTests {
         }
     }
 
-    @Test
-    func unknownAndMissingWeightsStillFailStrictFactoryLoading() async throws {
+    @Test(arguments: ["qwen3_5", "qwen3_8"])
+    func unknownAndMissingWeightsStillFailStrictFactoryLoading(family: String) async throws {
         for missing in [false, true] {
-            let fixture = try await makeFixture(vision: false, standalone: true)
+            let fixture = try await makeFixture(vision: false, standalone: true, family: family)
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let url = fixture.directory.appendingPathComponent("model.safetensors")
             var weights = try loadArrays(url: url)
@@ -813,12 +867,13 @@ struct Qwen35CheckpointLoadingTests {
     }
 
     private func makeFixture(
-        vision: Bool, standalone: Bool, prefix: String = "", bits: Int? = nil
+        vision: Bool, standalone: Bool, prefix: String = "", bits: Int? = nil,
+        family: String = "qwen3_5"
     ) async throws -> Fixture {
         let config = try fixtureConfiguration(
-            vision: vision, standalone: standalone, bits: bits, prefix: prefix)
+            vision: vision, standalone: standalone, bits: bits, prefix: prefix, family: family)
         let registry = ModelTypeRegistry<any MTPDrafterModel>()
-        let modelType = standalone ? "qwen3_5_mtp" : "qwen3_5"
+        let modelType = standalone ? family + "_mtp" : family
         await registry.registerModelType(modelType) { data in
             try makeDrafter(configuration: data, vision: vision)
         }
@@ -853,7 +908,8 @@ struct Qwen35CheckpointLoadingTests {
     }
 
     private func fixtureConfiguration(
-        vision: Bool, standalone: Bool, bits: Int?, prefix: String = "mtp."
+        vision: Bool, standalone: Bool, bits: Int?, prefix: String = "mtp.",
+        family: String = "qwen3_5"
     ) throws -> Data {
         let json =
             vision
@@ -866,7 +922,12 @@ struct Qwen35CheckpointLoadingTests {
         .replacingOccurrences(of: "\"head_dim\": 8", with: "\"head_dim\": 32")
         var root = try #require(
             JSONSerialization.jsonObject(with: Data(sized.utf8)) as? [String: Any])
-        if standalone { root["model_type"] = "qwen3_5_mtp" }
+        root["model_type"] = standalone ? family + "_mtp" : family
+        if var text = root["text_config"] as? [String: Any] {
+            text["model_type"] = family + "_text"
+            root["text_config"] = text
+        }
+        if standalone { root["vision_config"] = [String: Any]() }
         if let bits {
             root["quantization"] = [
                 "group_size": 32, "bits": bits,
@@ -879,11 +940,23 @@ struct Qwen35CheckpointLoadingTests {
 
 private func makeDrafter(configuration: Data, vision: Bool) throws -> any MTPDrafterModel {
     if vision {
+        let config = try JSONDecoder().decode(QwenMTPFixtureConfiguration.self, from: configuration)
         return MLXVLM.Qwen35VLMNextNDraftModel(
-            try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: configuration))
+            config.textConfiguration,
+            checkpointPolicy: .init(modelType: config.modelType, preconvertedNorms: false))
     }
     return MLXLLM.Qwen35MTPDraftModel(
         try JSONDecoder().decode(MLXLLM.Qwen35Configuration.self, from: configuration))
+}
+
+private struct QwenMTPFixtureConfiguration: Decodable {
+    let modelType: String
+    let textConfiguration: MLXVLM.Qwen35Configuration.TextConfiguration
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case textConfiguration = "text_config"
+    }
 }
 
 private struct UnusedTokenizerLoader: TokenizerLoader {

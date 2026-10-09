@@ -201,6 +201,10 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         super.init()
     }
 
+    public func isCompatible(with target: any LanguageModel) -> Bool {
+        target is Gemma4BackboneProviding
+    }
+
     public func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,

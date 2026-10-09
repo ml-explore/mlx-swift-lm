@@ -17,6 +17,10 @@ final class Qwen35VLMNextNPredictor: Module {
         var mtpArgs = args
         mtpArgs.hiddenLayers = max(args.mtpNumHiddenLayers, 1)
         mtpArgs.fullAttentionInterval = 1
+        let layerTypes = Array(
+            repeating: HybridAttentionSchedule.fullAttention, count: mtpArgs.hiddenLayers)
+        mtpArgs.layerTypes = layerTypes
+        mtpArgs.resolvedLayerTypes = layerTypes
 
         if args.mtpUseDedicatedEmbeddings {
             _embedTokens.wrappedValue = Embedding(
@@ -92,11 +96,11 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         self.init(
             configuration,
             checkpointPolicy: .init(
-                layout: configuration.modelType == "qwen3_5_mtp" ? .standalone : .embedded,
+                modelType: configuration.modelType,
                 preconvertedNorms: preconvertedNorms))
     }
 
-    private init(
+    package init(
         _ configuration: Qwen35Configuration.TextConfiguration,
         checkpointPolicy: Qwen35CheckpointPolicy
     ) {
@@ -113,12 +117,16 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         self.init(
             configuration.textConfiguration,
             checkpointPolicy: .init(
-                layout: configuration.modelType == "qwen3_5_mtp" ? .standalone : .embedded,
+                modelType: configuration.modelType,
                 preconvertedNorms: preconvertedNorms))
     }
 
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: mtp.newCache())
+    }
+
+    public func isCompatible(with target: any LanguageModel) -> Bool {
+        target is Qwen35
     }
 
     public func prepareDrafterState(
