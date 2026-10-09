@@ -823,6 +823,17 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
     }
 }
 
+extension Qwen3VLMoE: ModelStateRewinding {
+
+    public func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+        QwenVL.rewoundState(
+            forPrefix: prefix,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            key: qwen3VLMoERopeDeltasKey)
+    }
+}
+
 // MARK: - Chat conventions
 
 extension Qwen3VLMoE {
