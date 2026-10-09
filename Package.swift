@@ -158,7 +158,10 @@ let package = Package(
         // Scripted tokenizers and models
         .target(
             name: "MLXScriptedLM",
-            dependencies: ["MLXLMCommon"],
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
             path: "Libraries/MLXScriptedLM",
             exclude: ["README.md"]
         ),

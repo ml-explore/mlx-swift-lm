@@ -209,9 +209,22 @@ public protocol KVCacheAttentionProtocol: KVCache {
     ) -> MLXArray
 }
 
+/// A cache entry that holds no attention state, such as a record of the tokens processed so far.
+///
+/// Cache policy skips these entries: capacity and compression settings, offset alignment
+/// checks, and ``KVCacheStatus`` layers ignore them. Generation still trims, copies, and saves
+/// them with the other entries, so an auxiliary cache must be trimmable to keep pace. Make it
+/// ``PromptCacheRestorable`` to restore it from a prompt cache file.
+///
+/// Staged speculative rounds (MTP) write through an auxiliary entry and trim it back to the
+/// accepted positions, so it must stay trimmable after the round's width.
+public protocol AuxiliaryKVCache: KVCache {}
+
 /// Base cache implementation providing default behaviors
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
+
+    public init() {}
     public var maxSize: Int? { nil }
     open var evictedTokenCount: Int { 0 }
 
@@ -1775,6 +1788,9 @@ public class CacheList: BaseKVCache {
                 list.rewriteLeaves(path: childPath, using: transform)
                 return list
             }
+            if child is any AuxiliaryKVCache {
+                return child
+            }
             let leaf = KVCacheLeaf(path: childPath, cache: child)
             return transform(leaf)
         }
@@ -1891,6 +1907,9 @@ struct KVCacheError: Error, LocalizedError {
 
 /// Map a cache instance to its Python-compatible class name for serialization.
 private func cacheClassName(_ cache: KVCache) -> String {
+    if let custom = cache as? any PromptCacheRestorable {
+        return type(of: custom).promptCacheClassName
+    }
     switch cache {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
@@ -2380,7 +2399,13 @@ private func restoreCacheFromMetaState(
         return try CacheList.fromState(state: state, metaState: metaState)
 
     default:
-        throw KVCacheError(message: "Unknown cache class: \(className)")
+        if let type = PromptCacheTypeRegistry.shared.type(named: className) {
+            return try type.restore(state: state, metaState: metaState)
+        }
+        throw KVCacheError(
+            message:
+                "Unknown cache class: \(className). Custom cache types must be registered with registerPromptCacheType(_:)."
+        )
     }
 }
 

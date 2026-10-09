@@ -44,6 +44,11 @@ let prompt = try tokenizer.applyChatTemplate(
 - ``ScriptedTemplateMessage``
 - ``ScriptedTemplateError``
 
+### Model Support
+
+- ``TranscriptKVCache``
+- ``TranscriptKVCacheError``
+
 ### Vocabulary
 
 - ``VocabularyBuilder``

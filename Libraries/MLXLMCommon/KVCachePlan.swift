@@ -219,17 +219,19 @@ package final class KVCacheStorage {
     package func beginRound(maximumPositions: Int) -> KVCacheRound? {
         precondition(!roundIsOpen, "a staged round is already open on this storage")
 
-        let leaves = KVCacheTree.leaves(in: cache)
-        guard leaves.count == cache.count, leaves.allSatisfy({ $0.path.count == 1 }) else {
-            return nil
-        }
-
         var strategies = [any KVCacheRoundStrategy]()
-        strategies.reserveCapacity(leaves.count)
-        for leaf in leaves {
-            guard
+        strategies.reserveCapacity(cache.count)
+        for (slot, entry) in cache.enumerated() {
+            // Auxiliary entries are not leaves, but they append and trim like one.
+            if entry is any AuxiliaryKVCache {
+                guard entry.isTrimmable(after: maximumPositions) else { return nil }
+                strategies.append(AppendOnlyRoundStrategy(slot: slot, live: entry))
+                continue
+            }
+            guard !(entry is CacheList),
                 let strategy = KVCacheRoundStrategyFactory.make(
-                    for: leaf, slot: leaf.path[0], maximumPositions: maximumPositions)
+                    for: KVCacheLeaf(path: [slot], cache: entry), slot: slot,
+                    maximumPositions: maximumPositions)
             else { return nil }
             strategies.append(strategy)
         }
