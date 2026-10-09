@@ -1455,6 +1455,8 @@ public class TurboQuantKVCache: BaseKVCache {
         innerState().reduce(0) { $0 + $1.nbytes }
     }
 
+    override public var nbytes: Int { memoryBytes }
+
     // MARK: - State / Trim
 
     override public func innerState() -> [MLXArray] {
