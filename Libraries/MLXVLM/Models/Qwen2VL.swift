@@ -1125,6 +1125,17 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
 
 }
 
+extension Qwen2VL: ModelStateRewinding {
+
+    public func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+        QwenVL.rewoundState(
+            forPrefix: prefix,
+            imageTokenId: config.baseConfiguration.imageTokenId,
+            videoTokenId: config.baseConfiguration.videoTokenId,
+            key: ropeDeltasKey)
+    }
+}
+
 // MARK: - Configuration
 
 /// Configuration for ``Qwen2VL``

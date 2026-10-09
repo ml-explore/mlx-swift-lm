@@ -2022,6 +2022,17 @@ extension Qwen3VL: PreparedInputSplitting {
     }
 }
 
+extension Qwen3VL: ModelStateRewinding {
+
+    public func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+        QwenVL.rewoundState(
+            forPrefix: prefix,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            key: ropeDeltasKey)
+    }
+}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }

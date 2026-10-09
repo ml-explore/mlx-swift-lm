@@ -234,6 +234,55 @@ struct ContinuationAssertions {
         }
     }
 
+    /// The ChatSession rewind flow: the cache holds a text prefix, then an image and more text
+    /// the next prompt no longer shares. Trimmed back to the prefix and resumed from the model's
+    /// rewound state, the next turn must land where one cold prefill of prefix and suffix does.
+    ///
+    /// The dropped image shifted the carried rope delta, so the stale state is the control: it
+    /// must diverge, or this assertion could not tell a rewound state from a stale one.
+    func assertRewoundStateContinuation<M: LanguageModel & ModelStateRewinding>(
+        _ model: M, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        try withRandomState(MLXRandom.RandomState(seed: 11)) {
+            let image = image()
+            let prefix = textTokens(12)
+            let dropped = concatenated(
+                [textTokens(4, seed: 2), imageRun(), textTokens(6, seed: 4)], axis: 1)
+            let suffix = textTokens(8, seed: 6)
+
+            let cacheF = try model.newCache(parameters: nil)
+            let (logitsF, _) = try prefill(
+                model, concatenated([prefix, suffix], axis: 1), cache: cacheF)
+
+            func resumed(rewinding: Bool) throws -> MLXArray {
+                let cache = try model.newCache(parameters: nil)
+                let (_, carried) = try prefill(
+                    model, concatenated([prefix, dropped], axis: 1), image: image, cache: cache)
+                XCTAssertEqual(
+                    trimPromptCache(cache, numTokens: dropped.dim(1)), dropped.dim(1),
+                    file: file, line: line)
+                let state =
+                    rewinding
+                    ? try XCTUnwrap(
+                        model.rewoundState(forPrefix: prefix.asArray(Int.self)),
+                        "refused to rewind a media-free prefix", file: file, line: line)
+                    : carried
+                return try prefill(model, suffix, cache: cache, state: state).0
+            }
+
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(try resumed(rewinding: true), logitsF), MatmulPrecision.splitTolerance,
+                "the rewound state positioned the next turn wrong", file: file, line: line)
+            XCTAssertGreaterThan(
+                maxAbsDiff(try resumed(rewinding: false), logitsF), MatmulPrecision.splitTolerance,
+                "the stale state matched too, so the rewind went untested", file: file, line: line)
+            XCTAssertNil(
+                model.rewoundState(
+                    forPrefix: concatenated([prefix, dropped], axis: 1).asArray(Int.self)),
+                "a prefix holding media cannot be rewound from its tokens", file: file, line: line)
+        }
+    }
+
     /// The ChatSession append-only media flow end to end: turn 1 (an image) sits in the
     /// cache, turn 2 (another image) arrives as a full prepared input that the model must
     /// split at the turn boundary. The suffix — carrying only the second image — prefilled

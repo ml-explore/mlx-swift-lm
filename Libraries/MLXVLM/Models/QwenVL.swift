@@ -52,6 +52,25 @@ public struct QwenVL {
         return resumeState
     }
 
+    /// The state a cache rewound to `prefix` resumes from, in the same offset-relative frame as
+    /// ``continuationResumeState(ropeDeltas:cacheOffset:key:)``.
+    ///
+    /// The carried delta is what the cached media shifted M-RoPE positions by; text advances
+    /// positions one for one. A media-free prefix therefore resumes at a delta of zero, whatever
+    /// the dropped tokens held. A prefix with media needs its grids to recompute the delta, so
+    /// it returns `nil` and the cache is rebuilt.
+    static func rewoundState(
+        forPrefix prefix: [Int], imageTokenId: Int, videoTokenId: Int,
+        key: LMOutput.Key<MLXArray>
+    ) -> LMOutput.State? {
+        guard !prefix.contains(where: { $0 == imageTokenId || $0 == videoTokenId }) else {
+            return nil
+        }
+        var state = LMOutput.State()
+        state[key] = MLXArray([Int32(0)])
+        return state
+    }
+
     /// Rotates half the hidden dims of the input
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let index = x.dim(-1) / 2

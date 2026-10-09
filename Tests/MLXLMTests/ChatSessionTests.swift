@@ -1145,8 +1145,46 @@ public class ChatSessionTests: XCTestCase {
             tokenizer: base.tokenizer)
     }
 
-    private static func makeStateProducingModel() -> ModelContext {
-        let base = makeModel()
+    /// A state-producing model that takes its anchor back to a shorter prefix,
+    /// or declines to, the way a Qwen VL model declines a prefix holding media.
+    private final class StateRewindingModel: Module, LanguageModel, ModelStateRewinding {
+        let base: any LanguageModel
+        let declinesToRewind: Bool
+
+        init(_ base: any LanguageModel, declinesToRewind: Bool) {
+            self.base = base
+            self.declinesToRewind = declinesToRewind
+            super.init()
+        }
+
+        func rewoundState(forPrefix prefix: [Int]) -> LMOutput.State? {
+            guard !declinesToRewind else { return nil }
+            var state = LMOutput.State()
+            state[StateProducingModel.anchorKey] = MLXArray([Int32(0)])
+            return state
+        }
+
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            try base.prepare(input, cache: cache, state: state, prefill: prefill)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            base(input, cache: cache, state: state)
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
+        }
+    }
+
+    private static func makeStateProducingModel(
+        processor: TestInputProcessor = TestInputProcessor()
+    ) -> ModelContext {
+        let base = makeModel(processor: processor)
         guard let inner = base.model as? Gemma3TextModel else {
             fatalError("expected the test model to be a Gemma3TextModel")
         }
@@ -3294,6 +3332,50 @@ public class ChatSessionTests: XCTestCase {
     }
 
     // MARK: - Carrying model state
+
+    /// The second turn of a session whose template rewrites the cached tail, so
+    /// the cache must rewind to the longest common prefix while carrying state.
+    private func rewindingTurn(declinesToRewind: Bool) async throws -> (
+        info: GenerateCompletionInfo, firstPrompt: Int, secondPrompt: Int
+    ) {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(
+            renderedLengthContinuation: continuation,
+            rewritesCachedTailOnContinuation: true)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        var context = Self.makeStateProducingModel(processor: processor)
+        context.model = StateRewindingModel(context.model, declinesToRewind: declinesToRewind)
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstPrompt = await lengthIterator.next()
+        let reply = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondPrompt = await lengthIterator.next()
+        return (reply.info, try XCTUnwrap(firstPrompt), try XCTUnwrap(secondPrompt))
+    }
+
+    /// Carried state no longer costs a stateful model its cache: the state
+    /// follows the cache back, and only what the prefix does not hold is prefilled.
+    func testCarriedStateRewindsWithTheCacheToTheLongestCommonPrefix() async throws {
+        let turn = try await rewindingTurn(declinesToRewind: false)
+
+        let commonPrefixLength = turn.firstPrompt - 1
+        XCTAssertEqual(turn.info.cachedPromptTokenCount, commonPrefixLength)
+        XCTAssertEqual(turn.info.promptTokenCount, turn.secondPrompt - commonPrefixLength)
+    }
+
+    /// A model that cannot derive its state for the prefix gets a rebuild, never
+    /// a rewound cache paired with state describing the dropped tokens.
+    func testStateTheModelCannotRewindRebuildsTheCache() async throws {
+        let turn = try await rewindingTurn(declinesToRewind: true)
+
+        XCTAssertEqual(turn.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(turn.info.promptTokenCount, turn.secondPrompt)
+    }
 
     /// Stateful continuation models cannot safely rewind arbitrary model state
     /// when speculative proposals are rejected, so the session must use normal

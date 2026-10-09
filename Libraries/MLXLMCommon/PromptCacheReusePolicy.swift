@@ -79,7 +79,8 @@ struct PromptCacheTurn: Sendable {
     var carriesAttentionMask: Bool = false
 
     /// Per-call model state (e.g. M-RoPE deltas) is carried across turns. Such
-    /// state is anchored to a prefill and cannot be rewound.
+    /// state describes the tokens the cache holds, so a rewind must take it back
+    /// too.
     var carriesModelState: Bool = false
 
     /// This turn appends tool results to a transcript whose last assistant
@@ -113,6 +114,13 @@ struct PromptCacheTurn: Sendable {
     /// Capability is not a guarantee: the split may still be declined for a
     /// specific input, which the caller handles when applying the decision.
     var canSplitPreparedMedia: Bool = false
+
+    /// The model can rewind its carried state to a shorter prefix, so that state
+    /// does not stand in the way of rewinding the cache.
+    ///
+    /// Capability is not a guarantee: the model may still decline for a specific
+    /// prefix, which the caller handles when applying the decision.
+    var canRewindModelState: Bool = false
 }
 
 /// What speculative-cache reuse can safely accompany the authoritative main cache.
@@ -301,7 +309,7 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && !turn.carriesNewMedia
             && !turn.carriesPreparedMedia
             && !turn.carriesAttentionMask
-            && !turn.carriesModelState
+            && (!turn.carriesModelState || turn.canRewindModelState)
 
         guard canRewind else {
             // The template changed an already-cached portion of the transcript,
