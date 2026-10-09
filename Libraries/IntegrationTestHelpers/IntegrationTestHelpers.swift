@@ -784,6 +784,118 @@ public enum EmbedderTests {
 /// These checks download large model weights and belong in the separate IntegrationTesting
 /// project rather than the package test suite.
 public enum RerankerIntegrationTests {
+    /// Validate ContextualAI's raw logits and instruction placement against its model card.
+    public static func contextual(
+        downloader: any Downloader, tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        try await rawLogits(
+            modelID: "ContextualAI/ctxl-rerank-v2-instruct-multilingual-1b",
+            revision: "8fd1edf6a98564cb712064f884b8ef7df5c1b876",
+            query: "What are the health benefits of exercise?",
+            documents: [
+                "Regular exercise reduces risk of heart disease and improves mental health.",
+                "A 2024 study shows exercise enhances cognitive function in older adults.",
+                "Ancient Greeks valued physical fitness for military training.",
+            ],
+            instruction: "Prioritize recent medical research",
+            expectedScores: [-0.851_562_5, 0.503_906_25, -9.375],
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    /// Validate Zerank-2's single-token logits against its model card.
+    public static func zerank2(
+        downloader: any Downloader, tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        try await rawLogits(
+            modelID: "zeroentropy/zerank-2-reranker",
+            revision: "5eae30d5ee3c6b2df2ef6d723bde45172d761c4c",
+            query: "What is 2+2?",
+            documents: ["4", "The answer is definitely 1 million"],
+            instruction: nil, expectedScores: [5.406_25, -4.5],
+            referenceTolerance: 0.25,
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    private static func rawLogits(
+        modelID: String, revision: String, query: String, documents: [String],
+        instruction: String?, expectedScores: [Double],
+        referenceTolerance: Double = 0.15,
+        downloader: any Downloader, tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(id: modelID, revision: revision),
+            progressHandler: logProgress(modelID))
+        let batched = try await reranker.scores(
+            query: query, documents: documents, instruction: instruction)
+        let sequential = try await reranker.scores(
+            query: query, documents: documents, instruction: instruction,
+            options: .init(maxBatchSize: 1))
+        try check(batched.scoreKind == .logit, "\(modelID) must return raw logits")
+        try check(batched.results.count == expectedScores.count, "Unexpected score count")
+        try check(
+            sequential.results.count == expectedScores.count, "Unexpected sequential score count")
+        for index in expectedScores.indices {
+            let score = batched.results[index].score
+            try check(batched.results[index].index == index, "Document order changed")
+            try check(
+                abs(score - expectedScores[index]) < referenceTolerance,
+                "\(modelID) score diverged at \(index): expected \(expectedScores[index]), received \(score)"
+            )
+            try check(
+                abs(score - sequential.results[index].score) < 0.1,
+                "\(modelID) batched and sequential scores diverged at \(index): \(score) versus \(sequential.results[index].score)"
+            )
+        }
+    }
+
+    /// Validate dual markers and sliding attention against the pinned Jina v3.5 MLX code.
+    public static func jinaV35(
+        downloader: any Downloader, tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let modelID = "jinaai/jina-reranker-v3.5-mlx"
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader,
+            configuration: ModelConfiguration(
+                id: modelID, revision: "3dd4ac901ccdcac85abe3815df0a0aaaf44e4a21"),
+            progressHandler: logProgress(modelID))
+        // Generated with rerank.py and modeling.py at the checkpoint revision above.
+        let cases: [(documents: [String], expected: [Double])] = [
+            (
+                [
+                    "Gravity attracts bodies toward one another.",
+                    "Beijing is the capital city of China.",
+                ], [-0.151_747_305_391_780_1, 0.527_092_876_800_070_6]
+            ),
+            (
+                [
+                    "Gravity attracts bodies toward one another. ",
+                    "Beijing is the capital city of China. ",
+                    "Paris is the capital city of France. ",
+                    "The Pacific Ocean is the largest ocean. ",
+                ].map { String(repeating: $0, count: 48) },
+                [
+                    -0.056_797_303_976_663_46, 0.435_606_956_009_850_44,
+                    -0.071_696_541_738_192_65, -0.099_664_307_617_910_8,
+                ]
+            ),
+        ]
+        for testCase in cases {
+            let response = try await reranker.scores(
+                query: "What is the capital of China?", documents: testCase.documents)
+            try check(response.scoreKind == .cosineSimilarity, "Jina v3.5 must return cosines")
+            try check(response.results.count == testCase.expected.count, "Unexpected score count")
+            for index in testCase.expected.indices {
+                let result = response.results[index]
+                try check(result.index == index, "Document order changed")
+                try check(
+                    abs(result.score - testCase.expected[index]) < 3e-3,
+                    "Jina v3.5 score diverged at \(index): expected \(testCase.expected[index]), received \(result.score)"
+                )
+            }
+        }
+    }
+
     /// Validate BGE v2 M3 logits against the values published in its model card.
     public static func bgeV2M3(
         downloader: any Downloader,
