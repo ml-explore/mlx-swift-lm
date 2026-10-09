@@ -149,7 +149,7 @@ public enum GuidedGenerationLoop {
 
         try kvCachePlan.applyAndValidate(to: cacheStorage)
 
-        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var tokenCount = 0
         var grammarStopped = false
         var consumerStopped = false
@@ -450,7 +450,8 @@ public enum GuidedGenerationLoop {
             }
         }
 
-        if !consumerStopped, let text = detokenizer.finish() {
+        if !consumerStopped, let text = detokenizer.finish(), !text.isEmpty {
+            accumulatedText += text
             _ = emit(text)
         }
 

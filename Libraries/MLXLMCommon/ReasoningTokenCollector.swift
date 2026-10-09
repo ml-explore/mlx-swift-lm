@@ -5,7 +5,7 @@
 /// reasoning/response segments.
 ///
 /// This is the pure, model-free core of think-then-call **Phase 1**:
-/// it owns a ``NaiveStreamingDetokenizer`` and an emitter, so the device-side
+/// it owns a ``StreamingDetokenizer`` and an emitter, so the device-side
 /// caller only supplies token IDs (from `generateTokens`) and forwards the
 /// returned segments to its channel. Token IDs are carried verbatim — no
 /// decode→re-encode round-trip — so the accumulated span prefills the
@@ -19,7 +19,7 @@
 public struct ReasoningTokenCollector {
 
     private var emitter: ReasoningEventEmitter
-    private var detokenizer: NaiveStreamingDetokenizer
+    private var detokenizer: any StreamingDetokenizer
 
     /// Every token ingested so far, in order. Phase 2 prefills the model's
     /// prompt + these to continue from the completed reasoning span.
@@ -33,7 +33,7 @@ public struct ReasoningTokenCollector {
 
     public init(config: ReasoningConfig, primedInside: Bool, tokenizer: any Tokenizer) {
         self.emitter = ReasoningEventEmitter(config: config, primedInside: primedInside)
-        self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        self.detokenizer = tokenizer.makeStreamingDetokenizer()
     }
 
     /// Whether the scanner is currently inside a reasoning span.

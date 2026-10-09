@@ -167,8 +167,8 @@ private struct OnyxProtocolDecoder {
     private let toolParser = ATEMToolCallParser()
     private let tools: [[String: any Sendable]]?
     private let validationPolicy: ToolCallValidationPolicy
-    private var reasoningDetokenizer: NaiveStreamingDetokenizer
-    private var responseDetokenizer: NaiveStreamingDetokenizer
+    private var reasoningDetokenizer: any StreamingDetokenizer
+    private var responseDetokenizer: any StreamingDetokenizer
     private(set) var isInsideReasoning = false
 
     init?(
@@ -180,8 +180,8 @@ private struct OnyxProtocolDecoder {
         self.tokenizer = tokenizer
         self.tools = tools
         self.validationPolicy = toolCallPolicy.validation
-        self.reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-        self.responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        self.reasoningDetokenizer = tokenizer.makeStreamingDetokenizer()
+        self.responseDetokenizer = tokenizer.makeStreamingDetokenizer()
     }
 
     mutating func push(_ token: Int) -> TokenStreamEvent? {
@@ -197,8 +197,8 @@ private struct OnyxProtocolDecoder {
         case .consumed:
             isInsideReasoning = false
         case .opened(let header):
-            reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
-            responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+            reasoningDetokenizer = tokenizer.makeStreamingDetokenizer()
+            responseDetokenizer = tokenizer.makeStreamingDetokenizer()
             isInsideReasoning = header.recipient == .reasoning
         case .payload(let header, let token):
             switch header.recipient {
@@ -223,11 +223,11 @@ private struct OnyxProtocolDecoder {
             switch header.recipient {
             case .reasoning:
                 let text = reasoningDetokenizer.finish()
-                reasoningDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                reasoningDetokenizer = tokenizer.makeStreamingDetokenizer()
                 return text.map(TokenStreamEvent.reasoning)
             case .user:
                 let text = responseDetokenizer.finish()
-                responseDetokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+                responseDetokenizer = tokenizer.makeStreamingDetokenizer()
                 return text.map(TokenStreamEvent.response)
             case .tool(let recipient):
                 let text = tokenizer.decode(tokenIds: payload, skipSpecialTokens: false)
@@ -262,6 +262,8 @@ private struct OnyxProtocolDecoder {
             }
         case .rejected(let message):
             isInsideReasoning = false
+            reasoningDetokenizer = tokenizer.makeStreamingDetokenizer()
+            responseDetokenizer = tokenizer.makeStreamingDetokenizer()
             return .protocolError(message)
         }
         return nil
