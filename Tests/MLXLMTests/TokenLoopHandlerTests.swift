@@ -165,6 +165,7 @@ final class TokenLoopHandlerTests: XCTestCase {
                 case .toolCall(let call): calls.append(call.function)
                 case .rejectedToolCall: XCTFail("valid tool call was rejected")
                 case .info(let info): completion = info
+                case .steering: XCTFail("Unexpected steering event")
                 }
             }
         }
