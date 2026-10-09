@@ -365,8 +365,8 @@ public struct QwenVL {
         let ids = tokens.asArray(Int.self)
         guard prefixTokenCount > 0, prefixTokenCount < ids.count else { return nil }
 
-        // The processor pairs media with an all-ones mask. Anything else is a real
-        // padding mask this routine will not reinterpret.
+        // A mask that masks nothing can be sliced with the tokens. Anything else is a
+        // real padding mask this routine will not reinterpret.
         if let mask = input.text.mask {
             guard mask.size == ids.count else { return nil }
             guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {

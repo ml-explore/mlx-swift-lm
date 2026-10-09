@@ -912,9 +912,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: processedImage,
             video: processedVideo)
     }
