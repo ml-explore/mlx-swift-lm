@@ -201,6 +201,102 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         super.init()
     }
 
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard let provider = target as? any Gemma4BackboneProviding else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Gemma4AssistantDraftModel",
+                expected: "a Gemma 4 VLM target",
+                actual: String(describing: type(of: target))
+            )
+        }
+
+        func mismatch(_ property: String, expected: String, actual: String)
+            -> MTPDrafterCompatibilityError
+        {
+            .incompatibleTarget(
+                drafter: "Gemma4AssistantDraftModel",
+                expected: "\(property) \(expected)",
+                actual: "\(type(of: target)) with \(property) \(actual)")
+        }
+
+        let backbone = provider.textBackbone
+        let targetConfig = backbone.config
+        let draftConfig = config.textConfiguration
+        guard targetConfig.hiddenSize == config.backboneHiddenSize else {
+            throw mismatch(
+                "hiddenSize", expected: "\(config.backboneHiddenSize)",
+                actual: "\(targetConfig.hiddenSize)")
+        }
+        guard targetConfig.vocabularySize == draftConfig.vocabularySize else {
+            throw mismatch(
+                "vocabularySize", expected: "\(draftConfig.vocabularySize)",
+                actual: "\(targetConfig.vocabularySize)")
+        }
+
+        let sourceCount = backbone.firstKVSharedLayerIdx
+        guard sourceCount > 0, sourceCount <= backbone.layers.count else {
+            throw mismatch(
+                "KV-owning layer count", expected: "in 1...\(backbone.layers.count)",
+                actual: "\(sourceCount)")
+        }
+        let sourceLayers = backbone.layers.prefix(sourceCount)
+        var targetAttention: [String: Gemma4TextAttention] = [:]
+        // The target emits drafter state only when both KV types are available.
+        for layerType in ["full_attention", "sliding_attention"] {
+            guard let source = sourceLayers.last(where: { $0.layerType == layerType }) else {
+                throw mismatch(
+                    "\(layerType) KV source", expected: "in the KV-owning layer prefix",
+                    actual: "missing")
+            }
+            targetAttention[layerType] = source.selfAttention
+        }
+
+        for layer in model.layers {
+            guard let source = targetAttention[layer.layerType] else {
+                throw mismatch(
+                    "drafter layer type", expected: "full_attention or sliding_attention",
+                    actual: layer.layerType)
+            }
+            let attention = layer.selfAttention
+            guard source.numHeads > 0, source.numKVHeads > 0,
+                attention.numHeads > 0, attention.numKVHeads > 0
+            else {
+                throw mismatch(
+                    "\(layer.layerType) head counts", expected: "positive query and KV counts",
+                    actual: "target Q=\(source.numHeads), KV=\(source.numKVHeads); "
+                        + "drafter Q=\(attention.numHeads), KV=\(attention.numKVHeads)")
+            }
+            guard source.headDim == attention.headDim else {
+                throw mismatch(
+                    "\(layer.layerType) headDim", expected: "\(attention.headDim)",
+                    actual: "\(source.headDim)")
+            }
+            guard source.numKVHeads == attention.numKVHeads else {
+                throw mismatch(
+                    "\(layer.layerType) numKVHeads", expected: "\(attention.numKVHeads)",
+                    actual: "\(source.numKVHeads)")
+            }
+            guard attention.numHeads % source.numKVHeads == 0 else {
+                throw mismatch(
+                    "\(layer.layerType) drafter query heads",
+                    expected: "a multiple of \(source.numKVHeads)",
+                    actual: "\(attention.numHeads)")
+            }
+        }
+
+        guard draftConfig.slidingWindow > 0 else {
+            throw mismatch(
+                "drafter slidingWindow", expected: "greater than 0",
+                actual: "\(draftConfig.slidingWindow)")
+        }
+        let targetWindow = targetConfig.slidingWindow > 0 ? targetConfig.slidingWindow : 4096
+        guard targetWindow <= draftConfig.slidingWindow else {
+            throw mismatch(
+                "effective target slidingWindow", expected: "at most \(draftConfig.slidingWindow)",
+                actual: "\(targetWindow)")
+        }
+    }
+
     public func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,

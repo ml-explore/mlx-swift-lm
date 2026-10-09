@@ -107,6 +107,252 @@ func testGemma4AssistantDraftModelInstantiatesAndShape() {
     // We don't run inference here (would need actual weights + metal kernels).
 }
 
+@Test
+func testGemma4AssistantRejectsNonGemmaTarget() {
+    let drafter = Gemma4AssistantDraftModel(syntheticConfig(tieWordEmbeddings: true))
+
+    #expect(throws: MTPDrafterCompatibilityError.self) {
+        try drafter.validateCompatibility(with: NonGemmaTarget())
+    }
+}
+
+@Suite
+struct Gemma4AssistantCompatibilityTests {
+    @Test(arguments: [false, true], [0, 2])
+    func acceptsDifferentBackboneLayouts(unified: Bool, sharedLayers: Int) throws {
+        let drafter = try makeDrafter(unified: unified)
+        for window in [4, 8] {
+            let target = try makeTarget(
+                unified: unified,
+                overrides: [
+                    "layer_types": [
+                        "sliding_attention", "full_attention", "sliding_attention",
+                        "full_attention",
+                    ],
+                    "num_kv_shared_layers": sharedLayers,
+                    "sliding_window": window,
+                ])
+            try drafter.validateCompatibility(with: target)
+        }
+    }
+
+    @Test(
+        arguments: [false, true],
+        [
+            ("hidden_size", 16, "hiddenSize", 8),
+            ("vocab_size", 48, "vocabularySize", 32),
+            ("head_dim", 8, "sliding_attention headDim", 4),
+            ("global_head_dim", 4, "full_attention headDim", 8),
+            ("num_key_value_heads", 4, "sliding_attention numKVHeads", 2),
+            ("num_global_key_value_heads", 2, "full_attention numKVHeads", 1),
+        ])
+    func rejectsDimensionMismatches(
+        unified: Bool, testCase: (String, Int, String, Int)
+    ) throws {
+        let (key, actual, property, expected) = testCase
+        let target = try makeTarget(unified: unified, overrides: [key: actual])
+        let drafter = try makeDrafter(unified: unified)
+        try expectMismatch(
+            drafter, target, property: property,
+            expected: "\(expected)", actual: "\(actual)")
+    }
+
+    @Test(arguments: [false, true])
+    func rejectsNonDivisibleQueryHeads(unified: Bool) throws {
+        let target = try makeTarget(unified: unified)
+        let drafter = try makeDrafter(unified: unified, overrides: ["num_attention_heads": 3])
+        try expectMismatch(
+            drafter, target, property: "sliding_attention drafter query heads",
+            expected: "a multiple of 2", actual: "3")
+    }
+
+    @Test(
+        arguments: [false, true],
+        ["num_attention_heads", "num_key_value_heads", "num_global_key_value_heads"])
+    func rejectsNonPositiveHeadCounts(unified: Bool, key: String) throws {
+        let layerType = key == "num_global_key_value_heads" ? "full_attention" : "sliding_attention"
+        let target = try makeTarget(unified: unified)
+        let drafter = try makeDrafter(unified: unified, overrides: [key: 0])
+        try expectMismatch(
+            drafter, target, property: "\(layerType) head counts",
+            expected: "positive", actual: "0")
+
+        let invalidTarget = try makeTarget(unified: unified, overrides: [key: 0])
+        try expectMismatch(
+            makeDrafter(unified: unified), invalidTarget,
+            property: "\(layerType) head counts", expected: "positive", actual: "0")
+    }
+
+    @Test(arguments: [false, true], ["full_attention", "sliding_attention"])
+    func rejectsMissingSourceInOwningPrefix(unified: Bool, missingType: String) throws {
+        let presentType = missingType == "full_attention" ? "sliding_attention" : "full_attention"
+        let target = try makeTarget(
+            unified: unified,
+            overrides: ["layer_types": [presentType, missingType], "num_kv_shared_layers": 1])
+        try expectMismatch(
+            makeDrafter(unified: unified), target,
+            property: "\(missingType) KV source", expected: "KV-owning layer prefix",
+            actual: "missing")
+    }
+
+    @Test(arguments: [false, true], [2, -1])
+    func rejectsInvalidOwningPrefix(unified: Bool, sharedLayers: Int) throws {
+        let target = try makeTarget(
+            unified: unified, overrides: ["num_kv_shared_layers": sharedLayers])
+        try expectMismatch(
+            makeDrafter(unified: unified), target,
+            property: "KV-owning layer count", expected: "1...2", actual: "\(2 - sharedLayers)")
+    }
+
+    @Test(arguments: [false, true])
+    func rejectsUnknownDrafterLayerType(unified: Bool) throws {
+        let target = try makeTarget(unified: unified)
+        let drafter = try makeDrafter(
+            unified: unified, overrides: ["layer_types": ["unknown_attention"]])
+        try expectMismatch(
+            drafter, target, property: "drafter layer type",
+            expected: "full_attention or sliding_attention", actual: "unknown_attention")
+    }
+
+    @Test(arguments: [false, true])
+    func rejectsLargerTargetWindow(unified: Bool) throws {
+        let target = try makeTarget(unified: unified, overrides: ["sliding_window": 16])
+        try expectMismatch(
+            makeDrafter(unified: unified), target,
+            property: "effective target slidingWindow", expected: "at most 8", actual: "16")
+    }
+
+    @Test(arguments: [false, true], [0, -1])
+    func usesEffectiveTargetWindowFallback(unified: Bool, window: Int) throws {
+        let target = try makeTarget(unified: unified, overrides: ["sliding_window": window])
+        try expectMismatch(
+            makeDrafter(unified: unified), target,
+            property: "effective target slidingWindow", expected: "at most 8", actual: "4096")
+
+        let drafter = try makeDrafter(unified: unified, overrides: ["sliding_window": 4096])
+        try drafter.validateCompatibility(with: target)
+    }
+
+    @Test(arguments: [false, true], [0, -1])
+    func rejectsNonPositiveDrafterWindow(unified: Bool, window: Int) throws {
+        let target = try makeTarget(unified: unified)
+        let drafter = try makeDrafter(unified: unified, overrides: ["sliding_window": window])
+        try expectMismatch(
+            drafter, target, property: "drafter slidingWindow",
+            expected: "greater than 0", actual: "\(window)")
+    }
+
+    @Test(arguments: [false, true])
+    func ignoresUnusedGlobalKVHeadSetting(unified: Bool) throws {
+        let target = try makeTarget(
+            unified: unified,
+            overrides: ["attention_k_eq_v": false, "num_global_key_value_heads": 4])
+        let drafter = try makeDrafter(unified: unified, overrides: ["attention_k_eq_v": false])
+        try drafter.validateCompatibility(with: target)
+    }
+
+    @Test
+    func usesLocalKVHeadsWhenGlobalSettingIsAbsent() throws {
+        let target = try makeTarget(
+            unified: false, overrides: ["num_global_key_value_heads": NSNull()])
+        let drafter = try makeDrafter(
+            unified: false, overrides: ["num_global_key_value_heads": 2])
+        try drafter.validateCompatibility(with: target)
+    }
+
+    @Test(arguments: [false, true])
+    func usesLocalHeadDimensionWhenGlobalSettingIsZero(unified: Bool) throws {
+        let target = try makeTarget(unified: unified, overrides: ["global_head_dim": 0])
+        let drafter = try makeDrafter(unified: unified, overrides: ["global_head_dim": 4])
+        try drafter.validateCompatibility(with: target)
+    }
+
+    private func expectMismatch(
+        _ drafter: Gemma4AssistantDraftModel, _ target: any LanguageModel,
+        property: String, expected: String, actual: String
+    ) throws {
+        do {
+            try drafter.validateCompatibility(with: target)
+            Issue.record("Expected a compatibility error for \(property)")
+        } catch let error as MTPDrafterCompatibilityError {
+            switch error {
+            case .incompatibleTarget(let name, let expectation, let received):
+                #expect(name == "Gemma4AssistantDraftModel")
+                #expect(expectation.contains(property))
+                #expect(expectation.contains(expected))
+                #expect(received.contains(property))
+                #expect(received.contains(actual))
+                #expect(received.contains(String(describing: type(of: target))))
+            }
+        }
+    }
+
+    private func textConfig(unified: Bool, overrides: [String: Any]) -> [String: Any] {
+        var text: [String: Any] = [
+            "model_type": unified ? "gemma4_unified_text" : "gemma4_text",
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_global_key_value_heads": 1,
+            "head_dim": 4,
+            "global_head_dim": 8,
+            "vocab_size": 32,
+            "num_kv_shared_layers": 0,
+            "hidden_size_per_layer_input": 0,
+            "sliding_window": 8,
+            "attention_k_eq_v": true,
+            "use_double_wide_mlp": false,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "rope_parameters": [:] as [String: String],
+        ]
+        text.merge(overrides) { _, new in new }
+        text["num_hidden_layers"] = (text["layer_types"] as! [String]).count
+        return text
+    }
+
+    private func makeDrafter(
+        unified: Bool, overrides: [String: Any] = [:]
+    ) throws -> Gemma4AssistantDraftModel {
+        let text = textConfig(
+            unified: unified,
+            overrides: ["hidden_size": 4, "num_attention_heads": 8]
+                .merging(overrides) { _, new in new })
+        let json: [String: Any] = [
+            "model_type": unified ? "gemma4_unified_assistant" : "gemma4_assistant",
+            "backbone_hidden_size": 8,
+            "text_config": text,
+        ]
+        return try Gemma4AssistantDraftModel(
+            JSONDecoder().decode(
+                Gemma4AssistantConfiguration.self,
+                from: JSONSerialization.data(withJSONObject: json)))
+    }
+
+    private func makeTarget(
+        unified: Bool, overrides: [String: Any] = [:]
+    ) throws -> any LanguageModel {
+        var json: [String: Any] = [
+            "model_type": unified ? "gemma4_unified" : "gemma4",
+            "text_config": textConfig(unified: unified, overrides: overrides),
+        ]
+        if unified {
+            return try Gemma4Unified(
+                JSONDecoder().decode(
+                    Gemma4UnifiedConfiguration.self,
+                    from: JSONSerialization.data(withJSONObject: json)))
+        }
+        json["vision_config"] = [
+            "hidden_size": 4, "intermediate_size": 8, "num_hidden_layers": 1,
+            "num_attention_heads": 1, "num_key_value_heads": 1, "head_dim": 4,
+            "patch_size": 2, "position_embedding_size": 4, "pooling_kernel_size": 1,
+        ]
+        return try Gemma4(
+            JSONDecoder().decode(
+                Gemma4Configuration.self, from: JSONSerialization.data(withJSONObject: json)))
+    }
+}
+
 // MARK: - MaskedEmbedder forward (use_ordered_embeddings)
 
 /// Independent correctness pin for the centroid-routed sparse LM head.
@@ -407,6 +653,7 @@ func testDraftBlockAcceptsGemma4UnifiedTarget() throws {
     let drafterConfig = try JSONDecoder().decode(
         Gemma4AssistantConfiguration.self, from: Data(drafterJSON.utf8))
     let drafter = Gemma4AssistantDraftModel(drafterConfig)
+    try drafter.validateCompatibility(with: target)
 
     let lastHiddenSlice = lastHidden[0..., (-1)..., 0...]
     let proposed = drafter.draftBlock(
@@ -421,4 +668,21 @@ func testDraftBlockAcceptsGemma4UnifiedTarget() throws {
     )
     eval(proposed)
     #expect(proposed.shape == [1, 2])
+}
+
+private final class NonGemmaTarget: Module, LanguageModel, KVCacheDimensionProvider {
+    var kvHeads: [Int] { [] }
+
+    func prepare(
+        _ input: LMInput,
+        cache _: [KVCache],
+        state _: LMOutput.State?,
+        prefill _: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache _: [KVCache]?) -> MLXArray {
+        MLXArray.zeros([1, inputs.dim(-1), 1])
+    }
 }

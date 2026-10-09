@@ -86,7 +86,8 @@ struct ToolCallPolicyTests {
                             tokenizer: tokenizer, iterator: iterator, tools: tools,
                             toolCallPolicy: policy)
                         for await event in stream { events.append(event) }
-                        #expect(await task.value == tokens)
+                        let recordedTokens = (await task.value).consume().generatedTokens
+                        #expect(recordedTokens == tokens)
                     } else {
                         let (stream, task) = generateTask(
                             promptTokenCount: 0, modelConfiguration: configuration,
