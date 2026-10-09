@@ -127,9 +127,9 @@ is prefilled. Both the string-and-role overloads and the structured-message
 overloads use this same retained-conversation and cache-reuse path. If a
 template rewrites an earlier part of the prompt, the session rewinds to a
 verified common prefix when the cache and input can be trimmed safely: a
-media-carrying prompt is carved by the model's own ``PreparedInputSplitting``
+media-carrying prompt is carved by the model's own `PreparedInputSplitting`
 split, and state a model carries across turns is rewound through its
-``ModelStateRewinding`` conformance when it declares one. Otherwise, it
+`ModelStateRewinding` conformance when it declares one. Otherwise, it
 rebuilds the cache rather than combining stale model state with a mismatched
 prompt.
 
