@@ -175,4 +175,63 @@ struct PrefillParametersTests {
         #expect(short.events == [[5, 5]])
         #expect(short.cacheOffsets.allSatisfy { $0 == 5 })
     }
+
+    // MARK: - prefix through a real TokenIterator
+
+    private static func prompt(_ count: Int) -> LMInput {
+        LMInput(tokens: MLXArray((0 ..< count).map { Int32($0 % 100) }))
+    }
+
+    /// Builds a model and a cache over parameters that log prefill reports in
+    /// delivery order: a prefix as `[positions]`, a chunk as `[processed, total]`.
+    private static func recordingPrefill(
+        _ log: ProgressLog
+    ) throws -> (model: LlamaModel, parameters: GenerateParameters, cache: [KVCache]) {
+        var parameters = GenerateParameters(temperature: 0)
+        parameters.prefill = PrefillParameters(
+            stepSize: 8,
+            progress: { processed, total in log.events.append([processed, total]) },
+            prefix: { positions in log.events.append([positions]) })
+        let model = makeModel()
+        return (model, parameters, try model.newCache(parameters: parameters))
+    }
+
+    @Test("prefix precedes progress, and reports what a reused cache holds")
+    func prefixReportsTheReusedCache() throws {
+        let log = ProgressLog()
+        let (model, parameters, cache) = try Self.recordingPrefill(log)
+
+        _ = try TokenIterator(
+            input: Self.prompt(20), model: model, cache: cache, parameters: parameters)
+        #expect(log.events.first == [0])
+        #expect(log.events.dropFirst().allSatisfy { $0.count == 2 })
+        #expect(log.events.last == [20, 20])
+
+        log.events.removeAll()
+        _ = try TokenIterator(
+            input: Self.prompt(6), model: model, cache: cache, parameters: parameters)
+        #expect(log.events.first == [20])
+        #expect(log.events.dropFirst().allSatisfy { $0.count == 2 })
+        #expect(log.events.last == [6, 6])
+    }
+
+    @Test("speculative prefill reports the main cache's prefix once")
+    func prefixOfSpeculativePrefill() throws {
+        let log = ProgressLog()
+        let (mainModel, parameters, mainCache) = try Self.recordingPrefill(log)
+        let draftModel = Self.makeModel()
+        let draftCache = try draftModel.newCache(parameters: parameters)
+
+        _ = try TokenIterator(
+            input: Self.prompt(20), model: mainModel, cache: mainCache, parameters: parameters)
+        _ = try TokenIterator(
+            input: Self.prompt(20), model: draftModel, cache: draftCache, parameters: parameters)
+
+        log.events.removeAll()
+        _ = try SpeculativeTokenIterator(
+            input: Self.prompt(6), mainModel: mainModel, draftModel: draftModel,
+            mainCache: mainCache, draftCache: draftCache, parameters: parameters,
+            numDraftTokens: 2)
+        #expect(log.events.filter { $0.count == 1 } == [[20]])
+    }
 }
