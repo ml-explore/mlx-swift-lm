@@ -206,6 +206,51 @@ final class LoadWeightsTests: XCTestCase {
         XCTAssertEqual(names, ["model.safetensors"])
     }
 
+    func testKeyPrefixSelectsOnlyTheFilesTheIndexMapsThoseWeightsTo() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeEmptyFile("model-00001-of-00002.safetensors", in: directory)
+        try writeEmptyFile("model-00002-of-00002.safetensors", in: directory)
+        try writeEmptyFile("model-mtp-head.safetensors", in: directory)
+        try writeIndex(
+            [
+                "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                "model.norm.weight": "model-00002-of-00002.safetensors",
+                "mtp.fc.weight": "model-mtp-head.safetensors",
+                "mtp.norm.weight": "model-mtp-head.safetensors",
+            ], in: directory)
+
+        let names = try safetensorWeightURLs(in: directory, selection: .indexedKeyPrefix("mtp."))
+            .map(\.lastPathComponent)
+
+        XCTAssertEqual(names, ["model-mtp-head.safetensors"])
+    }
+
+    func testKeyPrefixTheIndexMapsNothingToFallsBackToTheAutomaticSelection() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeEmptyFile("model.safetensors", in: directory)
+        try writeEmptyFile("model-extra.safetensors", in: directory)
+        try writeIndex(["model.norm.weight": "model.safetensors"], in: directory)
+
+        // the head shares the target's file: the index decides, as it would without a prefix
+        XCTAssertEqual(
+            try safetensorWeightURLs(in: directory, selection: .indexedKeyPrefix("mtp."))
+                .map(\.lastPathComponent),
+            ["model.safetensors"])
+
+        let unindexed = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: unindexed) }
+        try writeEmptyFile("model.safetensors", in: unindexed)
+
+        XCTAssertEqual(
+            try safetensorWeightURLs(in: unindexed, selection: .indexedKeyPrefix("mtp."))
+                .map(\.lastPathComponent),
+            ["model.safetensors"])
+    }
+
     func testIndexMayNameFilesInSubdirectories() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

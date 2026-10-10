@@ -92,10 +92,17 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // The draft reads only its own `mtp.*` tensors (its `sanitize` drops the rest), and a
+        // checkpoint that ships the head keeps them in their own shard beside the target's:
+        // read that shard alone rather than the whole checkpoint the target already holds. An
+        // explicit selection on the configuration still wins.
+        let weightFileSelection: WeightFileSelection =
+            configuration.weightFileSelection == .automatic
+            ? .indexedKeyPrefix("mtp.") : configuration.weightFileSelection
         try await loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
-            weightFileSelection: configuration.weightFileSelection
+            weightFileSelection: weightFileSelection
         )
 
         let modelConfig = ModelConfiguration(
