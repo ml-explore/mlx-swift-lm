@@ -9,6 +9,7 @@ Common language model code.
 - <doc:wired-memory>
 - <doc:kv-cache-quantization>
 - <doc:generation-observability>
+- <doc:compiled-kv-cache>
 
 ## Reranking
 
