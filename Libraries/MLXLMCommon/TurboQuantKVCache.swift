@@ -630,7 +630,7 @@ class MSECodec {
 ///   all compressed tokens. Zero dequantization.
 ///
 /// Both keys and values: Algorithm 1 (MSE at b bits, no QJL)
-public class TurboQuantKVCache: BaseKVCache {
+public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
 
     public let bits: Int  // Legacy: used when keyBits == valueBits
     public let keyBits: Int  // Bit-width for key compression (0 = raw FP16, no compression)
@@ -1168,24 +1168,51 @@ public class TurboQuantKVCache: BaseKVCache {
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
     ) -> MLXArray {
-        let headDim = newKeys.dim(-1)
-        let B = queries.dim(0)
-        let nQHeads = queries.dim(1)
-        let nKVHeads = newKeys.dim(1)
-        let L = queries.dim(2)
-        let nRepeats = nQHeads / nKVHeads
+        appendCompressed(keys: newKeys, values: newValues)
+        return attend(queries: queries, scale: scale, mask: mask)
+    }
 
-        // Transition: compress raw cache on first decode call
+    private func appendCompressed(keys: MLXArray, values: MLXArray) {
         if !isCompressed {
             compressRawCache()
         }
+        encodeNewToken(keys: keys, values: values)
+        isCompressed = true
+    }
 
-        // Phase A: Encode new token
-        encodeNewToken(keys: newKeys, values: newValues)
+    package func updateForAttention(keys: MLXArray, values: MLXArray) {
+        if keys.dim(2) > 1 && !isCompressed {
+            _ = update(keys: keys, values: values)
+        } else {
+            appendCompressed(keys: keys, values: values)
+        }
+    }
+
+    package func attend(
+        queries: MLXArray, scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        if !isCompressed {
+            guard let rawKeys, let rawValues else {
+                preconditionFailure("TurboQuant attention requires populated KV")
+            }
+            return MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: rawKeys[.ellipsis, ..<offset, 0...],
+                values: rawValues[.ellipsis, ..<offset, 0...],
+                scale: scale, mask: mask)
+        }
 
         guard let valueMSECodec else {
             return queries
         }
+
+        let headDim = queries.dim(-1)
+        let B = queries.dim(0)
+        let nQHeads = queries.dim(1)
+        let nKVHeads = valPackedMSE!.dim(1)
+        let L = queries.dim(2)
+        let nRepeats = nQHeads / nKVHeads
 
         let tokenCount = offset
 

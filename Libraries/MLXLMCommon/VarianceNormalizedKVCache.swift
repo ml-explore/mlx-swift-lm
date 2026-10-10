@@ -4,6 +4,19 @@ import Foundation
 import MLX
 import MLXNN
 
+extension VarianceNormalizedKVCache: SharedAttentionKVCache {
+    package func updateForAttention(keys: MLXArray, values: MLXArray) {
+        append(keys: keys, values: values)
+    }
+
+    package func attend(
+        queries: MLXArray, scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        quantizedRotatedAttention(queries: queries, scale: scale, mask: mask)
+    }
+}
+
 private struct VarianceNormalizedKVTile {
     var keyWeight: MLXArray
     var keyScales: MLXArray
@@ -910,8 +923,8 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
     ) -> MLXArray {
-        append(keys: keys, values: values)
-        return quantizedRotatedAttention(queries: queries, scale: scale, mask: mask)
+        updateForAttention(keys: keys, values: values)
+        return attend(queries: queries, scale: scale, mask: mask)
     }
 
     public override var state: [MLXArray] {

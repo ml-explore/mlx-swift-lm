@@ -43,6 +43,11 @@ public struct Gemma3nTextConfiguration: Codable {
     let ropeScaling: [String: String]?
     let slidingWindowPattern: Int?
 
+    var attentionLayerTypes: [String] {
+        (layerTypes ?? Array(repeating: "full_attention", count: numHiddenLayers))
+            .map { $0 == "global_attention" ? "full_attention" : $0 }
+    }
+
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case hiddenSize = "hidden_size"
@@ -201,6 +206,11 @@ func gemma3nAdjustedAttentionMask(
     return .array(maskArray[.ellipsis, 0 ..< keySequenceLength])
 }
 
+struct Gemma3nSharedKV {
+    let attention: AttentionKVState
+    let positionOffset: RoPEOffset?
+}
+
 class Gemma3nAttention: Module {
     let isSliding: Bool
     let numHeads: Int
@@ -212,17 +222,16 @@ class Gemma3nAttention: Module {
     let isKvSharedLayer: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
-    @ModuleInfo(key: "v_proj") var vProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
+    @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
-    @ModuleInfo(key: "v_norm") var vNorm: RMSNoScale
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
+    @ModuleInfo(key: "v_norm") var vNorm: RMSNoScale?
     @ModuleInfo var rope: RoPELayer
 
     init(_ config: Gemma3nTextConfiguration, layerIdx: Int) {
-        let layerTypes =
-            config.layerTypes ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
+        let layerTypes = config.attentionLayerTypes
         self.isSliding = layerTypes[layerIdx] == "sliding_attention"
 
         let dim = config.hiddenSize
@@ -232,20 +241,21 @@ class Gemma3nAttention: Module {
         self.headDim = config.headDim
         self.layerIdx = layerIdx
         self.scale = 1.0
+        let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
+        self.isKvSharedLayer = layerIdx >= firstKvSharedLayerIdx
 
         self._qProj.wrappedValue = Linear(dim, numHeads * headDim, bias: false)
-        self._kProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
-        self._vProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
         self._oProj.wrappedValue = Linear(numHeads * headDim, dim, bias: false)
 
         self._qNorm.wrappedValue = RMSNorm(
             dimensions: config.headDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = RMSNorm(
-            dimensions: config.headDim, eps: config.rmsNormEps)
-        self._vNorm.wrappedValue = RMSNoScale(eps: config.rmsNormEps)
-
-        let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
-        self.isKvSharedLayer = layerIdx >= firstKvSharedLayerIdx
+        if !isKvSharedLayer {
+            self._kProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
+            self._vProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
+            self._kNorm.wrappedValue = RMSNorm(
+                dimensions: config.headDim, eps: config.rmsNormEps)
+            self._vNorm.wrappedValue = RMSNoScale(eps: config.rmsNormEps)
+        }
 
         // Use appropriate RoPE base frequency for sliding vs global attention
         let baseFreq = isSliding ? config.ropeLocalBaseFreq : config.ropeTheta
@@ -261,71 +271,64 @@ class Gemma3nAttention: Module {
     func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
-        cache: KVCache? = nil
+        cache: KVCache? = nil,
+        sharedKV: Gemma3nSharedKV? = nil
     ) -> MLXArray {
+        forward(x, mask: mask, cache: cache, sharedKV: sharedKV).0
+    }
+
+    func forward(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        sharedKV: Gemma3nSharedKV? = nil
+    ) -> (MLXArray, Gemma3nSharedKV) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x)
         queries = queries.reshaped(B, L, -1, headDim)
         queries = qNorm(queries)
 
-        let offset = cache?.ropeOffset
-        var keys: MLXArray
-        var values: MLXArray
-
-        if isKvSharedLayer && cache != nil {
-            let state = cache!.state
-            if state.count >= 2 {
-                keys = state[0]
-                values = state[1]
-            } else {
-                keys = kProj(x).reshaped(B, L, -1, headDim)
-                keys = kNorm(keys)
-                keys = keys.transposed(0, 2, 1, 3)
-                keys = applyRotaryPosition(rope, to: keys, offset: offset)
-
-                values = vProj(x).reshaped(B, L, -1, headDim)
-                values = vNorm(values)
-                values = values.transposed(0, 2, 1, 3)
-
-                if let cache = cache {
-                    (keys, values) = cache.update(keys: keys, values: values)
-                }
-            }
-        } else {
-            keys = kProj(x).reshaped(B, L, -1, headDim)
-            keys = kNorm(keys)
-            keys = keys.transposed(0, 2, 1, 3)
-            keys = applyRotaryPosition(rope, to: keys, offset: offset)
-
-            values = vProj(x).reshaped(B, L, -1, headDim)
-            values = vNorm(values)
-            values = values.transposed(0, 2, 1, 3)
-
-            if let cache = cache {
-                (keys, values) = cache.update(keys: keys, values: values)
-            }
-        }
+        let offset = sharedKV?.positionOffset ?? cache?.ropeOffset
 
         queries = queries.transposed(0, 2, 1, 3)
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
 
+        let kv: Gemma3nSharedKV
+        if isKvSharedLayer {
+            guard let sharedKV else {
+                preconditionFailure("Gemma3n shared attention requires its owner's KV")
+            }
+            precondition(cache == nil)
+            kv = sharedKV
+        } else {
+            guard let kProj, let kNorm, let vProj, let vNorm else {
+                preconditionFailure("Gemma3n owning attention requires K/V projections")
+            }
+            var keys = kNorm(kProj(x).reshaped(B, L, -1, headDim))
+            keys = keys.transposed(0, 2, 1, 3)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
+            let values = vNorm(vProj(x).reshaped(B, L, -1, headDim))
+                .transposed(0, 2, 1, 3)
+            kv = Gemma3nSharedKV(
+                attention: .update(keys: keys, values: values, cache: cache),
+                positionOffset: offset)
+        }
+
         let adjustedMask = gemma3nAdjustedAttentionMask(
             mask,
-            keySequenceLength: keys.dim(-2)
+            keySequenceLength: kv.attention.sequenceLength
         )
 
-        let output = MLXFast.scaledDotProductAttention(
+        let output = kv.attention.attend(
             queries: queries,
-            keys: keys,
-            values: values,
             scale: scale,
             mask: adjustedMask ?? .none
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
-        return oProj(output)
+        return (oProj(output), kv)
     }
 }
 
@@ -574,6 +577,16 @@ class Gemma3nDecoderLayer: Module {
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil
     ) -> MLXArray {
+        forward(x, mask: mask, cache: cache, perLayerInput: perLayerInput).0
+    }
+
+    func forward(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        perLayerInput: MLXArray? = nil,
+        sharedKV: Gemma3nSharedKV? = nil
+    ) -> (MLXArray, Gemma3nSharedKV) {
         var x = x
         if x.ndim == 1 {
             x = expandedDimensions(x, axis: 0)
@@ -585,10 +598,11 @@ class Gemma3nDecoderLayer: Module {
         let activePredictionNormed = inputLayernorm(activePrediction)
         let laurelOutput = laurel(activePredictionNormed)
 
-        let attn = selfAttn(
+        let (attn, kv) = selfAttn.forward(
             activePredictionNormed,
             mask: mask,
-            cache: cache
+            cache: cache,
+            sharedKV: sharedKV
         )
 
         let attnNormed = postAttentionLayernorm(attn)
@@ -625,7 +639,7 @@ class Gemma3nDecoderLayer: Module {
         let result = correctedPredictions
         result[1...] = result[1...] + firstPrediction
 
-        return result
+        return (result, kv)
     }
 }
 
@@ -636,9 +650,10 @@ public class Gemma3nLanguageModel: Module {
     let vocabSizePerLayerInput: Int
     let numHiddenLayers: Int
     let firstKvSharedLayerIdx: Int
-    let firstSlidingIdx: Int
-    let firstFullIdx: Int
+    let firstSlidingIdx: Int?
+    let firstFullIdx: Int?
     let layerIdxToCacheIdx: [Int]
+    let kvSharingSources: Set<Int>
     let finalLogitSoftcapping: Float?
     private let _perLayerProjectionScale: MLXArray
     private let _perLayerInputScale: MLXArray
@@ -659,8 +674,7 @@ public class Gemma3nLanguageModel: Module {
     public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
         let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
-        let layerTypes =
-            config.layerTypes ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
+        let layerTypes = config.attentionLayerTypes
 
         return try (0 ..< firstKvSharedLayerIdx).map { i in
             let layerType = layerTypes[i]
@@ -685,37 +699,30 @@ public class Gemma3nLanguageModel: Module {
         self.finalLogitSoftcapping = config.finalLogitSoftcapping
         self.firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
 
-        let layerTypes =
-            config.layerTypes ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
-
-        guard let firstSlidingIdx = layerTypes.firstIndex(of: "sliding_attention") else {
-            fatalError("Layer type 'sliding_attention' not found in layer_types")
-        }
-        guard let firstFullIdx = layerTypes.firstIndex(of: "full_attention") else {
-            fatalError("Layer type 'full_attention' not found in layer_types")
-        }
-        self.firstSlidingIdx = firstSlidingIdx
-        self.firstFullIdx = firstFullIdx
+        precondition(config.numKvSharedLayers >= 0 && firstKvSharedLayerIdx > 0)
+        let layerTypes = config.attentionLayerTypes
+        precondition(layerTypes.count == config.numHiddenLayers)
+        precondition(
+            layerTypes.allSatisfy { ["full_attention", "sliding_attention"].contains($0) })
 
         var layerIdxToCacheIdx: [Int] = []
         let concreteLayerTypes = Array(layerTypes[..<firstKvSharedLayerIdx])
-        let sharedFullIdx = concreteLayerTypes.lastIndex(of: "full_attention") ?? 0
-        let sharedSlidingIdx = concreteLayerTypes.lastIndex(of: "sliding_attention") ?? 0
+        self.firstSlidingIdx = concreteLayerTypes.firstIndex(of: "sliding_attention")
+        self.firstFullIdx = concreteLayerTypes.firstIndex(of: "full_attention")
 
         for (i, layerType) in layerTypes.enumerated() {
             if i < firstKvSharedLayerIdx {
                 layerIdxToCacheIdx.append(i)
             } else {
-                if layerType == "full_attention" {
-                    layerIdxToCacheIdx.append(sharedFullIdx)
-                } else if layerType == "sliding_attention" {
-                    layerIdxToCacheIdx.append(sharedSlidingIdx)
-                } else {
-                    fatalError("Unknown layer type: \(layerType)")
+                guard let source = concreteLayerTypes.lastIndex(of: layerType) else {
+                    preconditionFailure(
+                        "Gemma3n shared attention has no owner of type \(layerType)")
                 }
+                layerIdxToCacheIdx.append(source)
             }
         }
         self.layerIdxToCacheIdx = layerIdxToCacheIdx
+        self.kvSharingSources = Set(layerIdxToCacheIdx[firstKvSharedLayerIdx...])
 
         assert(vocabSize > 0)
 
@@ -791,20 +798,22 @@ public class Gemma3nLanguageModel: Module {
         }
 
         let finalPerLayerInputs = projectPerLayerInputs(h, perLayerInputs: perLayerInputsProcessed)
-        let firstKvSharedLayerIdx = self.firstKvSharedLayerIdx
-        let maxCacheIdx = layerIdxToCacheIdx.max() ?? 0
-        let requiredCacheSize = max(firstKvSharedLayerIdx, maxCacheIdx + 1)
-        let cacheArray = cache ?? Array(repeating: nil as KVCache?, count: requiredCacheSize)
+        let cacheArray = cache ?? Array(repeating: nil as KVCache?, count: firstKvSharedLayerIdx)
+        precondition(cacheArray.count >= firstKvSharedLayerIdx)
 
         var fullMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
         var slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode = .none
 
         if mask == nil {
-            fullMask = createAttentionMask(h: h, cache: cacheArray[firstFullIdx])
+            if let firstFullIdx {
+                fullMask = createAttentionMask(h: h, cache: cacheArray[firstFullIdx])
+            }
 
             let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
-            slidingWindowMask = createAttentionMask(
-                h: h, cache: cacheArray[firstSlidingIdx], windowSize: slidingWindow)
+            if let firstSlidingIdx {
+                slidingWindowMask = createAttentionMask(
+                    h: h, cache: cacheArray[firstSlidingIdx], windowSize: slidingWindow)
+            }
         }
 
         let h0 = h
@@ -826,32 +835,32 @@ public class Gemma3nLanguageModel: Module {
             h[1...] = h[1...] * (targetMagnitude / maximum(mags, epsilonTensor))
         }
 
+        var sharedKVByCache = [Int: Gemma3nSharedKV]()
         for (i, layer) in layers.enumerated() {
             let perLayerInput = finalPerLayerInputs[0..., 0..., i, 0...]
-
-            let layerTypes =
-                config.layerTypes
-                ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
-            let isGlobal = layerTypes[i] == "full_attention"
 
             let localMask: MLXFast.ScaledDotProductAttentionMaskMode
             if let mask {
                 localMask = mask
-            } else if isGlobal {
-                localMask = fullMask
-            } else {
+            } else if layer.selfAttn.isSliding {
                 localMask = slidingWindowMask
+            } else {
+                localMask = fullMask
             }
 
             let cacheIdx = layerIdxToCacheIdx[i]
-            let layerCache = cacheIdx < cacheArray.count ? cacheArray[cacheIdx] : nil
-
-            h = layer(
+            let isShared = layer.selfAttn.isKvSharedLayer
+            let (output, kv) = layer.forward(
                 h,
                 mask: localMask,
-                cache: layerCache,
-                perLayerInput: perLayerInput
+                cache: isShared ? nil : cacheArray[cacheIdx],
+                perLayerInput: perLayerInput,
+                sharedKV: isShared ? sharedKVByCache[cacheIdx] : nil
             )
+            h = output
+            if !isShared && kvSharingSources.contains(i) {
+                sharedKVByCache[i] = kv
+            }
         }
 
         let targetMagnitudeFinal = pow(mean(h[0].square(), axis: -1, keepDims: true), 0.5)
@@ -966,6 +975,16 @@ public class Gemma3nTextModel: Module, LLMModel {
             using: .init([
                 .replacePrefix("model.language_model", with: "language_model")
             ]))
+        // Older MLX exports include unused K/V modules on sharing layers.
+        let unusedPrefixes = (languageModel.firstKvSharedLayerIdx ..< config.numHiddenLayers)
+            .flatMap { index in
+                ["k_proj", "v_proj", "k_norm", "v_norm"].map {
+                    "language_model.layers.\(index).self_attn.\($0)"
+                }
+            }
+        checkpoint = try checkpoint.mapNames { name in
+            unusedPrefixes.contains { name == $0 || name.hasPrefix($0 + ".") } ? nil : name
+        }
         checkpoint.weights = trimVocabulary(weights: checkpoint.weights)
         return checkpoint
     }

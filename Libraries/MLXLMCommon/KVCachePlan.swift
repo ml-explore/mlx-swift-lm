@@ -400,8 +400,9 @@ package final class KVCacheStorage {
 
 extension KVCacheConfiguration.Capacity {
     /// Construct the bounded cache represented by this value.
-    package func makeRotatingCache() -> RotatingKVCache {
-        let cache = RotatingKVCache(maxSize: maxTokens, keep: preservedPrefixTokens)
+    package func makeRotatingCache(rewindCapacity: Int = 0) -> RotatingKVCache {
+        let cache = RotatingKVCache(
+            maxSize: maxTokens, keep: preservedPrefixTokens, rewindCapacity: rewindCapacity)
         cache.capacityOrigin = .requested
         return cache
     }
@@ -414,7 +415,11 @@ extension GenerateParameters {
     /// capacity so direct `newCache(parameters:)` calls fail with the same typed
     /// errors as generation entry points.
     package func effectiveKVCacheCapacity() throws -> KVCacheConfiguration.Capacity? {
-        try resolvedKVCacheConfiguration()?.capacity
+        let configuration = try resolvedKVCacheConfiguration()
+        if let capacity = configuration?.capacity {
+            try configuration?.rewind?.validate(window: capacity.maxTokens)
+        }
+        return configuration?.capacity
     }
 
     package func kvCachePlan() throws -> KVCachePlan {

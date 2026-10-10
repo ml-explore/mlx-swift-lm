@@ -14,6 +14,8 @@ import MLX
 
 enum TurboQuantMetalKernels {
 
+    // MLX may bind inputs in constant memory. Infer input pointer address spaces.
+
     /// Scoring kernel: computes attention scores from packed codebook indices.
     ///
     /// Each SIMD group (32 threads) handles one (query, key_token) pair.
@@ -43,8 +45,8 @@ enum TurboQuantMetalKernels {
         uint kv_idx = (q_idx / chunk_len) / repeat_count;
 
         // Pointers
-        const device float* q_ptr = q_rot + q_idx * Dim;
-        const device uint32_t* packed_ptr = packed + kv_idx * token_count * PackedWidth + k_idx * PackedWidth;
+        auto q_ptr = q_rot + q_idx * Dim;
+        auto packed_ptr = packed + kv_idx * token_count * PackedWidth + k_idx * PackedWidth;
         float norm_val = norms[kv_idx * token_count + k_idx];
 
         // Load codebook into registers (small: 4-16 entries)
@@ -476,7 +478,7 @@ enum TurboQuantMetalKernels {
         // Process tokens in this block
         for (uint t = t_start; t < t_end; t++) {
             // --- Score: Q×K dot product ---
-            const device uint32_t* k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
+            auto k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
             float k_norm = key_norms[kv_idx * token_count + t];
 
             float dot_partial = 0.0f;
@@ -504,7 +506,7 @@ enum TurboQuantMetalKernels {
             float exp_diff = exp(m - new_m);
             float exp_score = exp(score - new_m);
 
-            const device uint32_t* v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
 
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
@@ -588,7 +590,7 @@ enum TurboQuantMetalKernels {
         for (uint i = 0; i < DIMS_PER_LANE; i++) o[i] = 0.0f;
 
         for (uint t = 0; t < token_count; t++) {
-            const device uint32_t* k_packed_ptr =
+            auto k_packed_ptr =
                 key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
             float k_norm = key_norms[kv_idx * token_count + t];
 
@@ -613,7 +615,7 @@ enum TurboQuantMetalKernels {
             float exp_diff = exp(m - new_m);
             float exp_score = exp(score - new_m);
 
-            const device uint32_t* v_packed_ptr =
+            auto v_packed_ptr =
                 val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
@@ -719,7 +721,7 @@ enum TurboQuantMetalKernels {
         // Process tokens in this block
         for (uint t = t_start; t < t_end; t++) {
             // --- Score: Q×K, K read raw f16 (no unpack, no rotation) ---
-            const device KT* k_raw_ptr = (const device KT*)k_raw + kv_idx * token_count * Dim + t * Dim;
+            auto k_raw_ptr = k_raw + kv_idx * token_count * Dim + t * Dim;
             float dot_partial = 0.0f;
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
                 uint d = lane + i * 32;
@@ -733,7 +735,7 @@ enum TurboQuantMetalKernels {
             float exp_diff = exp(m - new_m);
             float exp_score = exp(score - new_m);
 
-            const device uint32_t* v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
 
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
@@ -819,11 +821,11 @@ enum TurboQuantMetalKernels {
         // Process tokens in this block
         for (uint t = t_start; t < t_end; t++) {
             // --- Score: Q×K, K dequantized inline from 8-bit affine ---
-            const device uint* k_w_ptr = k_weights + (kv_idx * token_count + t) * (Dim / 4);
-            const device KScaleT* k_s_ptr =
-                (const device KScaleT*)k_scales + (kv_idx * token_count + t) * (Dim / KGroup);
-            const device KBiasT* k_b_ptr =
-                (const device KBiasT*)k_biases + (kv_idx * token_count + t) * (Dim / KGroup);
+            auto k_w_ptr = k_weights + (kv_idx * token_count + t) * (Dim / 4);
+            auto k_s_ptr =
+                k_scales + (kv_idx * token_count + t) * (Dim / KGroup);
+            auto k_b_ptr =
+                k_biases + (kv_idx * token_count + t) * (Dim / KGroup);
             float dot_partial = 0.0f;
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
                 uint d = lane + i * 32;
@@ -839,7 +841,7 @@ enum TurboQuantMetalKernels {
             float exp_diff = exp(m - new_m);
             float exp_score = exp(score - new_m);
 
-            const device uint32_t* v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
 
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
@@ -960,7 +962,7 @@ enum TurboQuantMetalKernels {
         // Process tokens in this block (up to causal boundary)
         for (uint t = t_start; t < t_end; t++) {
             // --- Score: Q×K dot product ---
-            const device uint32_t* k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
+            auto k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
             float k_norm = key_norms[kv_idx * token_count + t];
 
             float dot_partial = 0.0f;
@@ -988,7 +990,7 @@ enum TurboQuantMetalKernels {
             float exp_diff = exp(m - new_m);
             float exp_score = exp(score - new_m);
 
-            const device uint32_t* v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
 
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
@@ -1131,7 +1133,7 @@ enum TurboQuantMetalKernels {
                 // dispatcher only selects this kernel when repeat_count is a
                 // multiple of NR0, so an aligned group can never span a
                 // KV-head boundary and kv_indices[0] is exact.
-                const device uint32_t* k_packed_ptr = key_packed + kv_indices[0] * token_count * KeyPackedWidth + t * KeyPackedWidth;
+                auto k_packed_ptr = key_packed + kv_indices[0] * token_count * KeyPackedWidth + t * KeyPackedWidth;
 
                 uint k_value = (k_packed_ptr[k_word_idx] >> k_shift);
                 int k_spill = (int)k_shift + (int)KeyBits - 32;
@@ -1145,7 +1147,7 @@ enum TurboQuantMetalKernels {
 
             // --- Dequant V for this token ONCE ---
             float v_decoded[DIMS_PER_LANE];
-            const device uint32_t* v_packed_ptr = val_packed + kv_indices[0] * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_indices[0] * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_indices[0] * token_count + t];
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
                 uint d = lane + i * 32;
@@ -1310,7 +1312,7 @@ enum TurboQuantMetalKernels {
         for (uint t = t_start; t < t_end; t++) {
             // Dequant K once
             float k_decoded[DIMS_PER_LANE];
-            const device uint32_t* k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
+            auto k_packed_ptr = key_packed + kv_idx * token_count * KeyPackedWidth + t * KeyPackedWidth;
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
                 uint d = lane + i * 32;
                 if (d >= Dim) { k_decoded[i] = 0.0f; continue; }
@@ -1329,7 +1331,7 @@ enum TurboQuantMetalKernels {
 
             // Dequant V once
             float v_decoded[DIMS_PER_LANE];
-            const device uint32_t* v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
+            auto v_packed_ptr = val_packed + kv_idx * token_count * ValuePackedWidth + t * ValuePackedWidth;
             float v_norm = val_norms[kv_idx * token_count + t];
             for (uint i = 0; i < DIMS_PER_LANE; i++) {
                 uint d = lane + i * 32;
@@ -1560,7 +1562,7 @@ enum TurboQuantMetalKernels {
             if (w < 1e-6f) continue;  // Sparse V: skip negligible attention weights
 
             float norm_val = norms[kv_head * token_count + t];
-            const device uint32_t* packed_ptr = packed + kv_head * token_count * PackedWidth + t * PackedWidth;
+            auto packed_ptr = packed + kv_head * token_count * PackedWidth + t * PackedWidth;
 
             uint bit_offset = d * Bits;
             uint word_idx = bit_offset / 32;

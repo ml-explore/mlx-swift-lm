@@ -1,6 +1,71 @@
 import Foundation
 import MLX
 
+/// Cache-native attention that can reuse an owner's KV without appending it again.
+package protocol SharedAttentionKVCache: KVCache {
+    func updateForAttention(keys: MLXArray, values: MLXArray)
+    func attend(
+        queries: MLXArray, scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray
+}
+
+/// An owner's attention presentation, valid until its next cache update.
+/// Keep this within one forward pass; serialization state is not an attention view.
+package enum AttentionKVState {
+    case regular(keys: MLXArray, values: MLXArray)
+    case quantized(
+        keys: (MLXArray, MLXArray, MLXArray?),
+        values: (MLXArray, MLXArray, MLXArray?),
+        groupSize: Int, bits: Int, mode: QuantizationMode
+    )
+    case native(cache: any SharedAttentionKVCache, sequenceLength: Int)
+
+    package var sequenceLength: Int {
+        switch self {
+        case .regular(let keys, _): keys.dim(2)
+        case .quantized(let keys, _, _, _, _): keys.0.dim(2)
+        case .native(_, let sequenceLength): sequenceLength
+        }
+    }
+
+    package static func update(keys: MLXArray, values: MLXArray, cache: KVCache?) -> Self {
+        if let cache = cache as? SharedAttentionKVCache {
+            cache.updateForAttention(keys: keys, values: values)
+            return .native(cache: cache, sequenceLength: cache.offset)
+        } else if let cache = cache as? QuantizedKVCacheProtocol {
+            let (keys, values) = cache.updateQuantized(keys: keys, values: values)
+            return .quantized(
+                keys: keys, values: values,
+                groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+        } else if let cache {
+            let (keys, values) = cache.update(keys: keys, values: values)
+            return .regular(keys: keys, values: values)
+        } else {
+            return .regular(keys: keys, values: values)
+        }
+    }
+
+    package func attend(
+        queries: MLXArray, scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        switch self {
+        case .regular(let keys, let values):
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+        case .quantized(let keys, let values, let groupSize, let bits, let mode):
+            return quantizedScaledDotProductAttention(
+                queries: queries, quantizedKeys: keys, quantizedValues: values,
+                scale: scale, mask: mask, groupSize: groupSize, bits: bits, mode: mode)
+        case .native(let cache, let sequenceLength):
+            // Native storage must still describe the owner's presentation.
+            precondition(cache.offset == sequenceLength)
+            return cache.attend(queries: queries, scale: scale, mask: mask)
+        }
+    }
+}
+
 /// Whether attention can be split around a plain `KVCache.update` call.
 ///
 /// Quantized and TurboQuant caches own their complete attention operation, so
