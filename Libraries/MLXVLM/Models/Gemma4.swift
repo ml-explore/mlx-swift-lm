@@ -1401,6 +1401,10 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         }
     }
 
+    /// - Parameter lastPositionOnly: project only the last position onto the vocabulary. The multimodal prompt
+    ///   step runs the whole prompt in one pass and only samples from the last position, while the logits for
+    ///   every position cost `positions × vocabulary × 4` bytes — about 1.9 GB for a prompt with three images.
+    ///   Callers that need every position (training, scoring) keep the default.
     func callAsFunction(
         _ inputs: MLXArray? = nil,
         cache: [KVCache]? = nil,
@@ -1408,7 +1412,8 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         perLayerInputs: MLXArray? = nil,
         tokenTypeIds: MLXArray? = nil,
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
-        emitDrafterState: Bool = false
+        emitDrafterState: Bool = false,
+        lastPositionOnly: Bool = false
     ) -> LMOutput {
         let (hidden, sharedKV, sharedKVSources) = model(
             inputs, inputsEmbeds: inputsEmbeds, mask: mask, cache: cache?.map { $0 as KVCache? },
@@ -1416,11 +1421,14 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
             tokenTypeIds: tokenTypeIds,
             emitDrafterState: emitDrafterState
         )
+        let projected =
+            lastPositionOnly && hidden.dim(1) > 1
+            ? hidden[0..., (hidden.dim(1) - 1)..., 0...] : hidden
         let logits: MLXArray
         if let lmHead {
-            logits = lmHead(hidden)
+            logits = lmHead(projected)
         } else {
-            logits = model.embedTokens.asLinear(hidden)
+            logits = model.embedTokens.asLinear(projected)
         }
         let softcappedLogits: MLXArray
         if let finalLogitSoftcapping, finalLogitSoftcapping > 0 {
@@ -2121,7 +2129,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
                     inputIds: input.text.tokens,
                     imageTokenId: config.imageTokenId,
                     videoTokenId: config.videoTokenId,
-                    audioTokenId: config.audioTokenId)
+                    audioTokenId: config.audioTokenId),
+                lastPositionOnly: true
             )
             let total = inputsEmbeds.dim(1)
             prefill.progress?(total, total)
@@ -2598,7 +2607,8 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider {
             cache: cache.map { $0 },
             inputsEmbeds: inputsEmbeds,
             perLayerInputs: perLayerInputs,
-            tokenTypeIds: tokenTypeIds
+            tokenTypeIds: tokenTypeIds,
+            lastPositionOnly: true
         )
         let total = inputsEmbeds.dim(1)
         prefill.progress?(total, total)
