@@ -13,6 +13,7 @@
 // count while slicing embeddings, positions, and the visual mask by token
 // index. The straddling-image tests below are what cover that lockstep.
 
+import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
@@ -97,6 +98,172 @@ final class Qwen3VLContinuationTests: XCTestCase {
     }
     private func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
         continuation.maxAbsDiff(a, b)
+    }
+
+    func testHiddenStatesMatchVocabularyProjectionForTextAndPixels() throws {
+        let model = try makeTinyModel()
+        let text = textTokens(8)
+        let visual = concatenated([visionStart(), imageRun(), text], axis: 1)
+        let inputs = [
+            LMInput(tokens: text), LMInput(text: .init(tokens: visual), image: makeImage()),
+        ]
+        let weights = Dictionary(uniqueKeysWithValues: model.parameters().flattened())
+        let head = try XCTUnwrap(weights["language_model.model.embed_tokens.weight"])
+        for input in inputs {
+            let hidden = try model.hiddenStates(input)
+            XCTAssertEqual(hidden.shape, [1, input.text.tokens.dim(1), 64])
+            let projected = matmul(hidden[0..., (hidden.dim(1) - 1)..., 0...], head.T)
+            let (logits, _) = try lastLogits(
+                model.prepare(
+                    input, cache: model.newCache(parameters: nil), state: nil, prefill: .init()))
+            XCTAssertLessThan(maxAbsDiff(projected, logits), 1e-4)
+            let repeated = try model.hiddenStates(input)
+            XCTAssertLessThan(maxAbsDiff(hidden, repeated), 1e-6)
+        }
+    }
+
+    func testHiddenStatesRejectPaddedAndBatchedInputs() throws {
+        let model = try makeTinyModel()
+        XCTAssertThrowsError(try model.hiddenStates(LMInput(tokens: textTokens(0))))
+        XCTAssertThrowsError(
+            try model.hiddenStates(LMInput(tokens: broadcast(textTokens(4), to: [2, 4]))))
+        let mask = MLXArray([Int32(1), 1, 1, 0], [1, 4])
+        XCTAssertThrowsError(
+            try model.hiddenStates(LMInput(text: .init(tokens: textTokens(4), mask: mask))))
+    }
+
+    private struct EmbeddingTokenizer: Tokenizer {
+        var oversized = false
+        var bosToken: String? { nil }
+        var eosToken: String? { nil }
+        var unknownToken: String? { nil }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            let tokens =
+                oversized
+                ? Array(repeating: 1, count: 32_769)
+                : text.split(separator: ",").compactMap { Int($0) }
+            return tokens + (addSpecialTokens ? [4] : [])
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenIds.map(String.init).joined(separator: ",")
+        }
+
+        func convertTokenToId(_ token: String) -> Int? { nil }
+        func convertIdToToken(_ id: Int) -> String? { nil }
+        func applyChatTemplate(
+            messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] { [1, 2, 3] }
+    }
+
+    private actor EmbeddingRequests {
+        struct Request: Sendable {
+            let instruction: String
+            let imageCount: Int
+            let minPixels: Int?
+            let maxPixels: Int?
+        }
+        private(set) var values: [Request] = []
+        func record(_ request: Request) { values.append(request) }
+    }
+
+    private static func embeddingImage() -> LMInput.ProcessedImage {
+        LMInput.ProcessedImage(pixels: MLX.ones([16, 3 * 2 * 16 * 16]), frames: [THW(1, 4, 4)])
+    }
+
+    private struct EmbeddingProcessor: UserInputProcessor {
+        let requests: EmbeddingRequests
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            guard case .chat(let messages) = input.prompt else {
+                throw Qwen3VLEmbedding.Error.emptyInput
+            }
+            await requests.record(
+                .init(
+                    instruction: messages[0].content, imageCount: input.images.count,
+                    minPixels: input.processing.minPixels, maxPixels: input.processing.maxPixels))
+            let text = messages[1].content == "second" ? [5, 6, 7] : [1, 2, 3]
+            if input.images.isEmpty {
+                return LMInput(tokens: MLXArray(text).expandedDimensions(axis: 0))
+            }
+            let tokens = [502, 500, 500, 500, 500] + text
+            let image = Qwen3VLContinuationTests.embeddingImage()
+            return LMInput(
+                text: .init(tokens: MLXArray(tokens).expandedDimensions(axis: 0)), image: image)
+        }
+    }
+
+    func testEmbeddingPipelinePoolsPostprocessorTokenForTextAndPixelsInInputOrder() async throws {
+        let model = try makeTinyModel()
+        model.train(false)
+        var expected: [[Float]] = []
+        let tokens = [[1, 2, 3, 4], [502, 500, 500, 500, 500, 1, 2, 3, 4], [5, 6, 7, 4]]
+        for (index, row) in tokens.enumerated() {
+            let input = LMInput(
+                text: .init(tokens: MLXArray(row).expandedDimensions(axis: 0)),
+                image: index == 1 ? Self.embeddingImage() : nil)
+            let last = try model.hiddenStates(input)[0, -1, 0...].asType(.float32)
+            let normalized = last / MLXLinalg.norm(last)
+            eval(normalized)
+            expected.append(normalized.asArray(Float.self))
+        }
+        let requests = EmbeddingRequests()
+        let container = ModelContainer(
+            context: ModelContext(
+                configuration: .init(id: "fixture"), model: model,
+                processor: EmbeddingProcessor(requests: requests), tokenizer: EmbeddingTokenizer()))
+        let embedder = try await Qwen3VLEmbedding(container: container)
+        let image = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32))
+        let actual = try await embedder.embed(
+            [.init(text: "first"), .init(images: [.ciImage(image)]), .init(text: "second")],
+            instruction: "Retrieve matching images and text.")
+        XCTAssertEqual(actual.count, expected.count)
+        for (row, reference) in zip(actual, expected) {
+            XCTAssertEqual(row.count, 64)
+            XCTAssertLessThan(zip(row, reference).map { abs($0 - $1) }.max() ?? 1, 1e-5)
+            XCTAssertEqual(row.reduce(0) { $0 + $1 * $1 }, 1, accuracy: 1e-5)
+        }
+        let recorded = await requests.values
+        XCTAssertEqual(recorded.map(\.imageCount), [0, 1, 0])
+        XCTAssertTrue(
+            recorded.allSatisfy { $0.instruction == "Retrieve matching images and text." })
+        XCTAssertTrue(recorded.allSatisfy { $0.minPixels == 4_096 && $0.maxPixels == 1_310_720 })
+        let repeated = try await embedder.embed(.init(text: "first"))
+        XCTAssertLessThan(zip(repeated, expected[0]).map { abs($0 - $1) }.max() ?? 1, 1e-5)
+        let defaults = await requests.values
+        XCTAssertEqual(defaults.last?.instruction, Qwen3VLEmbedding.defaultInstruction)
+    }
+
+    func testEmbeddingPipelineRejectsEmptyInputBeforePreparation() async throws {
+        let requests = EmbeddingRequests()
+        let container = ModelContainer(
+            context: ModelContext(
+                configuration: .init(id: "fixture"), model: try makeTinyModel(),
+                processor: EmbeddingProcessor(requests: requests), tokenizer: EmbeddingTokenizer()))
+        let embedder = try await Qwen3VLEmbedding(container: container)
+        let empty = try await embedder.embed([Qwen3VLEmbedding.Input]())
+        XCTAssertTrue(empty.isEmpty)
+        do {
+            _ = try await embedder.embed(.init(text: " \n"))
+            XCTFail("Empty input must be rejected")
+        } catch Qwen3VLEmbedding.Error.emptyInput {}
+        let count = await requests.values.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testEmbeddingPipelineRejectsContextOverflowBeforeModelForward() async throws {
+        let container = ModelContainer(
+            context: ModelContext(
+                configuration: .init(id: "fixture"), model: try makeTinyModel(),
+                processor: EmbeddingProcessor(requests: EmbeddingRequests()),
+                tokenizer: EmbeddingTokenizer(oversized: true)))
+        let embedder = try await Qwen3VLEmbedding(container: container)
+        do {
+            _ = try await embedder.embed(.init(text: "long"))
+            XCTFail("Context overflow must be rejected")
+        } catch Qwen3VLEmbedding.Error.contextExceeded {}
     }
 
     // MARK: - Warm continuation

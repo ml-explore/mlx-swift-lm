@@ -19,7 +19,7 @@ final class Qwen3VLProcessorTests: XCTestCase {
 
         func encode(text: String, addSpecialTokens: Bool) -> [Int] {
             if text.contains("<|vision_start|>") {
-                return [90, 91, 92]
+                return [90, 91, 92] + (addSpecialTokens ? [99] : [])
             }
             return [1, 2, 3]
         }
@@ -76,6 +76,7 @@ final class Qwen3VLProcessorTests: XCTestCase {
 
         let prepared = try await processor.prepare(input: input)
 
+        XCTAssertEqual(prepared.text.tokens.asArray(Int32.self), [90, 91, 92])
         let mask = try XCTUnwrap(prepared.text.mask)
         XCTAssertEqual(mask.shape, prepared.text.tokens.shape)
         XCTAssertNotNil(prepared.image)
