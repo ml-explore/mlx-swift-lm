@@ -21,6 +21,9 @@ package struct FusedQuantizedLinearProjection {
     package let sourceViews: [QuantizedLinear]
 }
 
+// These views belong to a fused projection; independent routing must leave them intact.
+private final class FusedQuantizedLinearSourceView: QuantizedLinear {}
+
 /// A fused projection could not replace its source modules atomically.
 ///
 /// `rollbackError` is non-nil only when restoring the original source modules
@@ -139,7 +142,9 @@ package func fuseQuantizedLinearProjections(
     let projections = linears.compactMap { $0 as? QuantizedLinear }
     guard projections.count == linears.count,
         zip(linears, projections).allSatisfy({ linear, projection in
-            ObjectIdentifier(type(of: linear)) == ObjectIdentifier(QuantizedLinear.self)
+            (ObjectIdentifier(type(of: linear)) == ObjectIdentifier(QuantizedLinear.self)
+                || ObjectIdentifier(type(of: linear))
+                    == ObjectIdentifier(FusedQuantizedLinearSourceView.self))
                 && linear === projection
         }),
         let first = projections.first,
@@ -207,7 +212,7 @@ package func fuseQuantizedLinearProjections(
         defer { start = end }
 
         let rows = start ..< end
-        let view = QuantizedLinear(
+        let view = FusedQuantizedLinearSourceView(
             weight: fusedWeight[rows],
             bias: nil,
             scales: fusedScales[rows],

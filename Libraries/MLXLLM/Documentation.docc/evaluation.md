@@ -30,6 +30,68 @@ the prompt and discard.  Multiple `ChatSession` instances could also be used
 (at the cost of the memory in the `KVCache`) to handle multiple streams of
 context.
 
+## Prefill Optimization
+
+Chunked text prefill reserves standard KV-cache capacity for the prompt and cached
+prefix, avoiding repeated growth and copies. Subsequent growth is proportional
+and bounded. Cache positions, attention masks, and saved state are unchanged;
+custom, rotating, compressed, and recurrent caches keep their allocation paths.
+
+Projection routing is opt-in. The default `.stock` policy skips module discovery
+and replacement, including on a model previously used with `.automatic`:
+
+```swift
+let parameters = GenerateParameters(
+    prefill: .init(stepSize: 4096, quantizedProjections: .automatic)
+)
+```
+
+On Apple Silicon GPUs, shared text preparation can route standard frozen FP16
+and BF16 affine projections through temporary dequantization and dense GEMM.
+MLX selects the device kernels for both routes, including quantized NAX where
+available; routing has no GPU-family filter, runtime calibration, or retained
+dense weights. The route requires at least
+384 rows for two-bit weights and 2048 rows for three-, four-, five-, six-, and
+eight-bit weights, with groups of 32, 64, or 128.
+Each dense projection is limited to 1/64 of the remaining allocator budget,
+using the smaller of Metal's recommended working set and the MLX memory limit.
+This is an allowance at graph construction, not a total transient-memory bound;
+pending graphs and other processes can also allocate memory. CPU execution,
+other formats, training, and decoding use stock projection kernels.
+Source views owned by an existing fused projection keep their fused route.
+Routing is scoped to the shared driver's prefill forwards. Retained wrappers use
+stock kernels outside that scope, including later unchunked requests. Managed
+compiled regions retain stock projections and their existing fusion. Dynamic
+routing outside those regions checks memory admission on each forward.
+
+With `.automatic`, eligible calls may route through dense GEMM. The 512-token
+default ceiling and caller-selected chunk schedules remain unchanged; at that
+ceiling, only two-bit projections can meet the row threshold. Wider chunks can be
+requested through `PrefillParameters.stepSize` or `GenerateParameters.prefillStepSize`.
+Spare cache capacity and temporary workspace can increase memory use;
+performance gains depend on the model, device, and actual chunk length. Measure
+your workload before enabling routing. The row thresholds are heuristics, not a
+guarantee of a speedup on every Apple Silicon generation.
+
+A rejected module replacement disables routing for that request after refreshing
+module metadata and invalidating affected traces. Earlier coherent wrappers may
+remain installed and use stock kernels. Cancellation still propagates. If a custom
+module also rejects the metadata refresh, preparation throws rather than continuing
+with stale module state. Custom setters must leave the model usable when they throw.
+
+Admission checks current allocator headroom, which excludes future lazy allocations
+such as reserved cache storage. Use `.stock` to avoid dense workspace under memory
+pressure. Cancelling prefill leaves only written tokens in the live cache, but its
+reserved backing capacity can remain allocated until that cache is released.
+
+Dense and quantized kernels can round differently. Validation compares projection
+error against an FP32 dequantization-and-matmul reference, using a bound
+of `1.5 * stockMaxError + 0.005`. These are projection regression limits,
+not a bound on accumulated model error. Multi-layer tests also compare logits
+and cache state against an FP32 reconstruction, with error scaled by output
+magnitude and precision. Bit-identical logits, KV-cache values, and
+generated tokens are not guaranteed; token choices near a tie can change.
+
 ## Streaming Output
 
 The previous example produced the entire response in one call.  Often
