@@ -142,6 +142,52 @@ private func lookupDrain(_ iterator: inout some TokenIteratorProtocol) -> [Int] 
 
 @Suite(.serialized)
 struct PromptLookupTokenIteratorTests {
+    @Test(
+        arguments: [(Float(0), false), (Float(0), true), (Float(0.8), false), (Float(0.8), true)],
+        [false, true])
+    func speculativeLogProbabilitiesMatchOrdinaryDecoding(
+        sampling: (Float, Bool), contextSensitive: Bool
+    ) throws {
+        let (temperature, usePenalty) = sampling
+        let prompt = Array(repeating: Array(0 ..< 8), count: 3).flatMap { $0 }
+        let parameters = GenerateParameters(
+            maxTokens: 32, temperature: temperature, topP: 0.95, logProbabilities: 3,
+            repetitionPenalty: usePenalty ? 1.2 : nil, seed: 123)
+        let plainModel = LookupHistoryModel(contextSensitive: contextSensitive, softLogits: true)
+        let lookupModel = LookupHistoryModel(contextSensitive: contextSensitive, softLogits: true)
+        var plain = try TokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)), model: plainModel, parameters: parameters)
+        var lookup = try PromptLookupTokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)), model: lookupModel,
+            parameters: parameters, configuration: lookupConfiguration())
+        for _ in 0 ..< 32 {
+            let expectedToken = plain.next()
+            let actualToken = lookup.next()
+            let expected = try #require(expectedToken)
+            let actual = try #require(actualToken)
+            #expect(actual == expected)
+            let a = try #require(plain.lastLogProbabilities).materialize()
+            let b = try #require(lookup.lastLogProbabilities).materialize()
+            #expect(b.chosen.token == actual)
+            #expect(abs(a.chosen.logProbability - b.chosen.logProbability) < 0.0001)
+            #expect(a.topLogProbabilities.map(\.token) == b.topLogProbabilities.map(\.token))
+            for (x, y) in zip(a.topLogProbabilities, b.topLogProbabilities) {
+                #expect(abs(x.logProbability - y.logProbability) < 0.0001)
+            }
+        }
+        let telemetry = try #require(lookup.speculativeDecodingTelemetry)
+        #expect(telemetry.roundCount > 0)
+        if temperature == 0 && !usePenalty {
+            #expect(telemetry.acceptedDraftTokenCount > 0)
+            if contextSensitive {
+                #expect(telemetry.rejectedDraftTokenCount > 0)
+            } else {
+                #expect(lookupModel.forwardWidths.count < plainModel.forwardWidths.count)
+            }
+        }
+        lookup.finish()
+    }
+
     @Test(arguments: [false, true])
     func forwardsProcessorLifecycleAndCacheMetrics(recurrent: Bool) throws {
         struct EmissionProcessor: LogitProcessor, GenerationReasoningTokenCounting {

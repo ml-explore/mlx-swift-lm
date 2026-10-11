@@ -66,7 +66,8 @@ private func drain(_ iterator: inout some TokenIteratorProtocol) -> [Int] {
 
 @Suite(.serialized)
 struct PromptLookupPublicLifecycleTests {
-    @Test func finishingEarlyLeavesAReusableCache() throws {
+    @Test(arguments: [false, true])
+    func finishingEarlyLeavesAReusableCache(reportProbabilities: Bool) throws {
         let prompt = Array(repeating: Array(0 ..< 8), count: 3).flatMap { $0 }
         let followUp = [3, 4, 5]
         let configuration = PromptLookupConfiguration(
@@ -79,10 +80,17 @@ struct PromptLookupPublicLifecycleTests {
             let cache = model.newCache(parameters: nil)
             var lookup = try PromptLookupTokenIterator(
                 input: LMInput(tokens: MLXArray(prompt)), model: model, cache: cache,
-                parameters: GenerateParameters(maxTokens: 64, temperature: 0),
+                parameters: GenerateParameters(
+                    maxTokens: 64, temperature: 0,
+                    logProbabilities: reportProbabilities ? 2 : nil),
                 configuration: configuration)
             var emitted = [Int]()
-            while emitted.count < stopAfter, let token = lookup.next() { emitted.append(token) }
+            while emitted.count < stopAfter, let token = lookup.next() {
+                emitted.append(token)
+                if reportProbabilities {
+                    #expect(lookup.lastLogProbabilities?.materialize().chosen.token == token)
+                }
+            }
             if cache[0].offset > prompt.count + emitted.count { stopsWithLookahead += 1 }
 
             lookup.finish()

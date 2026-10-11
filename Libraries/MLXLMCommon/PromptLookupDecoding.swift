@@ -94,6 +94,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     private let batchGreedy: Bool
     private var proposal: [Int] = []
     private var pending: [Int] = []
+    private var pendingProbabilities: [DeferredTokenLogProbabilities?] = []
     private var pendingIndex = 0
     private var committedPending = 0
     private var stagedPending = false
@@ -112,6 +113,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
     public var state: LMOutput.State? { base.state }
     public var promptPrefillTime: TimeInterval { base.promptPrefillTime }
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { telemetry }
+    public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
     public var evictedTokenCount: Int { base.evictedTokenCount }
     public var reasoningTokenCount: Int? { base.reasoningTokenCount }
     /// Ordinary decode steps, including lookup misses and unsupported cache topologies.
@@ -194,6 +196,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
             // Conversion may replace cache leaves and invalidate their restore points.
             if stagedPending { base.kvCachePlan.apply(to: cacheStorage) }
             pending.removeAll(keepingCapacity: true)
+            pendingProbabilities.removeAll(keepingCapacity: true)
             pendingIndex = 0
             committedPending = 0
             stagedPending = false
@@ -202,6 +205,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
         }
         guard pendingIndex < pending.count else { return nil }
         let token = pending[pendingIndex]
+        lastLogProbabilities = pendingProbabilities[pendingIndex]
         pendingIndex += 1
         tokenCount += 1
         if speculativePending { telemetry.recordGeneratedToken() }
@@ -279,6 +283,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
         base.state = result.state
         let accepted: Int
         let correction: Int
+        pendingProbabilities.append(base.deferredLogProbabilities)
         if batchGreedy {
             let tokens = argMax(result.logits.squeezed(axis: 0), axis: -1)
             eval(tokens, current)
@@ -291,20 +296,35 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
             }
             accepted = count
             correction = values[count]
+            if let topK = base.logProbabilityTopK {
+                let logits = result.logits[0, ..<(count + 1), 0...]
+                let distribution = LogProbabilityDistribution(logits: logits)
+                for position in 0 ... count {
+                    let probability = DeferredTokenLogProbabilities(
+                        logProbabilities: distribution.values[position ... position, 0...],
+                        token: tokens[position ... position], topK: topK)
+                    if position < count {
+                        pendingProbabilities.append(probability)
+                    } else {
+                        base.deferredLogProbabilities = probability
+                    }
+                }
+            } else {
+                pendingProbabilities.append(contentsOf: repeatElement(nil, count: count))
+            }
         } else {
             eval(result.logits, current)
             pending.append(current.item(Int.self))
             var count = 0
             var final = 0
             for position in 0 ... proposal.count {
-                var logits = result.logits[0..., position, 0...]
-                logits = base.processor?.process(logits: logits) ?? logits
-                let sampled = base.sampler.sample(logits: logits)
+                let logits = result.logits[0..., position ... position, 0...]
+                let sampled = base.convertToToken(logits: logits)
                 eval(sampled)
                 final = sampled.item(Int.self)
-                base.processor?.didSample(token: sampled)
                 guard position < proposal.count, final == proposal[position] else { break }
                 pending.append(final)
+                pendingProbabilities.append(base.deferredLogProbabilities)
                 count += 1
             }
             accepted = count
@@ -352,6 +372,7 @@ public struct PromptLookupTokenIterator: TokenIteratorProtocol {
         if !indexedCurrent { index?.append(token) }
         knownToken = nil
         pending.append(token)
+        pendingProbabilities.append(base.lastLogProbabilities)
         committedPending = 1
         fallbackTokenCount += 1
     }

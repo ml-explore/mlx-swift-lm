@@ -792,7 +792,7 @@ extension TokenIteratorProtocol {
 }
 
 /// Normalized logits shared by reporting and filtered sampling.
-private struct LogProbabilityDistribution {
+struct LogProbabilityDistribution {
     let values: MLXArray
 
     init(logits: MLXArray) {
@@ -919,7 +919,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
     let logProbabilityTopK: Int?
-    private var deferredLogProbabilities: DeferredTokenLogProbabilities?
+    var deferredLogProbabilities: DeferredTokenLogProbabilities?
 
     /// Log probabilities for the token returned by the most recent ``next()`` call.
     public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
