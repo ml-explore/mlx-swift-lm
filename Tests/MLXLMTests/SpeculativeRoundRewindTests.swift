@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXScriptedLM
 import Testing
 
 @testable import MLXLMCommon
@@ -188,7 +189,7 @@ struct SpeculativeRoundRewindTests {
 
     private func plainTokens(model: any LanguageModel, maxTokens: Int) async throws -> [Int] {
         let processor = TestInputProcessor(
-            tokenizer: TestTokenizer(vocabularySize: vocabularySize),
+            tokenizer: PseudoWordTokenizer(vocabularySize: vocabularySize),
             configuration: ModelConfiguration(id: "round-rewind-test"),
             messageGenerator: DefaultMessageGenerator())
         let context = ModelContext(

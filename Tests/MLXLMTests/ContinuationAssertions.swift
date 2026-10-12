@@ -279,7 +279,7 @@ struct ContinuationAssertions {
             model.prepare(suffix, cache: cacheW, state: s1, prefill: PrefillParameters()))
 
         XCTAssertLessThanOrEqual(
-            maxAbsDiff(logitsW, logitsF), 1e-3,
+            maxAbsDiff(logitsW, logitsF), MatmulPrecision.splitTolerance,
             "split media suffix continuation diverged from full prefill",
             file: file, line: line)
     }
