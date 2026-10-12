@@ -8,9 +8,9 @@ import Foundation
 /// ``LanguageModel/prepare(_:cache:state:prefill:)``:
 ///
 /// ```swift
-/// var parameters = GenerateParameters()
-/// parameters.prefill.stepSize = 1024
-/// parameters.prefill.progress = { processed, total in ... }
+/// let parameters = GenerateParameters(
+///     prefill: .init(stepSize: 4096, quantizedProjections: .automatic)
+/// )
 /// ```
 public struct PrefillParameters: Sendable {
 
@@ -21,6 +21,22 @@ public struct PrefillParameters: Sendable {
 
     /// How the prompt is divided into forwards. See ``Chunking``.
     public var chunking: Chunking
+
+    /// Projection policy for models using the shared text prefill driver.
+    /// Defaults to stock kernels; cache reservation is independent of this policy.
+    public var quantizedProjections: QuantizedProjections
+
+    /// Whether shared text prefill may install dense-routing projection wrappers.
+    public enum QuantizedProjections: Sendable {
+        /// Use the model's existing kernels without discovering or replacing modules.
+        /// Previously installed wrappers also use stock kernels for this request.
+        case stock
+
+        /// Allow temporary dequantization and dense GEMM for eligible projections.
+        /// Performance depends on device, shape, precision, and actual chunk length.
+        /// This uses extra memory and can change rounding and generated tokens.
+        case automatic
+    }
 
     /// Called after each prefill chunk with `(processedPositions, totalPositions)`.
     ///
@@ -58,10 +74,12 @@ public struct PrefillParameters: Sendable {
     public init(
         stepSize: Int? = nil,
         chunking: Chunking = .balanced,
+        quantizedProjections: QuantizedProjections = .stock,
         progress: (@Sendable (_ processed: Int, _ total: Int) -> Void)? = nil
     ) {
         self.stepSize = stepSize
         self.chunking = chunking
+        self.quantizedProjections = quantizedProjections
         self.progress = progress
     }
 

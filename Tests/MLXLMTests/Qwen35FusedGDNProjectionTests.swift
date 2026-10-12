@@ -110,6 +110,42 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
         }
     }
 
+    func testPrefillRoutingPreservesLLMFusedInputProjections() throws {
+        let layer = Qwen35GatedDeltaNet(try llmConfiguration())
+        layer.update(parameters: layer.parameters().mapValues { $0.asType(.bfloat16) })
+        try quantize(layer)
+        XCTAssertTrue(try layer.prepareFusedInputProjection())
+        layer.train(false)
+        let sources = [layer.inProjQKV, layer.inProjZ, layer.inProjB, layer.inProjA]
+        for _ in 0 ..< 2 {
+            try QuantizedPrefill.prepare(layer, rows: 2048)
+            XCTAssertTrue(layer.hasFusedInputProjection)
+            for (before, after) in zip(
+                sources, [layer.inProjQKV, layer.inProjZ, layer.inProjB, layer.inProjA])
+            {
+                XCTAssertTrue(before === after)
+            }
+        }
+    }
+
+    func testPrefillRoutingPreservesVLMFusedInputProjections() throws {
+        let layer = Qwen35Language.GatedDeltaNet(try vlmConfiguration())
+        layer.update(parameters: layer.parameters().mapValues { $0.asType(.bfloat16) })
+        try quantize(layer)
+        XCTAssertTrue(try layer.prepareFusedInputProjection())
+        layer.train(false)
+        let sources = [layer.inProjQKV, layer.inProjZ, layer.inProjB, layer.inProjA]
+        for _ in 0 ..< 2 {
+            try QuantizedPrefill.prepare(layer, rows: 2048)
+            XCTAssertTrue(layer.hasFusedInputProjection)
+            for (before, after) in zip(
+                sources, [layer.inProjQKV, layer.inProjZ, layer.inProjB, layer.inProjA])
+            {
+                XCTAssertTrue(before === after)
+            }
+        }
+    }
+
     func testLLMFullGDNForwardIsBitIdentical() throws {
         let layer = Qwen35GatedDeltaNet(try llmConfiguration())
         try quantize(layer)

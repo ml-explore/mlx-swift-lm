@@ -4,6 +4,11 @@ import Foundation
 import MLX
 import MLXNN
 
+// Compiled regions retain stock projections; dynamic routing belongs outside their traces.
+package enum PrefillExecutionContext {
+    @TaskLocal package static var isActive = false
+}
+
 // MLX traces a compiled function once. Any MLXArray the body reads but does not
 // take as an argument becomes a constant of that trace, so weights read through
 // a captured module freeze at the values of the first call. Plain inference
@@ -125,7 +130,13 @@ public final class CompiledTrace<Owner: Module>: CompiledTraceInvalidating {
     }
 
     /// Runs the trace, compiling it on first use.
+    /// Compiled regions use stock projections so traces never capture a temporary memory allowance.
     public func callAsFunction(_ owner: Owner, _ arguments: [MLXArray]) -> [MLXArray] {
+        if PrefillExecutionContext.isActive {
+            return PrefillExecutionContext.$isActive.withValue(false) {
+                self(owner, arguments)
+            }
+        }
         let traced = lock.withLock {
             if let function {
                 precondition(

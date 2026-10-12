@@ -126,8 +126,9 @@ public struct GenerateTokenLogProbabilities: Sendable, Equatable {
 /// for the `TokenIterator`.
 public struct GenerateParameters: Sendable {
 
-    /// How the prompt is prefilled into the cache: step size, chunking strategy,
-    /// and progress observation. See ``PrefillParameters``.
+    /// How the prompt is prefilled: chunking, projection routing, and progress.
+    /// Configure with `GenerateParameters(prefill: .init(...))`.
+    /// See ``PrefillParameters``.
     public var prefill: PrefillParameters
 
     /// See ``PrefillParameters/stepSize``.

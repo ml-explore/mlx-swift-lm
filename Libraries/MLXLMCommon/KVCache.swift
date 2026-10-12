@@ -414,6 +414,9 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
 public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     internal var keys: MLXArray?
     internal var values: MLXArray?
+    private var reservedCapacity: Int?
+
+    /// Minimum allocation granularity in tokens. Must be positive.
     public var step = 256
 
     public override init() {
@@ -424,32 +427,45 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         [self.keys, self.values].compactMap { $0 }
     }
 
+    /// Hint the total capacity needed by the next update, including existing tokens.
+    ///
+    /// Allocation waits until the next update supplies tensor shapes and dtypes.
+    /// The hint is consumed by that update; it does not change the offset, masks,
+    /// or serialized state. Ordinary growth adds 25%, bounded to 8192 tokens
+    /// (or one ``step`` if larger), to amortize copies during decoding.
+    public func reserveCapacity(_ minimumCapacity: Int) {
+        precondition(minimumCapacity >= 0)
+        reservedCapacity = max(reservedCapacity ?? 0, minimumCapacity)
+    }
+
+    package func clearCapacityReservation() {
+        reservedCapacity = nil
+    }
+
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let previous = self.offset
+        let required = previous + keys.dim(2)
+        let currentCapacity = self.keys?.dim(2) ?? 0
+        let reservation = reservedCapacity
+        reservedCapacity = nil
 
-        let reset =
-            if let currentKeys = self.keys, (previous + keys.dim(2)) > currentKeys.dim(2) {
-                true
-            } else {
-                self.keys == nil
-            }
-        if reset {
+        if self.keys == nil || max(required, reservation ?? 0) > currentCapacity {
             let B = keys.dim(0)
             let kvHeads = keys.dim(1)
             let kHeadDim = keys.dim(3)
             let vHeadDim = values.dim(3)
 
-            let nSteps = (step + keys.dim(2) - 1) / step
-            let kShape = [B, kvHeads, nSteps * step, kHeadDim]
-            let vShape = [B, kvHeads, nSteps * step, vHeadDim]
+            let capacity = KVCacheCapacity.next(
+                current: currentCapacity, required: required, step: step, reservation: reservation)
+            let kShape = [B, kvHeads, capacity - previous, kHeadDim]
+            let vShape = [B, kvHeads, capacity - previous, vHeadDim]
             let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
             let newV = MLXArray.zeros(vShape, dtype: values.dtype)
 
-            if var currentKeys = self.keys, var currentValues = self.values {
-                if previous % step != 0 {
-                    currentKeys = currentKeys[.ellipsis, ..<previous, 0...]
-                    currentValues = currentValues[.ellipsis, ..<previous, 0...]
-                }
+            if let currentKeys = self.keys, let currentValues = self.values {
+                // Only the live prefix survives a trim or a change in allocation granularity.
+                let currentKeys = currentKeys[.ellipsis, ..<previous, 0...]
+                let currentValues = currentValues[.ellipsis, ..<previous, 0...]
                 self.keys = concatenated([currentKeys, newK], axis: 2)
                 self.values = concatenated([currentValues, newV], axis: 2)
             } else {
@@ -458,7 +474,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             }
         }
 
-        self.offset += keys.dim(2)
+        self.offset = required
 
         self.keys?[.ellipsis, previous ..< self.offset, 0...] = keys
         self.values?[.ellipsis, previous ..< self.offset, 0...] = values
@@ -488,6 +504,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
             self.keys = newValue[0]
             self.values = newValue[1]
             self.offset = self.keys!.dim(2)
+            reservedCapacity = nil
         }
     }
 
@@ -495,6 +512,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
+        reservedCapacity = nil
         let trimmed = min(offset, n)
         offset -= trimmed
         return trimmed

@@ -27,7 +27,15 @@ extension LLMModel {
     ) throws
         -> PrepareResult
     {
-        let stepSize = prefill.resolvedStepSize()
+        try preparePrompt(input, cache: cache, state: state, prefill: prefill)
+    }
+
+    /// Shared text prefill driver, preserving the caller's chunk schedule.
+    package func preparePrompt(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters,
+        defaultStepSize: Int = PrefillParameters.defaultStepSize
+    ) throws -> PrepareResult {
+        let stepSize = prefill.resolvedStepSize(defaultStepSize: defaultStepSize)
         let y = input.text
         let total = y.tokens.size
 
@@ -38,23 +46,38 @@ extension LLMModel {
         guard total > stepSize else { return .tokens(y) }
 
         var processed = 0
-        try withPreparedCache(cache, lengths: y.sequenceLengths) {
-            // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
-            // chunk N. Under .remainder the reserved tail is the legacy leftover
-            // (up to a full step) rather than a single token.
-            var state: LMOutput.State? = state
-            processed = try prefill.forEachChunk(
-                total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
-            ) { range in
-                let input = y[.newAxis, range]
-                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
-                asyncEval(cache)
-            }
-
-            // Single sync after the loop to flush any remaining async work.
-            if processed > 0 {
-                eval(cache)
+        var routePrefill = false
+        try Task.checkCancellation()
+        if prefill.quantizedProjections == .automatic, y.tokens.ndim == 1, !cache.isEmpty,
+            let rows = prefill.chunkLength(
+                forChunking: total - (prefill.chunking == .remainder ? stepSize : 1),
+                defaultStepSize: defaultStepSize)
+        {
+            routePrefill = try QuantizedPrefill.prepare(self, rows: rows)
+        }
+        try withReservedPromptCache(cache, additionalTokens: y.cacheSequenceLength) {
+            try withPreparedCache(cache, lengths: y.sequenceLengths) {
+                // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
+                // chunk N. Under .remainder the reserved tail is the legacy leftover
+                // (up to a full step) rather than a single token.
+                var state: LMOutput.State? = state
+                var submitted = false
+                defer {
+                    // Finish submitted work before returning, including cancellation.
+                    if submitted { eval(cache) }
+                }
+                processed = try prefill.forEachChunk(
+                    total: total, reserving: prefill.chunking == .remainder ? stepSize : 1,
+                    defaultStepSize: defaultStepSize
+                ) { range in
+                    let input = y[.newAxis, range]
+                    let output = QuantizedPrefill.withPrefill(enabled: routePrefill) {
+                        self(input, cache: cache.isEmpty ? nil : cache, state: state)
+                    }
+                    state = output.state
+                    asyncEval(cache)
+                    submitted = true
+                }
             }
         }
 
