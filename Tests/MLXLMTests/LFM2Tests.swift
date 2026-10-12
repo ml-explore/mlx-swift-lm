@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import MLXScriptedLM
 import XCTest
 
 @testable import MLXLLM
@@ -11,7 +12,7 @@ import XCTest
 final class LFM2Tests: XCTestCase {
     private struct TokenizerLoaderStub: MLXLMCommon.TokenizerLoader {
         func load(from directory: URL) async throws -> any Tokenizer {
-            TestTokenizer(vocabularySize: 65_536)
+            PseudoWordTokenizer(vocabularySize: 65_536)
         }
     }
 
@@ -40,6 +41,25 @@ final class LFM2Tests: XCTestCase {
     private func config() throws -> LFM2Configuration {
         try JSONDecoder().decode(
             LFM2Configuration.self, from: Data(Self.tinyConfigJSON.utf8))
+    }
+
+    func testCommunityNamespacePreservesPerLayerPrecision() throws {
+        let model = LFM2Model(try config())
+        let prepared = try model.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: [
+                    "language_model.model.layers.0.conv.in_proj.weight": MLXArray.ones([8, 8])
+                ],
+                perLayerQuantization: .init(
+                    quantization: .init(groupSize: 64, bits: 4),
+                    perLayerQuantization: [
+                        "language_model.model.layers.0.conv.in_proj": .quantize(
+                            .init(groupSize: 64, bits: 8))
+                    ])))
+        XCTAssertNotNil(prepared.weights["model.layers.0.conv.in_proj.weight"])
+        XCTAssertEqual(
+            prepared.perLayerQuantization?.quantization(layer: "model.layers.0.conv.in_proj")?.bits,
+            8)
     }
 
     func testTransformersIntermediateSizeBuildsReleasedCheckpointShape() throws {

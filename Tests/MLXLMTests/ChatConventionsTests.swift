@@ -242,6 +242,18 @@ struct ChatConventionsTests {
                 modelId: "someone/LFM2.5-lookalike", modelType: "llama") == nil)
     }
 
+    @Test func lfm25ResolverDoesNotTreatEveryCheckpointAsReasoning() {
+        let resolver = LFM25ConventionsResolver()
+        for model in ["LFM2.5-1.2B-Instruct", "LFM2.5-1.2B-Base", "LFM2.5-1.2B-JP"] {
+            #expect(
+                resolver.reasoningConfig(modelId: "LiquidAI/\(model)", modelType: "lfm2") == nil)
+        }
+        #expect(
+            resolver.reasoningConfig(
+                modelId: "LiquidAI/LFM2.5-1.2B-Thinking-MLX", modelType: "lfm2")
+                == .alwaysOnThinking)
+    }
+
     @Test func sharedRegistryResolvesLFM25OutOfTheBox() {
         let resolved = ChatConventionsRegistry.shared.reasoningConfig(
             modelId: "LiquidAI/LFM2.5-2.6B-MLX", modelType: "lfm2")

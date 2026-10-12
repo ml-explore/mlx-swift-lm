@@ -118,8 +118,10 @@ public struct LFM25ConventionsResolver: ChatConventionsResolving {
 
     public func reasoningConfig(modelId: String, modelType: String) -> ReasoningConfig? {
         let supportedModelTypes = Set(["lfm2", "lfm2_moe"])
+        let modelName = modelId.split(separator: "/").last?.lowercased() ?? ""
+        let reasoningCheckpoints = ["lfm2.5-2.6b", "lfm2.5-8b-a1b", "lfm2.5-1.2b-thinking"]
         guard supportedModelTypes.contains(modelType.lowercased()),
-            modelId.lowercased().contains("lfm2.5")
+            reasoningCheckpoints.contains(where: modelName.hasPrefix)
         else {
             return nil
         }

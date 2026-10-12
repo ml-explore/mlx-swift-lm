@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import MLXScriptedLM
 import Testing
 
 @testable import MLXLLM
@@ -196,7 +197,7 @@ struct LFM2DSparkMetalTests {
 
 private struct DSparkTokenizerLoaderStub: TokenizerLoader {
     func load(from _: URL) async throws -> any Tokenizer {
-        TestTokenizer(vocabularySize: 128_000)
+        PseudoWordTokenizer(vocabularySize: 128_000)
     }
 }
 

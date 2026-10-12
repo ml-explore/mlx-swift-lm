@@ -46,6 +46,34 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     #expect(copy.rollbackCapacity == 8)
 }
 
+@Test func testHybridConvolutionTrimFailsWithoutPartiallyTrimmingAttention() {
+    for convolutionFirst in [false, true] {
+        let convolution = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+        let input = MLXArray.ones([1, 12, 4])
+        convolution.record(
+            input: input, initialState: MLXArray.zeros([1, 2, 4]),
+            currentState: input[0..., (-2)..., 0...])
+        let attention = KVCacheSimple()
+        let kv = MLXArray.ones([1, 1, 12, 4])
+        _ = attention.update(keys: kv, values: kv)
+        let caches: [KVCache] =
+            convolutionFirst
+            ? [convolution, attention] : [attention, convolution]
+        #expect(trimPromptCache(caches, numTokens: 9) == 0)
+        #expect(convolution.offset == 12)
+        #expect(attention.offset == 12)
+        #expect(CacheList(caches[0], caches[1]).trim(9) == 0)
+        #expect(convolution.offset == 12)
+        #expect(attention.offset == 12)
+        #expect(trimPromptCache(caches, numTokens: 8) == 8)
+        #expect(convolution.offset == 4)
+        #expect(attention.offset == 4)
+        #expect(trimPromptCache(caches, numTokens: 1) == 0)
+        #expect(convolution.offset == 4)
+        #expect(attention.offset == 4)
+    }
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {

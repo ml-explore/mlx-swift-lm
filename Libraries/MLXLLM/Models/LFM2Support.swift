@@ -15,6 +15,17 @@ enum LFM2RuntimeSupport {
     /// path, so cache construction and speculative rollback cannot drift.
     static let speculativeRollbackCapacity = 64
 
+    static func removingLanguageModelScope(from checkpoint: ModelCheckpoint) throws
+        -> ModelCheckpoint
+    {
+        let stripScope =
+            checkpoint.weights.keys.contains { $0.hasPrefix("language_model.model.") }
+            && !checkpoint.weights.keys.contains { $0.hasPrefix("model.") }
+        let mapping = CheckpointNameMapping(
+            stripScope ? [.replacePrefix("language_model", with: "")] : [])
+        return try checkpoint.mapNames(using: mapping)
+    }
+
     static func makeHybridCache(
         hiddenLayers: Int,
         fullAttentionIndices: Set<Int>,

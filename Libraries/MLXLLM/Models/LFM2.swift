@@ -529,6 +529,12 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider,
         return LMOutput(logits: logits, state: outState)
     }
 
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try LFM2RuntimeSupport.removingLanguageModelScope(from: checkpoint)
+        checkpoint.weights = sanitize(weights: checkpoint.weights)
+        return checkpoint
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights: [String: MLXArray] = [:]
         let shouldStripLanguageModelPrefix =

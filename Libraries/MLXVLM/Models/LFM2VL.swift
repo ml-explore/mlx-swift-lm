@@ -832,6 +832,17 @@ public struct LFM2VLProcessor: UserInputProcessor {
     }
 }
 
+private final class LFM2VLVision: Module {
+    @ModuleInfo(key: "vision_tower") var tower: Vision.VisionModel
+    @ModuleInfo(key: "multi_modal_projector") var projector: Lfm2VlMultiModalProjector
+
+    init(_ config: LFM2VLConfiguration) {
+        _tower.wrappedValue = Vision.VisionModel(
+            config: config.visionConfiguration, visionFeatureLayer: config.visionFeatureLayer)
+        _projector.wrappedValue = Lfm2VlMultiModalProjector(config: config)
+    }
+}
+
 // MARK: - Model
 
 /// LFM2 VL VLM
@@ -839,13 +850,14 @@ public struct LFM2VLProcessor: UserInputProcessor {
 /// This is typically created by ``VLMModelFactory``.
 public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
 
-    @ModuleInfo(key: "vision_tower") private var visionModel: Vision.VisionModel
+    @ModuleInfo(key: "vision_tower") private var visionModel: Vision.VisionModel?
     @ModuleInfo(key: "multi_modal_projector") private var multiModalProjector:
-        Lfm2VlMultiModalProjector
+        Lfm2VlMultiModalProjector?
     @ModuleInfo(key: "language_model") private var languageModel: Language.LanguageModel
     @ModuleInfo(key: "pixel_unshuffle") private var pixelUnshuffle: PixelUnshuffleBlock?
 
     public let config: LFM2VLConfiguration
+    private let onDemandVision: OnDemandComponent<LFM2VLVision>
 
     public var vocabularySize: Int { config.textConfiguration.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
@@ -857,18 +869,25 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     public init(_ config: LFM2VLConfiguration) {
         self.config = config
 
-        self._visionModel.wrappedValue = Vision.VisionModel(
-            config: config.visionConfiguration,
-            visionFeatureLayer: config.visionFeatureLayer
-        )
+        let vision = LFM2VLVision(config)
+        self._visionModel.wrappedValue = vision.tower
+        self._multiModalProjector.wrappedValue = vision.projector
+        self.onDemandVision = OnDemandComponent(.vision) { LFM2VLVision(config) }
 
         if config.downsampleFactor > 1 {
             self._pixelUnshuffle.wrappedValue = PixelUnshuffleBlock(factor: config.downsampleFactor)
         }
 
-        self._multiModalProjector.wrappedValue = Lfm2VlMultiModalProjector(config: config)
         self._languageModel.wrappedValue = Language.LanguageModel(
             config.textConfiguration, tieWordEmbeddings: config.tieWordEmbeddings)
+    }
+
+    private func vision() throws -> (Vision.VisionModel, Lfm2VlMultiModalProjector) {
+        if let visionModel, let multiModalProjector {
+            return (visionModel, multiModalProjector)
+        }
+        let vision = try onDemandVision.load()
+        return (vision.tower, vision.projector)
     }
 
     private func getInputEmbeddings(
@@ -894,9 +913,10 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             return inputsEmbeds
         }
 
-        // Get the output hidden states from the vision model
-        let visionOutput = visionModel(
-            pixelValues, outputHiddenStates: true, spatialShapes: spatialShapes)
+        let (tower, projector) = try vision()
+        let dtype = tower.embeddings.patchEmbedding.weight.dtype
+        let visionOutput = tower(
+            pixelValues.asType(dtype), outputHiddenStates: true, spatialShapes: spatialShapes)
         let hiddenStates = visionOutput.lastHiddenState
 
         // Get feature lengths from attention mask
@@ -924,7 +944,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             }
 
             // Project to language model dimension
-            var imgEmbedding = multiModalProjector(feature)
+            var imgEmbedding = projector(feature)
 
             // Flatten back
             imgEmbedding = imgEmbedding.reshaped(-1, imgEmbedding.dim(-1))
@@ -985,10 +1005,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     ) throws
         -> PrepareResult
     {
-        let dtype = visionModel.embeddings.patchEmbedding.weight.dtype
-
-        // Get image data if available
-        let pixelValues = input.image?.pixels.asType(dtype)
+        let pixelValues = input.image?.pixels
 
         var spatialShapes: MLXArray? = nil
         var pixelAttentionMask: MLXArray? = nil
@@ -1059,42 +1076,46 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         languageModel(inputs, cache: cache).logits
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        func transformKey(_ key: String) -> String {
-            var key = key
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try checkpoint.mapNames(Self.checkpointName)
+        checkpoint.weights = sanitize(weights: checkpoint.weights)
+        return checkpoint
+    }
 
-            if key.contains("vision_tower") {
-                key =
-                    key
-                    .replacingOccurrences(of: "model.", with: "")
-                    .replacingOccurrences(of: "vision_encoder", with: "encoder")
-                    .replacingOccurrences(of: "vision_embeddings", with: "embeddings")
-                    .replacingOccurrences(of: "vision_post_layernorm", with: "post_layernorm")
-            }
+    private static func checkpointName(_ key: String) -> String {
+        var key = key
 
-            if key.contains("language_model") {
-                key = key.replacingOccurrences(
-                    of: "model.language_model", with: "language_model.model")
-            }
-
-            if key.contains("multi_modal_projector") {
-                key = key.replacingOccurrences(
-                    of: "model.multi_modal_projector", with: "multi_modal_projector")
-            }
-
-            // HF checkpoints keep an untied `lm_head` at the top level.
-            if key.hasPrefix("model.") || key.hasPrefix("lm_head.") {
-                key = "language_model." + key
-            }
-
-            return key
+        if key.contains("vision_tower") {
+            key =
+                key
+                .replacingOccurrences(of: "model.", with: "")
+                .replacingOccurrences(of: "vision_encoder", with: "encoder")
+                .replacingOccurrences(of: "vision_embeddings", with: "embeddings")
+                .replacingOccurrences(of: "vision_post_layernorm", with: "post_layernorm")
         }
 
+        if key.contains("language_model") {
+            key = key.replacingOccurrences(
+                of: "model.language_model", with: "language_model.model")
+        }
+
+        if key.contains("multi_modal_projector") {
+            key = key.replacingOccurrences(
+                of: "model.multi_modal_projector", with: "multi_modal_projector")
+        }
+
+        if key.hasPrefix("model.") || key.hasPrefix("lm_head.") {
+            key = "language_model." + key
+        }
+        return key
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         let weights = filterLMHeadWeights(
             from: weights, tiedWordEmbeddings: config.tieWordEmbeddings)
-        var sanitizedWeights = [String: MLXArray]()
+>>>>>>> 6df5379 (Load LFM2VL vision on demand and harden LFM loading and cache rewinds)        var sanitizedWeights = [String: MLXArray]()
         for (k, v) in weights {
-            let newKey = transformKey(k)
+            let newKey = Self.checkpointName(k)
 
             // Handle conv weight transposition
             var value = v
@@ -1120,6 +1141,19 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             }
         }
     }
+}
+
+extension LFM2VL: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        let modules = ["vision_tower", "multi_modal_projector"]
+        return [
+            .vision: modules.map {
+                CheckpointComponent(name: $0, namespaces: [$0, "model.\($0)"], destination: $0)
+            }
+        ]
+    }
+
+    public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }
 
 // MARK: - Configuration

@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import MLXScriptedLM
 import XCTest
 
 @testable import MLXLLM
@@ -10,7 +11,7 @@ final class LFM2MoeRoutingTests: XCTestCase {
 
     private struct TokenizerLoaderStub: MLXLMCommon.TokenizerLoader {
         func load(from directory: URL) async throws -> any Tokenizer {
-            TestTokenizer(vocabularySize: 128_000)
+            PseudoWordTokenizer(vocabularySize: 128_000)
         }
     }
 
@@ -92,6 +93,25 @@ final class LFM2MoeRoutingTests: XCTestCase {
         let idx = r.indices.reshaped(-1).asArray(Int32.self).map(Int.init)
         let w = r.weights.reshaped(-1).asArray(Float.self)
         return Dictionary(uniqueKeysWithValues: zip(idx, w))
+    }
+
+    func testCommunityNamespacePreservesPerLayerPrecision() throws {
+        let model = LFM2MoEModel(try makeHybridConfig())
+        let prepared = try model.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: [
+                    "language_model.model.layers.1.feed_forward.gate.weight": MLXArray.ones([8, 8])
+                ],
+                perLayerQuantization: .init(
+                    quantization: .init(groupSize: 64, bits: 4),
+                    perLayerQuantization: [
+                        "language_model.model.layers.1.feed_forward.gate": .quantize(
+                            .init(groupSize: 64, bits: 8))
+                    ])))
+        XCTAssertNotNil(prepared.weights["model.layers.1.feed_forward.gate.weight"])
+        XCTAssertEqual(
+            prepared.perLayerQuantization?.quantization(layer: "model.layers.1.feed_forward.gate")?
+                .bits, 8)
     }
 
     func testExpertBiasSteersSelectionOnly() throws {
