@@ -1664,6 +1664,19 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 extension SpeculativeTokenIterator: GenerationFinalizingTokenIterator {
     mutating func finalizeGeneration() {
         defer { processor?.finalizeGeneration() }
+        // A round that accepted every draft left the last one for the next round to feed
+        // (`draftY` carries it). Feed it now if it was returned, so both caches end together.
+        if draftCommittedPendingTokenCount < mainCommittedPendingTokenCount,
+            pendingIndex >= mainCommittedPendingTokenCount,
+            passthroughReason == nil, !Task.isCancelled
+        {
+            let lastDraft = LMInput.Text(tokens: draftY.tokens[0 ..< 1])
+            _ = draftModel(lastDraft[text: .newAxis], cache: draftCache, state: nil)
+            eval(draftCache)
+            draftCacheStorage.commitProcessedTokens(1)
+            draftCommittedPendingTokenCount += 1
+        }
+
         // Trim through the storages so the model-wide processed-token timeline
         // rewinds with the caches; `ChatSession` reconciles its ledger against
         // that timeline, not against per-entry offsets.

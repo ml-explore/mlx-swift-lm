@@ -615,7 +615,7 @@ struct Qwen35CheckpointLoadingTests {
                 try JSONDecoder().decode(MLXLLM.Qwen35Configuration.self, from: data))
         }
         var weights = Dictionary(uniqueKeysWithValues: target.parameters().flattened())
-        let count = weights.count
+        let expectedKeys = Set(weights.keys)
         weights["language_model.mtp.norm.weight"] = MLXArray.zeros([64])
         weights["language_model.mtp.fc.weight"] = MLXArray.zeros([64, 128])
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -625,8 +625,8 @@ struct Qwen35CheckpointLoadingTests {
         try save(
             arrays: weights, metadata: ["format": "mlx"],
             url: directory.appendingPathComponent("model.safetensors"))
-        try loadWeights(modelDirectory: directory, model: target)
-        #expect(target.parameters().flattened().count == count)
+        try loadWeights(modelDirectory: directory, model: target, componentLoading: .immediate)
+        #expect(Set(target.parameters().flattened().map(\.0)) == expectedKeys)
     }
 
     @Test

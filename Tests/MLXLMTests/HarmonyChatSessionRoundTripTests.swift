@@ -429,8 +429,8 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
         XCTAssertEqual(firstGeneration.count, 12)
 
         // The cold restart prompt is [start, call, start, message, tool-result, end].
-        // The live main cache ends immediately before `call`, so it must receive
-        // the final five tokens as one main-only prefill.
+        // Both live caches end immediately before `call`, so both receive the final
+        // five tokens; the main cache verifies them together with three drafts.
         let timeline =
             [Harmony.start]
             + firstGeneration
@@ -480,11 +480,11 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
         XCTAssertTrue(reply.contains("Sunny in Paris."))
         XCTAssertFalse(reply.contains("Need weather"))
         XCTAssertTrue(
-            mainModel.calls.contains { $0.offset == 12 && $0.tokenCount == 5 },
-            "The main cache should retain private analysis and prefill call + tool result")
-        XCTAssertFalse(
-            draftModel.calls.contains { $0.offset >= 12 },
-            "A lagging draft cache must not be reused for the Harmony continuation")
+            mainModel.calls.contains { $0.offset == 12 && $0.tokenCount == 8 },
+            "The main cache should retain private analysis and verify call + tool result")
+        XCTAssertTrue(
+            draftModel.calls.contains { $0.offset == 12 && $0.tokenCount == 5 },
+            "The draft cache should resume where the main cache does")
     }
 
     func testRawGenerationDoesNotApplyHarmonySemanticStopTokens() async throws {

@@ -155,10 +155,10 @@ struct SpeculativeDecodingTests {
 
         #expect(tokens.count == 3)
         #expect(completion?.speculativeDecodingTelemetry?.roundCount == 1)
-        // Both caches advanced: prompt + 2 accepted drafts in the main cache,
-        // and the draft cache trails by one token after an all-accepted round.
+        // Both caches advanced: prompt + 2 accepted drafts. The draft cache feeds
+        // the last accepted draft when generation ends.
         #expect(mainCache.first?.offset == 3)
-        #expect(draftCache.first?.offset == 2)
+        #expect(draftCache.first?.offset == 3)
     }
 
     @Test(arguments: [2, 8, 48], [false, true])
@@ -259,9 +259,9 @@ struct SpeculativeDecodingTests {
         #expect(telemetry.emittedTokenCount == tokenCount)
     }
 
-    @Test(arguments: [1, 2, 4])
+    @Test(arguments: [1, 2, 3, 4])
     func `finalizeGeneration trims unreturned speculative lookahead`(consumedTokens: Int) throws {
-        // Contract: after `finalizeGeneration()` the shared caches must represent
+        // Contract: after `finalizeGeneration()` both caches must represent
         // exactly the tokens returned to the generation loop — no verified
         // but unreturned lookahead. ChatSession relies on this to reconcile
         // its token ledger against the model-wide processed-token timeline,
@@ -292,13 +292,13 @@ struct SpeculativeDecodingTests {
 
         iterator.finalizeGeneration()
 
-        let expectedMain = 1 + Swift.min(consumed, 3)
-        let expectedDraft = 1 + Swift.min(consumed, 2)
-        #expect(mainCache.first?.offset == expectedMain)
-        #expect(draftCache.first?.offset == expectedDraft)
+        // Once the third draft is returned, the draft cache feeds it too.
+        let expected = 1 + Swift.min(consumed, 3)
+        #expect(mainCache.first?.offset == expected)
+        #expect(draftCache.first?.offset == expected)
         // The authoritative timeline rewound with the entries, not behind them.
-        #expect(iterator.mainCacheStorage.processedTokenCount == expectedMain)
-        #expect(iterator.draftCacheStorage.processedTokenCount == expectedDraft)
+        #expect(iterator.mainCacheStorage.processedTokenCount == expected)
+        #expect(iterator.draftCacheStorage.processedTokenCount == expected)
         #expect(iterator.mainCacheStorage.nativeAttentionOffsetsAreAligned)
         #expect(iterator.draftCacheStorage.nativeAttentionOffsetsAreAligned)
     }
