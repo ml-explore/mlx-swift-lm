@@ -96,6 +96,7 @@ public enum VLMTypeRegistry {
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
         "qwen3_8": create(Qwen35Configuration.self, Qwen35.init),
         "qwen3_8_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
+        "prism_hadamard_qwen35": createPrismHadamardQwen35Model,
         "idefics3": create(Idefics3Configuration.self, Idefics3.init),
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4.init),
@@ -294,6 +295,12 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let bonsai2_27B_ternary_2bit = ModelConfiguration(
+        id: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<|im_end|>"]
+    )
+
     static public let museGlimmer30B4bit = ModelConfiguration(
         id: "mlx-community/Muse-Glimmer-30B-4bit",
         defaultPrompt: "Describe the image in English",
@@ -327,6 +334,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_5_35B_A3B_4bit,
             qwen3_8_27B_4bit,
             qwen3_8_27B_8bit,
+            bonsai2_27B_ternary_2bit,
             museGlimmer30B4bit,
         ]
     }

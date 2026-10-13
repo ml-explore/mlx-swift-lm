@@ -66,6 +66,13 @@ precision. Qwen uses component selection for its MTP predictor. Existing models
 still use their sanitizer through the default implementation; migrate renaming
 sanitizers to the checkpoint hook so their precision declarations follow renames.
 
+Rotated checkpoints use the same hook. A Hadamard-rotated pack such as
+`prism_hadamard_qwen35` names its rotated layers in `config.json`.
+``HadamardQuantizedCheckpointPolicy`` replaces those layers with
+``HadamardQuantizedLinear`` and ``HadamardQuantizedEmbedding`` before the load.
+Its ``HadamardQuantizedCheckpointPolicy/prepare(_:)`` runs in the model's hook to
+check the sign vectors and cast the unpacked tensors, for on-demand components too.
+
 Qwen3.5 targets exclude the MTP component. Drafters accept embedded `mtp.*` and
 converted `language_model.mtp.*` components, and unprefixed heads declared as
 `qwen3_5_mtp`. An ordinary target without MTP weights is not a standalone head.
