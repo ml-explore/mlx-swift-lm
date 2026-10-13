@@ -105,6 +105,24 @@ projections require their own checkpoint weights.
 
 See [llm-tool](../../Tools/llm-tool)
 
+# LFM2-VL
+
+`LFM2VLProcessor` prepares images as transformers' `Lfm2VlProcessor` does; its documentation
+describes the resize, decoding and errors. Callers who used it before will also notice:
+
+- The processor settings are read as mlx-vlm reads them: `processor_config.json` overrides
+  `preprocessor_config.json`, and a missing `resample` is bicubic. The files' tiling settings
+  (`do_image_splitting`, `min_tiles`, `max_tiles`, `use_thumbnail`) are ignored, as mlx-vlm
+  ignores them, so tiling stays on although LiquidAI's MLX repos turn it off. A value of the
+  wrong type keeps its default. A `resample` other than 2 (bilinear) or 3 (bicubic) fails the
+  load.
+- Extra `<image>` in system, assistant and tool messages and in tool specs are read as text,
+  so a reply that contains `<image>` does not break the next turns. transformers raises on
+  those.
+- A prompt can hold several images of different sizes.
+- A `resize` of 0 × 0, an `image_mean` or `image_std` that is not 1 or 3 values long, and a
+  tokenizer without the image tokens throw `VLMError`.
+
 # Adding a Model
 
 If the model follows the typical VLM pattern:

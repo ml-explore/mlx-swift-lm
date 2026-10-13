@@ -95,7 +95,8 @@ let package = Package(
             path: "Libraries/MLXVLM",
             exclude: [
                 "README.md"
-            ]
+            ],
+            resources: [.copy("NOTICE_MLXVLM.md")]
         ),
         .target(
             name: "MLXLMCommon",

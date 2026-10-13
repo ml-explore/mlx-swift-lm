@@ -36,3 +36,18 @@ ffmpeg \
 -write_tmcd true \
 -y audio_only.mov
 ```
+
+## LFM2-VL test vectors
+
+The expected values in `ImagePixelsTests.swift`, `LFM2VLImageProcessingTests.swift`,
+`LFM2VLProcessorTests.swift`, `LFM2VLTests.swift` and `Siglip2NaFlexTests.swift` come from
+Hugging Face transformers, except the hashes in
+`LFM2VLProcessorTests.severalImagesKeepTheirTokensAndPixels`, which are regression values from
+this port. To regenerate them:
+
+```
+pip install transformers torch torchvision pillow
+python tools/lfm2_vl_test_vectors.py
+```
+
+The script prints the values grouped by test. It needs no model weights.
