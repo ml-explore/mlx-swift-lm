@@ -625,7 +625,7 @@ struct Qwen35CheckpointLoadingTests {
         try save(
             arrays: weights, metadata: ["format": "mlx"],
             url: directory.appendingPathComponent("model.safetensors"))
-        try loadWeights(modelDirectory: directory, model: target)
+        try loadWeights(modelDirectory: directory, model: target, componentLoading: .immediate)
         #expect(target.parameters().flattened().count == count)
     }
 

@@ -666,9 +666,14 @@ public struct LFM2VLProcessor: UserInputProcessor {
     private let config: LFM2VLProcessorConfiguration
     private let tokenizer: any Tokenizer
 
+    /// The image placeholder id in this checkpoint's vocabulary, or `nil` when the
+    /// tokenizer has no such token.
+    private let imageTokenId: Int?
+
     public init(_ config: LFM2VLProcessorConfiguration, tokenizer: any Tokenizer) {
         self.config = config
         self.tokenizer = tokenizer
+        self.imageTokenId = tokenizer.convertTokenToId(config.imageToken)
     }
 
     /// Preprocess a single image
@@ -784,14 +789,16 @@ public struct LFM2VLProcessor: UserInputProcessor {
 
         // Replace image placeholder tokens with the correct count.
         //
-        // The id is per-model, not per-family: 396 is LFM2-VL's, while
-        // LFM2.5-VL-3B declares 124907. Hardcoding it meant the expansion below
-        // scanned for a token the template never emitted, left the single
-        // placeholder in place, and the model then aborted the process in
-        // `mergeInputIdsWithImageFeatures` with "tokens: 1, features 1536".
-        // The vocabulary is the authority; the old constant stays as the
-        // fallback for a tokenizer with no `<image>` entry.
-        let imageTokenId = tokenizer.convertTokenToId("<image>") ?? 396
+        // The id is per-checkpoint: 396 on LFM2-VL, 124907 on LFM2.5-VL-3B. The
+        // vocabulary is the only authority the chat template and this processor
+        // share, and there is deliberately no numeric fallback: 396 is the
+        // ordinary BPE token "ab" in the LFM2.5 vocabulary, so a wrong guess
+        // would silently match prose instead of failing.
+        guard let imageTokenId else {
+            throw VLMError.processing(
+                "The tokenizer has no '\(config.imageToken)' token, so the image placeholder cannot be expanded."
+            )
+        }
         var newPromptTokens = [Int]()
         var imageIdx = 0
         var i = 0
@@ -840,6 +847,17 @@ public struct LFM2VLProcessor: UserInputProcessor {
     }
 }
 
+private final class LFM2VLVision: Module {
+    @ModuleInfo(key: "vision_tower") var tower: Vision.VisionModel
+    @ModuleInfo(key: "multi_modal_projector") var projector: Lfm2VlMultiModalProjector
+
+    init(_ config: LFM2VLConfiguration) {
+        _tower.wrappedValue = Vision.VisionModel(
+            config: config.visionConfiguration, visionFeatureLayer: config.visionFeatureLayer)
+        _projector.wrappedValue = Lfm2VlMultiModalProjector(config: config)
+    }
+}
+
 // MARK: - Model
 
 /// LFM2 VL VLM
@@ -847,13 +865,14 @@ public struct LFM2VLProcessor: UserInputProcessor {
 /// This is typically created by ``VLMModelFactory``.
 public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
 
-    @ModuleInfo(key: "vision_tower") private var visionModel: Vision.VisionModel
+    @ModuleInfo(key: "vision_tower") private var visionModel: Vision.VisionModel?
     @ModuleInfo(key: "multi_modal_projector") private var multiModalProjector:
-        Lfm2VlMultiModalProjector
+        Lfm2VlMultiModalProjector?
     @ModuleInfo(key: "language_model") private var languageModel: Language.LanguageModel
     @ModuleInfo(key: "pixel_unshuffle") private var pixelUnshuffle: PixelUnshuffleBlock?
 
     public let config: LFM2VLConfiguration
+    private let onDemandVision: OnDemandComponent<LFM2VLVision>
 
     public var vocabularySize: Int { config.textConfiguration.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
@@ -865,17 +884,24 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     public init(_ config: LFM2VLConfiguration) {
         self.config = config
 
-        self._visionModel.wrappedValue = Vision.VisionModel(
-            config: config.visionConfiguration,
-            visionFeatureLayer: config.visionFeatureLayer
-        )
+        let vision = LFM2VLVision(config)
+        self._visionModel.wrappedValue = vision.tower
+        self._multiModalProjector.wrappedValue = vision.projector
+        self.onDemandVision = OnDemandComponent(.vision) { LFM2VLVision(config) }
 
         if config.downsampleFactor > 1 {
             self._pixelUnshuffle.wrappedValue = PixelUnshuffleBlock(factor: config.downsampleFactor)
         }
 
-        self._multiModalProjector.wrappedValue = Lfm2VlMultiModalProjector(config: config)
         self._languageModel.wrappedValue = Language.LanguageModel(config.textConfiguration)
+    }
+
+    private func vision() throws -> (Vision.VisionModel, Lfm2VlMultiModalProjector) {
+        if let visionModel, let multiModalProjector {
+            return (visionModel, multiModalProjector)
+        }
+        let vision = try onDemandVision.load()
+        return (vision.tower, vision.projector)
     }
 
     private func getInputEmbeddings(
@@ -901,9 +927,10 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             return inputsEmbeds
         }
 
-        // Get the output hidden states from the vision model
-        let visionOutput = visionModel(
-            pixelValues, outputHiddenStates: true, spatialShapes: spatialShapes)
+        let (tower, projector) = try vision()
+        let dtype = tower.embeddings.patchEmbedding.weight.dtype
+        let visionOutput = tower(
+            pixelValues.asType(dtype), outputHiddenStates: true, spatialShapes: spatialShapes)
         let hiddenStates = visionOutput.lastHiddenState
 
         // Get feature lengths from attention mask
@@ -931,7 +958,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             }
 
             // Project to language model dimension
-            var imgEmbedding = multiModalProjector(feature)
+            var imgEmbedding = projector(feature)
 
             // Flatten back
             imgEmbedding = imgEmbedding.reshaped(-1, imgEmbedding.dim(-1))
@@ -964,9 +991,9 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         let nImageFeatures = imageFeatures.dim(0)
-        if imageIndices.count != nImageFeatures {
+        guard imageIndices.count == nImageFeatures else {
             throw VLMError.processing(
-                "Image features and image tokens do not match: tokens: \(imageIndices.count), features \(nImageFeatures)"
+                "Image features and image tokens do not match: tokens \(imageIndices.count), features \(nImageFeatures). The processor expanded the placeholder with the tokenizer's id while the model scans for image_token_id \(imageTokenIndex)."
             )
         }
 
@@ -992,10 +1019,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     ) throws
         -> PrepareResult
     {
-        let dtype = visionModel.embeddings.patchEmbedding.weight.dtype
-
-        // Get image data if available
-        let pixelValues = input.image?.pixels.asType(dtype)
+        let pixelValues = input.image?.pixels
 
         var spatialShapes: MLXArray? = nil
         var pixelAttentionMask: MLXArray? = nil
@@ -1066,35 +1090,41 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         languageModel(inputs, cache: cache).logits
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        func transformKey(_ key: String) -> String {
-            var key = key
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try checkpoint.mapNames(Self.checkpointName)
+        checkpoint.weights = sanitize(weights: checkpoint.weights)
+        return checkpoint
+    }
 
-            if key.contains("vision_tower") {
-                key =
-                    key
-                    .replacingOccurrences(of: "model.", with: "")
-                    .replacingOccurrences(of: "vision_encoder", with: "encoder")
-                    .replacingOccurrences(of: "vision_embeddings", with: "embeddings")
-                    .replacingOccurrences(of: "vision_post_layernorm", with: "post_layernorm")
-            }
+    private static func checkpointName(_ key: String) -> String {
+        var key = key
 
-            if key.contains("language_model") {
-                key = key.replacingOccurrences(
-                    of: "model.language_model", with: "language_model.model")
-            }
-
-            if key.contains("multi_modal_projector") {
-                key = key.replacingOccurrences(
-                    of: "model.multi_modal_projector", with: "multi_modal_projector")
-            }
-
-            return key
+        if key.contains("vision_tower") {
+            key =
+                key
+                .replacingOccurrences(of: "model.", with: "")
+                .replacingOccurrences(of: "vision_encoder", with: "encoder")
+                .replacingOccurrences(of: "vision_embeddings", with: "embeddings")
+                .replacingOccurrences(of: "vision_post_layernorm", with: "post_layernorm")
         }
 
+        if key.contains("language_model") {
+            key = key.replacingOccurrences(
+                of: "model.language_model", with: "language_model.model")
+        }
+
+        if key.contains("multi_modal_projector") {
+            key = key.replacingOccurrences(
+                of: "model.multi_modal_projector", with: "multi_modal_projector")
+        }
+
+        return key
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights = [String: MLXArray]()
         for (k, v) in weights {
-            let newKey = transformKey(k)
+            let newKey = Self.checkpointName(k)
 
             // Handle conv weight transposition
             var value = v
@@ -1120,6 +1150,19 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             }
         }
     }
+}
+
+extension LFM2VL: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        let modules = ["vision_tower", "multi_modal_projector"]
+        return [
+            .vision: modules.map {
+                CheckpointComponent(name: $0, namespaces: [$0, "model.\($0)"], destination: $0)
+            }
+        ]
+    }
+
+    public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }
 
 // MARK: - Configuration
@@ -1226,7 +1269,11 @@ public struct LFM2VLConfiguration: Codable, Sendable {
     private let _downsampleFactor: Int?
     public var downsampleFactor: Int { _downsampleFactor ?? 2 }
     private let _imageTokenId: Int?
-    public var imageTokenIndex: Int { _imageTokenId ?? 396 }
+    public var imageTokenIndex: Int { _imageTokenId ?? Self.defaultImageTokenId }
+
+    /// LFM2-VL's image placeholder id, used when `config.json` omits `image_token_id`.
+    public static let defaultImageTokenId = 396
+
     private let _projectorBias: Bool?
     public var projectorBias: Bool { _projectorBias ?? true }
     private let _projectorHiddenSize: Int?
@@ -1277,6 +1324,13 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
     private let _encoderPatchSize: Int?
     private let _maxTiles: Int?
     private let _downsampleFactor: Int?
+    private let _imageToken: String?
+
+    /// The placeholder text the chat template emits for an image.
+    public var imageToken: String { _imageToken ?? Self.defaultImageToken }
+
+    /// The image placeholder used by the released LFM2-VL chat templates.
+    public static let defaultImageToken = "<image>"
 
     // Default values matching LFM2 VL models
     public var imageMean: [CGFloat] {
@@ -1304,6 +1358,7 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
         case _encoderPatchSize = "encoder_patch_size"
         case _maxTiles = "max_tiles"
         case _downsampleFactor = "downsample_factor"
+        case _imageToken = "image_token"
     }
 }
 

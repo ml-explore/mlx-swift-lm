@@ -1642,6 +1642,95 @@ public class MambaCache: ArraysCache {
     }
 }
 
+/// Compact convolution cache with a bounded token history for safe rewinds.
+///
+/// Hybrid models normally need only the final `stateLength` projected inputs,
+/// but retaining a small rolling history makes speculative rejection and short
+/// chat-template rewinds possible without keeping the full prompt activation
+/// history. Trims larger than the retained window fail atomically and callers
+/// can rebuild from the common prefix.
+public final class RewindableConvolutionCache: MambaCache {
+    public let stateLength: Int
+    public let rollbackCapacity: Int
+
+    public init(stateLength: Int, rollbackCapacity: Int = 64) {
+        precondition(stateLength > 0)
+        precondition(rollbackCapacity > 0)
+        self.stateLength = stateLength
+        self.rollbackCapacity = rollbackCapacity
+        super.init()
+    }
+
+    /// Commits one convolution call and retains only the bounded rewind window.
+    public func record(
+        input: MLXArray,
+        initialState: MLXArray,
+        currentState: MLXArray
+    ) {
+        let timeline: MLXArray
+        if let history = self[1] {
+            timeline = concatenated([history, input], axis: 1)
+        } else {
+            timeline = concatenated([initialState, input], axis: 1)
+        }
+
+        let retainedLength = min(timeline.dim(1), stateLength + rollbackCapacity)
+        self[0] = currentState
+        self[1] = contiguous(timeline[0..., (timeline.dim(1) - retainedLength)..., 0...])
+        offset += input.dim(1)
+        advance(input.dim(1))
+    }
+
+    public override var isTrimmable: Bool { true }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        positions >= 0 && positions <= rollbackCapacity
+    }
+
+    fileprivate func canRewind(_ positions: Int) -> Bool {
+        guard positions >= 0 else { return false }
+        if positions == 0 { return true }
+        guard let history = self[1] else { return false }
+        return positions <= min(offset, history.dim(1) - stateLength)
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, canRewind(n), let history = self[1] else { return 0 }
+
+        let retained = history[0..., ..<(history.dim(1) - n), 0...]
+        self[0] = contiguous(retained[0..., (retained.dim(1) - stateLength)..., 0...])
+        self[1] = contiguous(retained)
+        offset -= n
+        return n
+    }
+
+    public override func copy() -> any KVCache {
+        let copy = RewindableConvolutionCache(
+            stateLength: stateLength, rollbackCapacity: rollbackCapacity)
+        copyContents(to: copy)
+        return copy
+    }
+
+    /// Stable prompt-cache metadata. Transient batch lengths are finalized
+    /// before serialization and intentionally excluded.
+    public override var metaState: [String] {
+        get {
+            [
+                "\(offset)", "\(stateLength)", "\(rollbackCapacity)",
+                "\(slotCount)", presentSlotIndices.map(String.init).joined(separator: ","),
+            ]
+        }
+        set {
+            assertionFailure(
+                """
+                RewindableConvolutionCache.metaState cannot be set directly; \
+                restore through prompt-cache loading.
+                """)
+        }
+    }
+}
+
 /// Composite cache that manages multiple sub-caches
 public class CacheList: BaseKVCache {
     private var caches: [KVCache]
@@ -1746,6 +1835,7 @@ public class CacheList: BaseKVCache {
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
+        guard caches.allSatisfy({ canRewindConvolutionCache($0, positions: n) }) else { return 0 }
         var result = 0
         for cache in caches {
             result = cache.trim(n)
@@ -1833,6 +1923,7 @@ struct KVCacheError: Error, LocalizedError {
 private func cacheClassName(_ cache: KVCache) -> String {
     switch cache {
     case is ChunkedKVCache: return "ChunkedKVCache"
+    case is RewindableConvolutionCache: return "RewindableConvolutionCache"
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
     case is RotatingKVCache: return "RotatingKVCache"
@@ -2287,6 +2378,39 @@ private func restoreCacheFromMetaState(
         cache.restoreFromMetaState(state: state, savedMetaState: metaState)
         return cache
 
+    case "RewindableConvolutionCache":
+        guard metaState.count == 5,
+            let offset = Int(metaState[0]),
+            let stateLength = Int(metaState[1]),
+            let rollbackCapacity = Int(metaState[2]),
+            let slotCount = Int(metaState[3]),
+            slotCount == 2,
+            offset >= 0,
+            stateLength > 0,
+            rollbackCapacity > 0,
+            state.allSatisfy({ $0.ndim == 3 })
+        else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: invalid RewindableConvolutionCache state or metadata.")
+        }
+        let presentSlots =
+            metaState[4].isEmpty
+            ? [] : metaState[4].split(separator: ",").compactMap { Int($0) }
+        guard presentSlots.count == state.count,
+            presentSlots.allSatisfy({ (0 ..< slotCount).contains($0) })
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid RewindableConvolutionCache slots.")
+        }
+        let cache = RewindableConvolutionCache(
+            stateLength: stateLength, rollbackCapacity: rollbackCapacity)
+        for (arrayIndex, slotIndex) in presentSlots.enumerated() {
+            cache[slotIndex] = state[arrayIndex]
+        }
+        cache.offset = offset
+        return cache
+
     case "ArraysCache":
         let cache = ArraysCache(size: 0)
         cache.restoreFromMetaState(state: state, savedMetaState: metaState)
@@ -2479,24 +2603,41 @@ public func canTrimPromptCache(_ cache: [KVCache]) -> Bool {
 /// number of tokens that were trimmed.
 @discardableResult
 public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
-    guard canTrimPromptCache(cache), !cache.isEmpty else { return 0 }
+    guard canTrimPromptCache(cache), !cache.isEmpty,
+        cache.allSatisfy({ canRewindConvolutionCache($0, positions: numTokens) })
+    else { return 0 }
     cache.dropFirst().forEach { $0.trim(numTokens) }
     return cache.first?.trim(numTokens) ?? 0
 }
 
-/// Rewind a one-token speculative tail in a hybrid attention/recurrent cache.
+private func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
+    if let cache = cache as? RewindableConvolutionCache {
+        return cache.canRewind(positions)
+    }
+    if let cache = cache as? CacheList {
+        return cache.children.allSatisfy { canRewindConvolutionCache($0, positions: positions) }
+    }
+    return true
+}
+
+/// Rewind a speculative tail in a hybrid attention/recurrent cache.
 /// Attention entries trim normally; Mamba entries restore the checkpoint the
 /// model captured after the round's committed bonus token.
 @discardableResult
 package func rewindSpeculativePromptCache(
     _ cache: [KVCache], numTokens: Int
 ) -> Int {
-    guard numTokens == 1,
+    guard numTokens > 0,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
                 return entry.offset >= numTokens
+                    && canRewindConvolutionCache(entry, positions: numTokens)
             }
-            return (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
+            // A recurrent checkpoint records one atomic verify step. Models
+            // that support wider rollback use bounded trimmable recurrent
+            // caches (for example LFM's RewindableConvolutionCache).
+            return numTokens == 1
+                && (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
         })
     else { return 0 }
 
