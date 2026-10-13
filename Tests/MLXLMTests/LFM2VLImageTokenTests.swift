@@ -17,12 +17,16 @@ import XCTest
 
 @testable import MLXVLM
 
-/// A tokenizer with a fixed vocabulary mapping and a fixed chat template output.
+/// A tokenizer with a fixed vocabulary mapping and a fixed chat template output. It also knows
+/// the markers the processor wraps each image in.
 private struct StubTokenizer: Tokenizer {
+    static let markers = [
+        "<|image_start|>": 1_001, "<|image_end|>": 1_002, "<|img_thumbnail|>": 1_003,
+    ]
     var ids: [String: Int] = [:]
     var promptTokens: [Int] = []
 
-    func convertTokenToId(_ token: String) -> Int? { ids[token] }
+    func convertTokenToId(_ token: String) -> Int? { ids[token] ?? Self.markers[token] }
     func convertIdToToken(_ id: Int) -> String? { ids.first { $0.value == id }?.key }
     func encode(text: String, addSpecialTokens: Bool) -> [Int] { promptTokens }
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
