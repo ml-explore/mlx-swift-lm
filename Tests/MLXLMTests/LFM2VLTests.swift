@@ -270,6 +270,48 @@ struct LFM2VLTests {
         }
     }
 
+    @Test("Decision accessors match the generation path")
+    func accessorsMatchPrepare() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try tinyModel()
+            let imageToken = model.config.imageTokenIndex
+            // Views of 4x4 and 2x4 patches give 4 and 2 image tokens after the 2x2 unshuffle.
+            let ids = [1, 2] + Array(repeating: imageToken, count: 6) + [3, 4, 5]
+            let tokens = MLXArray(ids.map { Int32($0) })[.newAxis]
+            let shapes = [(4, 4), (2, 4)]
+            let pixels = randomPixels([2, 16, 12], seed: 4)
+
+            let input = LMInput(
+                text: .init(tokens: tokens),
+                image: .init(pixels: pixels, frames: shapes.map { THW(1, $0.0, $0.1) }))
+            let prepared = try model.prepare(
+                input, cache: model.newCache(parameters: nil), state: nil,
+                prefill: PrefillParameters())
+            guard case .logits(let output) = prepared else {
+                Issue.record("expected logits")
+                return
+            }
+
+            let features = try model.imageFeatures(pixels: pixels, spatialShapes: shapes)
+            let embeddings = try model.inputEmbeddings(tokens: tokens, imageFeatures: features)
+            #expect(embeddings.shape == [1, ids.count, 16])
+            let hidden = model.hiddenStates(tokens: tokens, embeddings: embeddings, cache: nil)
+            let logits = model.vocabularyLogits(hidden[0..., -1, 0...])
+            #expect(maxAbsDiff(output.logits[0..., -1, 0...], logits) < 1e-5)
+
+            #expect(throws: VLMError.self) {
+                try model.inputEmbeddings(tokens: tokens, imageFeatures: features[0 ..< 5])
+            }
+
+            // Text only: the plain forward equals hidden states plus the vocabulary projection.
+            let text = MLXArray([Int32(1), 2, 3, 4])[.newAxis]
+            let full = model(text, cache: nil)
+            let viaAccessors = model.vocabularyLogits(
+                model.hiddenStates(tokens: text, embeddings: nil, cache: nil))
+            #expect(maxAbsDiff(full, viaAccessors) < 1e-6)
+        }
+    }
+
     @Test("An untied model projects with lm_head")
     func untiedHead() throws {
         let model = try tinyModel(textExtras: #", "tie_word_embeddings": false"#)

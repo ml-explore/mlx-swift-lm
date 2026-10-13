@@ -15,9 +15,9 @@ import MLXLMCommon
 /// Decoding gives the stored samples, as transformers' `load_image` does, except that RGB in a
 /// colour space other than sRGB is converted to sRGB (see `SRGBConversion`). Per-pixel loops use
 /// raw pointers and `while`, which are faster in Debug builds.
-struct RGB8Image: Equatable, Sendable {
-    var width: Int
-    var height: Int
+package struct RGB8Image: Equatable, Sendable {
+    package var width: Int
+    package var height: Int
     /// `width * height * 3` bytes.
     var bytes: [UInt8]
 
@@ -425,9 +425,9 @@ extension RGB8Image {
 /// Decoded pixels as stored, and the EXIF orientation (1...8) that turns them upright as
 /// `ImageOps.exif_transpose` does. `resized` reads the stored pixels through the orientation,
 /// so a large photo is not rotated at full size first.
-struct OrientedImage: Sendable {
-    var stored: RGB8Image
-    var orientation: Int
+package struct OrientedImage: Sendable {
+    package var stored: RGB8Image
+    package var orientation: Int
 
     /// Orientations outside 1...8 read as 1, as `exif_transpose` ignores them.
     init(_ stored: RGB8Image, orientation: Int = 1) {
@@ -436,8 +436,8 @@ struct OrientedImage: Sendable {
     }
 
     /// The upright size.
-    var width: Int { orientation >= 5 ? stored.height : stored.width }
-    var height: Int { orientation >= 5 ? stored.width : stored.height }
+    package var width: Int { orientation >= 5 ? stored.height : stored.width }
+    package var height: Int { orientation >= 5 ? stored.width : stored.height }
 
     var upright: RGB8Image { stored.oriented(orientation) }
 
@@ -448,7 +448,7 @@ struct OrientedImage: Sendable {
 
     /// `.url` reads the file and keeps its EXIF orientation, as `load_image` applies it.
     /// `.ciImage` is read in its colour space, and `.array` is used as given.
-    init(_ image: UserInput.Image) throws {
+    package init(_ image: UserInput.Image) throws {
         switch image.source {
         case .url(let url):
             self = try OrientedImage(contentsOf: url)

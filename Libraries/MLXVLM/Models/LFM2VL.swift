@@ -393,6 +393,9 @@ public struct LFM2VLProcessor: UserInputProcessor {
         self.imageTokenId = tokenizer.convertTokenToId(config.imageToken)
     }
 
+    /// The resolved image settings, for callers that build their own prompts.
+    package var imageSettings: LFM2VLImageSettings { config.settings }
+
     public func prepare(input: UserInput) async throws -> LMInput {
         // transformers' `Lfm2VlProcessor` has no video input. Without this check the video would
         // be dropped, and the LFM2.5-VL template would print its part as JSON.
@@ -702,12 +705,12 @@ extension LFM2VL: ModelComponentsProviding {
     public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }
 
-// MARK: - Image features
+// MARK: - Accessors for callers that build their own prompts
 
 extension LFM2VL {
     /// Vision features per view, already projected: `[Nimage, hidden]`. Port of `encode_images`.
     /// `pixels` may be padded past each view's `h * w` patches; the padding is not read.
-    func imageFeatures(pixels: MLXArray, spatialShapes: [(Int, Int)]) throws -> MLXArray {
+    package func imageFeatures(pixels: MLXArray, spatialShapes: [(Int, Int)]) throws -> MLXArray {
         let (tower, projector) = try vision()
         let states = tower.viewStates(pixels, spatialShapes: spatialShapes)
         let features = zip(states, spatialShapes).map { (state, shape) -> MLXArray in
@@ -725,7 +728,7 @@ extension LFM2VL {
     /// Token embeddings with image features scattered at `image_token_id`: `[B, L, hidden]`.
     /// Features fill the image tokens in row-major order, as `masked_scatter` does.
     /// Throws when the number of image tokens and feature rows differ.
-    func inputEmbeddings(tokens: MLXArray, imageFeatures: MLXArray?) throws -> MLXArray {
+    package func inputEmbeddings(tokens: MLXArray, imageFeatures: MLXArray?) throws -> MLXArray {
         let ids = tokens.ndim == 1 ? tokens.expandedDimensions(axis: 0) : tokens
         let embeddings = languageModel.model.embedTokens(ids)
         guard let imageFeatures else { return embeddings }
@@ -742,6 +745,18 @@ extension LFM2VL {
         let rows = embeddings.reshaped(-1, embeddings.dim(-1))
         rows[MLXArray(positions.map { Int32($0) })] = imageFeatures.asType(rows.dtype)
         return rows.reshaped(embeddings.shape)
+    }
+
+    /// Final-norm hidden states without the vocabulary projection. tokens `[B, L]`.
+    package func hiddenStates(tokens: MLXArray, embeddings: MLXArray?, cache: [KVCache]?)
+        -> MLXArray
+    {
+        languageModel.model(tokens, cache: cache, inputEmbeddings: embeddings)
+    }
+
+    /// Vocabulary logits for selected hidden rows (tied embeddings or `lm_head`).
+    package func vocabularyLogits(_ hidden: MLXArray) -> MLXArray {
+        languageModel.vocabularyLogits(hidden)
     }
 }
 

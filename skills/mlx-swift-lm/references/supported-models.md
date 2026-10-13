@@ -181,6 +181,17 @@ VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
 | `muse_glimmer` | Meta Muse Glimmer (text, image, reasoning, and ATEM tool calls) |
 
+## Decision Models
+
+Load these with `DecisionModelFactory` from `MLXDecisions`. See [decisions.md](decisions.md).
+
+| model_type | Description |
+|------------|-------------|
+| `lfm2_vl`, `lfm2-vl` with `auto_map.AutoModel` ending in `D1Model` | LiquidAI d1-3B: decisions about text, JSON, and images. `VLMModelFactory` loads it as a plain LFM2-VL chat model. |
+
+LiquidAI's MLX conversions load the same way, for example `LiquidAI/d1-3B-MLX-4bit`, the
+d1-3B to use on an iPhone.
+
 ## Loading Any Model
 
 Models not in registries can be loaded by ID:

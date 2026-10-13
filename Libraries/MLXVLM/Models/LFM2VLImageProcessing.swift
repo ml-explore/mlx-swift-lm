@@ -9,7 +9,7 @@ import MLXLMCommon
 // MARK: - Settings
 
 /// LFM2-VL image processor settings, with the defaults of transformers' `Lfm2VlImageProcessor`.
-struct LFM2VLImageSettings: Equatable, Sendable {
+package struct LFM2VLImageSettings: Equatable, Sendable {
     var tileSize = 512
     var encoderPatchSize = 16
     var downsampleFactor = 2
@@ -28,7 +28,7 @@ struct LFM2VLImageSettings: Equatable, Sendable {
     var doNormalize = true
     var doPad = true
 
-    init() {}
+    package init() {}
 
     /// The tile range `_preprocess` uses: 1 to 1 when splitting is off.
     var tileRange: (min: Int, max: Int) { doImageSplitting ? (minTiles, maxTiles) : (1, 1) }
@@ -171,7 +171,7 @@ extension LFM2VLImageSettings: Codable {
 
     /// Decodes the image processor settings, flat or nested under `image_processor`. Malformed
     /// values keep their defaults, except `resample`, which must be bilinear (2) or bicubic (3).
-    init(from decoder: any Decoder) throws {
+    package init(from decoder: any Decoder) throws {
         var container = try decoder.container(keyedBy: CodingKeys.self)
         if container.contains(.imageProcessor) {
             container = try container.nestedContainer(
@@ -215,7 +215,7 @@ extension LFM2VLImageSettings: Codable {
     }
 
     /// Writes the settings flat, in the form `init(from:)` reads back.
-    func encode(to encoder: any Encoder) throws {
+    package func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(imageMean, forKey: .imageMean)
         try container.encode(imageStd, forKey: .imageStd)
@@ -337,9 +337,9 @@ struct LFM2VLImageLayout: Equatable, Sendable {
 /// transformers' `Lfm2VlImageProcessor` and the image-token expansion of `Lfm2VlProcessor`, for
 /// already-decoded images: per image, the crops in order (tiles row-major, then thumbnail),
 /// their patches, and the token run that replaces one `<image>`.
-struct LFM2VLImageProcessing: Sendable {
+package struct LFM2VLImageProcessing: Sendable {
     let settings: LFM2VLImageSettings
-    let imageTokenId: Int
+    package let imageTokenId: Int
     private let imageStartId: Int
     private let imageEndId: Int
     /// nil when the tokenizer lacks it. Only settings that tile with a thumbnail need it.
@@ -349,7 +349,7 @@ struct LFM2VLImageProcessing: Sendable {
     private let tileMarkerIds: [[Int?]]
 
     /// Resolves the `imageToken` placeholder and the image markers by name.
-    init(
+    package init(
         settings: LFM2VLImageSettings, tokenizer: any Tokenizer,
         imageToken: String = LFM2VLProcessorConfiguration.defaultImageToken
     ) throws {
@@ -417,12 +417,14 @@ struct LFM2VLImageProcessing: Sendable {
     }
 
     /// `process` for images that are already upright.
-    func process(_ images: [RGB8Image]) throws -> (patches: Siglip2Patches, tokenRuns: [[Int]]) {
+    package func process(_ images: [RGB8Image]) throws -> (
+        patches: Siglip2Patches, tokenRuns: [[Int]]
+    ) {
         try process(images) { OrientedImage($0) }
     }
 
     /// Replace each `<image>` id in `ids`, in order, with its token run.
-    func expand(_ ids: [Int], tokenRuns: [[Int]]) throws -> [Int] {
+    package func expand(_ ids: [Int], tokenRuns: [[Int]]) throws -> [Int] {
         let count = ids.reduce(0) { $0 + ($1 == imageTokenId ? 1 : 0) }
         guard count == tokenRuns.count else {
             throw VLMError.processing(
