@@ -74,6 +74,30 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     }
 }
 
+@Test(arguments: [7, 8, 12], [false, true])
+func testNativeHybridRewindChecksTheWrittenWindow(length: Int, convolutionFirst: Bool) {
+    let convolution = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    let input = MLXArray((0 ..< length).map(Float.init)).reshaped(1, length, 1)
+    convolution.record(
+        input: input, initialState: MLXArray.zeros([1, 2, 1]),
+        currentState: input[0..., (-2)..., 0...])
+    let attention = RotatingKVCache(maxSize: 8, keep: 0)
+    let kv = input.reshaped(1, 1, length, 1)
+    _ = attention.update(keys: kv, values: kv)
+    let caches: [KVCache] =
+        convolutionFirst ? [convolution, attention] : [attention, convolution]
+    #expect(!attention.isTrimmable(after: 3))
+
+    let expectedTrim = length == 7 ? 3 : 0
+    #expect(rewindSpeculativePromptCache(caches, numTokens: 3) == expectedTrim)
+    #expect(convolution.offset == length - expectedTrim)
+    #expect(attention.offset == length - expectedTrim)
+    if expectedTrim > 0 {
+        #expect(convolution[0]?.asArray(Float.self) == [2, 3])
+        #expect(attention.state[0].asArray(Float.self) == [0, 1, 2, 3])
+    }
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {

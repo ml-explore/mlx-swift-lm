@@ -241,7 +241,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let usesNativeHybridRewind =
             nativeRewindDepth >= effectiveBlockSize - 1
             && mainCache.contains { $0 is MambaCache }
-            && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
+            && mainCache.allSatisfy {
+                $0 is MambaCache || $0.isTrimmable(after: effectiveBlockSize)
+            }
         if !usesNativeHybridRewind {
             guard
                 let probe = self.mainCacheStorage.beginRound(
@@ -537,10 +539,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let nativeRewindDepth =
             (mainModel as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
+        // The full verify write must remain rewindable, including the committed bonus.
         let nativeHybridRewind =
             nativeRewindDepth >= numDraft
             && mainCache.contains { $0 is MambaCache }
-            && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
+            && mainCache.allSatisfy { $0 is MambaCache || $0.isTrimmable(after: numDraft + 1) }
         let round =
             nativeHybridRewind
             ? nil : mainCacheStorage.beginRound(maximumPositions: numDraft + 1)

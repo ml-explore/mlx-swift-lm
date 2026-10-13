@@ -2685,7 +2685,7 @@ package func rewindSpeculativePromptCache(
     guard numTokens > 0,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
-                return entry.offset >= numTokens && entry.isTrimmable(after: numTokens)
+                return entry.offset >= numTokens
                     && canRewindConvolutionCache(entry, positions: numTokens)
             }
             // A recurrent checkpoint records one atomic verify step. Models

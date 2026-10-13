@@ -2,12 +2,12 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import MLXScriptedLM
 import Testing
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 private let tinyLFM2DSparkTargetJSON = """
     {
@@ -71,6 +71,22 @@ private func tinyDSparkTarget() throws -> LFM2Model {
             LFM2Configuration.self, from: Data(tinyLFM2DSparkTargetJSON.utf8)))
 }
 
+private func tinyDSparkMoETarget() throws -> LFM2MoEModel {
+    var object =
+        try JSONSerialization.jsonObject(with: Data(tinyLFM2DSparkTargetJSON.utf8))
+        as! [String: Any]
+    object["model_type"] = "lfm2_moe"
+    object["num_experts"] = 4
+    object["num_experts_per_tok"] = 2
+    object["moe_intermediate_size"] = 16
+    object["num_dense_layers"] = 1
+    object["norm_topk_prob"] = true
+    object["use_expert_bias"] = true
+    return LFM2MoEModel(
+        try JSONDecoder().decode(
+            LFM2MoEConfiguration.self, from: JSONSerialization.data(withJSONObject: object)))
+}
+
 @Test
 func lfm2DSparkConfigurationAndCheckpointNamespaceMatchReleasedArchitecture() throws {
     let configuration = try tinyDSparkConfiguration()
@@ -110,6 +126,39 @@ func lfm2DSparkRegistryContainsEveryReleasedCheckpoint() {
 
 @Suite(.serialized)
 struct LFM2DSparkMetalTests {
+    @Test
+    func drafterCompatibilityAcceptsDenseAndMoEAndRejectsMismatchedTargets() throws {
+        let drafter = LFM2DSparkDraftModel(try tinyDSparkConfiguration())
+        #expect(drafter.isCompatible(with: try tinyDSparkTarget()))
+        #expect(drafter.isCompatible(with: try tinyDSparkMoETarget()))
+        for (key, value) in [
+            ("hidden_size", 16), ("vocab_size", 64),
+            ("num_hidden_layers", 3), ("rope_theta", 10000),
+        ] {
+            var object =
+                try JSONSerialization.jsonObject(with: Data(tinyLFM2DSparkTargetJSON.utf8))
+                as! [String: Any]
+            object[key] = value
+            if key == "hidden_size" {
+                object["block_dim"] = value
+            }
+            if key == "num_hidden_layers" {
+                object["layer_types"] = ["conv", "full_attention", "conv"]
+            }
+            let target = LFM2Model(
+                try JSONDecoder().decode(
+                    LFM2Configuration.self,
+                    from: JSONSerialization.data(withJSONObject: object)))
+            #expect(!drafter.isCompatible(with: target))
+            #expect(throws: MTPDrafterCompatibilityError.self) {
+                _ = try MTPSpeculativeTokenIterator(
+                    input: LMInput(tokens: MLXArray([Int32(1), 2])),
+                    mainModel: target, drafter: drafter,
+                    parameters: GenerateParameters(temperature: 0), blockSize: 4)
+            }
+        }
+    }
+
     @Test
     func targetEmitsOrderedDecoderFeatureTaps() throws {
         let target = try tinyDSparkTarget()
@@ -170,6 +219,74 @@ struct LFM2DSparkMetalTests {
 
         #expect(state.cache.allSatisfy { $0.offset == 6 })
         #expect(state.nextPosition == 6)
+    }
+
+    @Test
+    func iteratorRejectsSuppliedHybridCacheThatCannotRewindTheVerifyWidth() throws {
+        let target = try tinyDSparkTarget()
+        let drafter = LFM2DSparkDraftModel(try tinyDSparkConfiguration())
+        let parameters = GenerateParameters(maxTokens: 20, maxKVSize: 8, temperature: 0)
+        let cache = try target.newCache(parameters: parameters)
+        let prompt = LMInput.Text(tokens: MLXArray([Int32(1), 2, 3, 4, 5])[.newAxis])
+        eval(target(prompt, cache: cache, state: nil).logits)
+        #expect(cache.allSatisfy { $0.isTrimmable })
+        let offsets = cache.map(\.offset)
+
+        #expect(throws: MTPInitializationError.self) {
+            _ = try MTPSpeculativeTokenIterator(
+                input: LMInput(tokens: MLXArray([Int32(6)])),
+                mainModel: target, drafter: drafter, mainCache: cache,
+                parameters: parameters, blockSize: 4)
+        }
+        #expect(cache.map(\.offset) == offsets)
+    }
+
+    @Test(arguments: [3, 4, 7, 8, 12], [false, true])
+    func rotatingHybridCacheMatchesGreedyAcrossWindow(promptLength: Int, useMoE: Bool) throws {
+        MLXRandom.seed(41)
+        let target: any LanguageModel
+        if useMoE {
+            target = try tinyDSparkMoETarget()
+        } else {
+            target = try tinyDSparkTarget()
+        }
+        let drafter = LFM2DSparkDraftModel(try tinyDSparkConfiguration())
+        let input = LMInput(tokens: MLXArray((0 ..< promptLength).map { Int32($0 % 31) }))
+        let parameters = GenerateParameters(maxTokens: 20, maxKVSize: 8, temperature: 0)
+        let baselineCache = try target.newCache(parameters: parameters)
+        let speculativeCache = try target.newCache(parameters: parameters)
+        var baseline = try TokenIterator(
+            input: input, model: target, cache: baselineCache, parameters: parameters)
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: input, mainModel: target, drafter: drafter,
+            mainCache: speculativeCache, parameters: parameters, blockSize: 4)
+
+        var expected = [Int]()
+        while let token = baseline.next() { expected.append(token) }
+        var output = [Int]()
+        while let token = iterator.next() { output.append(token) }
+
+        #expect(output == expected)
+        #expect(output.count == 20)
+        #expect(iterator.passthroughReason != nil)
+        if promptLength == 3 {
+            #expect(iterator.proposedCount > 0)
+            #expect(iterator.acceptedCount < iterator.proposedCount)
+        } else {
+            #expect(iterator.proposedCount == 0)
+        }
+        // TokenIterator commits its last emitted token while computing lookahead.
+        let lastToken = try #require(output.last)
+        let last = LMInput.Text(tokens: MLXArray([Int32(lastToken)])[.newAxis])
+        eval(target(last, cache: speculativeCache, state: nil).logits)
+        for (actual, expected) in zip(speculativeCache, baselineCache) {
+            #expect(actual.offset == expected.offset)
+        }
+        let next = LMInput.Text(tokens: MLXArray([Int32(1)])[.newAxis])
+        let actualLogits = target(next, cache: speculativeCache, state: nil).logits
+        let expectedLogits = target(next, cache: baselineCache, state: nil).logits
+        let difference = abs(actualLogits - expectedLogits).max().item(Float.self)
+        #expect(difference < 1e-4)
     }
 
     @Test

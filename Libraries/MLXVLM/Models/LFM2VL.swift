@@ -1113,7 +1113,7 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         let weights = filterLMHeadWeights(
             from: weights, tiedWordEmbeddings: config.tieWordEmbeddings)
->>>>>>> 6df5379 (Load LFM2VL vision on demand and harden LFM loading and cache rewinds)        var sanitizedWeights = [String: MLXArray]()
+        var sanitizedWeights = [String: MLXArray]()
         for (k, v) in weights {
             let newKey = Self.checkpointName(k)
 

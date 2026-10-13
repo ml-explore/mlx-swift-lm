@@ -468,7 +468,16 @@ public final class LFM2DSparkDraftModel: Module, StatefulMTPDrafterModel {
         )
     }
 
-    private func validateTarget(_ target: any LanguageModel) {
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard isCompatible(with: target) else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "LFM2DSparkDraftModel",
+                expected: "an LFM2 target with matching dimensions and RoPE parameters",
+                actual: String(describing: type(of: target)))
+        }
+    }
+
+    public func isCompatible(with target: any LanguageModel) -> Bool {
         let targetLayerCount: Int
         let targetHiddenSize: Int
         let targetVocabularySize: Int
@@ -484,20 +493,15 @@ public final class LFM2DSparkDraftModel: Module, StatefulMTPDrafterModel {
             targetVocabularySize = target.configuration.vocabularySize
             targetRopeTheta = target.configuration.ropeTheta
         } else {
-            preconditionFailure(
-                "LFM2DSparkDraftModel requires an LFM2 or LFM2 MoE target, got \(type(of: target))"
-            )
+            return false
         }
-        precondition(
-            targetVocabularySize == configuration.vocabularySize
-                && targetHiddenSize == configuration.hiddenSize,
-            "LFM2 DSpark target embedding does not match the draft checkpoint")
-        precondition(
-            targetLayerCount == configuration.dflash.targetLayerCount,
-            "LFM2 DSpark draft checkpoint targets \(configuration.dflash.targetLayerCount) layers, but the verifier has \(targetLayerCount)"
-        )
-        precondition(
-            targetRopeTheta == configuration.ropeTheta,
-            "LFM2 DSpark draft and target checkpoints use different RoPE bases")
+        return targetVocabularySize == configuration.vocabularySize
+            && targetHiddenSize == configuration.hiddenSize
+            && targetLayerCount == configuration.dflash.targetLayerCount
+            && targetRopeTheta == configuration.ropeTheta
+    }
+
+    private func validateTarget(_ target: any LanguageModel) {
+        precondition(isCompatible(with: target), "LFM2 DSpark draft and target are incompatible")
     }
 }
