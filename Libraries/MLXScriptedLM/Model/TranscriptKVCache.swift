@@ -13,6 +13,10 @@ import MLXLMCommon
 ///
 /// It is an `AuxiliaryKVCache`, so capacity and compression settings ignore it, and it never
 /// stores keys or values.
+///
+/// Note: this KVCache should not be used for any production use.
+/// Its performance is O(n^2) or worse and is strictly meant as
+/// a mechanism that a `ScriptedModel` could use.
 public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache {
 
     public override static var serializedClassName: String? { "MLXScriptedLM.TranscriptKVCache" }
@@ -21,6 +25,13 @@ public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache {
     private static let registration: Void = {
         try! registerKVCacheType(TranscriptKVCache.self)
     }()
+
+    /// Register the type for KVCache save and restore.
+    /// This will happen automatically if a cache instance is
+    /// created.
+    public static func register() {
+        _ = Self.registration
+    }
 
     public private(set) var tokens: [Int]
 
