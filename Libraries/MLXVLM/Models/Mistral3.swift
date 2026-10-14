@@ -1023,8 +1023,7 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
                 additionalContext: input.additionalContext
             )
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: tokensArray)
-            return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
+            return LMInput(text: .init(tokens: tokensArray), image: nil)
         }
 
         guard input.images.count == 1 else {
@@ -1107,10 +1106,9 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray)
 
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: .init(pixels: preprocessResult.pixels, frames: preprocessResult.frames)
         )
     }

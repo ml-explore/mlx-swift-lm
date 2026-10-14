@@ -23,7 +23,7 @@ struct Gemma4ChunkedPrefillTests {
     /// → [sliding, sliding, full, sliding, sliding, full]; the last 2 are
     /// KV-shared, so 4 caches (3 rotating + 1 standard). sliding_window 8
     /// is much smaller than the test prompt, forcing rotation.
-    private static func makeTinyModel() throws -> Gemma4 {
+    static func makeTinyModel() throws -> Gemma4 {
         let json = """
             {
                 "text_config": {

@@ -21,7 +21,8 @@ struct PromptCacheReusePolicyTests {
         modelState: Bool = false,
         toolResultContinuation: Bool = false,
         speculativeDecoding: Bool = false,
-        canSplitMedia: Bool = false
+        canSplitMedia: Bool = false,
+        canRewindState: Bool = false
     ) -> PromptCacheTurn {
         PromptCacheTurn(
             promptTokens: prompt,
@@ -31,7 +32,8 @@ struct PromptCacheReusePolicyTests {
             carriesModelState: modelState,
             isToolResultContinuation: toolResultContinuation,
             usesSpeculativeDecoding: speculativeDecoding,
-            canSplitPreparedMedia: canSplitMedia)
+            canSplitPreparedMedia: canSplitMedia,
+            canRewindModelState: canRewindState)
     }
 
     /// A cache whose model-wide timeline agrees with `cached`, unless
@@ -200,6 +202,32 @@ struct PromptCacheReusePolicyTests {
                 attentionMask: blocker == "attention mask",
                 modelState: blocker == "model state"),
             cache: alignedCache([1, 2, 3, 4, 5], trimmable: blocker != "not trimmable"))
+
+        #expect(decision == .rebuild)
+    }
+
+    @Test func `prepared media rewinds through the model's split when it has one`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], preparedMedia: true, canSplitMedia: true),
+            cache: alignedCache([1, 2, 3, 4, 5]))
+
+        #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
+    }
+
+    @Test func `model state rewinds with the cache when the model can rewind it`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], modelState: true, canRewindState: true),
+            cache: alignedCache([1, 2, 3, 4, 5]))
+
+        #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
+    }
+
+    @Test func `rewindable model state does not lift the other blockers`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(
+                prompt: [1, 2, 9, 9], preparedMedia: true, modelState: true,
+                canRewindState: true),
+            cache: alignedCache([1, 2, 3, 4, 5]))
 
         #expect(decision == .rebuild)
     }
