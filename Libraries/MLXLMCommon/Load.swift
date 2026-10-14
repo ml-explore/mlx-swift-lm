@@ -216,23 +216,26 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
     DispatchQueue.concurrentPerform(iterations: items.count) { index in
         let item = items[index]
         do {
-            // Explicitly the CPU stream: `Load` has no GPU implementation and the arrays
-            // land in unified memory either way. The concurrency comes from evaluating
-            // disjoint groups from many threads, not from the stream itself.
-            let (all, metadata) = try loadArraysAndMetadata(url: item.url, stream: .cpu)
+            // A caller's withError does not reach this worker thread.
+            try withLoaderThreadError {
+                // Explicitly the CPU stream: `Load` has no GPU implementation and the arrays
+                // land in unified memory either way. The concurrency comes from evaluating
+                // disjoint groups from many threads, not from the stream itself.
+                let (all, metadata) = try loadArraysAndMetadata(url: item.url, stream: .cpu)
 
-            var selected = [String: MLXArray]()
-            if let names = item.names {
-                for name in names {
-                    if let array = all[name] { selected[name] = array }
+                var selected = [String: MLXArray]()
+                if let names = item.names {
+                    for name in names {
+                        if let array = all[name] { selected[name] = array }
+                    }
+                } else {
+                    selected = all.filter { isRead($0.key) }
                 }
-            } else {
-                selected = all.filter { isRead($0.key) }
-            }
 
-            // force this range's I/O here, on this stream, in file-offset order
-            if !selected.isEmpty { eval(Array(selected.values)) }
-            state.merge(file: item.file, weights: selected, metadata: metadata)
+                // force this range's I/O here, on this stream, in file-offset order
+                if !selected.isEmpty { eval(Array(selected.values)) }
+                state.merge(file: item.file, weights: selected, metadata: metadata)
+            }
         } catch {
             state.record(error: error)
         }
@@ -456,16 +459,32 @@ public func loadWeights(
     try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, any Error>) in
         DispatchQueue.global(qos: .userInitiated).async {
+            // The caller's withError does not reach this thread.
             continuation.resume(
                 with: Result {
-                    try loadWeights(
-                        modelDirectory: modelDirectory, model: model.consume(),
-                        quantization: quantization,
-                        perLayerQuantization: perLayerQuantization,
-                        weightFileSelection: weightFileSelection,
-                        excludedComponents: excludedComponents,
-                        componentLoading: componentLoading)
+                    try withLoaderThreadError {
+                        try loadWeights(
+                            modelDirectory: modelDirectory, model: model.consume(),
+                            quantization: quantization,
+                            perLayerQuantization: perLayerQuantization,
+                            weightFileSelection: weightFileSelection,
+                            excludedComponents: excludedComponents,
+                            componentLoading: componentLoading)
+                    }
                 })
+        }
+    }
+}
+
+/// Run `body` in an MLX error scope on the current thread. An MLX error is thrown
+/// in place of a later error it caused in `body`, such as a shape mismatch.
+func withLoaderThreadError<R>(_ body: () throws -> R) throws -> R {
+    try withError { mlxError in
+        do {
+            return try body()
+        } catch {
+            try mlxError.check()
+            throw error
         }
     }
 }

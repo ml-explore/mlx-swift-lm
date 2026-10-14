@@ -70,7 +70,63 @@ private final class FailingInferenceStateModel: Module, LanguageModel,
     }
 }
 
+/// A model whose `sanitize` raises an MLX error and passes on the failed result.
+private final class MLXErrorSanitizingModel: Module, BaseLanguageModel {
+    @ModuleInfo(key: "layer") var layer = Linear(2, 2, bias: false)
+
+    func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws
+        -> [String: MLXArray]
+    {
+        var weights = weights
+        weights["layer.weight"] = weights["layer.weight"]?.transposed(0, 2, 1)
+        return weights
+    }
+}
+
 final class LoadWeightsTests: XCTestCase {
+
+    // MARK: - MLX errors on the loader's threads
+
+    /// Called directly, so no other error scope covers the worker.
+    func testAnMLXErrorOnALoadWorkerThreadIsThrown() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // A sparse file holding one 256 GiB tensor, more than one Metal buffer
+        // holds: reading it fails on a load worker thread.
+        let shape = [1 << 19, 1 << 19]
+        let count = shape.reduce(1, *)
+        let header = try JSONSerialization.data(withJSONObject: [
+            "layer.weight": ["dtype": "U8", "shape": shape, "data_offsets": [0, count]]
+        ])
+        let url = directory.appendingPathComponent("model.safetensors")
+        var file = withUnsafeBytes(of: UInt64(header.count).littleEndian) { Data($0) }
+        file.append(header)
+        try file.write(to: url)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(file.count + count))
+        try handle.close()
+
+        XCTAssertThrowsError(try loadModelCheckpoint(urls: [url])) {
+            XCTAssertTrue($0 is MLXError, "\($0)")
+        }
+    }
+
+    /// The MLX error is thrown, not the shape mismatch its failed result causes later.
+    func testAnMLXErrorInSanitizeOnTheLoadThreadIsThrown() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try save(
+            arrays: ["layer.weight": MLXArray.zeros([2, 2])],
+            url: directory.appendingPathComponent("model.safetensors"))
+
+        do {
+            try await loadWeights(modelDirectory: directory, model: MLXErrorSanitizingModel())
+            XCTFail("expected the MLX error from sanitize")
+        } catch {
+            XCTAssertTrue(error is MLXError, "\(error)")
+        }
+    }
 
     // MARK: - Concurrent loading
 

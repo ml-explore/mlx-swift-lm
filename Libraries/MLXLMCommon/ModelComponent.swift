@@ -104,7 +104,9 @@ public class AnyOnDemandComponent: @unchecked Sendable {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(with: Result { _ = try self.loadModule() })
+                // The caller's withError does not reach this thread.
+                continuation.resume(
+                    with: Result { _ = try withLoaderThreadError { try self.loadModule() } })
             }
         }
     }

@@ -73,7 +73,13 @@ private final class Captioner: Module, BaseLanguageModel, ModelComponentsProvidi
     /// When set, `prepareCheckpoint` signals `entered` and then waits for `release`.
     var prepareGate: (entered: DispatchSemaphore, release: DispatchSemaphore)?
 
+    /// When set, `prepareCheckpoint` raises an MLX error.
+    var raisesMLXErrorInPrepare = false
+
     func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        if raisesMLXErrorInPrepare {
+            _ = MLXArray.zeros([2, 3]) + MLXArray.zeros([4, 5])
+        }
         if let prepareGate {
             prepareGate.entered.signal()
             prepareGate.release.wait()
@@ -370,6 +376,22 @@ final class ModelComponentTests: XCTestCase {
             urls: [url], excludedNamespaces: ["model.vision_tower"])
 
         XCTAssertEqual(Set(loaded.weights.keys), ["model.vision_tower_norm.weight"])
+    }
+
+    func testAnMLXErrorWhileAComponentLoadsInTheBackgroundIsThrown() async throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try await loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+        model.raisesMLXErrorInPrepare = true
+
+        do {
+            try await model.vision.loadInBackground()
+            XCTFail("expected the MLX error from prepareCheckpoint")
+        } catch {
+            XCTAssertTrue(error is MLXError, "\(error)")
+        }
     }
 
     // MARK: - Fixtures
