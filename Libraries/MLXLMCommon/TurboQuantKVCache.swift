@@ -631,6 +631,26 @@ class MSECodec {
 ///
 /// Both keys and values: Algorithm 1 (MSE at b bits, no QJL)
 public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
+    public override class var serializedClassName: String? { "TurboQuantKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        guard metaState.count >= 5,
+            let bits = Int(metaState[1]),
+            let keyBits = Int(metaState[2]),
+            let valueBits = Int(metaState[3]),
+            let seed = UInt64(metaState[4])
+        else {
+            throw KVCacheError(
+                message: "Invalid TurboQuantKVCache metaState")
+        }
+        let cache = TurboQuantKVCache(
+            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
+        cache.state = state
+        cache.metaState = metaState
+        return cache
+    }
 
     public let bits: Int  // Legacy: used when keyBits == valueBits
     public let keyBits: Int  // Bit-width for key compression (0 = raw FP16, no compression)

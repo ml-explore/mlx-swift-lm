@@ -13,13 +13,13 @@ import MLXLMCommon
 ///
 /// It is an `AuxiliaryKVCache`, so capacity and compression settings ignore it, and it never
 /// stores keys or values.
-public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache, PromptCacheRestorable {
+public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache {
 
-    public static var promptCacheClassName: String { "MLXScriptedLM.TranscriptKVCache" }
+    public override static var serializedClassName: String? { "MLXScriptedLM.TranscriptKVCache" }
 
     /// Registers the type for prompt cache files once, on first use.
     private static let registration: Void = {
-        try! registerPromptCacheType(TranscriptKVCache.self)
+        try! registerKVCacheType(TranscriptKVCache.self)
     }()
 
     public private(set) var tokens: [Int]
@@ -70,7 +70,9 @@ public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache, PromptCache
         set {}
     }
 
-    public static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
+    public override static func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
         let cache = TranscriptKVCache()
         cache.state = state
         guard metaState == [String(cache.tokens.count)] else {

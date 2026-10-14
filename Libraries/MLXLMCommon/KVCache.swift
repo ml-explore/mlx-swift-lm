@@ -65,6 +65,15 @@ public protocol KVCache: Evaluatable {
     /// get/set metadata state as string array for serialization
     var metaState: [String] { get set }
 
+    /// The class name written to prompt cache files, or `nil` if this cache cannot be saved.
+    ///
+    /// Use a unique name, for example with a module prefix. A subclass that does not override
+    /// it saves under its parent's name and restores as the parent.
+    static var serializedClassName: String? { get }
+
+    /// Rebuild a cache from the ``state`` and ``metaState`` it saved.
+    static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache
+
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
@@ -112,6 +121,12 @@ public protocol KVCache: Evaluatable {
 }
 
 extension KVCache {
+    public static var serializedClassName: String? { nil }
+
+    public static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
+        throw KVCacheError(message: "\(Self.self) cannot be restored from a prompt cache file")
+    }
+
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
     }
@@ -213,8 +228,8 @@ public protocol KVCacheAttentionProtocol: KVCache {
 ///
 /// Cache policy skips these entries: capacity and compression settings, offset alignment
 /// checks, and ``KVCacheStatus`` layers ignore them. Generation still trims, copies, and saves
-/// them with the other entries, so an auxiliary cache must be trimmable to keep pace. Make it
-/// ``PromptCacheRestorable`` to restore it from a prompt cache file.
+/// them with the other entries, so an auxiliary cache must be trimmable to keep pace, and it
+/// needs a ``KVCache/serializedClassName`` to be saved to a prompt cache file.
 ///
 /// Staged speculative rounds (MTP) write through an auxiliary entry and trim it back to the
 /// accepted positions, so it must stay trimmable after the round's width.
@@ -225,6 +240,13 @@ open class BaseKVCache: KVCache {
     public var offset: Int = 0
 
     public init() {}
+
+    open class var serializedClassName: String? { nil }
+
+    open class func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
+        throw KVCacheError(message: "\(Self.self) cannot be restored from a prompt cache file")
+    }
+
     public var maxSize: Int? { nil }
     open var evictedTokenCount: Int { 0 }
 
@@ -434,6 +456,27 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
 /// Standard KV cache implementation based on Python's KVCache
 /// See https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/base.py#L11
 public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
+    public override class var serializedClassName: String? { "KVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "KVCacheSimple", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [1])
+        guard metaState == [""] else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: KVCacheSimple metadata must contain its single empty placeholder."
+            )
+        }
+        let cache = KVCacheSimple()
+        if !state.isEmpty {
+            cache.state = state
+        }
+        return cache
+    }
+
     internal var keys: MLXArray?
     internal var values: MLXArray?
     public var step = 256
@@ -584,6 +627,46 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
+    public override class var serializedClassName: String? { "RotatingKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "RotatingKVCache", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [5, 6, 7, 8])
+        let values = try promptCacheIntegers(metaState.prefix(5), className: "RotatingKVCache")
+        if metaState.count >= 6,
+            RotatingKVCache.CapacityOrigin(rawValue: metaState[5]) == nil
+        {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: invalid RotatingKVCache capacity origin '\(metaState[5])'."
+            )
+        }
+        if metaState.count >= 7, Bool(metaState[6]) == nil {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: invalid RotatingKVCache wrapped flag '\(metaState[6])'."
+            )
+        }
+
+        if metaState.count == 8 {
+            guard let reserve = Int(metaState[7]), reserve >= 0,
+                values[1] <= Int.max - reserve
+            else {
+                throw KVCacheError(message: "Corrupt prompt cache: invalid rewind capacity.")
+            }
+        }
+
+        let cache = RotatingKVCache(maxSize: values[1])
+        if !state.isEmpty {
+            cache.state = state
+        }
+        cache.metaState = metaState
+        return cache
+    }
+
     package enum CapacityOrigin: String {
         case modelNative
         case requested
@@ -1080,6 +1163,23 @@ func resolvedKVQuantizationGroupSize(
 
 /// Quantized KV cache for memory efficiency using MLX quantization
 public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
+    public override class var serializedClassName: String? { "QuantizedKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "QuantizedKVCache", state: state, stateCounts: [0, 4, 6],
+            metadata: metaState, metadataCounts: [4])
+        let values = try promptCacheIntegers(metaState, className: "QuantizedKVCache")
+        let cache = QuantizedKVCache(groupSize: values[2], bits: values[3])
+        if !state.isEmpty {
+            cache.state = state
+        }
+        cache.metaState = metaState
+        return cache
+    }
+
     private var keys: (MLXArray, MLXArray, MLXArray?)?
     private var values: (MLXArray, MLXArray, MLXArray?)?
     private let step: Int
@@ -1370,6 +1470,31 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
 
 /// Chunked KV cache for processing large contexts in chunks
 public class ChunkedKVCache: KVCacheSimple {
+    public override class var serializedClassName: String? { "ChunkedKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "ChunkedKVCache", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [2])
+
+        let chunkSize: Int? =
+            if metaState[0] == "None" {
+                nil
+            } else {
+                try promptCacheInteger(metaState[0], className: "ChunkedKVCache")
+            }
+        _ = try promptCacheInteger(metaState[1], className: "ChunkedKVCache")
+
+        let cache = ChunkedKVCache(chunkSize: chunkSize)
+        if !state.isEmpty {
+            cache.state = state
+        }
+        cache.metaState = metaState
+        return cache
+    }
+
     private var chunkSize: Int?
     private var startPosition: Int = 0
 
@@ -1464,6 +1589,16 @@ public class ChunkedKVCache: KVCacheSimple {
 
 /// Base cache for array-based state storage
 public class ArraysCache: BaseKVCache {
+    public override class var serializedClassName: String? { "ArraysCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        let cache = ArraysCache(size: 0)
+        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return cache
+    }
+
     fileprivate var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
@@ -1658,6 +1793,16 @@ public class ArraysCache: BaseKVCache {
 
 /// Simple cache for Mamba-style state space models
 public class MambaCache: ArraysCache {
+    public override class var serializedClassName: String? { "MambaCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        let cache = MambaCache()
+        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return cache
+    }
+
     private struct SpeculativeCheckpoint {
         var state: [MLXArray?]
         var offset: Int
@@ -1713,6 +1858,14 @@ public class MambaCache: ArraysCache {
 
 /// Composite cache that manages multiple sub-caches
 public class CacheList: BaseKVCache {
+    public override class var serializedClassName: String? { "CacheList" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        return try CacheList.fromState(state: state, metaState: metaState)
+    }
+
     private var caches: [KVCache]
 
     public init(_ caches: KVCache...) {
@@ -1842,7 +1995,8 @@ public class CacheList: BaseKVCache {
         get {
             var result = ["\(caches.count)"]
             for cache in caches {
-                let className = cacheClassName(cache)
+                let className =
+                    type(of: cache).serializedClassName ?? String(describing: type(of: cache))
                 let meta = cache.metaState
                 result.append(className)
                 result.append("\(cache.state.count)")
@@ -1905,25 +2059,6 @@ struct KVCacheError: Error, LocalizedError {
 
 // MARK: - Utility Functions
 
-/// Map a cache instance to its Python-compatible class name for serialization.
-private func cacheClassName(_ cache: KVCache) -> String {
-    if let custom = cache as? any PromptCacheRestorable {
-        return type(of: custom).promptCacheClassName
-    }
-    switch cache {
-    case is ChunkedKVCache: return "ChunkedKVCache"
-    case is MambaCache: return "MambaCache"
-    case is ArraysCache: return "ArraysCache"
-    case is RotatingKVCache: return "RotatingKVCache"
-    case is VarianceNormalizedKVCache: return "VarianceNormalizedKVCache"
-    case is QuantizedKVCache: return "QuantizedKVCache"
-    case is TurboQuantKVCache: return "TurboQuantKVCache"
-    case is KVCacheSimple: return "KVCache"
-    case is CacheList: return "CacheList"
-    default: return "KVCache"
-    }
-}
-
 /// A prompt cache and the model state that belongs with it.
 ///
 /// Keeping the two together is the point: a KV cache restored without its model state positions
@@ -1979,11 +2114,13 @@ public func savePromptCache(
         throw KVCacheError(message: "Model state requires at least one prompt cache")
     }
 
+    let cacheClasses = try cache.map {
+        promptCacheClassName(
+            try KVCacheTypeRegistry.shared.serializedClassName(for: $0),
+            hasState: !stateArrays.isEmpty)
+    }
     let cacheData = cache.map { $0.state }
     let cacheInfo = cache.map { $0.metaState }
-    let cacheClasses = cache.map {
-        promptCacheClassName(cacheClassName($0), hasState: !stateArrays.isEmpty)
-    }
 
     // Flatten cache data using tree_flatten compatible structure: "i.j" format
     var flattenedData: [String: MLXArray] = [:]
@@ -2211,205 +2348,16 @@ private func restoreCacheFromMetaState(
     state: [MLXArray],
     metaState: [String]
 ) throws -> KVCache {
-    switch className {
-    case "KVCache", "KVCacheSimple":
-        try validatePromptCache(
-            className: "KVCacheSimple", state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [1])
-        guard metaState == [""] else {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: KVCacheSimple metadata must contain its single empty placeholder."
-            )
-        }
-        let cache = KVCacheSimple()
-        if !state.isEmpty {
-            cache.state = state
-        }
-        return cache
-
-    case "RotatingKVCache":
-        try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [5, 6, 7, 8])
-        let values = try promptCacheIntegers(metaState.prefix(5), className: className)
-        if metaState.count >= 6,
-            RotatingKVCache.CapacityOrigin(rawValue: metaState[5]) == nil
-        {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: invalid RotatingKVCache capacity origin '\(metaState[5])'."
-            )
-        }
-        if metaState.count >= 7, Bool(metaState[6]) == nil {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: invalid RotatingKVCache wrapped flag '\(metaState[6])'."
-            )
-        }
-
-        if metaState.count == 8 {
-            guard let reserve = Int(metaState[7]), reserve >= 0,
-                values[1] <= Int.max - reserve
-            else {
-                throw KVCacheError(message: "Corrupt prompt cache: invalid rewind capacity.")
-            }
-        }
-
-        let cache = RotatingKVCache(maxSize: values[1])
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
-    case "QuantizedKVCache":
-        try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 4, 6],
-            metadata: metaState, metadataCounts: [4])
-        let values = try promptCacheIntegers(metaState, className: className)
-        let cache = QuantizedKVCache(groupSize: values[2], bits: values[3])
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
-    case "VarianceNormalizedKVCache":
-        guard metaState.count == 7 || metaState.count == 10 else {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: VarianceNormalizedKVCache metadata must contain 7 legacy or 10 versioned values."
-            )
-        }
-        let values = try promptCacheIntegers(Array(metaState.prefix(7)), className: className)
-        let tileSize = values[0]
-        let offset = values[1]
-        let keyBits = values[2]
-        let valueBits = values[3]
-        let sinkhornIterations = values[4]
-        let tileCount = values[5]
-        let tailLength = values[6]
-        guard
-            (try? VarianceNormalizedKVCacheConfiguration(
-                keyBits: keyBits,
-                valueBits: valueBits,
-                tileSize: tileSize,
-                sinkhornIterations: sinkhornIterations)) != nil,
-            offset >= 0,
-            tileCount >= 0,
-            (0 ..< tileSize).contains(tailLength),
-            metaState.count == 7
-                || (Int(metaState[7]) == VarianceNormalizedKVCache.metadataVersion
-                    && (metaState[8] == "none"
-                        || varianceNormalizedDType(named: metaState[8])
-                            .map(isSupportedVarianceNormalizedDType) == true)
-                    && (metaState[9] == "none"
-                        || varianceNormalizedDType(named: metaState[9])
-                            .map(isSupportedVarianceNormalizedDType) == true))
-        else {
-            throw KVCacheError(
-                message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache metadata."
-            )
-        }
-        let (tiledLength, tileLengthOverflow) = tileCount.multipliedReportingOverflow(
-            by: tileSize)
-        let (representedLength, offsetOverflow) = tiledLength.addingReportingOverflow(tailLength)
-        let tailStateCount =
-            tailLength > 0 ? VarianceNormalizedKVCache.tailStateCount : 0
-        let tileStateCount = state.count - min(state.count, tailStateCount)
-        let hasValidTileStateCount =
-            if tileCount == 0 {
-                tileStateCount == 0
-            } else {
-                tileStateCount.isMultiple(of: tileCount)
-                    && [
-                        VarianceNormalizedKVCache.compactTileStateCount,
-                        VarianceNormalizedKVCache.legacyTileStateCount,
-                    ].contains(tileStateCount / tileCount)
-            }
-        guard
-            !tileLengthOverflow,
-            !offsetOverflow,
-            offset == representedLength,
-            state.count >= tailStateCount,
-            hasValidTileStateCount,
-            state.allSatisfy({ $0.ndim == 4 })
-        else {
-            throw KVCacheError(
-                message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state."
-            )
-        }
-        let cache = VarianceNormalizedKVCache(
-            tileSize: tileSize,
-            keyBits: keyBits,
-            valueBits: valueBits,
-            sinkhornIterations: sinkhornIterations)
-        cache.metaState = metaState
-        cache.state = state
-        return cache
-
-    case "ChunkedKVCache":
-        try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [2])
-
-        let chunkSize: Int? =
-            if metaState[0] == "None" {
-                nil
-            } else {
-                try promptCacheInteger(metaState[0], className: className)
-            }
-        _ = try promptCacheInteger(metaState[1], className: className)
-
-        let cache = ChunkedKVCache(chunkSize: chunkSize)
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
-    case "MambaCache":
-        let cache = MambaCache()
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
-        return cache
-
-    case "ArraysCache":
-        let cache = ArraysCache(size: 0)
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
-        return cache
-
-    case "TurboQuantKVCache":
-        guard metaState.count >= 5,
-            let bits = Int(metaState[1]),
-            let keyBits = Int(metaState[2]),
-            let valueBits = Int(metaState[3]),
-            let seed = UInt64(metaState[4])
-        else {
-            throw KVCacheError(
-                message: "Invalid TurboQuantKVCache metaState")
-        }
-        let cache = TurboQuantKVCache(
-            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
-        cache.state = state
-        cache.metaState = metaState
-        return cache
-
-    case "CacheList":
-        return try CacheList.fromState(state: state, metaState: metaState)
-
-    default:
-        if let type = PromptCacheTypeRegistry.shared.type(named: className) {
-            return try type.restore(state: state, metaState: metaState)
-        }
+    guard let type = KVCacheTypeRegistry.shared.type(named: className) else {
         throw KVCacheError(
             message:
-                "Unknown cache class: \(className). Custom cache types must be registered with registerPromptCacheType(_:)."
+                "Unknown cache class: \(className). Register custom cache types with registerKVCacheType(_:)."
         )
     }
+    return try type.restore(state: state, metaState: metaState)
 }
 
-private func validatePromptCache(
+func validatePromptCache(
     className: String,
     state: [MLXArray],
     stateCounts: Set<Int>,
@@ -2425,7 +2373,7 @@ private func validatePromptCache(
     }
 }
 
-private func promptCacheInteger(_ value: String, className: String) throws -> Int {
+func promptCacheInteger(_ value: String, className: String) throws -> Int {
     guard let value = Int(value) else {
         throw KVCacheError(
             message: "Corrupt prompt cache: \(className) metadata must contain integers."
@@ -2434,7 +2382,7 @@ private func promptCacheInteger(_ value: String, className: String) throws -> In
     return value
 }
 
-private func promptCacheIntegers(
+func promptCacheIntegers(
     _ metadata: some Collection<String>, className: String
 ) throws -> [Int] {
     try metadata.map { try promptCacheInteger($0, className: className) }
