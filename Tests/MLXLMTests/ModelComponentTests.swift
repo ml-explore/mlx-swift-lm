@@ -378,6 +378,21 @@ final class ModelComponentTests: XCTestCase {
         XCTAssertEqual(Set(loaded.weights.keys), ["model.vision_tower_norm.weight"])
     }
 
+    /// Called directly, so no other error scope covers the load.
+    func testAnMLXErrorWhileAComponentLoadsOnFirstUseIsThrown() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+        model.raisesMLXErrorInPrepare = true
+
+        XCTAssertThrowsError(try model.vision.load()) {
+            XCTAssertTrue($0 is MLXError, "\($0)")
+        }
+        XCTAssertFalse(model.vision.isLoaded)
+    }
+
     func testAnMLXErrorWhileAComponentLoadsInTheBackgroundIsThrown() async throws {
         let checkpoint = try writeCheckpoint()
         defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
