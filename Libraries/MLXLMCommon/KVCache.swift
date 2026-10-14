@@ -71,7 +71,7 @@ public protocol KVCache: Evaluatable {
     /// it saves under its parent's name and restores as the parent.
     static var serializedClassName: String? { get }
 
-    /// Rebuild a cache from the ``state`` and ``metaState`` it saved.
+    /// Rebuild a cache from the `state` and `metaState` it saved.
     static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache
 
     /// whether this cache can be trimmed

@@ -14,7 +14,7 @@ public func registerKVCacheType<T: KVCache>(_ type: T.Type) throws {
     try KVCacheTypeRegistry.shared.register(type)
 }
 
-private let logger = Logger(subsystem: "mlx-swift-lm", category: "kv-cache")
+private let logger = MLXLogger(label: "KVCacheTypeRegistry")
 
 /// Maps ``KVCache/serializedClassName`` to cache types, starting with the built-in caches.
 final class KVCacheTypeRegistry: @unchecked Sendable {
