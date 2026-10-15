@@ -254,7 +254,7 @@ open class BaseKVCache: KVCache {
     /// offset (e.g. a batched cache's per-row `.batch(...)`).
     open var ropeOffset: RoPEOffset { .scalar(offset) }
 
-    public func innerState() -> [MLXArray] { [] }
+    open func innerState() -> [MLXArray] { [] }
 
     open func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         fatalError("update(keys:values:) must be implemented by subclass")
