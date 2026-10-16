@@ -13,6 +13,21 @@ struct RerankerModelIntegrationTests {
     private let downloader = #hubDownloader()
     private let tokenizerLoader = #huggingFaceTokenizerLoader()
 
+    @Test func contextualReferenceScores() async throws {
+        try await RerankerIntegrationTests.contextual(
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    @Test func zerank2ReferenceScores() async throws {
+        try await RerankerIntegrationTests.zerank2(
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    @Test func jinaV35ReferenceScores() async throws {
+        try await RerankerIntegrationTests.jinaV35(
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
     @Test func bgeV2M3ReferenceScores() async throws {
         try await RerankerIntegrationTests.bgeV2M3(
             downloader: downloader, tokenizerLoader: tokenizerLoader)
