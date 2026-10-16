@@ -1481,6 +1481,71 @@ struct MuseGlimmerAgenticProtocolTests {
         #expect(events.contains { if case .protocolError = $0 { true } else { false } })
     }
 
+    private func onyxEvents(_ tokenizer: OnyxTestTokenizer, _ tokens: [Int]) throws
+        -> (reasoning: String, response: String)
+    {
+        var decoder = try #require(
+            ToolCallFormat.atem.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: nil, stopStrings: []))
+        var events: [TokenStreamEvent] = []
+        for token in tokens {
+            _ = decoder.push(token) {
+                events.append($0)
+                return true
+            }
+        }
+        _ = decoder.finish {
+            events.append($0)
+            return true
+        }
+        return (
+            events.compactMap { if case .reasoning(let text) = $0 { text } else { nil } }.joined(),
+            events.compactMap { if case .response(let text) = $0 { text } else { nil } }.joined()
+        )
+    }
+
+    @Test("Onyx markers spelled out in the middle of a frame stay in that frame")
+    func literalMarkersInsideFrames() throws {
+        let tokenizer = OnyxTestTokenizer()
+        let thought = "a frame is <|start|>assistant to=user<|message|> and ends with <|eot|>"
+        let answer = "private frames use <|start|>assistant to=self<|message|>"
+        let result = try onyxEvents(
+            tokenizer,
+            [
+                tokenizer.id(" to=self"), tokenizer.message, tokenizer.id(thought), tokenizer.eom,
+                tokenizer.start, tokenizer.id("assistant to=user"), tokenizer.message,
+                tokenizer.id(answer), tokenizer.eot,
+            ])
+
+        #expect(result.reasoning == thought)
+        #expect(result.response == answer)
+    }
+
+    @Test("an Onyx private frame that never closes is not shown as the answer")
+    func unclosedPrivateFrameStaysPrivate() throws {
+        let tokenizer = OnyxTestTokenizer()
+        let result = try onyxEvents(
+            tokenizer,
+            [tokenizer.id(" to=self"), tokenizer.message, tokenizer.id("unfinished plan")])
+
+        #expect(result.response.isEmpty)
+    }
+
+    @Test("a frame started inside an unclosed Onyx private frame does not leak it")
+    func frameStartedInsideUnclosedPrivateFrame() throws {
+        let tokenizer = OnyxTestTokenizer()
+        let result = try onyxEvents(
+            tokenizer,
+            [
+                tokenizer.id(" to=self"), tokenizer.message, tokenizer.id("first plan"),
+                tokenizer.start, tokenizer.id("assistant to=user"), tokenizer.message,
+                tokenizer.id("sunny"), tokenizer.eot,
+            ])
+
+        #expect(!result.response.contains("first plan"))
+        #expect(result.response == "sunny")
+    }
+
     @Test("prompt cache accounting follows each protocol's rendered call shape")
     func protocolSpecificCallAccounting() {
         let calls = [

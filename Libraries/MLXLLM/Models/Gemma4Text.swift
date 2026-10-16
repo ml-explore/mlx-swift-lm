@@ -974,4 +974,8 @@ extension Gemma4TextModel: LoRAModel {
 
 extension Gemma4TextModel {
     public var toolCallFormat: ToolCallFormat? { .gemma4 }
+
+    /// Gemma 4 brackets its thinking in labeled channels rather than a delimiter
+    /// pair (see `ReasoningConfig.gemma4`).
+    public var reasoningConfig: ReasoningConfig? { .gemma4 }
 }

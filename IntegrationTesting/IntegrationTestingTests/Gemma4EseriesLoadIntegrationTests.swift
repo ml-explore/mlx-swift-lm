@@ -55,9 +55,16 @@ struct Gemma4EseriesLoadIntegrationTests {
             parameters: GenerateParameters(maxTokens: 16, temperature: 0),
             context: context)
 
+        // Reasoning counts as output here: this checks the model loaded and generated,
+        // and Gemma 4 opens a thought channel unprompted (the E-series template prefills
+        // nothing), so all 16 tokens can land inside it and never reach `.chunk`.
         var text = ""
         for await event in stream {
-            if case .chunk(let c) = event { text += c }
+            switch event {
+            case .chunk(let c): text += c
+            case .reasoning(let c): text += c
+            default: break
+            }
         }
         #expect(!text.isEmpty, "\(modelId) loaded but produced no output")
     }
