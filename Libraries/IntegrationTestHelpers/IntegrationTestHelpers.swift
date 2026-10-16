@@ -437,6 +437,7 @@ public enum ChatSessionTests {
             to: "What is the weather in San Francisco?", images: [], videos: [])
         {
             switch generation {
+            case .steering: break
             case .chunk(let text):
                 print(text, terminator: "")
                 responseText += text
@@ -520,6 +521,7 @@ public enum ChatSessionTests {
                 id: call.id)
         ]) {
             switch generation {
+            case .steering: break
             case .chunk(let text):
                 followUpText += text
             case .toolCall(let call):
@@ -1259,6 +1261,7 @@ public enum ToolCallTests {
             var toolCalls: [ToolCall] = []
             for try await generation in stream {
                 switch generation {
+                case .steering: break
                 case .chunk(let chunk):
                     text += chunk
                 case .toolCall(let toolCall):

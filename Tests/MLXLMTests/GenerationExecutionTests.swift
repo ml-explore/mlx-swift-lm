@@ -86,7 +86,7 @@ final class GenerationExecutionTests: XCTestCase {
             for await event in stream {
                 if case .info(let info) = event { completion = info }
             }
-            let tokens = await task.value
+            let tokens = (await task.value).tokens
             XCTAssertEqual(tokens, [42, 42, 42])
             XCTAssertEqual(completion?.generationTokenCount, 3)
             XCTAssertEqual(completion?.stopReason, .length)
@@ -123,11 +123,11 @@ final class GenerationExecutionTests: XCTestCase {
         await fulfillment(of: [firstEntered, secondEntered], timeout: 5)
         first.cancel()
         resumeFirst.signal()
-        let firstTokens = await first.value
+        let firstTokens = (await first.value).tokens
         XCTAssertEqual(firstTokens, [42])
         XCTAssertFalse(second.isCancelled)
         resumeSecond.signal()
-        let secondTokens = await second.value
+        let secondTokens = (await second.value).tokens
         XCTAssertEqual(secondTokens, [42])
 
         var firstCompletion: GenerateCompletionInfo?
@@ -189,7 +189,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).tokens
         XCTAssertEqual(tokens, [42])
         XCTAssertEqual(completion?.stopReason, .cancelled)
         XCTAssertEqual(completion?.generationTokenCount, 1)
@@ -214,7 +214,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).tokens
         XCTAssertEqual(tokens, [])
         XCTAssertEqual(completion?.stopReason, .cancelled)
         await fulfillment(of: [finalized], timeout: 0)
@@ -271,7 +271,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).tokens
         XCTAssertEqual(tokens, [])
         XCTAssertEqual(completion?.stopReason, .length)
         XCTAssertEqual(completion?.generationTokenCount, 0)
@@ -292,6 +292,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             switch event {
             case .info(let info): completion = info
+            case .steering: XCTFail("Unexpected steering event")
             case .chunk, .toolCall, .rejectedToolCall: break
             }
         }
@@ -323,7 +324,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).tokens
         XCTAssertEqual(tokens, [42])
         XCTAssertEqual(completion?.stopReason, .length)
         await fulfillment(of: [finalized], timeout: 5)

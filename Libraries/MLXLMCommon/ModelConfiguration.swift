@@ -121,6 +121,16 @@ public struct ModelConfiguration: Sendable {
     /// Reasoning (chain-of-thought) protocol for this model (nil = non-reasoning model)
     public var reasoningConfig: ReasoningConfig? = nil
 
+    /// Whether a complete text boundary in this model's stream is a safe place
+    /// to end a step for ``ChatSession/steer(_:policy:response:)``.
+    ///
+    /// A declared reasoning model streams its chain of thought as ordinary text,
+    /// so an early boundary could split a reasoning block. Those models take
+    /// their natural step boundary instead.
+    package var allowsEarlySteeringBoundary: Bool {
+        reasoningConfig == nil
+    }
+
     /// How to choose which safetensors files in the model directory hold the model's weights.
     ///
     /// The default, ``WeightFileSelection/automatic``, handles a well-packaged checkpoint and
