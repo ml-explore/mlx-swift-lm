@@ -281,7 +281,7 @@ final class LoRADropoutTests: XCTestCase {
 
         _ = LoRATrain.evaluate(
             model: model,
-            dataset: ["sample"],
+            dataset: ["one sample"],
             loss: { model, _, _, _ in
                 observedTraining = model.training
                 return (MLXArray(0.0), MLXArray(1))
@@ -301,8 +301,8 @@ final class LoRADropoutTests: XCTestCase {
 
         try LoRATrain.train(
             model: model,
-            train: ["sample"],
-            validate: ["sample"],
+            train: ["one sample"],
+            validate: ["one sample"],
             optimizer: SGD(learningRate: 0.01),
             loss: { model, _, _, _ in
                 observedModes.insert(model.training)
@@ -328,8 +328,8 @@ final class LoRADropoutTests: XCTestCase {
 
         try LoRATrain.train(
             model: model,
-            train: ["sample"],
-            validate: ["sample"],
+            train: ["one sample"],
+            validate: ["one sample"],
             optimizer: SGD(learningRate: 0.01),
             loss: { model, _, _, _ in
                 let prediction = (model as! Linear)(MLXArray.ones([1, 1]))
