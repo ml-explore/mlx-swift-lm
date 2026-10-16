@@ -10,6 +10,7 @@ import MLXNN
 
 private enum Qwen3VLError: Error {
     case featureTokenMismatch(expected: Int, actual: Int)
+    case invalidEmbeddingInput
 }
 
 private let ropeDeltasKey = LMOutput.Key<MLXArray>("qwen35vl.ropeDeltas")
@@ -1663,16 +1664,28 @@ extension Qwen3VLLanguage {
 
 // MARK: - Model
 
+private final class Qwen3VLVisionStack: Module {
+    @ModuleInfo(key: "vision_tower") var tower: Qwen3VLVision.VisionModel
+
+    init(_ config: Qwen3VLConfiguration.VisionConfiguration) {
+        _tower.wrappedValue = Qwen3VLVision.VisionModel(config)
+    }
+}
+
 public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
 
-    @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel
+    @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel?
     @ModuleInfo(key: "language_model") private var languageModel: Qwen3VLLanguage.LanguageModel
+    private let onDemandVision: OnDemandComponent<Qwen3VLVisionStack>
 
     public let config: Qwen3VLConfiguration
 
     public init(_ config: Qwen3VLConfiguration) {
         self.config = config
         _visionModel.wrappedValue = Qwen3VLVision.VisionModel(config.visionConfiguration)
+        onDemandVision = OnDemandComponent(.vision) {
+            Qwen3VLVisionStack(config.visionConfiguration)
+        }
         _languageModel.wrappedValue = Qwen3VLLanguage.LanguageModel(config)
     }
 
@@ -1757,6 +1770,8 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     private func visionInputs(_ input: LMInput) throws -> VisionInputs {
         var result = VisionInputs()
 
+        guard input.image != nil || input.video != nil else { return result }
+        let visionModel = try visionModel ?? onDemandVision.load().tower
         let dtype = visionModel.patchEmbed.proj.weight.dtype
         var pixelParts: [MLXArray] = []
 
@@ -1809,6 +1824,31 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         return result
+    }
+
+    /// Returns final normalized hidden states before vocabulary projection for one unpadded input.
+    public func hiddenStates(_ input: LMInput) throws -> MLXArray {
+        let tokens = input.text.tokens
+        guard tokens.ndim == 2, tokens.dim(0) == 1, tokens.dim(1) > 0,
+            input.text.mask == nil
+                || (input.text.mask?.shape == tokens.shape
+                    && (input.text.mask?.all().item(Bool.self) ?? false))
+        else {
+            throw Qwen3VLError.invalidEmbeddingInput
+        }
+        let vision = try visionInputs(input)
+        let (positions, _) = Qwen3VLLanguage.getRopeIndex(
+            inputIds: tokens,
+            imageGridTHW: vision.imageFrames,
+            videoGridTHW: vision.videoFrames,
+            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            visionStartTokenId: config.visionStartTokenId)
+        return languageModel.model(
+            tokens, cache: nil, inputEmbeddings: vision.inputEmbeddings,
+            mask: nil, positionIds: positions, visualIndices: vision.visualIndices,
+            deepstackEmbeds: vision.deepstackEmbeds)
     }
 
     public func prepare(
@@ -1988,35 +2028,41 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         return result
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var adjusted: [String: MLXArray] = [:]
-        adjusted.reserveCapacity(weights.count)
-
-        for (key, value) in weights {
-            var newKey = key
-
-            if newKey.contains("model") {
-                if newKey.contains("model.visual") {
-                    newKey = newKey.replacingOccurrences(of: "model.visual", with: "vision_tower")
-                } else if newKey.contains("model.language_model") {
-                    newKey = newKey.replacingOccurrences(
-                        of: "model.language_model", with: "language_model.model")
-                }
-            } else if newKey.contains("lm_head") {
-                newKey = newKey.replacingOccurrences(of: "lm_head", with: "language_model.lm_head")
-            }
-
-            if config.textConfiguration.tieWordEmbeddings && newKey.contains(".lm_head.") {
-                // if using tieWordEmbeddings omit these keys as they will not be consumed
-                continue
-            }
-
-            adjusted[newKey] = value
-        }
-
-        let sanitized = visionModel.sanitize(weights: adjusted)
-        return sanitized
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        try prepareCheckpoint(.init(weights: weights)).weights
     }
+
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var rules: [CheckpointNameMapping.Rule] = [
+            .replacePrefix("model.visual", with: "vision_tower"),
+            .replacePrefix("visual", with: "vision_tower"),
+            .replacePrefix("model.vision_tower", with: "vision_tower"),
+            .replacePrefix("model.language_model", with: "language_model.model"),
+            .replacePrefix("lm_head", with: "language_model.lm_head"),
+        ]
+        if config.textConfiguration.tieWordEmbeddings {
+            rules.append(.excludePrefix("language_model.lm_head"))
+        }
+        var checkpoint = try checkpoint.mapNames(using: CheckpointNameMapping(rules))
+        checkpoint.weights = Qwen3VLVision.VisionModel.sanitize(
+            weights: checkpoint.weights, config: config.visionConfiguration)
+        return checkpoint
+    }
+}
+
+extension Qwen3VL: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        [
+            .vision: [
+                CheckpointComponent(
+                    name: "vision_tower",
+                    namespaces: ["vision_tower", "model.vision_tower", "visual", "model.visual"],
+                    destination: "vision_tower")
+            ]
+        ]
+    }
+
+    public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }
 
 extension Qwen3VL: PreparedInputSplitting {
