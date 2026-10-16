@@ -89,19 +89,19 @@ func makeReasoningTestModel(
         resolver: resolver)
 }
 
-/// A `ContainerLoader` backed by the production Hugging Face wiring: the same
+/// A `ProgressContainerLoader` backed by the production Hugging Face wiring: the same
 /// `#hubDownloader()` (a `HuggingFace.HubClient` bridge) and
 /// `#huggingFaceTokenizerLoader()` the `#huggingFaceLanguageModel` macro
 /// synthesizes. Paired with `testWeightsLocation(modelID:)`, so downloading
 /// and on-disk availability resolve against the same HubClient cache — exactly
 /// as they do in shipping code.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-func testLoad() -> MLXLanguageModel.ContainerLoader {
+func testLoad() -> MLXLanguageModel.ProgressContainerLoader {
     { configuration, progress in
         try await loadModelContainer(
             from: #hubDownloader(),
             using: #huggingFaceTokenizerLoader(),
-            configuration: configuration, progressHandler: progress)
+            configuration: configuration, progress: progress)
     }
 }
 
