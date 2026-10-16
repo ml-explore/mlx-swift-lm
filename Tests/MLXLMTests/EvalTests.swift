@@ -275,7 +275,8 @@ public class EvalTests: XCTestCase {
             temperature: 0)
 
         var cache = try model.newCache(parameters: parameters)
-        XCTAssertTrue(cache.allSatisfy { $0 is KVCacheSimple })
+        // Llama declares its head dimension, so the cache starts variance-normalized.
+        XCTAssertTrue(cache.allSatisfy { $0 is VarianceNormalizedKVCache })
 
         let prompt = MLXArray([1, 2, 3, 4])[.newAxis, .ellipsis]
         let output = model.callAsFunction(prompt, cache: cache)
@@ -283,7 +284,9 @@ public class EvalTests: XCTestCase {
         XCTAssertEqual(output.shape, [1, 4, 100])
 
         let configuration = try XCTUnwrap(parameters.kvCache)
-        _ = try applyKVCacheConfiguration(cache: &cache, configuration: configuration)
+        let result = try applyKVCacheConfiguration(cache: &cache, configuration: configuration)
+        XCTAssertEqual(result.convertedLayerCount, 0)
+        XCTAssertEqual(result.alreadyCompatibleLayerCount, 2)
         XCTAssertTrue(cache.allSatisfy { $0 is VarianceNormalizedKVCache })
 
         let next = MLXArray([5])[.newAxis, .ellipsis]

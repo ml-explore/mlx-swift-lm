@@ -161,6 +161,10 @@ public class GLM4ModelInner: Module {
 public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    public var kvHeadDim: Int? {
+        configuration.headDim > 0
+            ? configuration.headDim : configuration.hiddenSize / configuration.attentionHeads
+    }
 
     public let model: GLM4ModelInner
     let configuration: GLM4Configuration

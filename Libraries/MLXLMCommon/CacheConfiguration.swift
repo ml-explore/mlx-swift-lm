@@ -292,11 +292,22 @@ public func attentionCacheKind(parameters: GenerateParameters?) throws -> CacheL
 
 /// Build a standard full-attention ``KVCache`` that honors the requested capacity.
 ///
+/// Pass `headDim` when the layer's key/value head dimension is known: a strategy that
+/// compresses from token 0 then starts compressed instead of converting after the
+/// first prefill. Without it, or when the dimension does not support the strategy,
+/// the cache starts at full precision and dynamic conversion applies as before.
+///
 /// - Throws: ``KVCacheConfigurationError`` when the request is invalid.
-public func makeAttentionKVCache(parameters: GenerateParameters?) throws -> KVCache {
-    if let capacity = try parameters?.effectiveKVCacheCapacity() {
+public func makeAttentionKVCache(
+    parameters: GenerateParameters?, headDim: Int? = nil
+) throws -> KVCache {
+    let configuration = try parameters?.resolvedKVCacheConfiguration()
+    if let capacity = configuration?.capacity {
         return capacity.makeRotatingCache(
-            rewindCapacity: parameters?.kvCache?.rewind?.maxTokens ?? 0)
+            rewindCapacity: configuration?.rewind?.maxTokens ?? 0)
+    }
+    if let headDim, let compressed = configuration?.strategy.makeEmptyCache(headDim: headDim) {
+        return compressed
     }
     return KVCacheSimple()
 }

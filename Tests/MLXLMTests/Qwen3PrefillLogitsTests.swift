@@ -8,14 +8,15 @@ import MLXNN
 import XCTest
 
 final class Qwen3PrefillLogitsTests: XCTestCase {
-    private func makeModel(tied: Bool = true, bits: Int? = 4, dtype: DType = .bfloat16)
-        throws -> Qwen3Model
-    {
+    private func makeModel(
+        tied: Bool = true, bits: Int? = 4, dtype: DType = .bfloat16,
+        heads: Int = 2, kvHeads: Int = 1, headDim: Int = 32
+    ) throws -> Qwen3Model {
         let configuration = """
             {
-                "hidden_size": 64, "num_hidden_layers": 2,
-                "intermediate_size": 128, "num_attention_heads": 2,
-                "num_key_value_heads": 1, "head_dim": 32,
+                "hidden_size": \(heads * headDim), "num_hidden_layers": 2,
+                "intermediate_size": \(2 * heads * headDim), "num_attention_heads": \(heads),
+                "num_key_value_heads": \(kvHeads), "head_dim": \(headDim),
                 "rms_norm_eps": 0.000001, "vocab_size": 256,
                 "tie_word_embeddings": \(tied)
             }
@@ -105,6 +106,84 @@ final class Qwen3PrefillLogitsTests: XCTestCase {
             assertEqual(actual.logits, expected.logits)
             XCTAssertEqual(model(text.tokens, cache: nil).shape, [batch, 128, 256])
         }
+    }
+
+    func testEagerQuantizedCacheMatchesDynamicConversion() throws {
+        let model = try makeModel(bits: nil, dtype: .float32)
+        let parameters = GenerateParameters(kvBits: 8, kvGroupSize: 32, quantizedKVStart: 0)
+        let prompt = input(97).tokens
+
+        // Eager: the cache is quantized before the first token lands, chunk by chunk.
+        let eager = try model.newCache(parameters: parameters)
+        XCTAssertTrue(eager.allSatisfy { $0 is QuantizedKVCache })
+        for range in [0 ..< 64, 64 ..< 97] {
+            _ = model(.init(tokens: prompt[0..., range]), cache: eager, state: nil)
+        }
+
+        // Dynamic: the whole prompt at full precision, then one conversion.
+        var dynamic = try model.newCache(parameters: nil)
+        XCTAssertTrue(dynamic.allSatisfy { $0 is KVCacheSimple })
+        _ = model(.init(tokens: prompt), cache: dynamic, state: nil)
+        maybeQuantizeKVCache(cache: &dynamic, kvBits: 8, kvGroupSize: 32, quantizedKVStart: 0)
+        XCTAssertTrue(dynamic.allSatisfy { $0 is QuantizedKVCache })
+
+        // Layer 0 keys and values depend only on the embeddings, so both routes store the
+        // same quantized tokens. Deeper layers differ only by the second chunk attending to
+        // 8-bit instead of full-precision history.
+        assertCacheEqual([eager[0]], [dynamic[0]])
+        let next = input(98).tokens[0..., 97...]
+        let eagerLogits = model.nextTokenLogits(.init(tokens: next), cache: eager, state: nil)
+        let dynamicLogits = model.nextTokenLogits(
+            .init(tokens: next), cache: dynamic, state: nil)
+        XCTAssertTrue(
+            allClose(eagerLogits.logits, dynamicLogits.logits, rtol: 1e-2, atol: 1e-2)
+                .item(Bool.self))
+    }
+
+    func testEagerFourBitCachePrefillsThroughFusedAttention() throws {
+        // Head dim 64 with 64-token chunks: every prefill chunk lands in a 4-bit cache and
+        // attends through the dequantized fused route, as a real model would.
+        let model = try makeModel(bits: nil, dtype: .bfloat16, heads: 4, kvHeads: 2, headDim: 64)
+        let parameters = GenerateParameters(kvBits: 4, kvGroupSize: 64, quantizedKVStart: 0)
+        let prompt = input(128).tokens
+        XCTAssertTrue(
+            usesDequantizedPrefillAttention(
+                queries: MLXArray.zeros([1, 4, 64, 64], dtype: .bfloat16), valueHeadDim: 64))
+
+        let eager = try model.newCache(parameters: parameters)
+        XCTAssertTrue(eager.allSatisfy { $0 is QuantizedKVCache })
+        for range in [0 ..< 64, 64 ..< 128] {
+            _ = model(.init(tokens: prompt[0..., range]), cache: eager, state: nil)
+        }
+        XCTAssertTrue(eager.allSatisfy { $0 is QuantizedKVCache && $0.offset == 128 })
+
+        var dynamic = try model.newCache(parameters: nil)
+        _ = model(.init(tokens: prompt), cache: dynamic, state: nil)
+        maybeQuantizeKVCache(cache: &dynamic, kvBits: 4, kvGroupSize: 64, quantizedKVStart: 0)
+        XCTAssertTrue(dynamic.allSatisfy { $0 is QuantizedKVCache && $0.offset == 128 })
+
+        let next = input(129).tokens[0..., 128...]
+        let reference = try model.newCache(parameters: nil)
+        _ = model(.init(tokens: prompt), cache: reference, state: nil)
+        func logits(_ cache: [KVCache]) -> MLXArray {
+            model.nextTokenLogits(.init(tokens: next), cache: cache, state: nil).logits
+                .asType(.float32)
+        }
+        func relativeError(_ actual: MLXArray, _ expected: MLXArray) -> Float {
+            sqrt((mean(square(actual - expected)) / mean(square(expected))).item(Float.self))
+        }
+        let (eagerLogits, dynamicLogits, referenceLogits) = (
+            logits(eager), logits(dynamic), logits(reference)
+        )
+        XCTAssertTrue(all(isFinite(eagerLogits)).item(Bool.self))
+        XCTAssertTrue(eager.allSatisfy { $0.offset == 129 })
+
+        // The second chunk attended over 4-bit history instead of bfloat16, so eager sits
+        // in the same 4-bit noise band as dynamic conversion, measured against the
+        // never-quantized reference (about 0.13 vs 0.11 on this tiny random model).
+        let dynamicError = relativeError(dynamicLogits, referenceLogits)
+        XCTAssertLessThan(relativeError(eagerLogits, referenceLogits), 1.5 * dynamicError)
+        XCTAssertLessThan(relativeError(eagerLogits, dynamicLogits), 1.5 * dynamicError)
     }
 
     func testWarmSuffixAndContinuationPreserveEntireCache() throws {
