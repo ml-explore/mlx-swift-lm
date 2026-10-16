@@ -239,13 +239,57 @@ private func gatedDeltaStepOps(
 /// thousand tokens. Each chunk is run through a custom function whose
 /// backward recomputes the chunk instead, so only the chunk boundaries are
 /// kept - what `mx.checkpoint` does for the Python trainer. Inference is
-/// unaffected: the forward is the same ops in the same order.
+/// unaffected: the fused inference kernel is unchanged.
 let gatedDeltaRecomputeChunk = 16
 
 private enum GatedDeltaRecompute {
+    /// Solve the chunk's unit-lower-triangular delta system with a finite inverse.
+    /// Its strictly lower part is nilpotent, so doubling needs only log2(T) products.
+    /// Gate products avoid division, including when a decay underflows to zero.
+    static func parallelSteps(_ inputs: [MLXArray]) -> [MLXArray] {
+        let q = inputs[0].transposed(0, 2, 1, 3).asType(.float32)
+        let k = inputs[1].transposed(0, 2, 1, 3).asType(.float32)
+        let v = inputs[2].transposed(0, 2, 1, 3).asType(.float32)
+        let g = inputs[3].transposed(0, 2, 1)
+        let beta = inputs[4].transposed(0, 2, 1)[0..., 0..., 0..., .newAxis]
+        let state = inputs[5]
+        let length = q.dim(2)
+        let indices = MLXArray(0 ..< length)
+        let rows = indices[.newAxis, .newAxis, 0..., .newAxis]
+        let columns = indices[.newAxis, .newAxis, .newAxis, 0...]
+        let strictLower = rows .> columns
+        let lower = rows .>= columns
+        let decay = cumprod(
+            MLX.where(strictLower, g[0..., 0..., 0..., .newAxis], MLXArray(1.0)), axis: 2)
+        let prefix = cumprod(g, axis: 2)[0..., 0..., 0..., .newAxis]
+        let coupling = MLX.where(
+            strictLower, beta * decay * matmul(k, k.transposed(0, 1, 3, 2)), MLXArray(0.0))
+        let identity = eye(length)
+        var inverse = identity - coupling
+        var power = matmul(coupling, coupling)
+        var order = 2
+        while order < length {
+            inverse = matmul(inverse, identity + power)
+            power = matmul(power, power)
+            order *= 2
+        }
+        let initialValues = matmul(k, state.transposed(0, 1, 3, 2))
+        let updates = matmul(inverse, beta * (v - prefix * initialValues))
+        let attention = MLX.where(lower, decay * matmul(q, k.transposed(0, 1, 3, 2)), MLXArray(0.0))
+        let output = prefix * matmul(q, state.transposed(0, 1, 3, 2)) + matmul(attention, updates)
+        let finalKeys = decay[0..., 0..., -1, 0..., .newAxis] * k
+        let finalState =
+            prefix[0..., 0..., -1, .newAxis, 0...] * state
+            + matmul(updates.transposed(0, 1, 3, 2), finalKeys)
+        return [output.transposed(0, 2, 1, 3).asType(inputs[0].dtype), finalState]
+    }
+
     /// `inputs` = [q, k, v, g, beta, state] plus the mask when there is one,
     /// each sliced to the chunk; returns [y, state].
     static func steps(_ inputs: [MLXArray], masked: Bool) -> [MLXArray] {
+        if !masked, inputs[0].dim(1) > 1, inputs[3].ndim == 3 {
+            return parallelSteps(inputs)
+        }
         let (q, k, v, g, beta) = (inputs[0], inputs[1], inputs[2], inputs[3], inputs[4])
         var state = inputs[5]
         let mask = masked ? inputs[6] : nil
