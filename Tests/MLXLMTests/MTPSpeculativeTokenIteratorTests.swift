@@ -94,6 +94,7 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     /// must cover all positions the iterator will sample across the run.
     var nextLogitTokens: [Int32]
     var perPositionIndex: Int = 0
+    var logitStrength: Float = 100
     /// If `true`, omit the MTP state keys from the returned `LMOutput` so the
     /// iterator's passthrough fallback is exercised.
     var omitDrafterState: Bool = false
@@ -221,7 +222,7 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
         for i in 0 ..< positions {
             let tokIdx = perPositionIndex + i
             let tok = tokIdx < nextLogitTokens.count ? Int(nextLogitTokens[tokIdx]) : 0
-            data[i * vocab + tok] = 100
+            data[i * vocab + tok] = logitStrength
         }
         perPositionIndex += positions
         return MLXArray(data, [1, positions, vocab])
@@ -599,6 +600,88 @@ private final class EmissionLog: LogitProcessor {
         let copy = EmissionLog()
         copy.recordedTokens = recordedTokens
         return copy as! Self
+    }
+}
+
+@Suite(.serialized)
+struct MTPBatchedVerificationTests {
+    @Test func greedyTiesKeepTheSameWinner() throws {
+        func makeIterator() throws -> MTPSpeculativeTokenIterator {
+            let model = MockMainModel(nextLogitTokens: [])
+            model.logitStrength = 0
+            return try MTPSpeculativeTokenIterator(
+                input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: model,
+                drafter: MockDrafter(draftedTokenValue: 0),
+                parameters: GenerateParameters(maxTokens: 12, temperature: 0), blockSize: 4)
+        }
+        var batched = try makeIterator()
+        var sequential = try makeIterator()
+        sequential._setProcessorForTesting(EmissionLog())
+        var tokens = [Int]()
+        while let token = batched.next() {
+            #expect(token == sequential.next())
+            tokens.append(token)
+        }
+        #expect(tokens == Array(repeating: 0, count: 12))
+        #expect(batched.acceptedCount > 0)
+    }
+
+    @Test(arguments: 0 ... 3)
+    func matchesSequentialVerification(accepted: Int) throws {
+        let rows =
+            Array(repeating: Int32(7), count: accepted) + [9]
+            + Array(repeating: Int32(2), count: 3 - accepted)
+        func makeIterator() throws -> MTPSpeculativeTokenIterator {
+            try MTPSpeculativeTokenIterator(
+                input: LMInput(tokens: MLXArray([Int32(1), 2, 3])),
+                mainModel: MockMainModel(nextLogitTokens: [0, 0, 7] + rows),
+                drafter: MockDrafter(draftedTokenValue: 7),
+                parameters: GenerateParameters(maxTokens: 8, temperature: 0), blockSize: 4)
+        }
+        var batched = try makeIterator()
+        var sequential = try makeIterator()
+        let processor = EmissionLog()
+        sequential._setProcessorForTesting(processor)
+        var tokens = [Int]()
+        for _ in 0 ..< accepted + 2 {
+            let token = batched.next()
+            #expect(token == sequential.next())
+            tokens.append(try #require(token))
+        }
+        #expect(tokens == Array(repeating: 7, count: accepted + 1) + [9])
+        #expect(batched.acceptedCount == accepted)
+        #expect(batched.speculativeDecodingTelemetry == sequential.speculativeDecodingTelemetry)
+        #expect(
+            batched.mainCacheStorage.processedTokenCount
+                == sequential.mainCacheStorage.processedTokenCount)
+        #expect(processor.recordedTokens == Array(tokens.dropFirst()))
+        batched.finalizeGeneration()
+        sequential.finalizeGeneration()
+        #expect(batched.mainCache.map(\.offset) == sequential.mainCache.map(\.offset))
+    }
+
+    @Test func seededSamplingKeepsSequentialDraws() throws {
+        func makeIterator() throws -> MTPSpeculativeTokenIterator {
+            let model = MockMainModel(nextLogitTokens: [])
+            model.logitStrength = 0
+            return try MTPSpeculativeTokenIterator(
+                input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: model,
+                drafter: MockDrafter(draftedTokenValue: 7),
+                parameters: GenerateParameters(maxTokens: 48, temperature: 0.8, seed: 314),
+                blockSize: 4)
+        }
+        var plain = try makeIterator()
+        var processed = try makeIterator()
+        let processor = EmissionLog()
+        processed._setProcessorForTesting(processor)
+        var tokens = [Int]()
+        while let token = plain.next() {
+            #expect(token == processed.next())
+            tokens.append(token)
+        }
+        #expect(processed.next() == nil)
+        #expect(tokens.count == 48)
+        #expect(processor.recordedTokens == Array(tokens.dropFirst()))
     }
 }
 
