@@ -37,6 +37,7 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | `.gemma4` | Gemma4 | `<\|tool_call>call:name{key:<\|"\|>value<\|"\|>}<tool_call\|>` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
+| `.miniCPM5` | MiniCPM5 | `<function name="f"><param name="k">v</param></function>` |
 | `.atem` | Muse Glimmer (Onyx ATEM) | `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>` |
 | `.mistral` | Mistral3 | `[TOOL_CALLS]get_weather [ARGS]{"location":"Tokyo"}` |
 | `.llama3` | Llama 3 | `<\|python_tag\|>{"name":"func","parameters":{...}}` |

@@ -14,6 +14,7 @@ struct ToolCallFormatInferenceTests {
         "Each dialect is recognized by its template markers",
         arguments: [
             ("<minimax:tool_call>{...}</minimax:tool_call>", ToolCallFormat.minimaxM2),
+            (#"<function name="{{ name }}"><param name="k">v</param></function>"#, .miniCPM5),
             (#"<|tool_call>call:{{ name }}{...}<tool_call|>"#, .gemma4),
             ("<start_function_call>call:{{ name }}<end_function_call>", .gemma),
             ("<arg_key>{{ key }}</arg_key><arg_value>{{ value }}</arg_value>", .glm4),
@@ -67,6 +68,7 @@ struct ToolCallFormatInferenceTests {
             ("kimi_k2", .kimiK2),
             ("mistral", .mistral),
             ("minimax_m2", .minimaxM2),
+            ("minicpm5", .miniCPM5),
             ("json_tools", .json),
         ] as [(String, ToolCallFormat)]
     )
@@ -133,6 +135,22 @@ struct ToolCallFormatInferenceTests {
         #expect(call.function.name == "get_weather")
         #expect(call.function.arguments == ["location": .string("Paris")])
         #expect(call.id != nil)
+    }
+
+    @Test("MiniCPM5's XML template refines the heuristic Llama 3 declaration")
+    func miniCPM5TemplateRefinesLlama3Format() throws {
+        // MiniCPM5 reports `model_type: "llama"` with a vocabulary over the
+        // Llama 3 threshold, so the architecture heuristic guesses `.llama3`.
+        // The checkpoint's own template teaches a different dialect, and that must win.
+        let directory = try TokenizerFixture.make([
+            "chat_template.jinja":
+                #"<function name="{{ tool_call.name }}"><param name="k">v</param></function>"#
+        ])
+        defer { TokenizerFixture.remove(directory) }
+
+        #expect(
+            ToolCallFormat.resolved(
+                forTokenizerDirectory: directory, modelFormat: .llama3) == .miniCPM5)
     }
 
     @Test("A compatible model superset is preserved over template inference")
