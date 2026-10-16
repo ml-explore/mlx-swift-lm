@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// Controls whether the generation loop continues.
 public enum TokenLoopDisposition: Sendable {
     /// Continue generating tokens.
@@ -66,8 +68,7 @@ extension TokenLoopHandler {
 public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public typealias Output = Generation
 
-    private static let logger = Logger(
-        subsystem: "mlx-swift-lm", category: "TokenStreamProtocol")
+    private static let logger = MLXLogger(label: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
 
     public init(
