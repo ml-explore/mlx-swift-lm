@@ -1797,6 +1797,102 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             ])
     }
 
+    @Test(arguments: [
+        (headDim: 64, bits: 4, dtype: DType.float16),
+        (headDim: 64, bits: 8, dtype: DType.bfloat16),
+        (headDim: 128, bits: 4, dtype: DType.bfloat16),
+        (headDim: 128, bits: 8, dtype: DType.float16),
+    ])
+    func testQuantizedKVCachePrefillAttentionMatchesQuantizedMatmulPath(
+        headDim: Int, bits: Int, dtype: DType
+    ) {
+        // 64 queries over a 100-token quantized history take the dequantized fused route;
+        // it must agree with the quantized-matmul attention over the same cache contents
+        // and stay close to full-precision attention over the unquantized history.
+        let fusedCache = QuantizedKVCache(groupSize: 64, bits: bits)
+        let matmulCache = QuantizedKVCache(groupSize: 64, bits: bits)
+        let plainCache = KVCacheSimple()
+        let history = (
+            keys: deterministicTensor(shape: [1, 2, 100, headDim], salt: 40).asType(dtype),
+            values: deterministicTensor(shape: [1, 2, 100, headDim], salt: 41).asType(dtype)
+        )
+        for cache in [fusedCache, matmulCache] {
+            _ = cache.updateQuantized(keys: history.keys, values: history.values)
+        }
+        _ = plainCache.update(keys: history.keys, values: history.values)
+
+        let queries = deterministicTensor(shape: [1, 4, 64, headDim], salt: 42).asType(dtype)
+        let keys = deterministicTensor(shape: [1, 2, 64, headDim], salt: 43).asType(dtype)
+        let values = deterministicTensor(shape: [1, 2, 64, headDim], salt: 44).asType(dtype)
+        let scale = 1 / sqrt(Float(headDim))
+        #expect(usesDequantizedPrefillAttention(queries: queries, valueHeadDim: headDim))
+
+        let fused = attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: fusedCache,
+            scale: scale, mask: .causal)
+        let (quantizedKeys, quantizedValues) = matmulCache.updateQuantized(
+            keys: keys, values: values)
+        let viaMatmul = quantizedScaledDotProductAttention(
+            queries: queries, quantizedKeys: quantizedKeys, quantizedValues: quantizedValues,
+            scale: scale, mask: .causal, groupSize: 64, bits: bits)
+        let fullPrecision = attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: plainCache,
+            scale: scale, mask: .causal)
+        eval(fused, viaMatmul, fullPrecision)
+
+        #expect(fused.shape == [1, 4, 64, headDim])
+        #expect(fused.dtype == dtype)
+        #expect(relativeRMSError(fused, viaMatmul) < 1e-2)
+        #expect(relativeRMSError(fused, fullPrecision) < (bits == 4 ? 5e-2 : 1e-2))
+        #expect(fusedCache.offset == 164)
+    }
+
+    @Test func testAttentionKVStateQuantizedRouteSharesPrefillDispatch() {
+        // The state-based route (shared-KV layers) must make the same fused-versus-quantized
+        // decision as `attentionWithCacheUpdate`.
+        let stateCache = QuantizedKVCache(groupSize: 64, bits: 4)
+        let directCache = QuantizedKVCache(groupSize: 64, bits: 4)
+        let queries = deterministicTensor(shape: [1, 4, 64, 64], salt: 52)
+        let keys = deterministicTensor(shape: [1, 2, 64, 64], salt: 53)
+        let values = deterministicTensor(shape: [1, 2, 64, 64], salt: 54)
+        let scale = 1 / sqrt(Float(64))
+
+        let state = AttentionKVState.update(keys: keys, values: values, cache: stateCache)
+        guard case .quantized = state else {
+            Issue.record("expected a quantized attention state")
+            return
+        }
+        let viaState = state.attend(queries: queries, scale: scale, mask: .causal)
+        let direct = attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: directCache,
+            scale: scale, mask: .causal)
+        eval(viaState, direct)
+
+        #expect(state.sequenceLength == 64)
+        #expect(allClose(viaState, direct).item(Bool.self))
+    }
+
+    @Test func testDequantizedPrefillAttentionRouteGates() {
+        #expect(
+            !usesDequantizedPrefillAttention(
+                queries: deterministicTensor(shape: [1, 4, 1, 64], salt: 46), valueHeadDim: 64))
+        #expect(
+            !usesDequantizedPrefillAttention(
+                queries: deterministicTensor(shape: [1, 4, 63, 64], salt: 47), valueHeadDim: 64))
+        #expect(
+            usesDequantizedPrefillAttention(
+                queries: deterministicTensor(shape: [1, 4, 64, 64], salt: 48), valueHeadDim: 64))
+        // MLX runs head dim 256 unfused on most GPUs, so it keeps the quantized route.
+        #expect(
+            !usesDequantizedPrefillAttention(
+                queries: deterministicTensor(shape: [1, 4, 64, 256], salt: 49),
+                valueHeadDim: 256))
+        // MLA-style caches with narrower values than queries stay on the quantized route.
+        #expect(
+            !usesDequantizedPrefillAttention(
+                queries: deterministicTensor(shape: [1, 4, 64, 128], salt: 51), valueHeadDim: 64))
+    }
+
     @Test func testVarianceNormalizedKVCacheQuantizedTileAttentionSupportsGQA() {
         let nativeCache = VarianceNormalizedKVCache(
             tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
