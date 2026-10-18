@@ -790,4 +790,18 @@ public class NemotronHTests: XCTestCase {
         XCTAssertNotNil(sanitized["backbone.norm_f.weight"])
         XCTAssertNil(sanitized["mtp.layers.0.mixer.q_proj.weight"])
     }
+
+    func testReasoningConfigUsesEnableThinkingFlag() throws {
+        let model = NemotronHModel(makeTestConfig(pattern: "M*"))
+        let reasoning = try XCTUnwrap(model.reasoningConfig)
+        XCTAssertEqual(reasoning.startDelimiter, "<think>")
+        XCTAssertEqual(reasoning.endDelimiter, "</think>")
+        XCTAssertFalse(reasoning.isSpecialToken)
+        let off = try XCTUnwrap(
+            reasoning.promptStrategy.additionalContext(forThinkingEnabled: false))
+        XCTAssertEqual(off["enable_thinking"] as? Bool, false)
+        let unset = try XCTUnwrap(
+            reasoning.promptStrategy.additionalContext(forThinkingEnabled: nil))
+        XCTAssertEqual(unset["enable_thinking"] as? Bool, true)
+    }
 }

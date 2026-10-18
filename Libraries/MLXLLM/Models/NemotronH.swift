@@ -1098,4 +1098,12 @@ public struct NemotronHConfiguration: Codable, Sendable {
 
 extension NemotronHModel {
     public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+
+    /// Nemotron 3 and 3.5 templates open `<think>` in the generation prompt unless
+    /// `enable_thinking` is false. Their tokenizers don't mark `<think>` as special.
+    public var reasoningConfig: ReasoningConfig? {
+        ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true))
+    }
 }
