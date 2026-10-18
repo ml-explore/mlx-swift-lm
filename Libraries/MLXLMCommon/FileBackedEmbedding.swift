@@ -12,8 +12,8 @@ import os
 
 /// Storage for embedding tables during model loading.
 public enum EmbeddingStoragePolicy: Sendable, Equatable {
-    /// File-back supported frozen, lookup-only tables on Apple platforms.
-    /// Other tables keep their normal storage. Temporary storage can be required.
+    /// File-back supported frozen input tables on Apple platforms; other tables stay resident.
+    /// Keep checkpoint contents unchanged while the model is in use.
     case automatic
     /// Keep all tables in normal MLX storage.
     case resident

@@ -425,10 +425,10 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 /// that do not load now and of the model's ``BaseLanguageModel/excludedCheckpointNamespaces`` are
 /// not read.
 ///
-/// Automatic embedding storage moves supported frozen tables declared by
-/// ``InputOnlyEmbeddingsProviding`` into file-backed storage. This keeps
-/// unused rows reclaimable without changing tensor values. Set `embeddingStorage`
-/// to ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
+/// Supported frozen tables declared by ``InputOnlyEmbeddingsProviding`` use file-backed
+/// storage by default. Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
+///
+/// - Important: Do not rewrite or truncate mapped checkpoint files while the model is in use.
 public func loadWeights(
     modelDirectory: URL, model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,

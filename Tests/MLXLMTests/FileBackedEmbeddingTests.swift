@@ -5,9 +5,11 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXNN
+import MLXScriptedLM
 import XCTest
 
 @testable import MLXLMCommon
+@testable import MLXVLM
 
 final class FileBackedEmbeddingTests: XCTestCase {
     private final class Model: Module, BaseLanguageModel, InputOnlyEmbeddingsProviding {
@@ -36,11 +38,13 @@ final class FileBackedEmbeddingTests: XCTestCase {
 
     private final class CustomEmbedding: QuantizedEmbedding {}
 
-    private func embedding(dtype: DType = .bfloat16, bits: Int = 4) -> QuantizedEmbedding {
+    private func embedding(
+        dtype: DType = .bfloat16, bits: Int = 4, groupSize: Int = 64
+    ) -> QuantizedEmbedding {
         let values = withRandomState(MLXRandom.RandomState(seed: 42)) {
             MLXRandom.normal([257, 256]).asType(dtype)
         }
-        return QuantizedEmbedding(weight: values, groupSize: 64, bits: bits)
+        return QuantizedEmbedding(weight: values, groupSize: groupSize, bits: bits)
     }
 
     private func assertIdentical(
@@ -173,6 +177,104 @@ final class FileBackedEmbeddingTests: XCTestCase {
                         uniqueKeysWithValues: model.embedding.parameters().flattened())
                     let actual = try XCTUnwrap(copied[name])
                     assertIdentical(actual, value)
+                }
+            }
+        }
+    }
+
+    func testAdditionalAffineGroupSizesPreserveAllBits() throws {
+        for groupSize in [32, 128] {
+            for dtype in [DType.float16, .bfloat16, .float32] {
+                for bits in [2, 3, 4, 5, 6, 8] {
+                    let original = embedding(dtype: dtype, bits: bits, groupSize: groupSize)
+                    let model = Model(original)
+                    try prepareEmbeddingStorage(
+                        in: model, directory: FileManager.default.temporaryDirectory)
+                    let replacement = try XCTUnwrap(model.embedding as? QuantizedEmbedding)
+                    XCTAssertEqual(replacement.groupSize, groupSize)
+                    assertIdentical(
+                        replacement(MLXArray([0, 256, -1])), original(MLXArray([0, 256, -1])))
+                    for (name, expected) in original.parameters().flattened() {
+                        let actual = Dictionary(
+                            uniqueKeysWithValues: replacement.parameters().flattened())
+                        assertIdentical(try XCTUnwrap(actual[name]), expected)
+                    }
+                }
+            }
+        }
+    }
+
+    private struct TestTokenizerLoader: TokenizerLoader {
+        func load(from directory: URL) async throws -> any Tokenizer { PseudoWordTokenizer() }
+    }
+
+    func testQwen35FactoriesApplyStoragePolicyOnlyToUntiedInputTables() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for tied in [false, true] {
+            let config = Data(
+                """
+                {"model_type":"qwen3_5", "quantization":{"group_size":32,"bits":4},
+                 "text_config":{"model_type":"qwen3_5_text","hidden_size":256,
+                 "num_hidden_layers":1,"intermediate_size":512,"num_attention_heads":4,
+                 "num_key_value_heads":2,"head_dim":64,"vocab_size":257,"full_attention_interval":1,
+                 "tie_word_embeddings":\(tied),"rope_parameters":{"type":"default",
+                 "mrope_section":[8,12,12],"partial_rotary_factor":1.0,"rope_theta":100000}},
+                 "vision_config":{"model_type":"qwen3_5","depth":1,"hidden_size":32,
+                 "intermediate_size":64,"out_hidden_size":256,"num_heads":4,"patch_size":2,
+                 "spatial_merge_size":2,"temporal_patch_size":1,"num_position_embeddings":16}}
+                """.utf8)
+            try config.write(to: directory.appendingPathComponent("config.json"))
+            let decoded = try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: config)
+            let source = withRandomState(MLXRandom.RandomState(seed: 42)) { Qwen35(decoded) }
+            source.update(parameters: source.parameters().mapValues { $0.asType(.bfloat16) })
+            let original = QuantizedEmbedding(
+                weight: source.languageModel.model.embedTokens.weight, groupSize: 32, bits: 4)
+            try source.update(
+                modules: ModuleChildren.unflattened([
+                    ("language_model.model.embed_tokens", original)
+                ]), verify: [])
+            try save(
+                arrays: Dictionary(uniqueKeysWithValues: source.parameters().flattened()),
+                metadata: ["format": "mlx"],
+                url: directory.appendingPathComponent("model.safetensors"))
+            var sequences: [[Int]] = []
+            for policy in [EmbeddingStoragePolicy.automatic, .resident] {
+                let configuration = ModelConfiguration(
+                    directory: directory, embeddingStorage: policy
+                )
+                .resolved(modelDirectory: directory, tokenizerDirectory: directory)
+                let text = try await LLMModelFactory.shared._load(
+                    configuration: configuration, tokenizerLoader: TestTokenizerLoader())
+                let vision = try await VLMModelFactory.shared._load(
+                    configuration: configuration, tokenizerLoader: TestTokenizerLoader())
+                XCTAssertTrue(text.model is Qwen35Model)
+                XCTAssertTrue(vision.model is Qwen35)
+                for (index, context) in [text, vision].enumerated() {
+                    XCTAssertEqual(context.configuration.embeddingStorage, policy)
+                    let provider = try XCTUnwrap(context.model as? any InputOnlyEmbeddingsProviding)
+                    XCTAssertEqual(provider.inputOnlyEmbeddings.count, tied ? 0 : 1)
+                    let table = try XCTUnwrap(
+                        context.model.namedModules().first {
+                            $0.0 == "language_model.model.embed_tokens"
+                        }?.1 as? Embedding)
+                    XCTAssertEqual(
+                        table is FileBackedQuantizedEmbedding, !tied && policy == .automatic)
+                    assertIdentical(
+                        table(MLXArray([0, 256, -1])), original(MLXArray([0, 256, -1])))
+                    var iterator = try TokenIterator(
+                        input: LMInput(tokens: MLXArray([1, 17, 24])), model: context.model,
+                        parameters: GenerateParameters(maxTokens: 4, temperature: 0))
+                    var tokens: [Int] = []
+                    while let token = iterator.next() { tokens.append(token) }
+                    XCTAssertEqual(tokens.count, 4)
+                    if policy == .automatic {
+                        sequences.append(tokens)
+                    } else {
+                        XCTAssertEqual(tokens, sequences[index])
+                    }
                 }
             }
         }

@@ -31,37 +31,20 @@ print(try await session.respond(to: "How about a great place to eat?"))
 
 ## Embedding storage
 
-The loader can keep frozen input-only embedding tables in file-backed storage.
-CPU row gathers read only the tokens in the input. Quantized tables use the existing
-GPU dequantization. Floating tables keep their dtype. Models declare these tables with
-``InputOnlyEmbeddingsProviding``.
-Tied output tables, custom embedding classes, and unsupported quantization modes stay resident.
+``EmbeddingStoragePolicy/automatic`` keeps supported frozen input-only tables in
+file-backed storage so unused rows can be reclaimed. Models declare these tables with
+``InputOnlyEmbeddingsProviding``. Tensor values and precision are unchanged.
+Tied output tables, custom embeddings, and unsupported formats keep normal storage.
 
-``EmbeddingStoragePolicy/automatic`` is the default. The loader maps unchanged tables from the
-original checkpoint when the tensor offset is a multiple of eight bytes and the buffer
-fits the runtime's limits.
-Known input tables are mapped before their data is read. Renamed tables can use the same
-mapping after checkpoint preparation. Keep checkpoint contents unchanged while the model
-is in use.
+Compatible checkpoint tensors map directly. Other eligible tables use temporary files,
+with one copy per load and additional disk space. Loading peak memory can remain unchanged.
+Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
 
-Unaligned or transformed tables use aligned temporary storage. This path writes each
-table once per load and requires temporary disk space. The file name is removed at creation;
-its disk blocks are released with the final tensor. A backing-store failure retains normal
-storage. Both paths request random-access paging to limit read-ahead for unused rows. The
-operating system can reclaim unused clean pages under memory pressure.
+> Important: Do not rewrite or truncate checkpoint files while the model is in use.
+> Use ``EmbeddingStoragePolicy/resident`` if files must change in place.
 
-Use ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage:
-
-```swift
-let configuration = ModelConfiguration(
-    id: "mlx-community/Qwen3.5-9B-4bit",
-    embeddingStorage: .resident)
-```
-
-MLX memory counters still include the full mapped buffer. Measure the process footprint
-and system memory separately when checking the benefit. A wired-memory policy that covers
-all MLX buffers can also make the full mapped table resident. File-backed storage does not
-reduce the number of model parameters or their precision.
+MLX allocation counters include the full mapped table. Wiring all MLX buffers can keep
+all its pages resident, even when the process footprint is lower.
 
 ## Downloaders and Tokenizers
 
