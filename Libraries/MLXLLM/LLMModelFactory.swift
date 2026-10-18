@@ -827,7 +827,8 @@ public final class LLMModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection,
-            excludedComponents: configuration.excludedComponents)
+            excludedComponents: configuration.excludedComponents,
+            embeddingStorage: configuration.embeddingStorage)
 
         let tokenizer = try await tokenizerTask
 
@@ -854,7 +855,8 @@ public final class LLMModelFactory: GenericModelFactory {
             toolCallFormat: mutableConfiguration.toolCallFormat,
             reasoningConfig: mutableConfiguration.reasoningConfig,
             messageGenerator: mutableConfiguration.messageGenerator,
-            generationConfig: mutableConfiguration.generationConfig)
+            generationConfig: mutableConfiguration.generationConfig,
+            embeddingStorage: configuration.embeddingStorage)
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,

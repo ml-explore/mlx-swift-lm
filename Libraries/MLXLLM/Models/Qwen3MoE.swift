@@ -229,7 +229,10 @@ public class Qwen3MoEModelInner: Module {
     }
 }
 
-public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding
+{
+    public var inputOnlyEmbeddings: [Embedding] { lmHead == nil ? [] : [model.embedTokens] }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 

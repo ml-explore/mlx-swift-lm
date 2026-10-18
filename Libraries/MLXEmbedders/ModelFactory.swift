@@ -242,7 +242,8 @@ public final class EmbedderModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection,
-            excludedComponents: configuration.excludedComponents)
+            excludedComponents: configuration.excludedComponents,
+            embeddingStorage: configuration.embeddingStorage)
 
         let tokenizer = try await tokenizerTask
 
@@ -258,7 +259,8 @@ public final class EmbedderModelFactory: GenericModelFactory {
             extraEOSTokens: configuration.extraEOSTokens,
             stopStrings: configuration.stopStrings,
             eosTokenIds: configuration.eosTokenIds,
-            toolCallFormat: configuration.toolCallFormat)
+            toolCallFormat: configuration.toolCallFormat,
+            embeddingStorage: configuration.embeddingStorage)
 
         let pooling = loadPooling(modelDirectory: modelDirectory, model: model)
 
