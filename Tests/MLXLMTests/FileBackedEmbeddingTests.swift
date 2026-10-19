@@ -141,6 +141,37 @@ final class FileBackedEmbeddingTests: XCTestCase {
         }
     }
 
+    func testGemma4DeclaresPerLayerAndUntiedInputTables() throws {
+        for tied in [false, true] {
+            let data = Data(
+                """
+                {"model_type":"gemma4_text","hidden_size":8,"num_hidden_layers":2,
+                 "intermediate_size":16,"num_attention_heads":2,"num_key_value_heads":1,
+                 "head_dim":4,"global_head_dim":4,"vocab_size":12,"vocab_size_per_layer_input":12,
+                 "hidden_size_per_layer_input":4,"num_kv_shared_layers":0,"sliding_window":8,
+                 "sliding_window_pattern":1,"max_position_embeddings":32,"rms_norm_eps":0.000001,
+                 "rope_traditional":false,"use_double_wide_mlp":false,"enable_moe_block":false,
+                 "attention_k_eq_v":false,"layer_types":["full_attention","full_attention"],
+                 "rope_parameters":{},"tie_word_embeddings":\(tied)}
+                """.utf8)
+            let decoder = JSONDecoder()
+            let text = Gemma4TextModel(
+                try decoder.decode(MLXLLM.Gemma4TextConfiguration.self, from: data))
+            let vision = Gemma4TextLanguageModel(
+                try decoder.decode(MLXVLM.Gemma4TextConfiguration.self, from: data))
+            let models: [any InputOnlyEmbeddingsProviding] = [text, vision]
+            for model in models {
+                let names = model.inputOnlyEmbeddings.compactMap { embedding in
+                    model.namedModules().first { $0.1 === embedding }?.0
+                }
+                let expected =
+                    ["model.embed_tokens_per_layer"] + (tied ? [] : ["model.embed_tokens"])
+                XCTAssertEqual(Set(names), Set(expected))
+                XCTAssertEqual(names.count, expected.count)
+            }
+        }
+    }
+
     func testPhiMoEDeclaresItsInputTable() throws {
         let data = Data(
             """
