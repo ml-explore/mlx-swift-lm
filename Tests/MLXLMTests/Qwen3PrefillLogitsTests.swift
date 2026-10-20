@@ -68,7 +68,7 @@ final class Qwen3PrefillLogitsTests: XCTestCase {
             127, 128, 129, 255, 256, 257, 511, 512, 513, 1024, 1025,
         ]
         for dtype: DType in [.float32, .float16, .bfloat16] {
-            for bits in [4, 8] {
+            for bits in [4, 6, 8] {
                 let model = try makeModel(bits: bits, dtype: dtype)
                 let languageModel: any LanguageModel = model
                 for length in lengths {

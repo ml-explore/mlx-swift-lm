@@ -10,7 +10,7 @@ package func quantizedVocabularyProjectionInput(_ hidden: MLXArray, projection: 
         type(of: projection) == QuantizedEmbedding.self
             || type(of: projection) == QuantizedLinear.self,
         let quantized = projection as? any Quantized,
-        quantized.mode == .affine, quantized.bits == 4 || quantized.bits == 8
+        quantized.mode == .affine, [4, 6, 8].contains(quantized.bits)
     else {
         return hidden
     }

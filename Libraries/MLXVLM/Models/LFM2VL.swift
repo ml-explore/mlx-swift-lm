@@ -424,16 +424,7 @@ private enum Language {
         @ModuleInfo(key: "w3") var w3: Linear
 
         init(_ config: LFM2VLConfiguration.TextConfiguration) {
-            var adjustedFFDim = config.blockFFDim
-
-            if config.blockAutoAdjustFFDim {
-                adjustedFFDim = Int(Float(2 * adjustedFFDim) / 3.0)
-                adjustedFFDim = Int(config.blockFFNDimMultiplier * Float(adjustedFFDim))
-                adjustedFFDim =
-                    config.blockMultipleOf
-                    * ((adjustedFFDim + config.blockMultipleOf - 1) / config.blockMultipleOf)
-            }
-
+            let adjustedFFDim = config.feedForwardDimensions
             self._w1.wrappedValue = Linear(config.blockDim, adjustedFFDim, bias: false)
             self._w2.wrappedValue = Linear(adjustedFFDim, config.blockDim, bias: false)
             self._w3.wrappedValue = Linear(config.blockDim, adjustedFFDim, bias: false)
@@ -539,13 +530,19 @@ private enum Language {
         let modelType: String
         let model: LFM2ModelInner
 
+        @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
         var kvHeads: [Int]
 
-        init(_ config: LFM2VLConfiguration.TextConfiguration) {
+        init(_ config: LFM2VLConfiguration.TextConfiguration, tieWordEmbeddings: Bool) {
             self.config = config
             self.modelType = config.modelType
 
             self.model = LFM2ModelInner(config)
+            if !tieWordEmbeddings {
+                self._lmHead.wrappedValue = Linear(
+                    config.hiddenSize, config.vocabularySize, bias: false)
+            }
 
             self.kvHeads = (0 ..< config.hiddenLayers).map { layerIdx in
                 config.fullAttnIdxs.contains(layerIdx) ? config.kvHeads : 0
@@ -558,28 +555,16 @@ private enum Language {
             cache: [KVCache]? = nil,
             inputsEmbeds: MLXArray? = nil
         ) -> LMOutput {
-            var out = model(
+            let out = model(
                 inputs ?? MLXArray([0]), cache: cache, inputEmbeddings: inputsEmbeds)
-            out = model.embedTokens.asLinear(out)
-            return LMOutput(logits: out)
+            return LMOutput(logits: vocabularyLogits(out))
         }
 
-        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-            var sanitizedWeights = [String: MLXArray]()
-
-            for (name, param) in weights {
-                var sanitizedParam = param
-
-                if name.contains("conv.weight") {
-                    if param.shape[param.shape.count - 1] > param.dim(1) {
-                        sanitizedParam = param.transposed(0, 2, 1)
-                    }
-                }
-
-                sanitizedWeights[name] = sanitizedParam
+        func vocabularyLogits(_ hidden: MLXArray) -> MLXArray {
+            if let lmHead {
+                return lmHead(hidden)
             }
-
-            return sanitizedWeights
+            return model.embedTokens.asLinear(hidden)
         }
     }
 }
@@ -875,7 +860,8 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         self._multiModalProjector.wrappedValue = Lfm2VlMultiModalProjector(config: config)
-        self._languageModel.wrappedValue = Language.LanguageModel(config.textConfiguration)
+        self._languageModel.wrappedValue = Language.LanguageModel(
+            config.textConfiguration, tieWordEmbeddings: config.tieWordEmbeddings)
     }
 
     private func getInputEmbeddings(
@@ -1089,9 +1075,16 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
                     of: "model.multi_modal_projector", with: "multi_modal_projector")
             }
 
+            // HF checkpoints keep an untied `lm_head` at the top level.
+            if key.hasPrefix("model.") || key.hasPrefix("lm_head.") {
+                key = "language_model." + key
+            }
+
             return key
         }
 
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: config.tieWordEmbeddings)
         var sanitizedWeights = [String: MLXArray]()
         for (k, v) in weights {
             let newKey = transformKey(k)
@@ -1143,13 +1136,34 @@ public struct LFM2VLConfiguration: Codable, Sendable {
         private let _blockDim: Int?
         public var blockDim: Int { _blockDim ?? hiddenSize }
         private let _blockFFDim: Int?
-        public var blockFFDim: Int { _blockFFDim ?? hiddenSize }
+        private let _intermediateSize: Int?
+        /// MLP width before auto-adjustment: `block_ff_dim`, else `intermediate_size`.
+        public var blockFFDim: Int { _blockFFDim ?? _intermediateSize ?? hiddenSize }
         private let _blockMultipleOf: Int?
         public var blockMultipleOf: Int { _blockMultipleOf ?? 256 }
-        private let _blockFFNDimMultiplier: Float?
-        public var blockFFNDimMultiplier: Float { _blockFFNDimMultiplier ?? 1.0 }
+        private let _blockFFNDimMultiplier: Double?
+        public var blockFFNDimMultiplier: Float { Float(_blockFFNDimMultiplier ?? 1.0) }
         private let _blockAutoAdjustFFDim: Bool?
         public var blockAutoAdjustFFDim: Bool { _blockAutoAdjustFFDim ?? true }
+        private let _tieWordEmbeddings: Bool?
+        private let _tieEmbedding: Bool?
+        /// `text_config`'s `tie_embedding`, else `tie_word_embeddings`, else true. ``LFM2VL``
+        /// uses `LFM2VLConfiguration.tieWordEmbeddings`, which reads the top level first.
+        var tieWordEmbeddings: Bool { _tieEmbedding ?? _tieWordEmbeddings ?? true }
+
+        /// MLP width after transformers' `block_auto_adjust_ff_dim` rule. transformers skips the
+        /// rounding when `block_ffn_dim_multiplier` is an explicit null; this rounds anyway.
+        var feedForwardDimensions: Int {
+            var width = blockFFDim
+            if blockAutoAdjustFFDim {
+                width = Int(Double(2 * width) / 3)
+                if let multiplier = _blockFFNDimMultiplier {
+                    width = Int(multiplier * Double(width))
+                }
+                width = blockMultipleOf * ((width + blockMultipleOf - 1) / blockMultipleOf)
+            }
+            return width
+        }
         private let _fullAttnIdxs: [Int]?
         private let layerTypes: [String]?
         public var fullAttnIdxs: [Int] {
@@ -1165,8 +1179,16 @@ public struct LFM2VLConfiguration: Codable, Sendable {
 
             return Array(0 ..< hiddenLayers)
         }
+        private struct RopeParameters: Codable, Sendable {
+            let ropeTheta: Float?
+            enum CodingKeys: String, CodingKey {
+                case ropeTheta = "rope_theta"
+            }
+        }
         private let _ropeTheta: Float?
-        public var ropeTheta: Float { _ropeTheta ?? 1000000.0 }
+        private let _ropeParameters: RopeParameters?
+        /// `rope_parameters.rope_theta`, else `rope_theta`, else 1e6.
+        public var ropeTheta: Float { _ropeParameters?.ropeTheta ?? _ropeTheta ?? 1000000.0 }
 
         enum CodingKeys: String, CodingKey {
             case modelType = "model_type"
@@ -1180,12 +1202,16 @@ public struct LFM2VLConfiguration: Codable, Sendable {
             case _convLCache = "conv_L_cache"
             case _blockDim = "block_dim"
             case _blockFFDim = "block_ff_dim"
+            case _intermediateSize = "intermediate_size"
             case _blockMultipleOf = "block_multiple_of"
             case _blockFFNDimMultiplier = "block_ffn_dim_multiplier"
             case _blockAutoAdjustFFDim = "block_auto_adjust_ff_dim"
             case _fullAttnIdxs = "full_attn_idxs"
             case layerTypes = "layer_types"
             case _ropeTheta = "rope_theta"
+            case _ropeParameters = "rope_parameters"
+            case _tieWordEmbeddings = "tie_word_embeddings"
+            case _tieEmbedding = "tie_embedding"
         }
     }
 
@@ -1248,6 +1274,13 @@ public struct LFM2VLConfiguration: Codable, Sendable {
     public var minTiles: Int { _minTiles ?? 2 }
     private let _useThumbnail: Bool?
     public var useThumbnail: Bool { _useThumbnail ?? false }
+    private let _tieWordEmbeddings: Bool?
+    private let _tieEmbedding: Bool?
+    /// Whether the output projection reuses `embed_tokens`: the top-level `tie_embedding`, then
+    /// `tie_word_embeddings`, then the `text_config` flags, where mlx-vlm conversions keep them.
+    var tieWordEmbeddings: Bool {
+        _tieEmbedding ?? _tieWordEmbeddings ?? textConfiguration.tieWordEmbeddings
+    }
 
     enum CodingKeys: String, CodingKey {
         case textConfiguration = "text_config"
@@ -1265,6 +1298,8 @@ public struct LFM2VLConfiguration: Codable, Sendable {
         case _minImageTokens = "min_image_tokens"
         case _minTiles = "min_tiles"
         case _useThumbnail = "use_thumbnail"
+        case _tieWordEmbeddings = "tie_word_embeddings"
+        case _tieEmbedding = "tie_embedding"
     }
 }
 

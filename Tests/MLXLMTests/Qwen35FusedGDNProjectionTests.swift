@@ -213,6 +213,45 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
         XCTAssertFalse(layer.hasFusedInputProjection)
     }
 
+    func testScaledNVFP4PreparationPreservesOutputAndCheckpoint() throws {
+        for scaledIndex in [0, 3] {
+            let layer = Qwen35GatedDeltaNet(try llmConfiguration())
+            let names = ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"]
+            let sources = [layer.inProjQKV, layer.inProjZ, layer.inProjB, layer.inProjA]
+            let replacements = zip(names, sources).enumerated().map { index, item in
+                (
+                    item.0,
+                    QuantizedLinear(
+                        weight: item.1.weight, bias: nil, groupSize: 16, bits: 4,
+                        mode: .nvfp4, globalScale: index == scaledIndex ? MLXArray(Float(0.1)) : nil
+                    )
+                )
+            }
+            try layer.update(
+                modules: ModuleChildren.unflattened(replacements.map { ($0.0, $0.1 as Module) }),
+                verify: [])
+            let checkpoint = Dictionary(uniqueKeysWithValues: layer.parameters().flattened())
+            let input = MLXRandom.normal([1, 1, 64]).asType(.bfloat16)
+            layer.fusedInputProjectionEnabled = false
+            let expected = layer.projectInputs(input, batch: 1, sequence: 1)
+            eval(expected.qkv, expected.z, expected.b, expected.a)
+            layer.fusedInputProjectionEnabled = true
+            XCTAssertFalse(try layer.prepareFusedInputProjection())
+            let actual = layer.projectInputs(input, batch: 1, sequence: 1)
+            assertBitIdentical(actual.qkv, expected.qkv, "scaled qkv")
+            assertBitIdentical(actual.z, expected.z, "scaled z")
+            assertBitIdentical(actual.b, expected.b, "scaled b")
+            assertBitIdentical(actual.a, expected.a, "scaled a")
+            let prepared = Dictionary(uniqueKeysWithValues: layer.parameters().flattened())
+            XCTAssertEqual(Set(checkpoint.keys), Set(prepared.keys))
+            for (name, expected) in checkpoint {
+                let actual = try XCTUnwrap(prepared[name])
+                XCTAssertEqual(actual.dtype, expected.dtype)
+                XCTAssertTrue(allClose(actual, expected, rtol: 0, atol: 0).item(Bool.self), name)
+            }
+        }
+    }
+
     func testAdapterProjectionFallsBack() throws {
         let layer = Qwen35GatedDeltaNet(try llmConfiguration())
         try quantize(layer)

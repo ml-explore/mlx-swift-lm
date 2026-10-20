@@ -144,6 +144,7 @@ package func fuseQuantizedLinearProjections(
         }),
         let first = projections.first,
         first.bias == nil,
+        first.globalScale == nil,
         first.weight.ndim == 2,
         first.weight.dim(0) == first.shape.0,
         first.scales.ndim == 2,
@@ -157,6 +158,7 @@ package func fuseQuantizedLinearProjections(
     guard
         projections.allSatisfy({ projection in
             projection.bias == nil
+                && projection.globalScale == nil
                 && projection.bits == first.bits
                 && projection.groupSize == first.groupSize
                 && projection.mode == first.mode

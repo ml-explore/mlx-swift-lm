@@ -76,6 +76,14 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: GLM4 uses special tool call format
 ```
 
+### Mellum
+
+```swift
+// model_type: "mellum"
+LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2.5B-Thinking-6bit
+// Note: Mellum uses Qwen-style <think> reasoning and JSON tool calls
+```
+
 ### Other Supported LLM Types
 
 | model_type | Description |
