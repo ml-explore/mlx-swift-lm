@@ -390,6 +390,10 @@ public final class ChatSession {
         case kvcache(RealizedCache)
         case history([Chat.Message])
 
+        var isRealized: Bool {
+            if case .kvcache = self { true } else { false }
+        }
+
         /// A copy that shares no mutable state with this cache.
         func copy() -> Cache {
             guard case .kvcache(let stored) = self else { return self }
@@ -454,7 +458,7 @@ public final class ChatSession {
     /// If the session owns a realized cache, this reports its actual request,
     /// topology, strategy state, and progress. Otherwise it reports the cache
     /// planned by the current ``generateParameters``.
-    public func cacheStatus() async throws -> KVCacheStatus {
+    public nonisolated(nonsending) func cacheStatus() async throws -> KVCacheStatus {
         let parameters = generateParameters
         if let realized = await cache.read({ cache -> KVCacheStatus? in
             guard case .kvcache(let stored) = cache else { return nil }
@@ -1226,8 +1230,6 @@ public final class ChatSession {
                         kvCache = KVCacheStorage(
                             try model.newCache(parameters: generateParameters), plan: kvCachePlan)
                         conversation = Conversation(messages: [], cachedTokens: [])
-                        cache = .kvcache(
-                            .init(main: kvCache, conversation: conversation))
 
                     case .kvcache(let stored):
                         let realizedStatus = KVCacheStatus(
@@ -1275,8 +1277,6 @@ public final class ChatSession {
                         kvCache = KVCacheStorage(
                             try model.newCache(parameters: generateParameters), plan: kvCachePlan)
                         conversation = Conversation(messages: history, cachedTokens: [])
-                        cache = .kvcache(
-                            .init(main: kvCache, conversation: conversation))
                     }
 
                     let executionStream = StreamOrDevice.default.stream
@@ -1335,11 +1335,14 @@ public final class ChatSession {
                             if recordedStep && !finishedStep {
                                 conversation?.messages.append(contentsOf: dispatchedResults)
                             }
-                            cache = .kvcache(
-                                .init(
-                                    main: kvCache, draft: draftKVCache,
-                                    state: lmState, mtpDrafterContinuation: mtpDrafterContinuation,
-                                    conversation: conversation))
+                            if recordedStep || cache.isRealized {
+                                cache = .kvcache(
+                                    .init(
+                                        main: kvCache, draft: draftKVCache,
+                                        state: lmState,
+                                        mtpDrafterContinuation: mtpDrafterContinuation,
+                                        conversation: conversation))
+                            }
                         }
                         let isToolResultContinuation =
                             pendingMessages.contains { $0.role == .tool }
@@ -1373,9 +1376,6 @@ public final class ChatSession {
                             tools: tools, additionalContext: additionalContext)
                         needsExecutionFence = true
                         let preparedInput = try await processor.prepare(input: userInput)
-                        try await loadOnDemandComponents(
-                            pendingOnDemandComponents(
-                                of: model, among: ModelComponent.needed(by: preparedInput)))
                         var input = preparedInput
                         // The whole prompt, not `input`: the cache may leave less than the
                         // prefill to prefill. Read before the prefill is queued.
@@ -1666,6 +1666,10 @@ public final class ChatSession {
                             throw ChatSessionError.emptyPreparedInput
                         }
 
+                        try await loadOnDemandComponents(
+                            pendingOnDemandComponents(
+                                of: model, among: ModelComponent.needed(by: input)))
+
                         // Select the token iterator based on speculative decoding configuration.
                         typealias GenerationRun = (
                             events: AsyncStream<T.Handler.Output>,
@@ -1843,6 +1847,9 @@ public final class ChatSession {
                                         lmState = nil
                                         input = preparedInput
                                         cachedPromptTokenCount = 0
+                                        try await loadOnDemandComponents(
+                                            pendingOnDemandComponents(
+                                                of: model, among: ModelComponent.needed(by: input)))
                                     }
 
                                     // Allocate the draft KV cache once and reuse it across turns,
@@ -1852,13 +1859,6 @@ public final class ChatSession {
                                             try draftModel.newCache(
                                                 parameters: generateParameters),
                                             plan: kvCachePlan)
-                                        cache = .kvcache(
-                                            .init(
-                                                main: kvCache,
-                                                draft: draftKVCache,
-                                                state: lmState,
-                                                mtpDrafterContinuation: mtpDrafterContinuation,
-                                                conversation: conversation))
                                     }
 
                                     let iterator = try SpeculativeTokenIterator(
@@ -2096,6 +2096,24 @@ public final class ChatSession {
         }
     }
 
+    /// Evict inference caches while retaining the conversation and session configuration.
+    ///
+    /// Waits for current generation to finish. The next response rebuilds context from the
+    /// transcript, as a session initialized with that history would. This does not preserve
+    /// exact warm-cache continuation or clear the process-wide allocator cache. Retained media
+    /// and caches shared with forks may keep memory alive.
+    ///
+    /// - Throws: ``ChatSessionError/noHistoryAvailable`` for a raw cache without a transcript.
+    public nonisolated(nonsending) func evict() async throws {
+        try await cache.update { cache in
+            guard case .kvcache(let stored) = cache else { return }
+            guard let conversation = stored.conversation else {
+                throw ChatSessionError.noHistoryAvailable
+            }
+            cache = .history(conversation.messages)
+        }
+    }
+
     /// Create a session that starts from a copy of this session's cache.
     ///
     /// Each session continues without affecting the other. Copying is cheap: they share the
@@ -2213,6 +2231,8 @@ public final class ChatSession {
 public enum ChatSessionError: LocalizedError {
     /// ``ChatSession/saveCache(to:)`` was called before any generation occurred.
     case noCacheAvailable
+    /// A raw cache has no transcript from which to rebuild after eviction.
+    case noHistoryAvailable
     /// The processor produced no tokens for generation.
     case emptyPreparedInput
     /// The cache was realized under a different KV-cache configuration.
@@ -2225,6 +2245,8 @@ public enum ChatSessionError: LocalizedError {
         switch self {
         case .noCacheAvailable:
             "No KV cache is available. Call respond() or streamResponse() before saveCache(to:)."
+        case .noHistoryAvailable:
+            "Cannot evict a cache without its conversation history. Clear the session to start a new conversation."
         case .emptyPreparedInput:
             "The chat template produced no uncached tokens for generation."
         case .kvCacheConfigurationChanged:

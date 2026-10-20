@@ -37,6 +37,35 @@ private final class Mutexish<Value>: @unchecked Sendable {
     func withLock<R>(_ body: (inout Value) -> R) -> R { lock.withLock { body(&value) } }
 }
 
+private final class ReleaseObserver: @unchecked Sendable {
+    weak var component: AnyOnDemandComponent?
+    let loadedWhenReleased = Mutexish<Bool?>(nil)
+}
+
+private final class ObservedModule: Module {
+    let observer: ReleaseObserver
+
+    init(observer: ReleaseObserver) {
+        self.observer = observer
+        super.init()
+    }
+
+    deinit {
+        let loaded = observer.component?.isLoaded
+        observer.loadedWhenReleased.withLock { $0 = loaded }
+    }
+}
+
+private final class ComponentOwner: Module, ModelComponentsProviding {
+    let onDemandComponents: [AnyOnDemandComponent]
+    var modelComponents: [ModelComponent: [CheckpointComponent]] { [:] }
+
+    init(_ components: [AnyOnDemandComponent]) {
+        self.onDemandComponents = components
+        super.init()
+    }
+}
+
 /// A text model with a vision tower, and a vision projection nested in a module it shares.
 private final class Captioner: Module, BaseLanguageModel, ModelComponentsProviding {
     @ModuleInfo(key: "language_model") var language: Linear
@@ -215,6 +244,138 @@ final class ModelComponentTests: XCTestCase {
             loads.modules, [ObjectIdentifier(try vision.load())])
     }
 
+    func testProviderEvictionSupportsCustomComponentsWithoutModelSpecificCode() throws {
+        let adapter = OnDemandComponent(ModelComponent("adapter")) { Module() }
+        let projection = OnDemandComponent(ModelComponent("projection")) { Module() }
+        let pending = OnDemandComponent(ModelComponent("pending")) { Module() }
+        let excluded = OnDemandComponent(ModelComponent("excluded")) { Module() }
+        for holder in [adapter, projection, pending] {
+            holder.setSource(
+                .init(urls: [], namespaces: [], perLayerQuantization: nil, prepare: { $0 }))
+        }
+        let original = try adapter.load()
+        _ = try projection.load()
+        let provider: any ModelComponentsProviding = ComponentOwner([
+            adapter, projection, pending, excluded,
+        ])
+
+        let evicted = provider.evict([
+            adapter.component, pending.component, excluded.component, ModelComponent("unknown"),
+        ])
+
+        XCTAssertEqual(evicted, [adapter.component])
+        XCTAssertFalse(adapter.isLoaded)
+        XCTAssertTrue(projection.isLoaded)
+        XCTAssertTrue(pending.isPending)
+        XCTAssertFalse(excluded.isLoaded)
+        XCTAssertFalse(excluded.isPending)
+        XCTAssertTrue(provider.evict([adapter.component]).isEmpty)
+        XCTAssertTrue(provider.evict([]).isEmpty)
+        XCTAssertTrue(projection.isLoaded)
+        XCTAssertFalse(try adapter.load() === original)
+        XCTAssertEqual(provider.evict([projection.component]), [projection.component])
+    }
+
+    func testEvictionPreservesExistingUsersAndReloadsWithoutChangingTheModel() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+        let parameters = model.parameters().flattened().map(\.0)
+        weak var previous: CaptionerVision?
+
+        do {
+            let original = try model.vision.load()
+            previous = original
+            let input = MLXArray.ones([1, 64])
+            let expected = original.connector.projection(original.tower(input))
+            eval(expected)
+
+            XCTAssertTrue(model.vision.evict())
+            XCTAssertFalse(model.vision.isLoaded)
+            XCTAssertTrue(model.vision.isPending)
+            XCTAssertFalse(model.vision.evict())
+            XCTAssertTrue(
+                arrayEqual(
+                    original.connector.projection(original.tower(input)), expected
+                ).item(Bool.self))
+
+            let reloaded = try model.vision.load()
+            XCTAssertFalse(reloaded === original)
+            XCTAssertTrue(model.vision.isLoaded)
+            XCTAssertFalse(model.vision.isPending)
+            try assertParameters(of: reloaded, match: checkpoint.visual)
+            XCTAssertNil(model.tower)
+            XCTAssertEqual(model.parameters().flattened().map(\.0), parameters)
+        }
+
+        XCTAssertNil(previous)
+    }
+
+    func testConcurrentUsesAfterEvictionLoadOneReplacement() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+        let vision = model.vision
+        let original = try vision.load()
+        XCTAssertTrue(vision.evict())
+        let modules = Mutexish(Set<ObjectIdentifier?>())
+
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            let module = try? vision.load()
+            modules.withLock { _ = $0.insert(module.map(ObjectIdentifier.init)) }
+        }
+
+        let replacement = try vision.load()
+        XCTAssertFalse(replacement === original)
+        XCTAssertEqual(modules.withLock { $0 }, [ObjectIdentifier(replacement)])
+    }
+
+    func testFailedReloadRemainsPendingAndCanRetry() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+        let original = try model.vision.load()
+        XCTAssertTrue(model.vision.evict())
+
+        model.raisesMLXErrorInPrepare = true
+        XCTAssertThrowsError(try model.vision.load()) { XCTAssertTrue($0 is MLXError) }
+        XCTAssertFalse(model.vision.isLoaded)
+        XCTAssertTrue(model.vision.isPending)
+        XCTAssertFalse(model.vision.evict())
+
+        model.raisesMLXErrorInPrepare = false
+        let replacement = try model.vision.load()
+        XCTAssertFalse(replacement === original)
+        try assertParameters(of: replacement, match: checkpoint.visual)
+    }
+
+    func testEvictionReleasesTheModuleOutsideTheStateLock() async throws {
+        let observer = ReleaseObserver()
+        let component = OnDemandComponent(ModelComponent("observed")) {
+            ObservedModule(observer: observer)
+        }
+        observer.component = component
+        component.setSource(
+            .init(urls: [], namespaces: [], perLayerQuantization: nil, prepare: { $0 }))
+        _ = try component.load()
+        let finished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            component.evict()
+            finished.signal()
+        }
+
+        let completion = await wait(for: finished, seconds: 5)
+        XCTAssertEqual(completion, .success)
+        XCTAssertEqual(observer.loadedWhenReleased.withLock { $0 }, false)
+    }
+
     /// Async callers load before prefill on a GCD queue, never on a Swift concurrency thread.
     func testMediaInputLoadsPendingComponentsOffTheConcurrencyPool() async throws {
         let checkpoint = try writeCheckpoint()
@@ -225,9 +386,17 @@ final class ModelComponentTests: XCTestCase {
         let text = LMInput(tokens: MLXArray([1, 2] as [Int32]))
         let image = LMInput(
             text: text.text, image: .init(pixels: MLXArray.zeros([1, 3, 2, 2])))
+        let audio = LMInput(
+            text: text.text, audio: .init(features: MLXArray.zeros([1, 4])))
+        let multimodal = LMInput(
+            text: text.text,
+            image: .init(pixels: MLXArray.zeros([1, 3, 2, 2])),
+            audio: .init(features: MLXArray.zeros([1, 4])))
 
         XCTAssertEqual(ModelComponent.needed(by: text), [])
         XCTAssertEqual(ModelComponent.needed(by: image), [.vision])
+        XCTAssertEqual(ModelComponent.needed(by: audio), [.audio])
+        XCTAssertEqual(ModelComponent.needed(by: multimodal), [.vision, .audio])
         let pending = pendingOnDemandComponents(
             of: model, among: ModelComponent.needed(by: image))
         XCTAssertEqual(pending.map(\.component), [.vision])
@@ -267,15 +436,16 @@ final class ModelComponentTests: XCTestCase {
                 pendingOnDemandComponents(of: model, among: [.vision]).map(\.component)
             }
             inspected.signal()
-            return (pending, vision.isLoaded)
+            return (pending, vision.isLoaded, vision.evict())
         }
         let answered = await wait(for: inspected, seconds: 5)
         XCTAssertEqual(answered, .success, "state query waited for the load")
 
         release.signal()
-        let (pending, loadedDuringInspection) = await inspection.value
+        let (pending, loadedDuringInspection, evictedDuringLoad) = await inspection.value
         XCTAssertEqual(pending, [.vision])
         XCTAssertFalse(loadedDuringInspection)
+        XCTAssertFalse(evictedDuringLoad)
         try await load.value
         XCTAssertTrue(vision.isLoaded)
         XCTAssertTrue(pendingOnDemandComponents(of: model, among: [.vision]).isEmpty)
@@ -307,6 +477,7 @@ final class ModelComponentTests: XCTestCase {
         XCTAssertNil(excluded.tower)
         XCTAssertNotNil(immediate.tower)
         for model in [excluded, immediate] {
+            XCTAssertFalse(model.vision.evict())
             XCTAssertThrowsError(try model.vision.load()) { error in
                 guard case OnDemandComponentError.unavailable(.vision) = error else {
                     return XCTFail("expected unavailable, got \(error)")

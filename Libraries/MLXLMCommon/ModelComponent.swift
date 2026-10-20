@@ -56,6 +56,22 @@ public protocol ModelComponentsProviding: BaseLanguageModel {
 
 extension ModelComponentsProviding {
     public var onDemandComponents: [AnyOnDemandComponent] { [] }
+
+    /// Evict cached on-demand components. Their next use loads them again.
+    ///
+    /// Existing users keep their modules. Built-in, excluded, and pending components are
+    /// unchanged. This does not change the model's module tree or clear the allocator cache.
+    /// Checkpoint files must remain readable and unchanged for reloading.
+    ///
+    /// - Returns: The components whose cached modules were evicted.
+    @discardableResult
+    public func evict(_ components: Set<ModelComponent>) -> Set<ModelComponent> {
+        var evicted = Set<ModelComponent>()
+        for holder in onDemandComponents where components.contains(holder.component) {
+            if holder.evict() { evicted.insert(holder.component) }
+        }
+        return evicted
+    }
 }
 
 /// A model component that loads the first time it is used. See ``OnDemandComponent``.
@@ -77,7 +93,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
     private enum State {
         case unavailable
         case pending(Source)
-        case loaded(Module)
+        case loaded(Module, Source)
     }
 
     init(_ component: ModelComponent, make: @escaping @Sendable () -> Module) {
@@ -85,7 +101,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
         self.make = make
     }
 
-    /// Whether the component has loaded.
+    /// Whether the holder currently caches a loaded component.
     public var isLoaded: Bool {
         stateLock.withLock {
             if case .loaded = state { true } else { false }
@@ -94,10 +110,28 @@ public class AnyOnDemandComponent: @unchecked Sendable {
 
     func loadedTensors() -> [MLXArray]? {
         let module: Module? = stateLock.withLock {
-            if case .loaded(let module) = state { return module }
+            if case .loaded(let module, _) = state { return module }
             return nil
         }
         return module?.innerState()
+    }
+
+    /// Drop the cached component so its next use loads it again.
+    ///
+    /// Existing users keep their evaluated modules. Memory becomes reclaimable once those
+    /// users and their computations release it. A pending load is neither cancelled nor awaited.
+    /// The checkpoint files must remain readable and unchanged for the next load.
+    ///
+    /// - Returns: Whether a cached component was evicted.
+    @discardableResult
+    public func evict() -> Bool {
+        let released: Module? = stateLock.withLock {
+            guard case .loaded(let module, let source) = state else { return nil }
+            state = .pending(source)
+            return module
+        }
+        // Release the module outside the state lock.
+        return withExtendedLifetime(released) { released != nil }
     }
 
     /// Whether a source is set and the component has not loaded yet.
@@ -126,7 +160,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
     func loadModule() throws -> Module {
         try loadLock.withLock {
             switch stateLock.withLock({ state }) {
-            case .loaded(let module):
+            case .loaded(let module, _):
                 return module
             case .unavailable:
                 throw OnDemandComponentError.unavailable(component)
@@ -138,7 +172,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
                     eval(module)
                     return module
                 }
-                stateLock.withLock { state = .loaded(module) }
+                stateLock.withLock { state = .loaded(module, source) }
                 return module
             }
         }
@@ -202,7 +236,10 @@ public enum OnDemandComponentError: LocalizedError {
 extension ModelComponent {
     /// The components that `input`'s media need.
     static func needed(by input: LMInput) -> Set<ModelComponent> {
-        input.image != nil || input.video != nil ? [.vision] : []
+        var components = Set<ModelComponent>()
+        if input.image != nil || input.video != nil { components.insert(.vision) }
+        if input.audio != nil { components.insert(.audio) }
+        return components
     }
 }
 
