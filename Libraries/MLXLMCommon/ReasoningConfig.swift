@@ -241,3 +241,39 @@ public struct ReasoningConfig: Sendable, Equatable {
         implicitEndDelimiters: ["<|tool_call>"],
         channel: .gemma4)
 }
+
+/// A reasoning block a chat template prefilled at the end of a prompt.
+struct PrefilledReasoningBlock: Equatable {
+    /// Tokens the block spans at the end of the prompt.
+    let tokenCount: Int
+    /// Whether the block is still open, so the reply continues inside it. A closed, empty
+    /// block turns reasoning off.
+    let isOpen: Bool
+}
+
+extension ReasoningConfig {
+    /// The reasoning block a chat template prefilled at the end of `promptTokens`: the
+    /// shortest tail that starts with ``startDelimiter`` and is otherwise empty or closed.
+    func prefilledBlock(endingPrompt promptTokens: [Int], tokenizer: any Tokenizer)
+        -> PrefilledReasoningBlock?
+    {
+        guard !startDelimiter.isEmpty, !promptTokens.isEmpty else { return nil }
+        let longestBlock = startDelimiter.count + endDelimiter.count
+        for count in 1 ... promptTokens.count {
+            let tail = tokenizer.decode(
+                tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if tail.hasPrefix(startDelimiter) {
+                let body = tail.dropFirst(startDelimiter.count)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if body.isEmpty { return PrefilledReasoningBlock(tokenCount: count, isOpen: true) }
+                if body == endDelimiter {
+                    return PrefilledReasoningBlock(tokenCount: count, isOpen: false)
+                }
+                return nil
+            }
+            if tail.count(where: { !$0.isWhitespace }) > longestBlock { return nil }
+        }
+        return nil
+    }
+}

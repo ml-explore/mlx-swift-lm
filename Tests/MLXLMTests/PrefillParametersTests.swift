@@ -215,6 +215,21 @@ struct PrefillParametersTests {
         #expect(log.events.last == [6, 6])
     }
 
+    @Test("a checkpoint pauses prefill, which still reports as one")
+    func checkpointKeepsOnePrefillReport() throws {
+        let log = ProgressLog()
+        let (model, parameters, cache) = try Self.recordingPrefill(log)
+        let storage = KVCacheStorage(cache, plan: try parameters.kvCachePlan())
+
+        let iterator = try TokenIterator(
+            input: Self.prompt(20), model: model, cacheStorage: storage,
+            parameters: parameters, checkpointAt: 14)
+
+        #expect(log.events == [[0], [7, 20], [13, 20], [14, 20], [20, 20]])
+        #expect(iterator.prefillCheckpoint?.cache.processedTokenCount == 14)
+        #expect(storage.processedTokenCount == 20)
+    }
+
     @Test("speculative prefill reports the main cache's prefix once")
     func prefixOfSpeculativePrefill() throws {
         let log = ProgressLog()

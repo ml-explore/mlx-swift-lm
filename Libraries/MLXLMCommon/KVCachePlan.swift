@@ -348,6 +348,75 @@ package final class KVCacheStorage {
         return rewound
     }
 
+    /// A position this storage can return to after later writes have moved past it.
+    ///
+    /// Entries a trim may not return -- a sliding window that wraps, recurrent state -- are
+    /// copied; the rest are trimmed. The caller proves the trimmed entries still hold the same
+    /// tokens, as a session's token ledger does.
+    package struct Checkpoint {
+        /// The timeline position a restore returns to.
+        package let processedTokenCount: Int
+        fileprivate let plan: KVCachePlan
+        fileprivate let entryCount: Int
+        /// Copies of the entries a trim may not return, by slot.
+        fileprivate let copies: [Int: KVCache]
+    }
+
+    /// Whether a trim alone returns every entry to any earlier position, however far it grows.
+    ///
+    /// A checkpoint of such a storage copies nothing, and adds nothing to what a trim reaches.
+    package var canRewindToAnyPosition: Bool {
+        cache.allSatisfy { $0.isTrimmable(after: .max) }
+    }
+
+    /// Records the current position for ``restore(_:)``.
+    package func checkpoint() -> Checkpoint {
+        precondition(!roundIsOpen, "cannot checkpoint while a staged round is open")
+        var copies = [Int: KVCache]()
+        for (slot, entry) in cache.enumerated() where !entry.isTrimmable(after: .max) {
+            copies[slot] = entry.copy()
+        }
+        return Checkpoint(
+            processedTokenCount: processedTokenCount, plan: plan, entryCount: cache.count,
+            copies: copies)
+    }
+
+    /// Whether ``restore(_:)`` can return to `checkpoint`: the entries it did not copy must
+    /// still reach its position with a trim.
+    package func canRestore(_ checkpoint: Checkpoint) -> Bool {
+        !roundIsOpen && checkpoint.plan == plan && checkpoint.entryCount == cache.count
+            && checkpoint.processedTokenCount <= processedTokenCount
+            && canTrimPromptCache(
+                entriesTrimmed(restoring: checkpoint),
+                numTokens: processedTokenCount - checkpoint.processedTokenCount)
+    }
+
+    /// Returns to `checkpoint`, or changes nothing and returns `false` when it cannot.
+    ///
+    /// Copied entries take a copy of their copy, so the checkpoint can be restored again.
+    @discardableResult
+    package func restore(_ checkpoint: Checkpoint) -> Bool {
+        guard canRestore(checkpoint) else { return false }
+        let count = processedTokenCount - checkpoint.processedTokenCount
+        let trimmed = entriesTrimmed(restoring: checkpoint)
+        if count > 0, !trimmed.isEmpty {
+            let trimmedCount = trimPromptCache(trimmed, numTokens: count)
+            precondition(
+                trimmedCount == count, "a checked trim took back \(trimmedCount) of \(count)")
+        }
+        var restored = cache
+        for (slot, copy) in checkpoint.copies {
+            restored[slot] = copy.copy()
+        }
+        cache = restored
+        processedTokenCount = checkpoint.processedTokenCount
+        return true
+    }
+
+    private func entriesTrimmed(restoring checkpoint: Checkpoint) -> [KVCache] {
+        cache.indices.filter { checkpoint.copies[$0] == nil }.map { cache[$0] }
+    }
+
     /// How much of the emitted sequence the given leaf can still describe, outside a round.
     ///
     /// The whole stream for a global layer; the trailing window for a sliding one. This is the
