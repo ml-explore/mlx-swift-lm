@@ -230,6 +230,27 @@ struct PrefillParametersTests {
         #expect(storage.processedTokenCount == 20)
     }
 
+    @Test(
+        "reference prefill schedules ignore checkpoint splitting",
+        arguments: [
+            PrefillParameters.Chunking.unchunked, .remainder,
+        ])
+    func checkpointPreservesReferencePrefill(_ chunking: PrefillParameters.Chunking) throws {
+        let log = ProgressLog()
+        var (model, parameters, cache) = try Self.recordingPrefill(log)
+        parameters.prefill.chunking = chunking
+        let storage = KVCacheStorage(cache, plan: try parameters.kvCachePlan())
+        let iterator = try TokenIterator(
+            input: Self.prompt(20), model: model, cacheStorage: storage,
+            parameters: parameters, checkpointAt: 14)
+        #expect(iterator.prefillCheckpoint == nil)
+        #expect(
+            log.events
+                == (chunking == .unchunked
+                    ? [[0], [20, 20]] : [[0], [8, 20], [16, 20], [20, 20]]))
+        #expect(storage.processedTokenCount == 20)
+    }
+
     @Test("speculative prefill reports the main cache's prefix once")
     func prefixOfSpeculativePrefill() throws {
         let log = ProgressLog()

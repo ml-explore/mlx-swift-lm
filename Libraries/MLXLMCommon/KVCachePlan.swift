@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// Immutable, resolved cache behavior for one generation request.
 ///
 /// A disabled plan is a first-class value, so generation paths do not need to
@@ -9,6 +11,11 @@ package struct KVCachePlan: Sendable, Equatable {
 
     package let configuration: KVCacheConfiguration?
     package let requestSource: KVCacheStatus.RequestSource?
+
+    /// Tile compression must run before a checkpoint captures its mutable raw tail.
+    package var requiresRealizedCheckpoint: Bool {
+        configuration?.strategy.identifier == .varianceNormalized
+    }
 
     package init(
         configuration: KVCacheConfiguration?,
@@ -348,73 +355,129 @@ package final class KVCacheStorage {
         return rewound
     }
 
-    /// A position this storage can return to after later writes have moved past it.
-    ///
-    /// Entries a trim may not return -- a sliding window that wraps, recurrent state -- are
-    /// copied; the rest are trimmed. The caller proves the trimmed entries still hold the same
-    /// tokens, as a session's token ledger does.
-    package struct Checkpoint {
-        /// The timeline position a restore returns to.
+    /// A saved prefix. The caller proves its tokens still match the live cache's prefix.
+    package struct Checkpoint: Evaluatable {
         package let processedTokenCount: Int
         fileprivate let plan: KVCachePlan
-        fileprivate let entryCount: Int
-        /// Copies of the entries a trim may not return, by slot.
-        fileprivate let copies: [Int: KVCache]
-    }
+        fileprivate let leaves: [Leaf]
 
-    /// Whether a trim alone returns every entry to any earlier position, however far it grows.
-    ///
-    /// A checkpoint of such a storage copies nothing, and adds nothing to what a trim reaches.
-    package var canRewindToAnyPosition: Bool {
-        cache.allSatisfy { $0.isTrimmable(after: .max) }
-    }
-
-    /// Records the current position for ``restore(_:)``.
-    package func checkpoint() -> Checkpoint {
-        precondition(!roundIsOpen, "cannot checkpoint while a staged round is open")
-        var copies = [Int: KVCache]()
-        for (slot, entry) in cache.enumerated() where !entry.isTrimmable(after: .max) {
-            copies[slot] = entry.copy()
+        package var retainedBytes: Int {
+            innerState().reduce(0) { $0 + $1.nbytes }
         }
-        return Checkpoint(
-            processedTokenCount: processedTokenCount, plan: plan, entryCount: cache.count,
-            copies: copies)
+
+        package func innerState() -> [MLXArray] {
+            leaves.flatMap { leaf -> [MLXArray] in
+                switch leaf.recovery {
+                case .trim: []
+                case .copy(let copy): copy.innerState()
+                case .varianceNormalized(let checkpoint): checkpoint.innerState()
+                }
+            }
+        }
+
+        fileprivate struct Leaf {
+            let path: [Int]
+            let recovery: Recovery
+        }
+
+        fileprivate enum Recovery {
+            case trim
+            case copy(KVCache)
+            case varianceNormalized(VarianceNormalizedKVCache.Checkpoint)
+
+            func canRestore(_ leaf: KVCacheLeaf, trimming count: Int) -> Bool {
+                switch self {
+                case .trim:
+                    return leaf.checkpointStrategy == .trim && leaf.cache.maxTrimCount >= count
+                case .copy(let copy):
+                    return type(of: leaf.cache) == type(of: copy)
+                        && leaf.cache.maxSize == copy.maxSize
+                case .varianceNormalized(let checkpoint):
+                    return (leaf.cache as? VarianceNormalizedKVCache)
+                        .map { $0.canRestore(checkpoint) } ?? false
+                }
+            }
+
+            func restore(_ cache: KVCache, trimming count: Int) -> KVCache {
+                switch self {
+                case .trim:
+                    if count > 0 {
+                        precondition(cache.trim(count) == count, "a checked prefix trim failed")
+                    }
+                    return cache
+                case .copy(let copy):
+                    return copy.copy()
+                case .varianceNormalized(let checkpoint):
+                    let cache = cache as! VarianceNormalizedKVCache
+                    cache.restore(checkpoint)
+                    return cache
+                }
+            }
+        }
     }
 
-    /// Whether ``restore(_:)`` can return to `checkpoint`: the entries it did not copy must
-    /// still reach its position with a trim.
+    /// Whether a supported leaf needs more than a trim to recover an arbitrary prefix.
+    package var needsCheckpoint: Bool {
+        let strategies = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+            .map(\.checkpointStrategy)
+        return !strategies.contains(.unsupported)
+            && (plan.requiresRealizedCheckpoint || strategies.contains { $0 != .trim })
+    }
+
+    /// Copies only bounded state, including within composite caches. Unknown leaves refuse.
+    package func checkpoint() -> Checkpoint? {
+        precondition(!roundIsOpen, "cannot checkpoint while a staged round is open")
+        let leaves = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+        guard leaves.allSatisfy({ $0.checkpointStrategy != .unsupported }) else { return nil }
+        let saved = leaves.map { leaf -> Checkpoint.Leaf in
+            let recovery: Checkpoint.Recovery
+            switch leaf.checkpointStrategy {
+            case .trim: recovery = .trim
+            case .copy:
+                recovery = .copy(
+                    (leaf.cache as? RotatingKVCache)?.copyForCheckpoint()
+                        ?? (leaf.cache as? ArraysCache)?.copyForCheckpoint()
+                        ?? leaf.cache.copy())
+            case .varianceNormalized:
+                recovery = .varianceNormalized(
+                    (leaf.cache as! VarianceNormalizedKVCache).checkpoint())
+            case .unsupported: preconditionFailure("checkpoint support was checked above")
+            }
+            return Checkpoint.Leaf(path: leaf.path, recovery: recovery)
+        }
+        let checkpoint = Checkpoint(
+            processedTokenCount: processedTokenCount, plan: plan, leaves: saved)
+        asyncEval(checkpoint)
+        return checkpoint
+    }
+
+    /// Checks every path and recovery operation before changing any leaf.
     package func canRestore(_ checkpoint: Checkpoint) -> Bool {
-        !roundIsOpen && checkpoint.plan == plan && checkpoint.entryCount == cache.count
-            && checkpoint.processedTokenCount <= processedTokenCount
-            && canTrimPromptCache(
-                entriesTrimmed(restoring: checkpoint),
-                numTokens: processedTokenCount - checkpoint.processedTokenCount)
+        guard !roundIsOpen, checkpoint.plan == plan,
+            checkpoint.processedTokenCount <= processedTokenCount
+        else { return false }
+        let leaves = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+        guard leaves.map(\.path) == checkpoint.leaves.map(\.path) else { return false }
+        let count = processedTokenCount - checkpoint.processedTokenCount
+        return zip(leaves, checkpoint.leaves).allSatisfy { leaf, saved in
+            saved.recovery.canRestore(leaf, trimming: count)
+        }
     }
 
     /// Returns to `checkpoint`, or changes nothing and returns `false` when it cannot.
-    ///
-    /// Copied entries take a copy of their copy, so the checkpoint can be restored again.
     @discardableResult
     package func restore(_ checkpoint: Checkpoint) -> Bool {
         guard canRestore(checkpoint) else { return false }
         let count = processedTokenCount - checkpoint.processedTokenCount
-        let trimmed = entriesTrimmed(restoring: checkpoint)
-        if count > 0, !trimmed.isEmpty {
-            let trimmedCount = trimPromptCache(trimmed, numTokens: count)
-            precondition(
-                trimmedCount == count, "a checked trim took back \(trimmedCount) of \(count)")
-        }
         var restored = cache
-        for (slot, copy) in checkpoint.copies {
-            restored[slot] = copy.copy()
+        var index = 0
+        KVCacheTree.rewrite(&restored, includingAuxiliary: true) { leaf in
+            defer { index += 1 }
+            return checkpoint.leaves[index].recovery.restore(leaf.cache, trimming: count)
         }
         cache = restored
         processedTokenCount = checkpoint.processedTokenCount
         return true
-    }
-
-    private func entriesTrimmed(restoring checkpoint: Checkpoint) -> [KVCache] {
-        cache.indices.filter { checkpoint.copies[$0] == nil }.map { cache[$0] }
     }
 
     /// How much of the emitted sequence the given leaf can still describe, outside a round.

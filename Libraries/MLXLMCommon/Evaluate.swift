@@ -1240,7 +1240,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         prefill.prefix?(cacheStorage.processedTokenCount)
         var input = input
         var prefill = prefill
-        if let checkpointPosition {
+        if let checkpointPosition, prefill.chunking == .balanced {
             (input, prefill) = try prefillToCheckpoint(
                 input, at: checkpointPosition, prefill: prefill)
         }
@@ -1297,7 +1297,12 @@ public struct TokenIterator: TokenIteratorProtocol {
                 LMInput(text: input.text[.ellipsis, ..<position]), into: cacheStorage,
                 state: state, parameters: prefill.pass(after: 0, of: total))
         }
-        prefillCheckpoint = PrefillCheckpoint(cache: cacheStorage.checkpoint(), state: state)
+        if kvCachePlan.requiresRealizedCheckpoint {
+            try kvCachePlan.applyAndValidate(to: cacheStorage)
+        }
+        prefillCheckpoint = cacheStorage.checkpoint().map {
+            PrefillCheckpoint(cache: $0, state: state)
+        }
         return (
             LMInput(text: input.text[.ellipsis, position...]),
             prefill.pass(after: position, of: total)

@@ -28,10 +28,11 @@ final class ChatSessionCheckpointTests: XCTestCase {
             additionalContext: [String: any Sendable]?
         ) throws -> [String] {
             var segments: [String] = []
-            for message in messages {
+            let lastUser = messages.lastIndex { $0["role"] as? String == "user" } ?? -1
+            for (index, message) in messages.enumerated() {
                 let role = message["role"] as? String ?? ""
                 var content = message["content"] as? String ?? ""
-                if role == "assistant", let end = content.range(of: "</think>") {
+                if role == "assistant", index < lastUser, let end = content.range(of: "</think>") {
                     content = String(content[end.upperBound...].drop(while: \.isNewline))
                 }
                 segments += [ChatMLTemplate.imStart, role + "\n"]
@@ -49,8 +50,9 @@ final class ChatSessionCheckpointTests: XCTestCase {
     /// Serves `base`'s attention caches beside recurrent state that sums every token it has
     /// seen, and records each forward with the sum it started from.
     private final class RecurrentStateModel: Module, LanguageModel {
+        static let carriedSum = LMOutput.Key<Int>("checkpoint.carriedSum")
         let base: any LanguageModel
-        private(set) var forwards: [(tokens: [Int], stateBefore: Int)] = []
+        private(set) var forwards: [(tokens: [Int], stateBefore: Int, carriedBefore: Int)] = []
 
         init(_ base: any LanguageModel) {
             self.base = base
@@ -71,10 +73,13 @@ final class ChatSessionCheckpointTests: XCTestCase {
             let recurrent = cache?.last as! MambaCache
             let tokens = input.tokens.asArray(Int.self)
             let before = recurrent[0]?.item(Int.self) ?? 0
-            forwards.append((tokens, before))
+            forwards.append((tokens, before, state?[Self.carriedSum] ?? 0))
             recurrent[0] = MLXArray(before + tokens.reduce(0, +))
             recurrent.offset += tokens.count
-            return base(input, cache: cache.map { Array($0.dropLast()) }, state: state)
+            let output = base(input, cache: cache.map { Array($0.dropLast()) }, state: nil)
+            var carried = LMOutput.State()
+            carried[Self.carriedSum] = (state?[Self.carriedSum] ?? 0) + tokens.reduce(0, +)
+            return LMOutput(logits: output.logits, state: carried)
         }
 
         func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
@@ -104,7 +109,9 @@ final class ChatSessionCheckpointTests: XCTestCase {
 
     private func makeSession(
         reply: String, reasoning: ReasoningConfig? = nil,
-        additionalContext: [String: any Sendable]? = nil
+        additionalContext: [String: any Sendable]? = nil,
+        prefill: PrefillParameters = .init(), kvCache: KVCacheConfiguration? = nil,
+        headDim: Int = 16
     ) throws -> (ChatSession, RecurrentStateModel) {
         let eos = try XCTUnwrap(tokenizer.eosTokenId)
         let configuration = ModelConfiguration(
@@ -112,7 +119,7 @@ final class ChatSessionCheckpointTests: XCTestCase {
         let base = Gemma3TextModel(
             Gemma3TextConfiguration(
                 modelType: "text", hiddenSize: 32, hiddenLayers: 2, intermediateSize: 32,
-                attentionHeads: 2, headDim: 16, rmsNormEps: 0.00001,
+                attentionHeads: 2, headDim: headDim, rmsNormEps: 0.00001,
                 vocabularySize: tokenizer.vocabulary.size, kvHeads: 1,
                 ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000, ropeTraditional: false,
                 queryPreAttnScalar: 16, slidingWindow: 16, slidingWindowPattern: 2,
@@ -129,7 +136,8 @@ final class ChatSessionCheckpointTests: XCTestCase {
                     vocabularySize: tokenizer.vocabulary.size),
                 tokenizer: tokenizer),
             generateParameters: GenerateParameters(
-                maxTokens: replyTokens.count + 1, temperature: 0),
+                maxTokens: replyTokens.count + 1, kvCache: kvCache, temperature: 0, prefill: prefill
+            ),
             additionalContext: additionalContext)
         session.components = GenerationComponents(logitProcessorFactory: {
             ForcedReply(tokens: replyTokens)
@@ -137,12 +145,14 @@ final class ChatSessionCheckpointTests: XCTestCase {
         return (session, model)
     }
 
-    private func respond(_ session: ChatSession, to prompt: String) async throws -> (
-        text: String, info: GenerateCompletionInfo
-    ) {
+    private func respond(_ session: ChatSession, to prompt: String, role: Chat.Message.Role = .user)
+        async throws -> (
+            text: String, info: GenerateCompletionInfo
+        )
+    {
         var text = ""
         var info: GenerateCompletionInfo?
-        for try await item in session.streamDetails(to: prompt) {
+        for try await item in session.streamDetails(to: prompt, role: role) {
             text += item.chunk ?? ""
             info = item.info ?? info
         }
@@ -168,6 +178,9 @@ final class ChatSessionCheckpointTests: XCTestCase {
         XCTAssertEqual(Array(prefilled), Array(prompt.dropFirst(prefix)), file: file, line: line)
         XCTAssertEqual(
             model.forwards.first?.stateBefore, prompt.prefix(prefix).reduce(0, +),
+            file: file, line: line)
+        XCTAssertEqual(
+            model.forwards.first?.carriedBefore, prompt.prefix(prefix).reduce(0, +),
             file: file, line: line)
     }
 
@@ -213,5 +226,67 @@ final class ChatSessionCheckpointTests: XCTestCase {
 
         XCTAssertEqual(second.info.cachedPromptTokenCount, firstPrompt.count - block)
         assertResumes(model, from: firstPrompt.count - block, of: secondPrompt)
+    }
+
+    func testUnchunkedSessionPrefillsTheWholePromptInOneForward() async throws {
+        let (session, model) = try makeSession(
+            reply: "<think>\nreason\n</think>\n\nanswer", prefill: .init(chunking: .unchunked))
+        _ = try await respond(session, to: firstQuestion)
+        let prompt = try render([("user", firstQuestion)])
+        XCTAssertEqual(model.forwards.first?.tokens, prompt)
+        model.clearForwards()
+        let second = try await respond(session, to: "word")
+        XCTAssertEqual(second.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(model.forwards.first?.stateBefore, 0)
+        XCTAssertEqual(model.forwards.first?.carriedBefore, 0)
+    }
+
+    func testForkRestoresIndependentlyAndRejectsADifferentPrefix() async throws {
+        let (session, _) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
+        _ = try await respond(session, to: firstQuestion)
+        let fork = await session.fork()
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        let branch = try await respond(fork, to: "word")
+        let original = try await respond(session, to: "answer")
+        XCTAssertEqual(branch.info.cachedPromptTokenCount, prefix)
+        XCTAssertEqual(original.info.cachedPromptTokenCount, prefix)
+
+        let unrelated = await session.fork(history: [])
+        let cold = try await respond(unrelated, to: "different question")
+        XCTAssertEqual(cold.info.cachedPromptTokenCount, 0)
+    }
+
+    func testToolContinuationKeepsTheCheckpointBeforeTheFirstReply() async throws {
+        let (session, model) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
+        let first = try await respond(session, to: firstQuestion)
+        let tool = try await respond(session, to: "result", role: .tool)
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        XCTAssertGreaterThan(tool.info.cachedPromptTokenCount, 0)
+
+        model.clearForwards()
+        let next = try await respond(session, to: "word")
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("tool", "result"),
+            ("assistant", tool.text), ("user", "word"),
+        ])
+        XCTAssertEqual(next.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
+    }
+
+    func testTileCompressionIsRealizedBeforeSavingTheFirstCheckpoint() async throws {
+        let configuration = KVCacheConfiguration(
+            strategy: .varianceNormalized(try .init(tileSize: 32, sinkhornIterations: 2)),
+            compatibility: .allowPartial)
+        let (session, model) = try makeSession(
+            reply: "<think>\nreason\n</think>\n\nanswer", kvCache: configuration, headDim: 32)
+        let first = try await respond(session, to: firstQuestion)
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        model.clearForwards()
+        let second = try await respond(session, to: "word")
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", "word"),
+        ])
+        XCTAssertEqual(second.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
     }
 }

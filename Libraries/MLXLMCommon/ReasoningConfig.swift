@@ -252,28 +252,42 @@ struct PrefilledReasoningBlock: Equatable {
 }
 
 extension ReasoningConfig {
-    /// The reasoning block a chat template prefilled at the end of `promptTokens`: the
-    /// shortest tail that starts with ``startDelimiter`` and is otherwise empty or closed.
+    /// The shortest token tail covering an empty or open reasoning block at the prompt's end.
     func prefilledBlock(endingPrompt promptTokens: [Int], tokenizer: any Tokenizer)
         -> PrefilledReasoningBlock?
     {
         guard !startDelimiter.isEmpty, !promptTokens.isEmpty else { return nil }
-        let longestBlock = startDelimiter.count + endDelimiter.count
-        for count in 1 ... promptTokens.count {
-            let tail = tokenizer.decode(
+        func decode(_ count: Int) -> String {
+            tokenizer.decode(
                 tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
             ).trimmingCharacters(in: .whitespacesAndNewlines)
-            if tail.hasPrefix(startDelimiter) {
-                let body = tail.dropFirst(startDelimiter.count)
+        }
+        let longestBlock = startDelimiter.count + endDelimiter.count
+        var count = 1
+        var lower = 1
+        while true {
+            let tail = decode(count)
+            if let start = tail.range(of: startDelimiter, options: .backwards) {
+                let body = tail[start.upperBound...]
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if body.isEmpty { return PrefilledReasoningBlock(tokenCount: count, isOpen: true) }
-                if body == endDelimiter {
-                    return PrefilledReasoningBlock(tokenCount: count, isOpen: false)
+                guard body.isEmpty || body == endDelimiter else { return nil }
+                var upper = count
+                while lower < upper {
+                    let middle = lower + (upper - lower) / 2
+                    if decode(middle).contains(startDelimiter) {
+                        upper = middle
+                    } else {
+                        lower = middle + 1
+                    }
                 }
+                return PrefilledReasoningBlock(tokenCount: lower, isOpen: body.isEmpty)
+            }
+            if count == promptTokens.count || tail.count(where: { !$0.isWhitespace }) > longestBlock
+            {
                 return nil
             }
-            if tail.count(where: { !$0.isWhitespace }) > longestBlock { return nil }
+            lower = count + 1
+            count += min(count, promptTokens.count - count)
         }
-        return nil
     }
 }

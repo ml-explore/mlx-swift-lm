@@ -140,4 +140,23 @@ struct ReasoningConfigTests {
                 endingPrompt: Self.prompt("Hello", ["<think>", "\n"]).tokens,
                 tokenizer: Self.tokenizer) == nil)
     }
+
+    @Test func `a delimiter sharing a token with the assistant header keeps the whole token`() {
+        let tokenizer = ScriptedTokenizer(
+            corpus: [], template: ChatMLTemplate(), specials: ["assistant\n<think>"])
+        let tokens = tokenizer.encode(text: "assistant\n<think>", addSpecialTokens: false)
+        #expect(tokens.count == 1)
+        #expect(
+            ReasoningConfig.thinkTagsWithEnableThinking.prefilledBlock(
+                endingPrompt: tokens, tokenizer: tokenizer)
+                == PrefilledReasoningBlock(tokenCount: 1, isOpen: true))
+    }
+
+    @Test func `long whitespace after a prefilled block is included`() {
+        let prompt = Self.prompt("Hello", ["<think>"] + Array(repeating: "\n\n", count: 1024))
+        #expect(
+            ReasoningConfig.thinkTagsWithEnableThinking.prefilledBlock(
+                endingPrompt: prompt.tokens, tokenizer: Self.tokenizer)
+                == PrefilledReasoningBlock(tokenCount: prompt.tail, isOpen: true))
+    }
 }

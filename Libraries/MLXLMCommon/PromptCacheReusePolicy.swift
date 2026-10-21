@@ -178,8 +178,8 @@ struct PromptCacheState: Sendable {
     /// Exact rewind limit across all participating layers.
     var maxTrimCount: Int = 0
 
-    /// The length of a prefix of ``cachedTokens`` the main cache holds a
-    /// checkpoint for, and can return to whatever its trim limit.
+    /// The length of a candidate checkpoint. Applying a restore must verify its
+    /// token prefix and cache compatibility before reusing it.
     var checkpointLength: Int?
 }
 
