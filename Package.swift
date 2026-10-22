@@ -161,6 +161,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
             ],
             path: "Libraries/MLXScriptedLM",
             exclude: ["README.md"]

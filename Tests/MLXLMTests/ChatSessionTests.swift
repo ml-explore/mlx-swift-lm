@@ -2,7 +2,7 @@
 
 import Foundation
 import MLX
-import MLXLLM
+@_spi(Testing) import MLXLLM
 import MLXNN
 import MLXOptimizers
 import MLXScriptedLM
@@ -458,16 +458,8 @@ public class ChatSessionTests: XCTestCase {
     )
         -> ModelContext
     {
-        let config = Gemma3TextConfiguration(
-            modelType: "text",
-            hiddenSize: 64, hiddenLayers: 8, intermediateSize: 64, attentionHeads: 4,
-            headDim: 64,
-            rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 4,
-            ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000,
-            ropeTraditional: false, queryPreAttnScalar: 256,
-            slidingWindow: 512, slidingWindowPattern: 6,
-            maxPositionEmbeddings: 32768
-        )
+        let config = Gemma3TextConfiguration.smallConfiguration(
+            vocabularySize: 100)
         let model = Gemma3TextModel(config)
         quantize(model: model, groupSize: 64, bits: 4)
 
