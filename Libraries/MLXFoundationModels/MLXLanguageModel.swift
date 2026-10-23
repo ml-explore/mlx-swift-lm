@@ -660,12 +660,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if collected.isEmpty {
                 collected = [Chat.Message.user("")]
             }
-            let messages = collected
 
             // The SDK's vision check does not cover `.attachment` segments, so the adapter
             // must enforce `.vision` for image attachments itself.
             if !model.capabilities.contains(.vision),
-                messages.contains(where: { !$0.images.isEmpty })
+                collected.contains(where: { !$0.images.isEmpty })
             {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
@@ -690,6 +689,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 schemaJSON = nil
             }
+
+            // Guided generation shows the model the schema, including its @Guide
+            // descriptions, not just the grammar. Tool-aware prompts are unchanged.
+            let promptMessages = TranscriptConverter.promptMessages(
+                collected, schemaJSON: schemaJSON,
+                includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
 
             let modelID = self.modelID
             let requestedMaxTokens = request.generationOptions.maximumResponseTokens
@@ -719,16 +724,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     ["modelID": modelID, "requestID": request.id.uuidString],
                     entryID: entryID, into: channel)
 
-                // Generate tokens inside actor isolation. `messages` carries
+                // Generate tokens inside actor isolation. `promptMessages` carries
                 // non-Sendable `Chat.Message` instances (UserInput.Image and
-                // .Video are not Sendable), so route the array through
+                // .Video are not Sendable), so route it through
                 // perform(nonSendable:_:) which boxes it across the actor hop.
-                try await container.perform(nonSendable: messages) { context, messages in
+                try await container.perform(nonSendable: promptMessages) {
+                    context, promptMessages in
                     try AttachmentLabelValidator.default.validate(
                         labeledAttachments, with: context.tokenizer)
 
-                    // Render the prompt through the model's UserInputProcessor.
-                    let userInput = UserInput(chat: messages)
+                    // Render the guided-generation prompt through the model's UserInputProcessor.
+                    let userInput = UserInput(chat: promptMessages.withSchema)
                     let input = try await context.processor.prepare(input: userInput)
 
                     // Resolve the per-instance configuration. Held strictly as
@@ -806,7 +812,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let suppressionConfig = resolved.reasoningConfig
                     {
                         suppressedInput = try await Self.preparedInput(
-                            messages: messages, config: suppressionConfig,
+                            messages: promptMessages.withoutSchema, config: suppressionConfig,
                             thinkingEnabled: false, processor: context.processor,
                             cannotDisableMessage:
                                 "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
@@ -823,7 +829,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         let thinkingEnabled = Self.thinkingEnabled(
                             for: request.contextOptions.reasoningLevel)
                         let reasoningInput = try await Self.preparedInput(
-                            messages: messages, config: reasoningConfig,
+                            messages: promptMessages.withoutSchema, config: reasoningConfig,
                             thinkingEnabled: thinkingEnabled, processor: context.processor,
                             cannotDisableMessage:
                                 "This model always reasons; reasoning cannot be disabled via reasoningLevel."
@@ -915,7 +921,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 from: enabledToolDefinitions)
                             let toolAwareInput = try await context.processor.prepare(
                                 input: UserInput(
-                                    chat: messages,
+                                    chat: promptMessages.withoutSchema,
                                     tools: toolSpecs,
                                     additionalContext: toolAwareContext))
                             let reasoning = thinkThenCallConfig.map {
@@ -987,7 +993,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             from: requiredToolDefinitions)
                         let toolAwareInput = try await context.processor.prepare(
                             input: UserInput(
-                                chat: messages,
+                                chat: promptMessages.withoutSchema,
                                 tools: toolSpecs,
                                 additionalContext: toolAwareContext))
 

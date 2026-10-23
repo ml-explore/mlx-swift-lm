@@ -206,6 +206,48 @@ struct TranscriptConverter {
         let entry: Transcript.Entry
     }
 
+    /// The schema JSON to inline into the prompt: nil only when `includeSchemaInPrompt` is `false`.
+    static func schemaJSONForPrompt(_ schemaJSON: String?, includeSchemaInPrompt: Bool?) -> String?
+    {
+        includeSchemaInPrompt == false ? nil : schemaJSON
+    }
+
+    /// Adds the response schema to the system message, as the FoundationModels
+    /// provider contract asks when `includeSchemaInPrompt` is not `false`.
+    /// Appends to the leading system message, or inserts one when there is none.
+    static func messages(
+        _ messages: [Chat.Message], inliningSchemaJSON schemaJSON: String?
+    ) -> [Chat.Message] {
+        guard let schemaJSON else { return messages }
+        let text = "Respond with JSON that conforms to this JSON Schema:\n" + schemaJSON
+        var result = messages
+        if result.first?.role == .system {
+            result[0].content += "\n\n" + text
+        } else {
+            result.insert(.system(text), at: 0)
+        }
+        return result
+    }
+
+    /// The chat messages with and without the response schema. Only guided
+    /// generation uses `withSchema`; tool-aware and unconstrained prompts use
+    /// `withoutSchema`.
+    struct PromptMessages {
+        let withSchema: [Chat.Message]
+        let withoutSchema: [Chat.Message]
+    }
+
+    static func promptMessages(
+        _ collected: [Chat.Message], schemaJSON: String?, includeSchemaInPrompt: Bool?
+    ) -> PromptMessages {
+        PromptMessages(
+            withSchema: messages(
+                collected,
+                inliningSchemaJSON: schemaJSONForPrompt(
+                    schemaJSON, includeSchemaInPrompt: includeSchemaInPrompt)),
+            withoutSchema: collected)
+    }
+
     /// Reads only prompt entries, because the adapter drops the attachments of every other entry.
     static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
         -> [LabeledAttachment]
