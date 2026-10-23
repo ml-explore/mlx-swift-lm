@@ -531,38 +531,36 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
-        eval(flatDraftTokens)
-        let draftTokensList = flatDraftTokens.asArray(Int.self)
-
-        var accepted = 0
-        var finalToken: MLXArray?
-        for i in 0 ..< numDraft {
-            var logits = mainLogits[0..., verifyStart + i, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let targetToken = sampler.sample(logits: logits)
-            eval(targetToken)
-            let targetTokenValue = targetToken.item(Int.self)
-            processor?.didSample(token: targetToken)
-            pendingTokens.append(targetTokenValue)
-            guard targetTokenValue == draftTokensList[i] else {
-                finalToken = targetToken
-                break
+        let accepted: Int
+        let emittedFinalToken: MLXArray
+        if sampler is ArgMaxSampler, processor == nil {
+            let tokens = sampler.sample(
+                logits: mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0))
+            eval(tokens, flatDraftTokens)
+            let values = tokens.asArray(Int.self)
+            let drafts = flatDraftTokens.asArray(Int.self)
+            accepted = zip(values, drafts).prefix { $0.0 == $0.1 }.count
+            pendingTokens.append(contentsOf: values.prefix(accepted + 1))
+            emittedFinalToken = tokens[accepted ... accepted]
+        } else {
+            eval(flatDraftTokens)
+            let drafts = flatDraftTokens.asArray(Int.self)
+            var count = 0
+            var token = bonusToken
+            for position in 0 ... numDraft {
+                var logits = mainLogits[0..., verifyStart + position, 0...]
+                logits = processor?.process(logits: logits) ?? logits
+                token = sampler.sample(logits: logits)
+                eval(token)
+                let value = token.item(Int.self)
+                processor?.didSample(token: token)
+                pendingTokens.append(value)
+                guard position < numDraft, value == drafts[position] else { break }
+                count += 1
             }
-            accepted += 1
+            accepted = count
+            emittedFinalToken = token
         }
-
-        // Only the all-accepted path samples the bonus row. On rejection the
-        // mismatching target sample above is already the emitted correction.
-        if finalToken == nil {
-            var logits = mainLogits[0..., verifyStart + accepted, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let bonus = sampler.sample(logits: logits)
-            eval(bonus)
-            processor?.didSample(token: bonus)
-            pendingTokens.append(bonus.item(Int.self))
-            finalToken = bonus
-        }
-        let emittedFinalToken = finalToken!
         committedPendingTokenCount = accepted
 
         proposedCount += numDraft
