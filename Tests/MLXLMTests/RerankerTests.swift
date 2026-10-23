@@ -482,7 +482,7 @@ struct RerankerTests {
                 documents: Array(repeating: "d", count: 65),
                 instruction: nil,
                 maxInputTokens: 131_072,
-                maximumDocuments: 64,
+                family: .v3,
                 options: .init())
         }
     }
@@ -499,7 +499,7 @@ struct RerankerTests {
             documents: [String(repeating: "d", count: 1_000)],
             instruction: nil,
             maxInputTokens: 131_072,
-            maximumDocuments: 64,
+            family: .v3,
             options: .init(maxBatchTokens: 800))
 
         #expect(scores.count == 1)
@@ -604,6 +604,7 @@ struct RerankerTests {
             documents: ["a", "bbbb", "cc"],
             instruction: nil,
             maxInputTokens: 8_192,
+            family: .qwen3, scorePolicy: try qwenScorePolicy(tokenizer),
             options: .init(maxBatchSize: 2, maxBatchTokens: 4_096))
 
         #expect(scores.count == 3)
@@ -615,6 +616,7 @@ struct RerankerTests {
             documents: ["a", "bbbb", "cc"],
             instruction: nil,
             maxInputTokens: 8_192,
+            family: .qwen3, scorePolicy: try qwenScorePolicy(tokenizer),
             options: .init(maxBatchSize: 1, maxBatchTokens: 4_096))
         #expect(scores == singletonScores)
     }
@@ -631,6 +633,7 @@ struct RerankerTests {
             documents: [String(repeating: "d", count: 1_000)],
             instruction: nil,
             maxInputTokens: 8_192,
+            family: .qwen3, scorePolicy: try qwenScorePolicy(tokenizer),
             options: .init(maxBatchTokens: 512))
 
         #expect(model.callShapes == [[1, 512]])
@@ -693,10 +696,12 @@ struct RerankerTests {
 
         let actual = try await container.causalRerankerScores(
             query: "q", documents: documents, instruction: nil,
-            maxInputTokens: 512, options: options)
+            maxInputTokens: 512,
+            family: .qwen3, scorePolicy: try qwenScorePolicy(tokenizer), options: options)
         let expected = try await reference.causalRerankerScores(
             query: "q", documents: documents, instruction: nil,
-            maxInputTokens: 512, options: options)
+            maxInputTokens: 512,
+            family: .qwen3, scorePolicy: try qwenScorePolicy(tokenizer), options: options)
         let calls = try await container.perform { context in
             let model = try #require(context.model as? TestHiddenStateRerankerModel)
             return (model.hiddenStateShapes, model.projectedShapes, model.fullForwardShapes)
@@ -748,9 +753,9 @@ struct RerankerTests {
 
         #expect(
             try bge.architecture(modelID: "BAAI/bge-reranker-v2-m3") == .encoder)
-        #expect(try jina.architecture(modelID: "jinaai/jina-reranker-v3-mlx") == .jina)
+        #expect(try jina.architecture(modelID: "jinaai/jina-reranker-v3-mlx") == .jina(.v3))
         #expect(
-            try qwen.architecture(modelID: "Qwen/Qwen3-Reranker-0.6B") == .qwen3)
+            try qwen.architecture(modelID: "Qwen/Qwen3-Reranker-0.6B") == .causal(.qwen3))
         #expect(try unsupported.architecture(modelID: "test/model") == nil)
 
         #expect(throws: RerankerError.self) {
@@ -761,7 +766,410 @@ struct RerankerTests {
         }
         #expect(
             try qwen.architecture(
-                modelID: "lampo/private-model", allowUnverifiedModel: true) == .qwen3)
+                modelID: "lampo/private-model", allowUnverifiedModel: true) == .causal(.qwen3))
+    }
+    @Test(arguments: [CausalRerankerFamily.zerank2, .contextual])
+    func rawLogitPromptsMatchTheirReference(family: CausalRerankerFamily) throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let processor = family.inputProcessor(instruction: nil)
+        let input = try processor.encode(
+            query: "query", document: "document",
+            tokenizer: tokenizer, maxInputTokens: nil, truncation: .error)
+        let reference =
+            family == .zerank2
+            ? "<|im_start|>system\nquery<|im_end|>\n<|im_start|>user\ndocument<|im_end|>\n<|im_start|>assistant\n"
+            : "Check whether a given document contains information helpful to answer the query.\n<Document> document\n<Query> query ??"
+        #expect(input.tokenIds == tokenizer.encode(text: reference, addSpecialTokens: false))
+        let instructed = try family.inputProcessor(instruction: "Prefer recent sources")
+            .encode(
+                query: "query", document: "document",
+                tokenizer: tokenizer, maxInputTokens: nil, truncation: .error)
+        let instructedReference =
+            family == .zerank2
+            ? reference
+            : "Check whether a given document contains information helpful to answer the query.\n<Document> document\n<Query> query Prefer recent sources ??"
+        #expect(
+            instructed.tokenIds
+                == tokenizer.encode(text: instructedReference, addSpecialTokens: false))
+        let truncated = try processor.encode(
+            query: "query", document: String(repeating: "d", count: 1_000),
+            tokenizer: tokenizer, maxInputTokens: 160, truncation: .truncate)
+        #expect(truncated.tokenIds.count <= 160)
+        #expect(
+            tokenizer.decode(tokenIds: truncated.tokenIds).hasSuffix(
+                family == .zerank2 ? "assistant\n" : " ??"))
+        #expect(throws: RerankerError.self) {
+            try processor.encode(
+                query: "query", document: String(repeating: "d", count: 1_000),
+                tokenizer: tokenizer, maxInputTokens: 160, truncation: .error)
+        }
+    }
+
+    @Test func causalMetadataSelectsScoresWithoutGuessingYesAndNo() throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let qwen = try CausalRerankerFamily.qwen3.scorePolicy(
+            metadata: causalMetadata(trueID: 7, falseID: 8), tokenizer: tokenizer,
+            vocabularySize: 128)
+        #expect(qwen == .binaryMargin(positive: 7, negative: 8))
+        let raw = try CausalRerankerFamily.zerank2.scorePolicy(
+            metadata: causalMetadata(trueID: 7), tokenizer: tokenizer, vocabularySize: 128)
+        #expect(CausalRerankerFamily.zerank2.scoreKind == .logit)
+        let values = MLXArray([Float(-9), 3, 4, 5, 6, 7, 8, -2, 0])
+        #expect(raw(values) == [-2])
+        #expect(abs(qwen(values)[0] - 1 / (1 + exp(2))) < 1e-7)
+        for metadata in [
+            try causalMetadata(trueID: 7), try causalMetadata(trueID: 7, falseID: 7),
+            try causalMetadata(trueID: -1, falseID: 8), try causalMetadata(trueID: 128, falseID: 8),
+        ] {
+            #expect(throws: RerankerError.self) {
+                try CausalRerankerFamily.qwen3.scorePolicy(
+                    metadata: metadata, tokenizer: tokenizer, vocabularySize: 128)
+            }
+        }
+        #expect(throws: RerankerError.self) {
+            try CausalRerankerFamily.contextual.scorePolicy(
+                metadata: causalMetadata(trueID: 0, falseID: 2), tokenizer: tokenizer,
+                vocabularySize: 128)
+        }
+        let contextual = try CausalRerankerFamily.contextual.scorePolicy(
+            metadata: nil, tokenizer: tokenizer, vocabularySize: 128)
+        #expect(contextual == .logit(tokenID: 0, roundsToBFloat16: true))
+    }
+
+    @Test func scorePolicyReadsEveryRowAtOnce() {
+        let logits = MLXArray([Float(0), 1, 3, 0, 4, 1]).reshaped(2, 3)
+        let margin = CausalRerankerScorePolicy.binaryMargin(positive: 2, negative: 1)
+        let expected = [2.0, -3.0].map { 1 / (1 + exp(-$0)) }
+        #expect(zip(margin(logits), expected).allSatisfy { abs($0 - $1) < 1e-12 })
+        let logit = CausalRerankerScorePolicy.logit(tokenID: 0, roundsToBFloat16: false)
+        #expect(logit(logits) == [0, 0])
+        #expect(logit(logits.asType(.float16)) == [0, 0])
+    }
+
+    @Test func factoryDistinguishesSupportedProtocolsAndRejectsUnknownRerankers() throws {
+        let descriptor = try JSONDecoder().decode(
+            RerankerDescriptor.self,
+            from: Data("{\"model_type\":\"qwen3\",\"architectures\":[\"Qwen3ForCausalLM\"]}".utf8))
+        #expect(
+            try descriptor.architecture(modelID: "zeroentropy/zerank-2-reranker")
+                == .causal(.zerank2))
+        #expect(
+            try descriptor.architecture(modelID: "zeroentropy/zerank-2")
+                == .causal(.zerank2))
+        #expect(
+            try descriptor.architecture(
+                modelID: "ContextualAI/ctxl-rerank-v2-instruct-multilingual-1b")
+                == .causal(.contextual))
+        #expect(throws: RerankerError.self) {
+            try descriptor.architecture(modelID: "example/another-reranker")
+        }
+        let jina = try JSONDecoder().decode(RerankerDescriptor.self, from: jinaConfigurationData())
+        #expect(try jina.architecture(modelID: "jinaai/jina-reranker-v3.5-mlx") == .jina(.v35))
+        #expect(throws: RerankerError.self) {
+            try jina.architecture(modelID: "jinaai/jina-reranker-v3.50")
+        }
+    }
+
+    @Test func jinaV35PromptMatchesDualMatchingReference() throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let input = try JinaRerankerInputProcessor(family: .v35).encode(
+            query: "query", documents: ["document"],
+            tokenizer: tokenizer, maxInputTokens: nil, truncation: .error)
+        let reference = jinaReferencePrompt(query: "query", documents: ["document"])
+            .replacingOccurrences(
+                of: "relevance to query: query\n",
+                with: "relevance to query: query<|rerank_token|>\n"
+            )
+            .replacingOccurrences(
+                of: "</query><|im_end|>",
+                with:
+                    "</query>\nPlease provide the ranking of all passages based on their relevance to the search query, in descending order of relevance, with each label enclosed in square brackets (e.g., [2] > [1] > [3] > [0]).<|im_end|>"
+            )
+        #expect(input.tokenIds == tokenizer.encode(text: reference, addSpecialTokens: false))
+        #expect(input.markerTokenIds?.queryCount == 2)
+        #expect(input.tokenIds.filter { $0 == tokenizer.rerankTokenID }.count == 2)
+    }
+
+    @Test func jinaV35FusesQueryEmbeddingsAcrossBlocks() throws {
+        let blocks = [
+            JinaRerankerEmbeddings(
+                documents: MLXArray([Float(1), 0]).reshaped(1, 2),
+                query: MLXArray([Float(1), 0]).reshaped(1, 2)),
+            JinaRerankerEmbeddings(
+                documents: MLXArray([Float(1), 0]).reshaped(1, 2),
+                query: MLXArray([Float(0), 1]).reshaped(1, 2)),
+        ]
+        let scores = jinaFusedScores(blocks)
+        #expect(scores.count == 2)
+        #expect(scores.allSatisfy { abs($0 - 2 / sqrt(5.0)) < 1e-6 })
+        let single = jinaFusedScores([blocks[1]])
+        #expect(single == [0])
+    }
+
+    @Test func jinaV35BlocksFollowTheReferenceGeometry() throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let blocking = try #require(JinaRerankerFamily.v35.blocking)
+        let short = try blocking.blocks(
+            query: "q", documents: Array(repeating: "doc", count: 3), tokenizer: tokenizer,
+            blockTokens: 131_072, truncation: .error)
+        #expect(short.documents.map(\.count) == [3])
+        let long = String(repeating: "d", count: 9_000)
+        let packed = try blocking.blocks(
+            query: "q", documents: Array(repeating: long, count: 20), tokenizer: tokenizer,
+            blockTokens: 131_072, truncation: .truncate)
+        // The block closes at 1 + 8_191 * 16 tokens, past 131_072 - 8_192.
+        #expect(packed.documents.map(\.count) == [16, 4])
+        #expect(packed.documents[0][0].count == 8_191)
+        #expect(throws: RerankerError.self) {
+            try blocking.blocks(
+                query: "q", documents: [long], tokenizer: tokenizer,
+                blockTokens: 131_072, truncation: .error)
+        }
+    }
+
+    @Test(arguments: [1, 3, 7, 1_000])
+    func jinaChunkedPrefillMatchesOneForwardPass(stepSize: Int) throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(with: jinaConfigurationData()) as? [String: Any])
+        // Byte tokens reach 137, beyond the fixture's 128-entry vocabulary.
+        object["vocab_size"] = 256
+        object["num_hidden_layers"] = 2
+        object["layer_types"] = ["sliding_attention", "full_attention"]
+        object["sliding_window"] = 4
+        object["use_sliding_window"] = true
+        let configuration = try JSONDecoder().decode(
+            MLXLLM.Qwen3Configuration.self, from: JSONSerialization.data(withJSONObject: object))
+        let model = withRandomState(MLXRandom.RandomState(seed: 7)) {
+            JinaRerankerModel(configuration)
+        }
+        let tokenizer = ByteRerankerTokenizer()
+        let input = try JinaRerankerInputProcessor(family: .v35).encode(
+            query: "query", documents: ["first passage", "second"], tokenizer: tokenizer,
+            maxInputTokens: nil, truncation: .error)
+        let reference = try model.embeddings(input: input, documentCount: 2, stepSize: 1_000_000)
+        let chunked = try model.embeddings(input: input, documentCount: 2, stepSize: stepSize)
+
+        #expect(chunked.documents.shape == [2, 512])
+        #expect(chunked.query.shape == [1, 512])
+        #expect(abs(chunked.documents - reference.documents).max().item(Float.self) < 1e-4)
+        #expect(abs(chunked.query - reference.query).max().item(Float.self) < 1e-4)
+    }
+
+    @Test func qwenSlidingAttentionMatchesAnIndependentBandedMask() throws {
+        let configuration = try qwenAttentionConfiguration(types: ["sliding_attention"], window: 4)
+        let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+            MLXLLM.Qwen3Model(configuration)
+        }
+        let block = MLXLLM.Qwen3TransformerBlock(configuration)
+        let prefix = "model.layers.0."
+        let weights = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().compactMap { key, value in
+                key.hasPrefix(prefix) ? (String(key.dropFirst(prefix.count)), value) : nil
+            })
+        try block.update(parameters: ModuleParameters.unflattened(weights))
+        for length in [3, 4, 5, 9] {
+            let tokens = MLXArray(Array(1 ... length)).reshaped(1, length)
+            let mask = MLXArray(
+                (0 ..< length).flatMap { row in
+                    (0 ..< length).map { column in column <= row && column > row - 4 }
+                }
+            ).reshaped(length, length)
+            let expected = model.model.norm(
+                block(model.model.embedTokens(tokens), mask: .array(mask), cache: nil))
+            let actual = model.hiddenStates(tokens, cache: nil)
+            #expect(abs(actual - expected).max().item(Float.self) < 1e-5)
+        }
+    }
+
+    @Test func qwenMixedAttentionCachedPrefillMatchesUncachedForward() throws {
+        let configuration = try qwenAttentionConfiguration(
+            types: ["sliding_attention", "full_attention"], window: 4)
+        let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+            MLXLLM.Qwen3Model(configuration)
+        }
+        let tokens = MLXArray(Array(1 ... 13)).reshaped(1, 13)
+        let expected = model(tokens, cache: nil)
+        let cache = try model.newCache(parameters: nil)
+        #expect(cache[0] is RotatingKVCache)
+        #expect(cache[1] is KVCacheSimple)
+        for range in [0 ..< 3, 3 ..< 8, 8 ..< 11, 11 ..< 12, 12 ..< 13] {
+            let actual = model(tokens[0..., range], cache: cache)
+            #expect(abs(actual - expected[0..., range]).max().item(Float.self) < 1e-4)
+        }
+    }
+
+    @Test func qwenRejectsInvalidAttentionDeclarationsAndPreservesRoundTrips() throws {
+        #expect(throws: ModelFactoryError.self) {
+            try qwenAttentionConfiguration(types: ["sliding_attention"], window: nil)
+        }
+        #expect(throws: ModelFactoryError.self) {
+            try qwenAttentionConfiguration(types: ["full_attention"], window: 0, layers: 2)
+        }
+        #expect(throws: DecodingError.self) {
+            try qwenAttentionConfiguration(types: ["future_attention"], window: 4)
+        }
+        let configuration = try qwenAttentionConfiguration(
+            types: ["sliding_attention", "full_attention"], window: 4)
+        let decoded = try JSONDecoder().decode(
+            MLXLLM.Qwen3Configuration.self, from: JSONEncoder().encode(configuration))
+        #expect(decoded.layerTypes == configuration.layerTypes)
+        #expect(decoded.slidingWindow == 4)
+    }
+
+    @Test(arguments: [false, true])
+    func factoryRejectsContradictoryMetadataBeforeLoadingWeights(remote: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            .appending(path: "Qwen3-Reranker-test")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        try Data(
+            "{\"model_type\":\"qwen3\",\"architectures\":[\"Qwen3ForCausalLM\"],\"vocab_size\":128}"
+                .utf8
+        )
+        .write(to: directory.appending(path: "config.json"))
+        let metadataDirectory = directory.appending(path: "1_LogitScore")
+        try FileManager.default.createDirectory(
+            at: metadataDirectory, withIntermediateDirectories: true)
+        for metadata in [
+            "{\"true_token_id\":0,\"false_token_id\":null}",
+            "{\"true_token_id\":128,\"false_token_id\":1}",
+        ] {
+            try Data(metadata.utf8).write(to: metadataDirectory.appending(path: "config.json"))
+            await #expect(throws: RerankerError.self) {
+                if remote {
+                    _ = try await RerankerModelFactory.shared.loadContainer(
+                        from: FixtureRerankerDownloader(directory: directory),
+                        using: FixtureRerankerTokenizerLoader(), id: "test/Qwen3-Reranker-test",
+                        allowUnverifiedModel: true)
+                } else {
+                    _ = try await RerankerModelFactory.shared.loadContainer(
+                        from: directory,
+                        using: FixtureRerankerTokenizerLoader(), allowUnverifiedModel: true)
+                }
+            }
+        }
+        try Data("{\"true_token_id\":\"invalid\"}".utf8).write(
+            to: metadataDirectory.appending(path: "config.json"))
+        await #expect(throws: ModelFactoryError.self) {
+            _ = try await RerankerModelFactory.shared.loadContainer(
+                from: directory, using: FixtureRerankerTokenizerLoader())
+        }
+    }
+
+    @Test(arguments: ["zerank-2-reranker", "ctxl-rerank-v2-instruct-multilingual-1b"])
+    func rawLogitFactoryLoadsAndScoresTinyCheckpoint(name: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            .appending(path: name)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        var object = try #require(
+            JSONSerialization.jsonObject(with: jinaConfigurationData()) as? [String: Any])
+        object["architectures"] = ["Qwen3ForCausalLM"]
+        object["vocab_size"] = 256
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try data.write(to: directory.appending(path: "config.json"))
+        let configuration = try JSONDecoder().decode(MLXLLM.Qwen3Configuration.self, from: data)
+        let model = withRandomState(MLXRandom.RandomState(seed: 42)) {
+            MLXLLM.Qwen3Model(configuration)
+        }
+        try save(
+            arrays: Dictionary(uniqueKeysWithValues: model.parameters().flattened()),
+            url: directory.appending(path: "model.safetensors"))
+        let metadataDirectory = directory.appending(path: "1_LogitScore")
+        try FileManager.default.createDirectory(
+            at: metadataDirectory, withIntermediateDirectories: true)
+        let classifierID = name == "zerank-2-reranker" ? 7 : 0
+        try JSONSerialization.data(withJSONObject: [
+            "true_token_id": classifierID, "false_token_id": NSNull(),
+        ])
+        .write(to: metadataDirectory.appending(path: "config.json"))
+        let reranker = try await RerankerModelFactory.shared.loadContainer(
+            from: directory, using: FixtureRerankerTokenizerLoader())
+        #expect(reranker.scoreKind == .logit)
+        let response = try await reranker.scores(query: "query", documents: ["a", "bbbb"])
+        let singleton = try await reranker.scores(
+            query: "query", documents: ["a", "bbbb"], options: .init(maxBatchSize: 1))
+        #expect(response.results.count == 2)
+        for (actual, sequential) in zip(response.results, singleton.results) {
+            #expect(abs(actual.score - sequential.score) < 1e-5)
+            let document = actual.index == 0 ? "a" : "bbbb"
+            let prompt =
+                name == "zerank-2-reranker"
+                ? "<|im_start|>system\nquery<|im_end|>\n<|im_start|>user\n\(document)<|im_end|>\n<|im_start|>assistant\n"
+                : "Check whether a given document contains information helpful to answer the query.\n<Document> \(document)\n<Query> query ??"
+            let tokens = ByteRerankerTokenizer().encode(text: prompt, addSpecialTokens: false)
+            let logit = model(MLXArray(tokens).reshaped(1, -1), cache: nil)[0, -1, classifierID]
+            let expected = name == "zerank-2-reranker" ? logit : logit.asType(.bfloat16)
+            #expect(abs(actual.score - Double(expected.item(Float.self))) < 1e-5)
+        }
+    }
+
+    @Test func jinaV35ScoresMoreThanOneBlockInOriginalOrder() async throws {
+        let tokenizer = ByteRerankerTokenizer()
+        let model = TestCausalRerankerModel(trueTokenID: 1, falseTokenID: 2)
+        let container = makeModelContainer(model: model, tokenizer: tokenizer)
+        let scores = try await container.listwiseRerankerScores(
+            query: "q", documents: Array(repeating: "d", count: 126),
+            instruction: nil, maxInputTokens: 131_072, family: .v35, options: .init())
+        #expect(model.listwiseBlockCounts == [125, 1])
+        #expect(scores.count == 126)
+        #expect(scores.allSatisfy { abs($0 - 2 / sqrt(5.0)) < 1e-6 })
+    }
+
+    @Test func qwenSlidingConfigurationFollowsTransformers() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(with: jinaConfigurationData()) as? [String: Any])
+        object["num_hidden_layers"] = 3
+        object["use_sliding_window"] = true
+        object["sliding_window"] = 4
+        object["max_window_layers"] = 2
+        func decode() throws -> MLXLLM.Qwen3Configuration {
+            try JSONDecoder().decode(
+                MLXLLM.Qwen3Configuration.self,
+                from: JSONSerialization.data(withJSONObject: object))
+        }
+        // `max_window_layers` counts the bottom full-attention layers.
+        #expect(try decode().layerTypes == [.fullAttention, .fullAttention, .slidingAttention])
+        object["layer_types"] = ["sliding_attention", "full_attention", "sliding_attention"]
+        #expect(try decode().layerTypes == [.slidingAttention, .fullAttention, .slidingAttention])
+        object["use_sliding_window"] = false
+        #expect(try decode().layerTypes == [.fullAttention, .fullAttention, .fullAttention])
+        object["use_sliding_window"] = true
+        object["layer_types"] = nil
+        object["sliding_window"] = NSNull()
+        #expect(try decode().layerTypes == [.fullAttention, .fullAttention, .fullAttention])
+    }
+
+    @Test func explicitFamilyLoadsRenamedCheckpointsAndRejectsMismatches() throws {
+        let causal = try JSONDecoder().decode(
+            RerankerDescriptor.self,
+            from: Data("{\"model_type\":\"qwen3\",\"architectures\":[\"Qwen3ForCausalLM\"]}".utf8))
+        let jina = try JSONDecoder().decode(RerankerDescriptor.self, from: jinaConfigurationData())
+        var object = try #require(
+            JSONSerialization.jsonObject(with: jinaConfigurationData()) as? [String: Any])
+        object["use_sliding_window"] = true
+        let slidingJina = try JSONDecoder().decode(
+            RerankerDescriptor.self, from: JSONSerialization.data(withJSONObject: object))
+
+        #expect(
+            try causal.architecture(modelID: "lampo/finetune", family: .zerank2)
+                == .causal(.zerank2))
+        #expect(
+            try causal.architecture(modelID: "mlx-community/zerank-2-4bit") == .causal(.zerank2))
+        #expect(
+            try jina.architecture(modelID: "lampo/listwise", family: .jinaV35) == .jina(.v35))
+        #expect(throws: RerankerError.self) {
+            try causal.architecture(modelID: "zeroentropy/zerank-2", family: .jinaV35)
+        }
+        #expect(throws: RerankerError.self) {
+            try jina.architecture(modelID: "lampo/listwise")
+        }
+        #expect(
+            try jina.architecture(modelID: "lampo/listwise", allowUnverifiedModel: true)
+                == .jina(.v3))
+        #expect(
+            try slidingJina.architecture(modelID: "lampo/listwise", allowUnverifiedModel: true)
+                == .jina(.v35))
     }
 }
 
@@ -1100,7 +1508,7 @@ private final class TestHiddenStateRerankerModel: Module, HiddenStateLanguageMod
     func newCache(parameters: GenerateParameters?) -> [KVCache] { [] }
 }
 
-private final class TestCausalRerankerModel: Module, LanguageModel, ListwiseRerankerModel,
+private final class TestCausalRerankerModel: Module, LanguageModel, JinaRerankerEmbeddingModel,
     @unchecked Sendable
 {
     let trueTokenID: Int
@@ -1108,6 +1516,7 @@ private final class TestCausalRerankerModel: Module, LanguageModel, ListwiseRera
     var callCount = 0
     var callShapes = [[Int]]()
     var listwiseTokenCount = 0
+    var listwiseBlockCounts = [Int]()
 
     init(trueTokenID: Int, falseTokenID: Int) {
         self.trueTokenID = trueTokenID
@@ -1156,9 +1565,16 @@ private final class TestCausalRerankerModel: Module, LanguageModel, ListwiseRera
 
     func newCache(parameters: GenerateParameters?) -> [KVCache] { [] }
 
-    func score(input: RerankerInput, documentCount: Int) throws -> [Double] {
+    func embeddings(input: RerankerInput, documentCount: Int, stepSize: Int) throws
+        -> JinaRerankerEmbeddings
+    {
         listwiseTokenCount = input.tokenIds.count
-        return Array(repeating: 0.5, count: documentCount)
+        let query = listwiseBlockCounts.isEmpty ? [Float(1), 0] : [Float(0), 1]
+        listwiseBlockCounts.append(documentCount)
+        return JinaRerankerEmbeddings(
+            documents: tiled(
+                MLXArray([Float(1), 0]).reshaped(1, 2), repetitions: [documentCount, 1]),
+            query: MLXArray(query).reshaped(1, 2))
     }
 }
 
@@ -1169,4 +1585,42 @@ extension TestInputProcessor {
             configuration: ModelConfiguration(id: "test/reranker"),
             messageGenerator: DefaultMessageGenerator())
     }
+}
+
+private func qwenScorePolicy(_ tokenizer: any Tokenizer) throws -> CausalRerankerScorePolicy {
+    try CausalRerankerFamily.qwen3.scorePolicy(
+        metadata: nil, tokenizer: tokenizer, vocabularySize: 128)
+}
+
+private func causalMetadata(trueID: Int, falseID: Int? = nil) throws -> CausalRerankerMetadata {
+    let object: [String: Any] = [
+        "true_token_id": trueID, "false_token_id": falseID.map { $0 as Any } ?? NSNull(),
+    ]
+    return try JSONDecoder().decode(
+        CausalRerankerMetadata.self, from: JSONSerialization.data(withJSONObject: object))
+}
+
+private func qwenAttentionConfiguration(types: [String], window: Int?, layers: Int? = nil) throws
+    -> MLXLLM.Qwen3Configuration
+{
+    var object = try #require(
+        JSONSerialization.jsonObject(with: jinaConfigurationData()) as? [String: Any])
+    object["layer_types"] = types
+    object["use_sliding_window"] = true
+    object["num_hidden_layers"] = layers ?? types.count
+    object["sliding_window"] = window.map { $0 as Any } ?? NSNull()
+    return try JSONDecoder().decode(
+        MLXLLM.Qwen3Configuration.self, from: JSONSerialization.data(withJSONObject: object))
+}
+
+private struct FixtureRerankerTokenizerLoader: TokenizerLoader {
+    func load(from directory: URL) async throws -> any Tokenizer { ByteRerankerTokenizer() }
+}
+
+private struct FixtureRerankerDownloader: Downloader {
+    let directory: URL
+    func download(
+        id: String, revision: String?, matching patterns: [String], useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL { directory }
 }
