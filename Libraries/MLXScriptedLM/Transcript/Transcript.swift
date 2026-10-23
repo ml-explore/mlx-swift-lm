@@ -116,14 +116,22 @@ extension ScriptedTokenizer {
 }
 
 extension TurnScripts {
-    /// The transcript's assistant scripts, with the template's generation prompt as the
-    /// turn marker.
+
+    /// Initialize the TurnScripts.
     ///
-    /// An assistant turn that follows a user turn ends its prompt with that user message,
-    /// rendered alone. This assumes the template renders a lone user message without a
-    /// default system prompt.
+    /// The transcript's assistant scripts, with the template's
+    /// generation prompt as the turn marker.
     ///
-    /// - Parameter stopTokens: token ids that stop generation besides the tokenizer's EOS.
+    /// An assistant turn that follows a user turn ends its prompt
+    /// with that user message, rendered alone. This assumes the
+    /// template renders a lone user message without a default
+    /// system prompt.
+    ///
+    /// - Parameters:
+    ///   - transcript: the transcript
+    ///   - tokenizer: the tokenizer
+    ///   - stopTokens: token ids that stop generation besides the
+    ///     tokenizer's EOS
     public init(
         transcript: Transcript, tokenizer: ScriptedTokenizer, stopTokens: Set<Int> = []
     ) throws {
