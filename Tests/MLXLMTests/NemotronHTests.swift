@@ -670,4 +670,138 @@ public class NemotronHTests: XCTestCase {
         // Only M and * contribute to kvHeads
         XCTAssertEqual(model.kvHeads, [0, 2])
     }
+
+    // MARK: - Nemotron 3.5
+
+    func testConfigurationDecodingLayersBlockType() throws {
+        // Nemotron 3.5 Lightning: block names instead of hybrid_override_pattern, plus MTP keys.
+        let json = """
+            {
+                "model_type": "nemotron_h",
+                "vocab_size": 100,
+                "hidden_size": 64,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "mamba_num_heads": 4,
+                "mamba_head_dim": 16,
+                "ssm_state_size": 16,
+                "conv_kernel": 4,
+                "n_groups": 2,
+                "intermediate_size": 128,
+                "moe_intermediate_size": 64,
+                "moe_shared_expert_intermediate_size": 64,
+                "moe_latent_size": null,
+                "n_routed_experts": 4,
+                "num_experts_per_tok": 2,
+                "layers_block_type": ["mamba", "moe", "attention", "mlp", "full_attention"],
+                "mtp_layers_block_type": ["attention", "moe"],
+                "num_nextn_predict_layers": 1,
+                "partial_rotary_factor": 1.0
+            }
+            """
+        let config = try JSONDecoder().decode(
+            NemotronHConfiguration.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(config.hybridOverridePattern, "ME*-*")
+        XCTAssertEqual(config.numHiddenLayers, 5)
+        XCTAssertNil(config.moeLatentSize)
+    }
+
+    func testConfigurationDecodingRejectsUnknownBlockType() {
+        let json = """
+            {
+                "vocab_size": 100, "hidden_size": 64, "num_attention_heads": 4,
+                "num_key_value_heads": 2, "mamba_num_heads": 4, "mamba_head_dim": 16,
+                "ssm_state_size": 16, "conv_kernel": 4, "n_groups": 2,
+                "layers_block_type": ["mamba", "sliding_attention"]
+            }
+            """
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                NemotronHConfiguration.self, from: json.data(using: .utf8)!))
+    }
+
+    func testPuzzleBlockConfigsWithLatentMoE() throws {
+        // Nemotron 3.5 Bolt (nemotron_h_puzzle): per-layer MoE shapes and latent experts.
+        let json = """
+            {
+                "model_type": "nemotron_h_puzzle",
+                "vocab_size": 100,
+                "hidden_size": 64,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "mamba_num_heads": 4,
+                "mamba_head_dim": 16,
+                "ssm_state_size": 16,
+                "conv_kernel": 4,
+                "n_groups": 2,
+                "intermediate_size": 128,
+                "moe_shared_expert_intermediate_size": 48,
+                "moe_latent_size": 32,
+                "n_shared_experts": 1,
+                "block_configs": [
+                    {"block_type": "mamba"},
+                    {"block_type": "moe", "moe_intermediate_size": 40,
+                     "n_routed_experts": 6, "num_experts_per_tok": 2},
+                    {"block_type": "attention"},
+                    {"block_type": "moe", "moe_intermediate_size": 24,
+                     "n_routed_experts": 8, "num_experts_per_tok": 3}
+                ],
+                "layers_block_type": ["mamba", "moe", "attention", "moe"],
+                "mtp_layers_block_type": []
+            }
+            """
+        let config = try JSONDecoder().decode(
+            NemotronHConfiguration.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(config.hybridOverridePattern, "ME*E")
+        XCTAssertEqual(config.layerConfiguration(3).nRoutedExperts, 8)
+        XCTAssertEqual(config.layerConfiguration(3).numExpertsPerTok, 3)
+
+        let model = NemotronHModel(config)
+        let params = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { ($0.0, $0.1.shape) })
+        XCTAssertEqual(params["backbone.layers.1.mixer.switch_mlp.fc1.weight"], [6, 40, 32])
+        XCTAssertEqual(params["backbone.layers.3.mixer.switch_mlp.fc2.weight"], [8, 32, 24])
+        XCTAssertEqual(params["backbone.layers.3.mixer.gate.weight"], [8, 64])
+        XCTAssertEqual(params["backbone.layers.1.mixer.fc1_latent_proj.weight"], [32, 64])
+        XCTAssertEqual(params["backbone.layers.1.mixer.fc2_latent_proj.weight"], [64, 32])
+        XCTAssertEqual(params["backbone.layers.1.mixer.shared_experts.up_proj.weight"], [48, 64])
+
+        let input = MLXArray([1, 2, 3])[.newAxis, .ellipsis]
+        XCTAssertEqual(model.callAsFunction(input, cache: nil).shape, [1, 3, 100])
+
+        // Per-layer expert counts drive expert stacking.
+        var weights = [String: MLXArray]()
+        for e in 0 ..< 8 {
+            weights["backbone.layers.3.mixer.experts.\(e).up_proj.weight"] =
+                MLXArray.ones([24, 32])
+        }
+        let sanitized = model.sanitize(weights: weights)
+        XCTAssertEqual(
+            sanitized["backbone.layers.3.mixer.switch_mlp.fc1.weight"]?.shape, [8, 24, 32])
+    }
+
+    func testSanitizeDropsMTPWeights() throws {
+        let model = NemotronHModel(makeTestConfig(pattern: "M*"))
+        let weights: [String: MLXArray] = [
+            "backbone.norm_f.weight": MLXArray.ones([64]),
+            "mtp.layers.0.mixer.q_proj.weight": MLXArray.ones([4, 4]),
+        ]
+        let sanitized = model.sanitize(weights: weights)
+        XCTAssertNotNil(sanitized["backbone.norm_f.weight"])
+        XCTAssertNil(sanitized["mtp.layers.0.mixer.q_proj.weight"])
+    }
+
+    func testReasoningConfigUsesEnableThinkingFlag() throws {
+        let model = NemotronHModel(makeTestConfig(pattern: "M*"))
+        let reasoning = try XCTUnwrap(model.reasoningConfig)
+        XCTAssertEqual(reasoning.startDelimiter, "<think>")
+        XCTAssertEqual(reasoning.endDelimiter, "</think>")
+        XCTAssertFalse(reasoning.isSpecialToken)
+        let off = try XCTUnwrap(
+            reasoning.promptStrategy.additionalContext(forThinkingEnabled: false))
+        XCTAssertEqual(off["enable_thinking"] as? Bool, false)
+        let unset = try XCTUnwrap(
+            reasoning.promptStrategy.additionalContext(forThinkingEnabled: nil))
+        XCTAssertEqual(unset["enable_thinking"] as? Bool, true)
+    }
 }
