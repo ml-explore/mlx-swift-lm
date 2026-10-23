@@ -840,7 +840,13 @@ private class Gemma4TextExperts: Module {
 
 // MARK: - Public Model
 
-public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider,
+    InputOnlyEmbeddingsProviding
+{
+    public var inputOnlyEmbeddings: [Embedding] {
+        [model.embedTokensPerLayer].compactMap { $0 } + (lmHead == nil ? [] : [model.embedTokens])
+    }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 

@@ -1569,7 +1569,11 @@ private final class Qwen35Vision: Module {
     }
 }
 
-public class Qwen35: Module, VLMModel {
+public class Qwen35: Module, VLMModel, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] {
+        languageModel.lmHead == nil ? [] : [languageModel.model.embedTokens]
+    }
+
     @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel?
     @ModuleInfo(key: "language_model") var languageModel: Qwen35Language.LanguageModel
 

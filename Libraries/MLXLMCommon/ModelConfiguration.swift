@@ -137,6 +137,9 @@ public struct ModelConfiguration: Sendable {
     /// without a component load it anyway; see ``ModelComponentsProviding``.
     public var excludedComponents: Set<ModelComponent> = []
 
+    /// Storage for supported frozen, lookup-only embedding tables.
+    public var embeddingStorage: EmbeddingStoragePolicy = .automatic
+
     /// Overrides the ``MessageGenerator`` the model would otherwise supply.
     ///
     /// A model class is shared by every checkpoint of its model type, so a fine-tune that
@@ -155,7 +158,8 @@ public struct ModelConfiguration: Sendable {
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
-        messageGenerator: (any MessageGenerator)? = nil
+        messageGenerator: (any MessageGenerator)? = nil,
+        embeddingStorage: EmbeddingStoragePolicy = .automatic
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerSource = tokenizerSource
@@ -166,6 +170,7 @@ public struct ModelConfiguration: Sendable {
         self.toolCallFormat = toolCallFormat
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
+        self.embeddingStorage = embeddingStorage
     }
 
     public init(
@@ -177,7 +182,8 @@ public struct ModelConfiguration: Sendable {
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
-        messageGenerator: (any MessageGenerator)? = nil
+        messageGenerator: (any MessageGenerator)? = nil,
+        embeddingStorage: EmbeddingStoragePolicy = .automatic
     ) {
         self.id = .directory(directory)
         self.tokenizerSource = tokenizerSource
@@ -188,6 +194,7 @@ public struct ModelConfiguration: Sendable {
         self.toolCallFormat = toolCallFormat
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
+        self.embeddingStorage = embeddingStorage
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -210,7 +217,7 @@ public struct ModelConfiguration: Sendable {
             reasoningConfig: reasoningConfig,
             messageGenerator: messageGenerator,
             weightFileSelection: weightFileSelection,
-            excludedComponents: excludedComponents)
+            excludedComponents: excludedComponents, embeddingStorage: embeddingStorage)
     }
 
 }
@@ -230,6 +237,7 @@ extension ModelConfiguration: Equatable {
             && lhs.reasoningConfig == rhs.reasoningConfig
             && lhs.weightFileSelection == rhs.weightFileSelection
             && lhs.excludedComponents == rhs.excludedComponents
+            && lhs.embeddingStorage == rhs.embeddingStorage
             && sameMessageGenerator(lhs.messageGenerator, rhs.messageGenerator)
     }
 

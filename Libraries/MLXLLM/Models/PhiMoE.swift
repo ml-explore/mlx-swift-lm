@@ -212,7 +212,9 @@ public class PhiMoEModelInner: Module {
     }
 }
 
-public class PhiMoEModel: Module, LLMModel, KVCacheDimensionProvider {
+public class PhiMoEModel: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] { [model.embedTokens] }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
