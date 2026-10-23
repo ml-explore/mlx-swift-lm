@@ -417,11 +417,15 @@ public func loadWeights(
             of: model, urls: weightURLs, excluded: excludedComponents,
             loading: componentLoading, perLayerQuantization: perLayerQuantization)
         + model.excludedCheckpointNamespaces
-    var checkpoint = try loadModelCheckpoint(
-        urls: weightURLs, excludedNamespaces: excludedNamespaces)
-    checkpoint.perLayerQuantization = perLayerQuantization
-    checkpoint = try model.prepareCheckpoint(checkpoint)
-    try applyCheckpoint(checkpoint, to: model)
+    // The checkpoint goes out of scope before materialization, so tensors that preparation
+    // replaces are freed by then.
+    do {
+        var checkpoint = try loadModelCheckpoint(
+            urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        checkpoint.perLayerQuantization = perLayerQuantization
+        checkpoint = try model.prepareCheckpoint(checkpoint)
+        try applyCheckpoint(checkpoint, to: model)
+    }
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.

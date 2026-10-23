@@ -37,10 +37,22 @@ package struct Qwen35CheckpointPolicy: Sendable {
         ".q_norm.weight", ".k_norm.weight",
     ]
 
+    package static let visionComponent = CheckpointComponent(
+        name: "vision_tower", namespaces: ["vision_tower", "model.visual", "visual"],
+        destination: "vision_tower")
+
+    /// The components a Qwen 3.5 checkpoint can carry.
+    package static let components: [ModelComponent: [CheckpointComponent]] = [
+        .vision: [visionComponent]
+    ]
+
     /// Target namespaces an embedded head drops on selection, so the loader need not read them.
     package var excludedCheckpointNamespaces: [String] {
         layout == .embedded ? Self.mtpComponent.excludedNamespaces : []
     }
+
+    /// The MTP head, which the target drops, so the loader need not read it.
+    package static var excludedTargetNamespaces: [String] { mtpComponent.namespaces }
 
     package static func targetWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         let mapping = CheckpointNameMapping(mtpComponent.namespaces.map { .excludePrefix($0) })
@@ -64,10 +76,7 @@ package struct Qwen35CheckpointPolicy: Sendable {
                 .replacePrefix("visual", with: "vision_tower"),
             ]
         } else {
-            rules += [
-                .excludePrefix("model.visual"), .excludePrefix("vision_tower"),
-                .excludePrefix("visual"),
-            ]
+            rules += visionComponent.namespaces.map { .excludePrefix($0) }
         }
         rules.append(.replacePrefix("model.language_model", with: "model"))
         if layout == .text {

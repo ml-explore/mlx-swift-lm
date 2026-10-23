@@ -344,20 +344,12 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
     }
 
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        var components: [ModelComponent: [CheckpointComponent]] = [:]
-        if config.vision != nil { components[.vision] = Self.visionComponents }
-        if config.audio != nil { components[.audio] = Self.audioComponents }
-        return components
+        Gemma4Checkpoint.components
     }
 
     public var onDemandComponents: [AnyOnDemandComponent] {
         let components: [AnyOnDemandComponent?] = [onDemandVision, onDemandAudio]
         return components.compactMap { $0 }
-    }
-
-    public var excludedCheckpointNamespaces: [String] {
-        (config.vision == nil ? Self.visionComponents.flatMap(\.namespaces) : [])
-            + (config.audio == nil ? Self.audioComponents.flatMap(\.namespaces) : [])
     }
 
     package var supportedComponents: Set<ModelComponent> {
@@ -378,15 +370,6 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
         async throws
     {
         try await loadOnDemandComponents(pendingOnDemandComponents(of: self, among: needed))
-    }
-
-    private static let visionComponents = components(["vision_tower", "embed_vision"])
-    private static let audioComponents = components(["audio_tower", "embed_audio"])
-
-    private static func components(_ modules: [String]) -> [CheckpointComponent] {
-        modules.map {
-            CheckpointComponent(name: $0, namespaces: [$0, "model.\($0)"], destination: $0)
-        }
     }
 
     /// - Parameter pixels: `[B, 3, H, W]` images or video frames of one size.
