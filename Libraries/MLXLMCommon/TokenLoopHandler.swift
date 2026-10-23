@@ -33,6 +33,9 @@ public protocol TokenLoopHandler: SendableMetatype {
     /// are not included in the public output or generation token count.
     var receivesStopTokens: Bool { get }
 
+    /// Whether decoding can end here to apply pending steering input.
+    var canEndForSteering: Bool { get }
+
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
     ///
     /// `logProbabilities` stays on the GPU until you call
@@ -60,6 +63,7 @@ public protocol TokenLoopHandler: SendableMetatype {
 }
 
 extension TokenLoopHandler {
+    public var canEndForSteering: Bool { false }
     public var additionalStopTokenIDs: Set<Int> { [] }
     public var receivesStopTokens: Bool { false }
 }
@@ -70,6 +74,12 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
 
     private static let logger = MLXLogger(label: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
+    private var hasResponse = false
+    private var hasNonTextOutput = false
+
+    public var canEndForSteering: Bool {
+        hasResponse && !hasNonTextOutput && decoder.canEndForSteering
+    }
 
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
@@ -151,22 +161,26 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
             return .more
 
         case .response(let response):
+            hasResponse = hasResponse || !response.isEmpty
             if !emit(.chunk(response)) {
                 return .cancelled
             }
             return .more
 
         case .toolCall(let toolCall):
+            hasNonTextOutput = true
             if !emit(.toolCall(toolCall)) {
                 return .cancelled
             }
             return .more
 
         case .protocolError(let message):
+            hasNonTextOutput = true
             Self.logger.error("\(message)")
             return .more
 
         case .rejectedToolCall(let rejection):
+            hasNonTextOutput = true
             if !emit(.rejectedToolCall(rejection)) {
                 return .cancelled
             }
