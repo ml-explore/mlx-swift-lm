@@ -150,6 +150,11 @@ struct ReasoningEventEmitterTests {
         #expect(segments == [.reasoning("a<think>b"), .response("c")])
     }
 
+    @Test func nestedInnerThinkNeverClosedFlushesAsReasoning() {
+        let segments = run(["<think>a<think>b"])
+        #expect(segments == [.reasoning("a<think>b")])
+    }
+
     @Test func strayCloseWhenNeverOpenedIsLiteralResponse() {
         let segments = run(["answer </think> more"])
         #expect(segments == [.response("answer </think> more")])
@@ -249,6 +254,36 @@ struct ReasoningEventEmitterTests {
         #expect(
             ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: "<think>\n\n  ", config: Self.thinkConfig))
+    }
+
+    /// Qwen3-8B's real thinking-on prompt for a user who typed `<think>`. The typed
+    /// text tokenizes to the template's own `<think>` id, so token ids cannot tell them apart.
+    @Test func openerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    @Test func prefillAfterOpenerInUserTurnIsDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n"
+        #expect(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    /// Qwen3-8B's real thinking-off prompt for the same user turn.
+    @Test func closedPrefillAfterOpenerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
     }
 
     @Test func customDelimiterPrefillDetected() {

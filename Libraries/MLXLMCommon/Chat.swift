@@ -21,6 +21,10 @@ public enum Chat {
         // Records an opening reasoning delimiter supplied by the generation prompt.
         package var prefilledReasoningStartDelimiter: String? = nil
 
+        // Finished reasoning that was streamed apart from `content`, kept for
+        // templates that replay it.
+        package var reasoning: String? = nil
+
         /// Array of image data associated with the message.
         public var images: [UserInput.Image]
 
