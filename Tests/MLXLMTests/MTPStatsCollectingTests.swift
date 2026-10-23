@@ -58,6 +58,7 @@ struct MTPStatsCollectingTests {
         #expect(info.proposedDraftTokens == 21)
         #expect(info.acceptedDraftTokens == 7)
         #expect(info.passthroughReason == nil)
+        #expect(info.speculativeDecodingFallbackReason == nil)
     }
 
     // Passthrough engagement: a conformer that returns a non-nil reason
@@ -85,6 +86,7 @@ struct MTPStatsCollectingTests {
         #expect(info.proposedDraftTokens == 0)
         #expect(info.acceptedDraftTokens == 0)
         #expect(info.passthroughReason == "main model did not emit drafter state")
+        #expect(info.speculativeDecodingFallbackReason == nil)
     }
 
     // (B) A non-MTP iterator does not conform to `MTPStatsCollecting`; the
@@ -131,6 +133,7 @@ struct MTPStatsCollectingTests {
         #expect(info.acceptedDraftTokens == nil)
         #expect(info.passthroughReason == nil)
         #expect(info.stopReason == .stop)
+        #expect(info.speculativeDecodingFallbackReason == nil)
     }
 
     // The `MTPSpeculativeTokenIterator` itself conforms to
