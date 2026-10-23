@@ -161,3 +161,18 @@ public struct PrefillParameters: Sendable {
         return processed
     }
 }
+
+extension PrefillParameters {
+    /// These parameters for one pass of a prefill split in two, so the passes report as one.
+    ///
+    /// `offset` positions precede the pass in a prefill of `total`. The caller reports
+    /// ``prefix`` once, before the first pass, so the pass reports none.
+    package func pass(after offset: Int, of total: Int) -> PrefillParameters {
+        var pass = self
+        pass.prefix = nil
+        if let progress {
+            pass.progress = { processed, _ in progress(offset + processed, total) }
+        }
+        return pass
+    }
+}
