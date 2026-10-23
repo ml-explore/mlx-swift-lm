@@ -209,6 +209,36 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         XCTAssertEqual(function["name"] as? String, "get_weather")
     }
 
+    func testEvictPreservesStructuredToolCallsForTheNextResult() async throws {
+        let log = MessageLog()
+        let context = Self.makeContext(
+            tokenizer: ScriptedToolCallTokenizer(),
+            messageGenerator: RecordingMessageGenerator(log: log))
+        let session = ChatSession(
+            context, instructions: "Use the weather tool",
+            generateParameters: GenerateParameters(maxTokens: 24), tools: [Self.weatherTool])
+        var call: ToolCall?
+        for try await item in session.streamDetails(to: "Weather in Paris?") {
+            if let toolCall = item.toolCall { call = toolCall }
+        }
+        let toolCall = try XCTUnwrap(call)
+
+        try await session.evict()
+
+        let reply = try await session.respond(to: [
+            .tool("sunny", id: toolCall.id, name: toolCall.function.name)
+        ])
+        XCTAssertFalse(reply.isEmpty)
+        let messages = try XCTUnwrap(log.all.last)
+        XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .tool])
+        XCTAssertEqual(messages.first?.content, "Use the weather tool")
+        XCTAssertEqual(messages.last?.content, "sunny")
+        let rendered = DefaultMessageGenerator().generate(message: messages[2])
+        let calls = try XCTUnwrap(rendered["tool_calls"] as? [[String: any Sendable]])
+        let function = try XCTUnwrap(calls.first?["function"] as? [String: any Sendable])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+    }
+
     func testGenerationPolicyControlsValidationBeforeAutomaticDispatch() async throws {
         let restrictedTool: ToolSpec = [
             "type": "function",

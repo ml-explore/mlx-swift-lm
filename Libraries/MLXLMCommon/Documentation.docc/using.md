@@ -233,3 +233,50 @@ You can use the <doc:#MLXHuggingFace-Macros> like this:
         .product(name: "Tokenizers", package: "swift-transformers"),
     ]),
 ```
+
+## Evicting idle state
+
+Evict a session's inference caches while keeping its conversation, instructions,
+tools, and generation settings:
+
+```swift
+try await session.evict()
+```
+
+Eviction waits for current generation to finish. The next response rebuilds
+context from the retained transcript, as a new session initialized with that
+history would. It does not preserve exact warm-cache continuation. A session
+initialized from a raw cache without a transcript throws
+``ChatSessionError/noHistoryAvailable`` and keeps its cache.
+
+Sessions owned by an actor can call `evict()`, `cacheStatus()`, and `synchronize()`
+without transferring the session out of that actor. After eviction, `cacheStatus()`
+reports `.planned`, with no realized cache progress. This does not mean the
+conversation is empty: applications must still budget for replaying its history.
+Keep active conversations and pending tool follow-ups warm when possible.
+
+Evict cached on-demand components through their model container:
+
+```swift
+let evicted = await model.evict([.vision, .audio])
+```
+
+The returned set identifies holders that dropped their cached modules. Existing
+users keep their evaluated modules, and subsequent use reloads the component.
+Pending loads continue; built-in and excluded components are unchanged.
+Checkpoint files must remain readable and unchanged for reloading.
+
+`MLXEmbedders.EmbedderModelContainer` and
+`MLXVLM.EmbeddingGemma2Embedding` expose the same `evict(_:)` operation.
+Embedding eviction keeps the text model and supported modalities available.
+The shared implementation comes from ``ModelComponentsProviding/evict(_:)``.
+Models that declare on-demand components inherit it, including custom component
+kinds. Containers and higher-level APIs delegate to it under their own isolation.
+A text follow-up that reuses cached media leaves evicted encoders unloaded.
+Rebuilding a retained transcript with media reloads the encoders it needs.
+
+Neither operation clears the process-wide allocator cache. After releasing idle
+state, call `Memory.clearCache()` if the application wants MLX to return unused
+buffers. Other sessions, forks, retained media, and pending computations can
+still own memory. Evict selectively: rebuilding a long conversation or reloading
+an encoder trades memory for latency.

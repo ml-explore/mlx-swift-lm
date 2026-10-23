@@ -128,6 +128,18 @@ public final class ModelContainer: Sendable {
 
     // MARK: - Thread-safe convenience methods
 
+    /// Evict cached on-demand components. Their next use loads them again.
+    ///
+    /// Uses ``ModelComponentsProviding/evict(_:)`` with serialized access to the model.
+    ///
+    /// - Returns: The components whose cached modules were evicted.
+    @discardableResult
+    public func evict(_ components: Set<ModelComponent>) async -> Set<ModelComponent> {
+        await context.read { context in
+            (context.model as? any ModelComponentsProviding)?.evict(components) ?? []
+        }
+    }
+
     /// Authoritative planned cache status for the given generation parameters.
     ///
     /// Reports topology, capacity provenance, and strategy compatibility without
