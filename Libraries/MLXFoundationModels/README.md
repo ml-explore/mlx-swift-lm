@@ -57,12 +57,12 @@ if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             }
             return cache.repoDirectory(repo: repo, kind: .model)
         },
-        load: { configuration, progressHandler in
+        load: { configuration, progress in
             try await loadModelContainer(
                 from: #hubDownloader(),
                 using: #huggingFaceTokenizerLoader(),
                 configuration: configuration,
-                progressHandler: progressHandler)
+                progress: progress)
         })
     let session = LanguageModelSession(model: model)
 }
