@@ -187,6 +187,59 @@ func testMaskedEmbedderQuantizedTiedEmbedding() throws {
     #expect(agree.all().item(Bool.self))
 }
 
+/// The matrix-gather path and the forward fallback must agree on identical weights.
+@Test
+func testMaskedEmbedderFallbackMatchesGatherPath() throws {
+    let (h, v, c, k) = (64, 128, 8, 2)  // vsc = 16, N = 32
+
+    let emb = Gemma4AssistantMaskedEmbedder(
+        config: orderedSyntheticConfig(hidden: h, vocab: v, centroids: c, topK: k))
+    try emb.update(
+        parameters: ModuleParameters.unflattened([
+            "token_ordering": MLXArray((0 ..< v).map { Int32($0) })
+        ]), verify: [])
+
+    let hidden = (MLXArray(0 ..< (2 * 3 * h)).asType(.float32) * 0.01 - 0.2).reshaped([2, 3, h])
+    let lmHead = (MLXArray(0 ..< (v * h)).asType(.float32) * 0.003 - 0.4).reshaped([v, h])
+
+    let gathered = emb(hidden, tiedEmbedding: Embedding(weight: lmHead))
+    let fallback = emb(hidden, tiedEmbedding: ForwardOnlyEmbedding(weight: lmHead))
+    // Different dot-product kernels agree to rounding; tolerance scales with logit size.
+    let diff = abs(gathered - fallback)
+    #expect((diff .< 1e-4 + 1e-4 * abs(gathered)).all().item(Bool.self))
+}
+
+/// Multi-row dense parity pin: with identity `token_ordering`, every selected
+/// position of every row must reproduce the dense logit `hidden · embᵀ`.
+@Test
+func testMaskedEmbedderMultiRowMatchesDense() throws {
+    let (h, v, c, k) = (8, 16, 4, 2)  // vsc = 4, N = 8
+    let vsc = v / c
+    let n = k * vsc
+
+    let emb = Gemma4AssistantMaskedEmbedder(
+        config: orderedSyntheticConfig(hidden: h, vocab: v, centroids: c, topK: k))
+    try emb.update(
+        parameters: ModuleParameters.unflattened([
+            "token_ordering": MLXArray((0 ..< v).map { Int32($0) })
+        ]), verify: [])
+
+    let hidden = (MLXArray(0 ..< (2 * 3 * h)).asType(.float32) * 0.05 - 0.6).reshaped([2, 3, h])
+    let lmHead = (MLXArray(0 ..< (v * h)).asType(.float32) * 0.1 - 1.0).reshaped([v, h])
+
+    let masked = emb(hidden, tiedEmbedding: Embedding(weight: lmHead))
+    let dense = matmul(hidden, lmHead.swappedAxes(-1, -2))
+
+    let maskValue = masked.min()
+    let selected = masked .!= maskValue
+    #expect(selected.sum().item(Int.self) == n * 2 * 3)
+    let agree = MLX.where(selected, abs(masked - dense) .< 1e-4, MLXArray(true))
+    #expect(agree.all().item(Bool.self))
+}
+
+/// Forces the forward scoring fallback despite a plain weight layout.
+private final class ForwardOnlyEmbedding: Embedding {}
+
 // MARK: - Helpers
 
 /// Tiny `use_ordered_embeddings=true` config. Defaults (hidden 4, vocab 8, 4
