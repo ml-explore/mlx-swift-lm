@@ -209,7 +209,7 @@ enum Qwen3VLMoELanguage {
 
         func callAsFunction(
             _ x: MLXArray,
-            mask: MLXArray?,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
             positionIds: MLXArray?
         ) -> MLXArray {
@@ -227,18 +227,14 @@ enum Qwen3VLMoELanguage {
 
             values = values.reshaped(batch, length, kvHeads, headDim).transposed(0, 2, 1, 3)
 
-            var kvSequenceLength = keys.dim(-2)
             var positionIds = positionIds
 
             if positionIds == nil {
                 let offset = cache?.offset ?? 0
-                kvSequenceLength += offset + 1
                 var base = MLXArray(stride(from: offset, to: offset + length, by: 1)).asType(.int32)
                 base = tiled(base[.newAxis, 0...], repetitions: [batch, 1])
                 positionIds = base[.newAxis, 0..., 0...]
                 positionIds = tiled(positionIds!, repetitions: [3, 1, 1])
-            } else if let cache {
-                kvSequenceLength += cache.offset + 1
             }
 
             let (cosValues, sinValues) = rotaryEmbedding(positionIds: positionIds!, dtype: x.dtype)
@@ -246,21 +242,13 @@ enum Qwen3VLMoELanguage {
             (queries, keys) = Qwen3VLLanguage.applyMultimodalRotary(
                 q: queries, k: keys, cos: cosValues, sin: sinValues)
 
-            let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
-            if let mask {
-                let slicedMask = mask[.ellipsis, 0 ..< kvSequenceLength]
-                attentionMask = .array(slicedMask)
-            } else {
-                attentionMask = .none
-            }
-
             let output = attentionWithCacheUpdate(
                 queries: queries,
                 keys: keys,
                 values: values,
                 cache: cache,
                 scale: scale,
-                mask: attentionMask
+                mask: mask
             )
             .transposed(0, 2, 1, 3)
             .reshaped(batch, length, -1)
@@ -351,7 +339,7 @@ enum Qwen3VLMoELanguage {
 
         func callAsFunction(
             _ x: MLXArray,
-            mask: MLXArray?,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
             positionIds: MLXArray?
         ) -> MLXArray {
@@ -398,14 +386,17 @@ enum Qwen3VLMoELanguage {
                 fatalError("Either input ids or embeddings must be provided")
             }
 
-            var mask = mask
-            if mask == nil {
-                mask = createAttentionMask(h: hidden, cache: cache)
+            let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
+            if let mask {
+                attentionMask = .array(mask)
+            } else {
+                attentionMask = createAttentionMask(h: hidden, cache: cache?.first)
             }
 
             for (index, layer) in layers.enumerated() {
                 let layerCache = cache?[index]
-                hidden = layer(hidden, mask: mask, cache: layerCache, positionIds: positionIds)
+                hidden = layer(
+                    hidden, mask: attentionMask, cache: layerCache, positionIds: positionIds)
 
                 if let embeds = deepstackEmbeds, index < embeds.count, let visualMask {
                     hidden = applyDeepstack(

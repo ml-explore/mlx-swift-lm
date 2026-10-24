@@ -913,6 +913,36 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             ])
     }
 
+    @Test func testArrayMaskSpansTheRetainedCacheWindow() throws {
+        let cache = RotatingKVCache(maxSize: 8)
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 20, 2], dtype: .float32),
+            values: MLXArray.ones([1, 1, 20, 2], dtype: .float32))
+
+        let pending = MLXArray.ones([1, 5, 2], dtype: .float32)
+        let arrayMask: MLXArray? = createAttentionMask(h: pending, cache: [cache])
+        // 7 retained rows plus the 5 pending: the absolute offset (20) must
+        // not leak into the width.
+        #expect(arrayMask?.shape == [5, 12])
+
+        let (presentedKeys, _) = cache.update(
+            keys: MLXArray.ones([1, 1, 5, 2], dtype: .float32),
+            values: MLXArray.ones([1, 1, 5, 2], dtype: .float32))
+        #expect(arrayMask?.dim(-1) == presentedKeys.dim(2))
+    }
+
+    @Test func testArrayMaskKeepsOffsetWidthForUnboundedCaches() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 3, 2], dtype: .float32),
+            values: MLXArray.ones([1, 1, 3, 2], dtype: .float32))
+
+        let arrayMask: MLXArray? = createAttentionMask(
+            h: MLXArray.ones([1, 5, 2], dtype: .float32), cache: [cache])
+        // A cache that never evicts keeps every token: width stays offset + n.
+        #expect(arrayMask?.shape == [5, 8])
+    }
+
     @Test func testSSMMaskUsesSharedMambaMetadataPath() throws {
         let leftPadded = MambaCache(leftPadding: [1, 3])
         let input = MLXArray.ones([2, 4, 8], dtype: .float32)

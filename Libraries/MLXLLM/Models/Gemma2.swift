@@ -74,7 +74,8 @@ class Gemma2Attention: Module {
         scores = tanh(scores / logitSoftCap) * logitSoftCap
 
         if let mask {
-            scores = scores + mask
+            // Boolean masks suppress positions; only float masks are additive.
+            scores = applyAttentionMask(scores: scores, mask: .array(mask))
         }
         scores = softmax(scores, axis: -1, precise: true)
         var output = matmul(scores, values)
