@@ -626,7 +626,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
 }
 
 /// Rotating KV cache for sliding window attention
-public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
+public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebugStringConvertible {
     public override class var serializedClassName: String? { "RotatingKVCache" }
 
     public override class func restore(
@@ -788,7 +788,17 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 
     private func retainedView(tail: Int) -> (MLXArray, MLXArray)? {
-        guard let keys = self.keys, let values = self.values else { return nil }
+        guard let keys, let values, let ranges = retainedRanges(tail: tail) else { return nil }
+        func view(_ array: MLXArray) -> MLXArray {
+            let parts = ranges.map { array[.ellipsis, $0, 0...] }
+            return parts.count == 1 ? parts[0] : concatenated(parts, axis: 2)
+        }
+        return (view(keys), view(values))
+    }
+
+    /// Storage rows holding the trailing `tail` entries, in chronological order.
+    private func retainedRanges(tail: Int) -> [Range<Int>]? {
+        guard let keys else { return nil }
 
         let available = wrapped ? keys.dim(2) : idx
         let prefix = Swift.min(keep, available)
@@ -797,27 +807,29 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
         if !wrapped || idx == available {
             if prefix == 0 || bound == available {
-                return (
-                    keys[.ellipsis, (available - bound) ..< available, 0...],
-                    values[.ellipsis, (available - bound) ..< available, 0...]
-                )
+                return [(available - bound) ..< available]
             }
         } else if prefix == 0 && bound <= idx {
-            return (
-                keys[.ellipsis, (idx - bound) ..< idx, 0...],
-                values[.ellipsis, (idx - bound) ..< idx, 0...]
-            )
+            return [(idx - bound) ..< idx]
         }
 
         let recent = Swift.min(bound - prefix, idx - prefix)
         let older = bound - prefix - recent
-        let ranges = [0 ..< prefix, (available - older) ..< available, (idx - recent) ..< idx]
+        return [0 ..< prefix, (available - older) ..< available, (idx - recent) ..< idx]
             .filter { !$0.isEmpty }
-        func view(_ array: MLXArray) -> MLXArray {
-            let parts = ranges.map { array[.ellipsis, $0, 0...] }
-            return parts.count == 1 ? parts[0] : concatenated(parts, axis: 2)
+    }
+
+    /// Marks the storage rows inside the attention window, so a decode step can attend the
+    /// ring in place and leave the rewind reserve out.
+    private func attentionWindowMask(rows: Int) -> MLXArray? {
+        guard rows > maxCacheSize, let ranges = retainedRanges(tail: maxCacheSize) else {
+            return nil
         }
-        return (view(keys), view(values))
+        var inWindow = [Bool](repeating: false, count: rows)
+        for range in ranges {
+            inWindow.replaceSubrange(range, with: repeatElement(true, count: range.count))
+        }
+        return MLXArray(inWindow)
     }
 
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -921,6 +933,32 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             return retainedView(tail: Swift.min(live, maxCacheSize - 1) + count)!
         }
         return result
+    }
+
+    /// Attends a single decode token to the ring in place when a rewind reserve is configured.
+    ///
+    /// ``update(keys:values:)`` returns a copy of the window without the reserve rows. This
+    /// masks the reserve rows instead, so a reserve costs no copy per token. Other writes and
+    /// caller-supplied masks take the ``update(keys:values:)`` path unchanged.
+    public func updateAndAttend(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        guard rewindCapacity > 0, keys.dim(2) == 1, case .none = mask else {
+            let (cachedKeys, cachedValues) = update(keys: keys, values: values)
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: cachedKeys, values: cachedValues, scale: scale,
+                mask: mask)
+        }
+        wrappedFlag = wrapped
+        let (ringKeys, ringValues) = updateInPlace(keys: keys, values: values)
+        let windowMask = attentionWindowMask(rows: ringKeys.dim(2))
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: ringKeys, values: ringValues, scale: scale,
+            mask: windowMask.map { .array($0) } ?? .none)
     }
 
     public override var state: [MLXArray] {
