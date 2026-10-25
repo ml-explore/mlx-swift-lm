@@ -184,6 +184,67 @@ final class ChatSessionCheckpointTests: XCTestCase {
             file: file, line: line)
     }
 
+    func testCacheStatusReportsBoundedCheckpointMemorySeparately() async throws {
+        let (session, _) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
+        let planned = try await session.cacheStatus()
+        XCTAssertEqual(planned.phase, .planned)
+        XCTAssertNil(planned.checkpoint)
+
+        let first = try await respond(session, to: firstQuestion)
+        let status = try await session.cacheStatus()
+        // Global history adds no checkpoint storage; only the window and recurrent state do.
+        let checkpointBytes = 2 * 16 * 16 * MemoryLayout<Float>.size + MemoryLayout<Int32>.size
+        XCTAssertEqual(status.phase, .realized)
+        XCTAssertEqual(status.checkpoint?.memory, checkpointBytes)
+        let checkpoint = try XCTUnwrap(status.checkpoint)
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        XCTAssertEqual(checkpoint.tokens, prefix)
+        XCTAssertLessThan(checkpoint.tokens, try XCTUnwrap(status.processedTokenCount))
+        let liveBytes = await session.withCache { KVCacheStatus(cache: $0 ?? []).memoryBytes }
+        XCTAssertEqual(status.memoryBytes, liveBytes)
+
+        _ = try await respond(session, to: firstQuestion)
+        let updated = try await session.cacheStatus()
+        XCTAssertEqual(updated.checkpoint?.memory, checkpointBytes)
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", firstQuestion),
+        ])
+        XCTAssertEqual(updated.checkpoint?.tokens, prompt.count - 1)
+
+        await session.clear()
+        let cleared = try await session.cacheStatus()
+        XCTAssertEqual(cleared.phase, .planned)
+        XCTAssertEqual(cleared.memoryBytes, 0)
+        XCTAssertNil(cleared.checkpoint)
+    }
+
+    func testForkReportsItsRetainedCheckpointAfterTheSourceIsCleared() async throws {
+        let (session, _) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
+        _ = try await respond(session, to: firstQuestion)
+        let original = try await session.cacheStatus()
+        let fork = await session.fork()
+        let forked = try await fork.cacheStatus()
+        let checkpoint = try XCTUnwrap(original.checkpoint)
+        XCTAssertGreaterThan(checkpoint.memory, 0)
+        XCTAssertEqual(forked.checkpoint, checkpoint)
+
+        await session.clear()
+        let retained = try await fork.cacheStatus()
+        XCTAssertEqual(retained.checkpoint, forked.checkpoint)
+        let reply = try await respond(fork, to: "word")
+        XCTAssertGreaterThan(reply.info.cachedPromptTokenCount, 0)
+    }
+
+    func testReferencePrefillSchedulesReportNoCheckpointMemory() async throws {
+        for chunking in [PrefillParameters.Chunking.unchunked, .remainder] {
+            let (session, _) = try makeSession(reply: "answer", prefill: .init(chunking: chunking))
+            _ = try await respond(session, to: firstQuestion)
+            let status = try await session.cacheStatus()
+            XCTAssertGreaterThan(status.memoryBytes, 0)
+            XCTAssertNil(status.checkpoint)
+        }
+    }
+
     func testDroppedReasoningResumesBeforeTheLastPromptToken() async throws {
         let (session, model) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
         let first = try await respond(session, to: firstQuestion)
@@ -281,6 +342,12 @@ final class ChatSessionCheckpointTests: XCTestCase {
             reply: "<think>\nreason\n</think>\n\nanswer", kvCache: configuration, headDim: 32)
         let first = try await respond(session, to: firstQuestion)
         let prefix = try render([("user", firstQuestion)]).count - 1
+        let status = try await session.cacheStatus()
+        let slidingBytes = 2 * 16 * 32 * MemoryLayout<Float>.size
+        let tailBytes = 2 * (prefix % 32) * 32 * MemoryLayout<Float>.size
+        XCTAssertEqual(status.checkpoint?.tokens, prefix)
+        XCTAssertEqual(
+            status.checkpoint?.memory, slidingBytes + tailBytes + MemoryLayout<Int32>.size)
         model.clearForwards()
         let second = try await respond(session, to: "word")
         let prompt = try render([

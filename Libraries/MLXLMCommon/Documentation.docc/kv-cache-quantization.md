@@ -66,8 +66,13 @@ typed configuration. It reports the normalized request, request source,
 planned or realized phase, flattened cache topology, per-layer capacity source,
 strategy state, skip reason, allocated bytes, and the container-owned
 `processedTokenCount`. Aggregate compressed, pending, skipped, and
-capacity-application counts, and the total `memoryBytes`, are available on the
+capacity-application counts, and the live-layer `memoryBytes`, are available on the
 same value.
+
+``KVCacheStatus/checkpoint`` reports the saved prefix length (`tokens`) and
+retained cache memory in bytes (`memory`). It is `nil` when no checkpoint is kept.
+Storage may be shared with the live cache or forks.
+
 ``LanguageModel/cacheStatus(parameters:)`` and
 ``ModelContainer/cacheStatus(parameters:)`` provide the same shape for planned
 caches. The lower-level ``kvCacheRuntimeReport(cache:configuration:)`` remains

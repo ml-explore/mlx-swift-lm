@@ -478,7 +478,12 @@ public final class ChatSession {
                 cache: stored.main.cache,
                 plan: stored.main.plan,
                 phase: .realized,
-                processedTokenCount: stored.main.processedTokenCount)
+                processedTokenCount: stored.main.processedTokenCount,
+                checkpoint: stored.conversation?.checkpoint.map {
+                    .init(
+                        tokens: $0.prefill.cache.processedTokenCount,
+                        memory: $0.prefill.cache.retainedBytes)
+                })
         }) {
             return realized
         }

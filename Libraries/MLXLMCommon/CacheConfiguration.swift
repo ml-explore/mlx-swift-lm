@@ -114,6 +114,21 @@ public struct KVCacheStatus: Sendable, Hashable {
         case ignored
     }
 
+    /// Status of a session's prompt recovery checkpoint.
+    public struct Checkpoint: Sendable, Hashable {
+        /// Number of prompt tokens represented by the checkpoint.
+        /// Restoring it returns the cache to the end of this prefix.
+        public let tokens: Int
+        /// Bytes of cache tensors retained by the checkpoint.
+        /// These tensors can share storage with a restored cache or forked session.
+        public let memory: Int
+
+        package init(tokens: Int, memory: Int) {
+            self.tokens = tokens
+            self.memory = memory
+        }
+    }
+
     public let phase: Phase
     /// `nil` when no capacity or compression behavior was requested.
     public let requestedConfiguration: KVCacheConfiguration?
@@ -122,6 +137,8 @@ public struct KVCacheStatus: Sendable, Hashable {
     public let layers: [KVCacheLayerStatus]
     /// Authoritative model-wide position for realized session storage.
     public let processedTokenCount: Int?
+    /// The prompt recovery checkpoint, or `nil` when none is retained.
+    public let checkpoint: Checkpoint?
     public let capacityDisposition: CapacityDisposition
     public let capacityAppliedLayerCount: Int
     public let capacityUnappliedLayerCount: Int
@@ -155,7 +172,7 @@ public struct KVCacheStatus: Sendable, Hashable {
         layers.count { $0.state == .skipped }
     }
 
-    /// Bytes allocated across all layers.
+    /// Bytes allocated across the live cache layers. Checkpoint storage is reported separately.
     public var memoryBytes: Int {
         layers.reduce(0) { $0 + $1.memoryBytes }
     }
@@ -179,14 +196,16 @@ public struct KVCacheStatus: Sendable, Hashable {
         cache: [KVCache],
         plan: KVCachePlan,
         phase: Phase,
-        processedTokenCount: Int? = nil
+        processedTokenCount: Int? = nil,
+        checkpoint: Checkpoint? = nil
     ) {
         self.init(
             cache: cache,
             configuration: plan.configuration,
             requestSource: plan.requestSource,
             phase: phase,
-            processedTokenCount: processedTokenCount)
+            processedTokenCount: processedTokenCount,
+            checkpoint: checkpoint)
     }
 
     private init(
@@ -194,7 +213,8 @@ public struct KVCacheStatus: Sendable, Hashable {
         configuration: KVCacheConfiguration?,
         requestSource: RequestSource?,
         phase: Phase,
-        processedTokenCount: Int?
+        processedTokenCount: Int?,
+        checkpoint: Checkpoint? = nil
     ) {
         let layers = kvCacheLayerStatuses(cache: cache, configuration: configuration)
         let capacity = Self.capacityOutcome(
@@ -207,6 +227,7 @@ public struct KVCacheStatus: Sendable, Hashable {
         self.requestSource = requestSource
         self.layers = layers
         self.processedTokenCount = processedTokenCount
+        self.checkpoint = checkpoint
         self.capacityDisposition = capacity.disposition
         self.capacityAppliedLayerCount = capacity.applied
         self.capacityUnappliedLayerCount = capacity.unapplied
