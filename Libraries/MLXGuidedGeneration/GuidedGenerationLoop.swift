@@ -72,6 +72,15 @@ public enum GuidedGenerationLoop {
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
+    ///   - logitProcessor: Optional processor, such as
+    ///     `GenerateParameters.processor()` for repetition, presence and
+    ///     frequency penalties. It processes the raw logits before the grammar
+    ///     mask. As in `TokenIterator`, `didSample` sees every sampled token,
+    ///     including a stop token, and `didEmit` every token in the output.
+    ///     Fast-forward tokens get both calls but are not processed or sampled.
+    ///   - logitSampler: Sampler applied to the masked logits, such as
+    ///     `GenerateParameters.sampler()` for temperature, top-p, top-k and
+    ///     min-p. Nil samples greedily.
     ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
     ///     progress callback). Defaults to a 512-token step with balanced
     ///     chunking.
@@ -98,6 +107,8 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        logitProcessor: (any LogitProcessor)? = nil,
+        logitSampler: (any LogitSampler)? = nil,
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         emit: (String) -> Bool
     ) throws -> Int {
@@ -113,6 +124,9 @@ public enum GuidedGenerationLoop {
             KVCacheStorage(
                 try model.newCache(parameters: generationParameters), plan: kvCachePlan))
         var modelState: LMOutput.State?
+        var processor = logitProcessor
+        processor?.prompt(input.text.tokens)
+        defer { processor?.finalizeGeneration() }
 
         // Build EOS token set
         let stopTokenIDs = Self.buildStopTokenIDs(
@@ -276,9 +290,18 @@ public enum GuidedGenerationLoop {
             let token = applyMaskAndSample(
                 logits: logits,
                 maskArray: maskArray,
-                closingBias: activeBias
+                closingBias: activeBias,
+                logitProcessor: processor,
+                logitSampler: logitSampler
             )
             let tokenId = Int(token)
+
+            // A caller's sampler must not pick a token the grammar excludes.
+            if mask.needsApply && !maskAllows(mask, tokenId: tokenId, vocabSize: vocabSize) {
+                throw GrammarError.commitFailed(
+                    "the sampler chose token \(tokenId), which the grammar does not allow")
+            }
+            processor?.didSample(token: MLXArray([Int32(tokenId)]))
 
             // Track the sampled token for whitespace run detection.
             // Fast-forward tokens are NOT tracked (they are grammar-forced).
@@ -297,7 +320,7 @@ public enum GuidedGenerationLoop {
             // When `needsApply` IS true: if the grammar mask allowed
             // EOS (bit = 1), the grammar considers the output
             // acceptable. If the mask did NOT allow EOS,
-            // `applyMaskAndSample` set it to -inf, so argmax would not
+            // `applyMaskAndSample` set it to -inf, so the sampler could not
             // have selected it.
             if mask.needsApply {
                 if tokenId == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenId) {
@@ -317,6 +340,7 @@ public enum GuidedGenerationLoop {
             diagnosticSink?.recordSampledToken(tokenId)
             // Yield the sampled token
             detokenizer.append(token: tokenId)
+            processor?.didEmit(token: tokenId)
             if let text = detokenizer.next() {
                 accumulatedText += text
                 if !emit(text) {
@@ -369,8 +393,10 @@ public enum GuidedGenerationLoop {
                         shouldStopAfterFF = true
                         break
                     }
+                    processor?.didSample(token: MLXArray([ffToken]))
                     diagnosticSink?.recordFastForwardToken(Int(ffToken))
                     detokenizer.append(token: Int(ffToken))
+                    processor?.didEmit(token: Int(ffToken))
                     if let text = detokenizer.next() {
                         accumulatedText += text
                         if !emit(text) {
@@ -527,14 +553,19 @@ public enum GuidedGenerationLoop {
     ///     tokens (no mask to apply).
     ///   - closingBias: Optional logit bias favoring closing tokens. Applied
     ///     after the grammar mask so masked-out tokens remain at -inf.
+    ///   - logitProcessor: Optional processor, applied before the grammar mask.
+    ///   - logitSampler: Sampler for the masked logits. Nil samples greedily.
     /// - Returns: The sampled token ID.
     static func applyMaskAndSample(
         logits rawLogits: MLXArray,
         maskArray: MLXArray?,
-        closingBias: MLXArray? = nil
+        closingBias: MLXArray? = nil,
+        logitProcessor: (any LogitProcessor)? = nil,
+        logitSampler: (any LogitSampler)? = nil
     ) -> UInt32 {
         // Extract last-position logits: [batch, seq, vocab] -> [vocab]
         var logits = rawLogits[0..., -1, 0...]
+        logits = logitProcessor?.process(logits: logits) ?? logits
 
         if let maskArray {
             logits = logits + maskArray
@@ -557,9 +588,17 @@ public enum GuidedGenerationLoop {
             }
         }
 
-        // Grammar-constrained generation samples greedily by construction.
-        let sampled = argMax(logits, axis: -1)
+        let sampled = logitSampler?.sample(logits: logits) ?? argMax(logits, axis: -1)
         return sampled.item(UInt32.self)
+    }
+
+    /// Whether `mask` allows `tokenId`. Ids at or beyond `vocabSize` are never
+    /// allowed, matching `bitmaskToMLXArray`.
+    static func maskAllows(_ mask: MaskResult, tokenId: Int, vocabSize: Int) -> Bool {
+        guard tokenId >= 0, tokenId < vocabSize, tokenId / 32 < mask.mask.count else {
+            return false
+        }
+        return (UInt32(bitPattern: mask.mask[tokenId / 32]) >> UInt32(tokenId % 32)) & 1 == 1
     }
 
     /// Build the additive grammar-mask array for a freshly computed `MaskResult`,
