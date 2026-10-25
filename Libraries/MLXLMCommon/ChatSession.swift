@@ -1408,7 +1408,6 @@ public final class ChatSession {
                             input: preparedInput, modelConfiguration: modelConfiguration,
                             tokenizer: tokenizer)
                         var prefilledReasoningStartDelimiter: String?
-                        var prefilledReasoning: PrefilledReasoningBlock?
                         // Where this turn's prefill pauses to checkpoint the cache, in `input`.
                         var checkpointPosition: Int?
                         pendingMessages.removeAll()
@@ -1481,8 +1480,6 @@ public final class ChatSession {
                             || preparedInput.audio != nil
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
-                            prefilledReasoning = modelConfiguration.reasoningConfig?.prefilledBlock(
-                                endingPrompt: promptTokenIds, tokenizer: tokenizer)
                             if reasoningPrimedInside {
                                 prefilledReasoningStartDelimiter =
                                     modelConfiguration.reasoningConfig?.startDelimiter
@@ -1699,18 +1696,22 @@ public final class ChatSession {
                             currentConversation.transcriptBuiltCache = true
                             conversation = currentConversation
 
-                            // Templates drop reasoning from every reply since the last user
-                            // message, so only a turn answering the user checkpoints, before
-                            // any prefilled reasoning block and the token sampled from.
-                            let heldBack = max(1, prefilledReasoning?.tokenCount ?? 0)
-                            if templateMessages.last?.role == .user,
+                            // Append-only turns keep their checkpoint. Rewritten prompts replace
+                            // it before prefilled reasoning and the final prompt token.
+                            if !decision.reusesCachedPrefix || decision.rewinds,
+                                templateMessages.last?.role == .user,
                                 generateParameters.prefill.chunking == .balanced,
                                 !containsNewMedia, !carriesPreparedMedia, draftKVCache == nil,
                                 input.text.mask == nil,
-                                input.text.cacheSequenceLength >= heldBack,
                                 kvCache.needsCheckpoint
                             {
-                                checkpointPosition = input.text.cacheSequenceLength - heldBack
+                                let prefilledReasoning = modelConfiguration.reasoningConfig?
+                                    .prefilledBlock(
+                                        endingPrompt: promptTokenIds, tokenizer: tokenizer)
+                                let heldBack = max(1, prefilledReasoning?.tokenCount ?? 0)
+                                if input.text.cacheSequenceLength >= heldBack {
+                                    checkpointPosition = input.text.cacheSequenceLength - heldBack
+                                }
                             }
                         }
 

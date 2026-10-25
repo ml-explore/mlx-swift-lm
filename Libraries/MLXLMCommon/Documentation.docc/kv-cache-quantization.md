@@ -71,7 +71,8 @@ same value.
 
 ``KVCacheStatus/checkpoint`` reports the saved prefix length (`tokens`) and
 retained cache memory in bytes (`memory`). It is `nil` when no checkpoint is kept.
-Storage may be shared with the live cache or forks.
+The count covers cache tensors, including padding and lengths, rather than total
+checkpoint memory. Storage may be shared with the live cache or forks.
 
 ``LanguageModel/cacheStatus(parameters:)`` and
 ``ModelContainer/cacheStatus(parameters:)`` provide the same shape for planned
@@ -118,6 +119,7 @@ If a later template drops that reply's reasoning, the session first tries an exa
 trim, then the saved checkpoint, then a full rebuild. Reuse requires an exact token
 prefix match; it preserves the computation for that prefix rather than changing the
 model's reasoning or attention window.
+Append-only turns keep the existing checkpoint without splitting prefill again.
 
 The checkpoint copies only rotating and recurrent leaves, including inside composite
 caches. Global attention history is trimmed in place. Variance-normalized caches save

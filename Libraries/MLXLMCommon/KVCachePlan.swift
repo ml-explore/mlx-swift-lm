@@ -355,7 +355,7 @@ package final class KVCacheStorage {
         return rewound
     }
 
-    /// A saved prefix. The caller proves its tokens still match the live cache's prefix.
+    /// A saved prefix from this cache's history. The caller must verify its token prefix.
     package struct Checkpoint: Evaluatable {
         package let processedTokenCount: Int
         fileprivate let plan: KVCachePlan

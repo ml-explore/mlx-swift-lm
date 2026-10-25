@@ -1676,7 +1676,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     public override func innerState() -> [MLXArray] {
-        cache.compactMap { $0 }
+        (cache + [leftPadding, lengths]).compactMap { $0 }
     }
 
     public subscript(index: Int) -> MLXArray? {

@@ -138,6 +138,25 @@ final class KVCacheCheckpointTests: XCTestCase {
         XCTAssertEqual(global.copies, 0)
     }
 
+    func testCheckpointCountsAndRestoresRecurrentBatchMetadata() throws {
+        let entry = ArraysCache(size: 1, leftPadding: [1, 0])
+        entry[0] = MLXArray.zeros([2, 3])
+        entry.prepare(lengths: [3, 4])
+        let live = KVCacheStorage([entry], plan: .disabled)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        XCTAssertEqual(
+            checkpoint.retainedBytes,
+            6 * MemoryLayout<Float>.size + 4 * MemoryLayout<Int32>.size)
+
+        entry.filter(batchIndices: MLXArray([1]))
+        XCTAssertTrue(live.restore(checkpoint))
+
+        let restored = try XCTUnwrap(live.cache[0] as? ArraysCache)
+        XCTAssertEqual(restored[0]?.shape, [2, 3])
+        XCTAssertEqual(restored.leftPadding?.asArray(Int32.self), [1, 0])
+        XCTAssertEqual(restored.lengths?.asArray(Int32.self), [3, 4])
+    }
+
     func testUnknownLeafDeclinesWithoutCallingCopy() {
         let live = KVCacheStorage([BaseKVCache()], plan: .disabled)
         XCTAssertFalse(live.needsCheckpoint)

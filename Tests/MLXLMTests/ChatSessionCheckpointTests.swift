@@ -245,6 +245,35 @@ final class ChatSessionCheckpointTests: XCTestCase {
         }
     }
 
+    func testAppendOnlyTurnsKeepTheCheckpointForALaterRewrite() async throws {
+        let (session, model) = try makeSession(reply: "answer")
+        let first = try await respond(session, to: firstQuestion)
+        let original = try await session.cacheStatus()
+        let prefix = try XCTUnwrap(original.checkpoint).tokens
+        let replyTokens =
+            tokenizer.encode(
+                text: "<think>\nreason\n</think>\n\nanswer", addSpecialTokens: false
+            ) + [try XCTUnwrap(tokenizer.eosTokenId)]
+        session.generateParameters.maxTokens = replyTokens.count + 1
+        session.components = GenerationComponents(logitProcessorFactory: {
+            ForcedReply(tokens: replyTokens)
+        })
+
+        let second = try await respond(session, to: "word")
+        let extended = try await session.cacheStatus()
+        XCTAssertGreaterThan(second.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(extended.checkpoint, original.checkpoint)
+
+        model.clearForwards()
+        let third = try await respond(session, to: "answer")
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", "word"),
+            ("assistant", second.text), ("user", "answer"),
+        ])
+        XCTAssertEqual(third.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
+    }
+
     func testDroppedReasoningResumesBeforeTheLastPromptToken() async throws {
         let (session, model) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
         let first = try await respond(session, to: firstQuestion)

@@ -9,6 +9,34 @@ import XCTest
 @testable import MLXLMCommon
 
 final class PromptCheckpointNumericsTests: XCTestCase {
+    private final class CountedModel: Module, LLMModel {
+        let base: any LanguageModel
+        var forwards = 0
+        var loraLayers: [Module] { [] }
+
+        init(_ base: any LanguageModel) {
+            self.base = base
+        }
+
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+            try base.newCache(parameters: parameters)
+        }
+
+        func callAsFunction(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            forwards += 1
+            return base(input, cache: cache, state: state)
+        }
+
+        func nextTokenLogits(
+            _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+        ) -> LMOutput {
+            forwards += 1
+            return base.nextTokenLogits(input, cache: cache, state: state)
+        }
+    }
+
     private func mellum() throws -> any LanguageModel {
         let json = #"""
             {
@@ -161,10 +189,11 @@ final class PromptCheckpointNumericsTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["MLX_RUN_CHECKPOINT_BENCHMARKS"] == "1" else {
             return
         }
-        for (name, model) in [("Mellum", try mellum()), ("Qwen35", try qwen())] {
-            quantize(model: model, groupSize: 32, bits: 4)
-            model.apply { $0.dtype == .float32 ? $0.asType(.bfloat16) : $0 }
-            eval(model)
+        for (name, base) in [("Mellum", try mellum()), ("Qwen35", try qwen())] {
+            quantize(model: base, groupSize: 32, bits: 4)
+            base.apply { $0.dtype == .float32 ? $0.asType(.bfloat16) : $0 }
+            eval(base)
+            let model = CountedModel(base)
             for count in [512, 2048] {
                 let prefix = tokens(count)
                 let suffix = tokens(33, seed: 11)
@@ -189,6 +218,12 @@ final class PromptCheckpointNumericsTests: XCTestCase {
                 var warm: [Double] = []
                 var split: [Double] = []
                 var unsplit: [Double] = []
+                var appendSplit: [Double] = []
+                var appendUnsplit: [Double] = []
+                var splitForwards = 0
+                var unsplitForwards = 0
+                var appendSplitForwards = 0
+                var appendUnsplitForwards = 0
                 for _ in 0 ..< 4 {
                     let fresh = try storage(model)
                     let coldStart = Date.timeIntervalSinceReferenceDate
@@ -199,13 +234,33 @@ final class PromptCheckpointNumericsTests: XCTestCase {
                     _ = try run(suffix, cache: live, state: checkpoint.state)
                     warm.append(Date.timeIntervalSinceReferenceDate - warmStart)
                     let splitCache = try storage(model)
+                    model.forwards = 0
                     let splitStart = Date.timeIntervalSinceReferenceDate
-                    _ = try run(prefix + [12], cache: splitCache, checkpointAt: count)
+                    let splitIterator = try run(
+                        prefix + [12], cache: splitCache, checkpointAt: count)
                     split.append(Date.timeIntervalSinceReferenceDate - splitStart)
+                    splitForwards = model.forwards
                     let unsplitCache = try storage(model)
+                    model.forwards = 0
                     let unsplitStart = Date.timeIntervalSinceReferenceDate
-                    _ = try run(prefix + [12], cache: unsplitCache)
+                    let unsplitIterator = try run(prefix + [12], cache: unsplitCache)
                     unsplit.append(Date.timeIntervalSinceReferenceDate - unsplitStart)
+                    unsplitForwards = model.forwards
+
+                    // Both prompts extend the live cache. Neither restores its checkpoint.
+                    model.forwards = 0
+                    let appendSplitStart = Date.timeIntervalSinceReferenceDate
+                    _ = try withExtendedLifetime(splitIterator.prefillCheckpoint) {
+                        try run(suffix, cache: splitCache, state: splitIterator.state)
+                    }
+                    appendSplit.append(Date.timeIntervalSinceReferenceDate - appendSplitStart)
+                    appendSplitForwards = model.forwards
+                    model.forwards = 0
+                    let appendUnsplitStart = Date.timeIntervalSinceReferenceDate
+                    _ = try run(suffix, cache: unsplitCache, state: unsplitIterator.state)
+                    appendUnsplit.append(Date.timeIntervalSinceReferenceDate - appendUnsplitStart)
+                    appendUnsplitForwards = model.forwards
+                    XCTAssertEqual(appendSplitForwards, appendUnsplitForwards)
                 }
                 func median(_ samples: [Double]) -> Double {
                     samples.dropFirst().sorted()[1] * 1000
@@ -216,6 +271,10 @@ final class PromptCheckpointNumericsTests: XCTestCase {
                             "[CHECKPOINT] %@ prefix=%d cold=%.3fms restore=%.3fms split=%.3fms unsplit=%.3fms saved=%d bytes",
                         name, count, median(cold), median(warm), median(split), median(unsplit),
                         checkpoint.cache.retainedBytes))
+                print(
+                    "[CHECKPOINT] \(name) prefix=\(count) forwards=\(splitForwards)/\(unsplitForwards) "
+                        + "append=\(median(appendSplit))/\(median(appendUnsplit))ms "
+                        + "append_forwards=\(appendSplitForwards)/\(appendUnsplitForwards)")
             }
         }
     }
