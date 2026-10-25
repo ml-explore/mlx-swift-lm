@@ -733,6 +733,26 @@ public final class GrammarConstraint: @unchecked Sendable {
         return GrammarConstraint(fromFork: forkedHandle, parent: self)
     }
 
+    /// A new constraint over this constraint's compiled grammar, at the
+    /// grammar's initial state.
+    ///
+    /// Compiling a grammar is the expensive step; a matcher is cheap. Unlike
+    /// `clone()`, this does not need `GrammarMatcher::Fork()`, and the result
+    /// never inherits this constraint's matcher state.
+    public func freshMatcher() throws -> GrammarConstraint {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var matcherPtr: OpaquePointer?
+        let status = xg_matcher_new(compiled, &matcherPtr)
+        guard status == XG_OK, let matcherHandle = matcherPtr else {
+            throw GrammarError.constraintCompilationFailed(
+                Self.captureShimError(status: status, fallback: "xg_matcher_new")
+            )
+        }
+        return GrammarConstraint(fromFork: matcherHandle, parent: forkParent ?? self)
+    }
+
     /// Query termination while already holding `lock`. Named `Locked`
     /// as the convention for "caller must hold the lock"; this avoids
     /// re-entrancy with `NSLock` (which is not reentrant).
