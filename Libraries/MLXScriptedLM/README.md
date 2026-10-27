@@ -15,11 +15,10 @@ It is available as a library so that downstream consumers
 can make use of it as well.
 
 Status: Tokenizers are built and integrated into the local tests.
+Scripted models follow plain-text transcripts.
 
-Planned: Scripted LanguageModels that wrap real (random weight) models.
-This will allow you to construct tests that have real model behavior in
-terms of KVCache, but require no weight downloads.  Scripted tool
-integration is also planned.
+Planned: tool calls and reasoning in transcripts, and speculative
+decoding scenarios.
 
 ## Pieces
 
@@ -44,6 +43,33 @@ integration is also planned.
 - `ChatMLTemplate` — plain ChatML (`<|im_start|>user\n` … `<|im_end|>`). Tools
   and tool calls throw `unsupported` until family variants arrive.
 
+### Scripted Models
+
+- `Transcript` — the conversation: system, user, and assistant turns. Write
+  it as an array or load it from JSON. Each assistant turn ends with EOS
+  unless its terminator is `none`.
+- `ScriptedLogitsModel` — wraps a small random-weight model and raises the
+  scripted token above each logits row's maximum. The wrapped model does the
+  real cache and prefill work, and samplers still see a full distribution.
+  `Margin.dominant` keeps the script under any sampler; `.plausible` lets
+  processors override it.
+- `TurnScripts` — finds the turn and position. Each assistant turn starts
+  after the template's generation prompt, and the script is indexed by
+  position from there. The prompt's last user message picks the turn, so a
+  turn that `ChatSession` drops (empty, cancelled) does not replay. After the
+  script, stop tokens and the turn marker are blocked until the turn ends. A
+  turn past the end of the transcript emits EOS at once.
+- `TranscriptKVCache` — the tokens the model has processed, kept as the last
+  cache entry. Generation trims and copies it with the rest of the cache, so
+  the position stays right after rewinds and speculative rejection.
+- `ForwardCallLog` — every call: cache offset, inputs, boosted tokens, and
+  any input that differed from the script.
+- `ForwardingLanguageModel` — forwards every `LanguageModel` requirement, for
+  wrappers that change one behavior. Its parameters are the wrapped model's,
+  under the same keys, so weights load and quantize through it.
+- `ScriptedScenario` — builds the tokenizer, model, and `ModelContext` from a
+  transcript. You supply the wrapped model, sized to the vocabulary.
+
 ## Example
 
 ```swift
@@ -57,6 +83,19 @@ let tokenizer = ScriptedTokenizer(
 let prompt = try tokenizer.applyChatTemplate(
     messages: [["role": "user", "content": "how are you doing?"]])
 let reply = tokenizer.encode(text: "fine, you?", addSpecialTokens: false)
+```
+
+```swift
+@_spi(Testing) import MLXLLM
+
+let scenario = try ScriptedScenario(
+    transcript: Transcript([.user("hello"), .assistant("hi there")])
+) { vocabularySize in
+    // any small random-weight model with this vocabulary size
+    Gemma3TextModel(.smallConfiguration(vocabularySize: vocabularySize))
+}
+let session = ChatSession(scenario.context)
+let reply = try await session.respond(to: "hello")  // "hi there"
 ```
 
 ## Implementation Notes

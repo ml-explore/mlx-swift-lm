@@ -2383,6 +2383,23 @@ func promptPrimesReasoning(
     }
 }
 
+/// Records the same token ledger with a composed output handler.
+func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
+    promptTokenCount: Int,
+    modelConfiguration: ModelConfiguration,
+    tokenizer: Tokenizer,
+    iterator: consuming any TokenIteratorProtocol,
+    handler: consuming Handler
+) -> (AsyncStream<Handler.Output>, Task<[Int], Never>) {
+    generateLoopTask(
+        promptTokenCount: promptTokenCount,
+        modelConfiguration: modelConfiguration,
+        tokenizer: tokenizer,
+        iterator: iterator,
+        tokenCollector: RecordingGeneratedTokens(),
+        handler: handler)
+}
+
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
 ///
 /// This is similar to `generate(input:cache:state:parameters:context:)`, but yields raw token IDs instead of decoded text/tool calls.

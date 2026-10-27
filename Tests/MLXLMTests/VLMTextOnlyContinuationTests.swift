@@ -177,14 +177,14 @@ struct VLMTextOnlyContinuationTests {
         let expected = try prepare(
             model, tokens: MLXArray((1 ... 9).map(Int32.init)).expandedDimensions(axis: 0),
             cache: referenceCache, prefill: .init(chunking: .unchunked))
-        #expect(
-            allClose(actual[0..., -1, 0...], expected[0..., -1, 0...], rtol: 1e-4, atol: 1e-4)
-                .item(Bool.self))
+        expectClose(
+            actual[0..., -1, 0...], expected[0..., -1, 0...], rtol: 1e-4, atol: 1e-4,
+            reducedAtol: 2e-2)
         let token = MLXArray([Int32(11)]).expandedDimensions(axis: 0)
         let decoded = model(token, cache: cache)
         let reference = model(token, cache: referenceCache)
         eval(decoded, reference, cache, referenceCache)
-        #expect(allClose(decoded, reference, rtol: 1e-4, atol: 1e-4).item(Bool.self))
+        expectClose(decoded, reference, rtol: 1e-4, atol: 1e-4, reducedAtol: 2e-2)
         #expect(cache.allSatisfy { $0.offset == 10 })
     }
 

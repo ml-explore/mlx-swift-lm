@@ -19,13 +19,94 @@ enum SchemaConverter {
     /// So `JSONEncoder().encode(schema)` produces the same JSON bytes as
     /// `JSONEncoder().encode(schema.jsonSchema())` would, without needing
     /// to import the framework that owns the `JSONSchema` type.
+    ///
+    /// Object `properties` are written in the schema's declared order (see
+    /// `orderedJSONString(_:)`).
     static func encodeToJSON(_ schema: GenerationSchema) throws -> String {
         let data = try JSONEncoder().encode(schema)
-        guard let jsonString = String(data: data, encoding: .utf8) else {
+        let jsonString = try orderedJSONString(try JSONSerialization.jsonObject(with: data))
+        logger.debug("Schema JSON (\(jsonString.utf8.count) bytes)")
+        return jsonString
+    }
+
+    /// Serializes parsed JSON, writing the keys of every schema `properties`
+    /// object in the order given by its sibling `"x-order"` array.
+    ///
+    /// xgrammar generates properties in the order they appear in the schema
+    /// text, while `GenerationSchema` encodes them from a dictionary in an
+    /// arbitrary order. `x-order` carries the declared order. Properties
+    /// missing from `x-order` follow the ordered ones, sorted by name, and
+    /// `x-order` entries with no matching property are ignored. Other keys
+    /// are sorted by name.
+    static func orderedJSONString(_ value: Any) throws -> String {
+        var output = ""
+        try writeJSON(value, to: &output, isPropertyMap: false, order: nil)
+        return output
+    }
+
+    private static func writeJSON(
+        _ value: Any, to output: inout String, isPropertyMap: Bool, order: [String]?
+    ) throws {
+        switch value {
+        case let object as [String: Any]:
+            var keys = object.keys.sorted()
+            if let order {
+                let rank = Dictionary(
+                    order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+                keys.sort {
+                    switch (rank[$0], rank[$1]) {
+                    case (let a?, let b?): a < b
+                    case (_?, nil): true
+                    case (nil, _?): false
+                    case (nil, nil): $0 < $1
+                    }
+                }
+            }
+            // Inside a property map the keys are property names, so a
+            // property that happens to be called `properties` is not a
+            // schema keyword.
+            let xOrder = isPropertyMap ? nil : (object["x-order"] as? [String])
+            output += "{"
+            for (index, key) in keys.enumerated() {
+                if index > 0 { output += "," }
+                try writeJSON(key, to: &output, isPropertyMap: false, order: nil)
+                output += ":"
+                let isProperties =
+                    !isPropertyMap && key == "properties" && object[key] is [String: Any]
+                try writeJSON(
+                    object[key] as Any, to: &output,
+                    isPropertyMap: isProperties, order: isProperties ? xOrder : nil)
+            }
+            output += "}"
+        case let array as [Any]:
+            output += "["
+            for (index, element) in array.enumerated() {
+                if index > 0 { output += "," }
+                try writeJSON(element, to: &output, isPropertyMap: false, order: nil)
+            }
+            output += "]"
+        case let string as String:
+            // A one-element array encodes to `["<escaped string>"]`.
+            let data = try JSONSerialization.data(withJSONObject: [string])
+            guard let encoded = String(data: data, encoding: .utf8) else {
+                throw SchemaConversionError.encodingFailed
+            }
+            output += encoded.dropFirst().dropLast()
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                output += number.boolValue ? "true" : "false"
+            } else {
+                let data = try JSONSerialization.data(withJSONObject: [number])
+                guard let encoded = String(data: data, encoding: .utf8) else {
+                    throw SchemaConversionError.encodingFailed
+                }
+                output += encoded.dropFirst().dropLast()
+            }
+        case is NSNull:
+            output += "null"
+        default:
             throw SchemaConversionError.encodingFailed
         }
-        logger.debug("Schema JSON (\(data.count) bytes)")
-        return jsonString
     }
 
     /// Builds the JSON Schema describing the tool-calling envelope itself:
@@ -66,12 +147,9 @@ enum SchemaConverter {
         tools: [Transcript.ToolDefinition]
     ) throws -> String {
         let envelope = try toolCallingEnvelopeObject(tools: tools)
-        let data = try JSONSerialization.data(withJSONObject: envelope)
-        guard let jsonString = String(data: data, encoding: .utf8) else {
-            throw SchemaConversionError.encodingFailed
-        }
+        let jsonString = try orderedJSONString(envelope)
         logger.debug(
-            "Tool-calling envelope JSON (\(data.count) bytes, \(tools.count) tools)")
+            "Tool-calling envelope JSON (\(jsonString.utf8.count) bytes, \(tools.count) tools)")
         return jsonString
     }
 
@@ -187,12 +265,9 @@ enum SchemaConverter {
             ] as [String: Any],
         ]
 
-        let data = try JSONSerialization.data(withJSONObject: structuralTag)
-        guard let jsonString = String(data: data, encoding: .utf8) else {
-            throw SchemaConversionError.encodingFailed
-        }
+        let jsonString = try orderedJSONString(structuralTag)
         logger.debug(
-            "Tool-calling structural-tag JSON (\(data.count) bytes, \(tools.count) tools)"
+            "Tool-calling structural-tag JSON (\(jsonString.utf8.count) bytes, \(tools.count) tools)"
         )
         return jsonString
     }
@@ -239,6 +314,7 @@ enum SchemaConverter {
                 "type": "object",
                 "required": ["name", "arguments"],
                 "additionalProperties": false,
+                "x-order": ["name", "arguments"],
                 "properties": [
                     "name": ["const": tool.name],
                     "arguments": paramsAny,

@@ -1,8 +1,7 @@
 import Foundation
 import MLX
-import os
 
-private let logger = Logger(subsystem: "mlx-swift-lm", category: "paroquant")
+private let logger = MLXLogger(label: "paroquant")
 
 /// Prepared Checkpoint — the once-converted MLX-native form of a PARO
 /// checkpoint, stored beside the original so later loads skip the AutoAWQ
@@ -143,14 +142,14 @@ public enum ParoQuantPreparedCheckpoint {
                     Manifest.self, from: Data(manifestJSON.utf8)),
                 stored == manifest
             else {
-                logger.notice("Prepared Checkpoint is stale — re-converting")
+                logger.info("Prepared Checkpoint is stale — re-converting")
                 try? FileManager.default.removeItem(at: url)
                 return nil
             }
             return arrays
         } catch {
             logger.warning(
-                "Prepared Checkpoint unreadable (\(String(describing: error), privacy: .public)) — re-converting"
+                "Prepared Checkpoint unreadable (\(String(describing: error))) — re-converting"
             )
             try? FileManager.default.removeItem(at: url)
             return nil
@@ -186,8 +185,8 @@ public enum ParoQuantPreparedCheckpoint {
                 importantUsage > 0
                 ? importantUsage : Int64(capacity?.volumeAvailableCapacity ?? 0)
             if free > 0, free < estimatedBytes * freeSpaceSafetyFactor {
-                logger.notice(
-                    "Prepared Checkpoint write skipped — free space \(free, privacy: .public)B < \(freeSpaceSafetyFactor, privacy: .public)× estimated \(estimatedBytes, privacy: .public)B"
+                logger.info(
+                    "Prepared Checkpoint write skipped — free space \(free)B < \(freeSpaceSafetyFactor)× estimated \(estimatedBytes)B"
                 )
                 return
             }
@@ -204,12 +203,12 @@ public enum ParoQuantPreparedCheckpoint {
             try? fm.removeItem(at: url)
             try fm.moveItem(at: tmpURL, to: url)
             let seconds = (clock.now - start) / .seconds(1)
-            logger.notice(
-                "Prepared Checkpoint written: \(estimatedBytes, privacy: .public)B in \(String(format: "%.1f", seconds), privacy: .public)s"
+            logger.info(
+                "Prepared Checkpoint written: \(estimatedBytes)B in \(String(format: "%.1f", seconds))s"
             )
         } catch {
             logger.warning(
-                "Prepared Checkpoint write failed (\(String(describing: error), privacy: .public)) — next load converts again"
+                "Prepared Checkpoint write failed (\(String(describing: error))) — next load converts again"
             )
             try? fm.removeItem(at: tmpURL)
         }

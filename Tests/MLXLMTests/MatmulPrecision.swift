@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import Testing
 import XCTest
 
 /// The precision MLX uses for float32 matmuls on the machine running the tests, measured once.
@@ -57,6 +58,64 @@ enum MatmulPrecision {
     /// to a few times 1e-3; 2e-2 clears that with margin while staying far below the O(1)
     /// shift a real positioning error produces.
     static let splitTolerance: Float = tolerance(float32: 1e-3, reduced: 2e-2)
+
+    /// Nil when `|actual - expected| <= atol + rtol * |expected|` elementwise, else a message
+    /// with the worst difference. `atol` applies with IEEE float32, `reducedAtol` with TF32.
+    static func mismatch(
+        _ actual: MLXArray, _ expected: MLXArray, rtol: Double, atol: Double, reducedAtol: Double
+    ) -> String? {
+        guard actual.shape == expected.shape else {
+            return "shape \(actual.shape) != \(expected.shape)"
+        }
+        let atol = tolerance(float32: atol, reduced: reducedAtol)
+        if allClose(actual, expected, rtol: rtol, atol: atol).item(Bool.self) {
+            return nil
+        }
+        let worst = abs(actual - expected).max().item(Float.self)
+        let precision = isReducedFloat32 ? "TF32" : "float32"
+        return "values differ by up to \(worst) (rtol \(rtol), atol \(atol), \(precision))"
+    }
+}
+
+/// Expect two float32 results to agree when they come from different matmul shapes or kernels
+/// (chunked, cached, quantized, or an external reference). See ``MatmulPrecision``.
+func expectClose(
+    _ actual: MLXArray, _ expected: MLXArray, rtol: Double = 0, atol: Double,
+    reducedAtol: Double, sourceLocation: SourceLocation = #_sourceLocation
+) {
+    let mismatch = MatmulPrecision.mismatch(
+        actual, expected, rtol: rtol, atol: atol, reducedAtol: reducedAtol)
+    #expect(mismatch == nil, "\(mismatch ?? "")", sourceLocation: sourceLocation)
+}
+
+/// ``expectClose(_:_:rtol:atol:reducedAtol:sourceLocation:)`` against reference values.
+func expectClose(
+    _ actual: MLXArray, _ expected: [Float], rtol: Double = 0, atol: Double,
+    reducedAtol: Double, sourceLocation: SourceLocation = #_sourceLocation
+) {
+    guard actual.size == expected.count else {
+        Issue.record(
+            "\(actual.size) values, expected \(expected.count)", sourceLocation: sourceLocation)
+        return
+    }
+    expectClose(
+        actual, MLXArray(expected, actual.shape), rtol: rtol, atol: atol,
+        reducedAtol: reducedAtol, sourceLocation: sourceLocation)
+}
+
+/// The XCTest form of ``expectClose(_:_:rtol:atol:reducedAtol:sourceLocation:)``.
+func assertClose(
+    _ actual: MLXArray, _ expected: MLXArray, rtol: Double = 0, atol: Double,
+    reducedAtol: Double, _ message: String = "", file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    if let mismatch = MatmulPrecision.mismatch(
+        actual, expected, rtol: rtol, atol: atol, reducedAtol: reducedAtol)
+    {
+        XCTFail(
+            [message, mismatch].filter { !$0.isEmpty }.joined(separator: ": "), file: file,
+            line: line)
+    }
 }
 
 final class MatmulPrecisionTests: XCTestCase {

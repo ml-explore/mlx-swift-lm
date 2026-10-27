@@ -108,6 +108,111 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertWarmTextContinuation(try makeTinyModel())
     }
 
+    func testWarmContinuationAfterCacheRotationMatchesDecode() throws {
+        for (capacity, suffixLength) in [(16, 6), (16, 1), (16, 23), (1, 6)] {
+            let model = try makeTinyModel()
+            let parameters = GenerateParameters(
+                kvCache: KVCacheConfiguration(
+                    capacity: try .init(maxTokens: capacity, preservedPrefixTokens: 0)))
+            let cache = try model.newCache(parameters: parameters)
+            let (_, initialState) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: textTokens(capacity))), cache: cache, state: nil,
+                    prefill: .init(chunking: .unchunked)))
+            var state = initialState
+            let decoded = textTokens(5, seed: 3)
+            for index in 0 ..< decoded.dim(1) {
+                let output = model(
+                    .init(tokens: decoded[0..., index ..< index + 1]), cache: cache, state: state)
+                eval(output.logits)
+                state = output.state
+            }
+            XCTAssertTrue(cache.allSatisfy { $0.offset == capacity + 5 })
+
+            let referenceCache = cache.map { $0.copy() }
+            let suffix = textTokens(suffixLength, seed: 9)
+            var referenceState = state
+            var expected = [MLXArray]()
+            for index in 0 ..< suffix.dim(1) {
+                let output = model(
+                    .init(tokens: suffix[0..., index ..< index + 1]), cache: referenceCache,
+                    state: referenceState)
+                eval(output.logits)
+                expected.append(output.logits)
+                referenceState = output.state
+            }
+
+            let result = try model.prepare(
+                LMInput(text: .init(tokens: suffix)), cache: cache, state: state,
+                prefill: .init(chunking: .unchunked))
+            guard case .logits(let output) = result else {
+                return XCTFail("expected logits from warm continuation")
+            }
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(output.logits, concatenated(expected, axis: 1)),
+                MatmulPrecision.splitTolerance)
+            XCTAssertTrue(cache.allSatisfy { $0.offset == capacity + 5 + suffixLength })
+        }
+    }
+
+    func testWindowedPrefillBeyondCacheCapacityMatchesDecode() throws {
+        let model = try makeTinyModel()
+        let parameters = GenerateParameters(
+            kvCache: KVCacheConfiguration(
+                capacity: try .init(maxTokens: 16, preservedPrefixTokens: 0)))
+        let tokens = textTokens(40)
+        let referenceCache = try model.newCache(parameters: parameters)
+        let (_, initialState) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: tokens[0..., 0 ..< 1])), cache: referenceCache,
+                state: nil, prefill: .init()))
+        var state = initialState
+        var expected = MLXArray(0)
+        for index in 1 ..< tokens.dim(1) {
+            let output = model(
+                .init(tokens: tokens[0..., index ..< index + 1]), cache: referenceCache,
+                state: state)
+            expected = output.logits[0..., -1, 0...]
+            eval(expected)
+            state = output.state
+        }
+
+        let cache = try model.newCache(parameters: parameters)
+        let (actual, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: tokens)), cache: cache, state: nil,
+                prefill: .init(stepSize: 7)))
+        XCTAssertLessThanOrEqual(maxAbsDiff(actual, expected), MatmulPrecision.splitTolerance)
+        XCTAssertEqual(cache.first?.offset, 40)
+        XCTAssertEqual(cache.first?.state.first?.dim(2), 16)
+    }
+
+    func testWindowedImageContinuationWithPreservedCachePrefix() throws {
+        try withRandomState(MLXRandom.RandomState(seed: 47)) {
+            let model = try makeTinyModel()
+            let parameters = GenerateParameters(
+                kvCache: KVCacheConfiguration(
+                    capacity: try .init(maxTokens: 16, preservedPrefixTokens: 4)))
+            let cache = try model.newCache(parameters: parameters)
+            let prompt = concatenated(
+                [textTokens(6), visionStart(), imageRun(), textTokens(12, seed: 2)], axis: 1)
+            let (initialLogits, state) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: prompt), image: makeImage()), cache: cache,
+                    state: nil, prefill: .init(stepSize: 5)))
+            eval(initialLogits)
+            XCTAssertEqual(cache.first?.offset, 23)
+
+            let (logits, _) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: textTokens(9, seed: 5))), cache: cache,
+                    state: state, prefill: .init(stepSize: 4)))
+            XCTAssertTrue(logits.asArray(Float.self).allSatisfy(\.isFinite))
+            XCTAssertEqual(cache.first?.offset, 32)
+            XCTAssertEqual(cache.first?.state.first?.dim(2), 16)
+        }
+    }
+
     /// A text-only follow-up may be rank-1 even though the cache was seeded by
     /// a batched image prompt. Warm routing must normalize it before slicing.
     func testRank1WarmImageContinuationMatchesFullPrefill() throws {

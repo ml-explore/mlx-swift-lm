@@ -2,6 +2,58 @@
 
 Compose a token handler to observe generation without changing ordinary text or tool-call events.
 
+## Cached chat sessions
+
+Observe a ``ChatSession`` response while retaining its transcript and KV cache.
+The `observe` method accepts a ``GenerationTransformer`` that configures
+this request and wraps a fresh text/tool handler for every generation pass:
+
+```swift
+let session = ChatSession(modelContainer)
+for try await event in session.observe(to: "Explain gravity.", using: .logProbabilities(topCount: 5)) {
+    if let generation = event.generation, let text = generation.chunk {
+        print(text, terminator: "")
+    }
+    if let values = event.logProbabilities {
+        print(values.chosen.token, values.chosen.logProbability)
+    }
+}
+```
+
+`topCount` is the number of top candidates; `0` reports only the chosen token.
+``LogProbabilityGenerationTransformer`` configures a copy of the session's
+parameters. This applies to the entire request, including automatic tool restarts,
+without changing `generateParameters`, later calls, or forks.
+
+## Custom transformers
+
+A transformer's ``GenerationTransformer/configure(_:)`` enables the computation
+its handler needs. Its ``GenerationTransformer/makeHandler(wrapping:)`` creates
+fresh decoding state for each pass. The output can be any
+``GenerationProviding`` type, including custom events unrelated to probabilities.
+Observation-only events return `nil` from ``GenerationProviding/generation``.
+``TextGenerationTransformer`` passes through the standard handler and parameters.
+
+Wrap the supplied ``TextToolTokenLoopHandler`` and forward each base event exactly
+once, in order. Preserve its stop-token properties, dispositions, final output,
+and completion metadata. The session uses those events to update its transcript
+and cache and dispatch tools. Automatically dispatched tool-call events are
+consumed by the session; other transformed events reach the caller unchanged.
+Cached-prompt counts are attached before the transformer sees completion events.
+
+Probability events precede the token's decoded events. They include reasoning and
+tool syntax and omit excluded stop tokens and unused lookahead. A completion
+event ends each pass before automatic tool dispatch starts the next pass, so
+observations can be grouped without a separate callback channel.
+
+The ordinary `streamDetails` overload, `respond`, and `streamResponse` retain their
+output and handler through the text transformer. Leave `GenerateParameters.logProbabilities` as `nil` when
+unused to avoid probability computation and readback.
+
+Requesting log probabilities with active speculative decoding throws
+``ChatSession/ObservationError/unsupportedSpeculativeDecoding``. A configuration that falls back to standard decoding can still report
+probabilities. Observation does not silently change the decoding strategy.
+
 ## Overview
 
 ``Generation`` and ``TokenGeneration`` keep their existing cases. For token-level

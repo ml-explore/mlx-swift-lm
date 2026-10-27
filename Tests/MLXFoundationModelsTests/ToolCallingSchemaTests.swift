@@ -125,6 +125,10 @@ struct ToolCallingSchemaTests {
         let nameSchema = try #require(properties["name"] as? [String: Any])
         #expect(nameSchema["const"] as? String == "get_weather")
         #expect(properties["arguments"] != nil, "arguments schema must be nested verbatim")
+
+        let nameIndex = try #require(json.range(of: "\"name\":{")).lowerBound
+        let argumentsIndex = try #require(json.range(of: "\"arguments\":{")).lowerBound
+        #expect(nameIndex < argumentsIndex, "name must be generated before arguments")
     }
 
     @Test
