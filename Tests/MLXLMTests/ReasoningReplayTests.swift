@@ -113,6 +113,75 @@ struct ReasoningReplayTests {
                 "<|channel>thought\nI need the weather\n<channel|><|tool_call>"))
         #expect(infos.last?.cachedPromptTokenCount == prompts[0].count + firstOutput.count)
     }
+
+    // MARK: - The prompt is read before the prefill is queued
+
+    @Test("generate() reads the prompt before the first forward pass")
+    func generateReadsPromptBeforePrefill() async throws {
+        let log = EventLog()
+        let prompt = bytes("user:\nhi\nassistant:\n")
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "replay", eosTokenIds: [256], reasoningConfig: QwenReasoningProtocol.qwen3),
+            model: ScriptedModel(scripts: [bytes("ok") + [256]], log: log),
+            processor: QwenLikeProcessor(generator: DefaultMessageGenerator(), log: log),
+            tokenizer: ByteTokenizer(log: log))
+
+        let stream = try MLXLMCommon.generate(
+            input: LMInput(tokens: MLXArray(prompt)),
+            parameters: GenerateParameters(maxTokens: 4, temperature: 0), context: context)
+        for await _ in stream {}
+
+        let events = log.events
+        let firstForward = try #require(events.firstIndex(of: .forward))
+        #expect(events[..<firstForward].contains(.decode(prompt)))
+        #expect(!events[firstForward...].contains(.decode(prompt)))
+    }
+
+    @Test("Speculative generate() reads the prompt before the first forward pass")
+    func speculativeGenerateReadsPromptBeforePrefill() async throws {
+        let log = EventLog()
+        let prompt = bytes("user:\nhi\nassistant:\n")
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "replay", eosTokenIds: [256], reasoningConfig: QwenReasoningProtocol.qwen3),
+            model: ScriptedModel(scripts: [bytes("ok") + [256]], log: log),
+            processor: QwenLikeProcessor(generator: DefaultMessageGenerator(), log: log),
+            tokenizer: ByteTokenizer(log: log))
+
+        let stream = try MLXLMCommon.generate(
+            input: LMInput(tokens: MLXArray(prompt)),
+            parameters: GenerateParameters(maxTokens: 4, temperature: 0), context: context,
+            draftModel: ScriptedModel(scripts: [bytes("ok") + [256]], log: log),
+            numDraftTokens: 2)
+        for await _ in stream {}
+
+        let events = log.events
+        let firstForward = try #require(events.firstIndex(of: .forward))
+        #expect(events[..<firstForward].contains(.decode(prompt)))
+        #expect(!events[firstForward...].contains(.decode(prompt)))
+    }
+
+    @Test("ChatSession decodes the prompt tail once per turn, before the prefill")
+    func chatSessionDecodesPromptTailOnce() async throws {
+        let log = EventLog()
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "replay", eosTokenIds: [256], reasoningConfig: QwenReasoningProtocol.qwen3),
+            model: ScriptedModel(scripts: [bytes("ok") + [256]], log: log),
+            processor: QwenLikeProcessor(generator: DefaultMessageGenerator(), log: log),
+            tokenizer: ByteTokenizer(log: log))
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 4, temperature: 0))
+
+        _ = try await session.respond(to: "hi")
+
+        let prompt = try #require(log.prompts.first)
+        let events = log.events
+        let firstForward = try #require(events.firstIndex(of: .forward))
+        #expect(events.filter { $0 == .decode(prompt) }.count == 1)
+        #expect(events[..<firstForward].contains(.decode(prompt)))
+    }
 }
 
 // MARK: - Helpers

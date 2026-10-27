@@ -268,15 +268,6 @@ public final class ChatSession {
         }
     }
 
-    private static func prefilledReasoningStartDelimiter(
-        in promptTokens: [Int], config: ReasoningConfig?, tokenizer: any Tokenizer
-    ) -> String? {
-        guard let config, !config.startDelimiter.isEmpty else { return nil }
-        let primed = ReasoningEventEmitter.promptEndsInsideReasoning(
-            promptTokens: promptTokens, config: config, tokenizer: tokenizer)
-        return primed ? config.startDelimiter : nil
-    }
-
     /// All mutable continuation state for one realized model cache.
     ///
     /// `KVCacheStorage` provides shared ownership of the cache array because
@@ -1206,6 +1197,11 @@ public final class ChatSession {
                             pendingOnDemandComponents(
                                 of: model, among: ModelComponent.needed(by: preparedInput)))
                         var input = preparedInput
+                        // The whole prompt, not `input`: the cache may leave less than the
+                        // prefill to prefill. Read before the prefill is queued.
+                        let reasoningPrimedInside = promptPrimesReasoning(
+                            input: preparedInput, modelConfiguration: modelConfiguration,
+                            tokenizer: tokenizer)
                         var prefilledReasoningStartDelimiter: String?
                         pendingMessages.removeAll()
 
@@ -1238,10 +1234,10 @@ public final class ChatSession {
                             || preparedInput.audio != nil
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
-                            prefilledReasoningStartDelimiter =
-                                ChatSession.prefilledReasoningStartDelimiter(
-                                    in: promptTokenIds, config: modelConfiguration.reasoningConfig,
-                                    tokenizer: tokenizer)
+                            if reasoningPrimedInside {
+                                prefilledReasoningStartDelimiter =
+                                    modelConfiguration.reasoningConfig?.startDelimiter
+                            }
                             let cachedTokenIds = currentConversation.cachedTokens
                             assert(
                                 kvCache.nativeAttentionOffsetsAreAligned,
@@ -1415,16 +1411,8 @@ public final class ChatSession {
                                 format: modelConfiguration.toolCallFormat ?? .json,
                                 tools: toolValidationSchemas,
                                 toolCallPolicy: generateParameters.toolCallPolicy,
-                                // The whole prompt, not `input`: the cache may leave
-                                // less than the prefill to prefill.
                                 reasoning: modelConfiguration.reasoningConfig.map {
-                                    (
-                                        config: $0,
-                                        primedInside: promptPrimesReasoning(
-                                            input: preparedInput,
-                                            modelConfiguration: modelConfiguration,
-                                            tokenizer: tokenizer)
-                                    )
+                                    (config: $0, primedInside: reasoningPrimedInside)
                                 })
                             base.cachedPromptTokenCount = cachedPromptTokenCount
                             return MLXLMCommon.generateTaskRecordingTokens(

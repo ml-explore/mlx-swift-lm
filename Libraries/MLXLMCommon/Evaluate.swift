@@ -2129,6 +2129,9 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    // Read the prompt before the iterator queues its prefill, which this would wait for.
+    let reasoningPrimedInside = promptPrimesReasoning(
+        input: input, modelConfiguration: context.configuration, tokenizer: context.tokenizer)
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
@@ -2140,9 +2143,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         tools: tools,
         toolCallPolicy: parameters.toolCallPolicy,
-        reasoningPrimedInside: promptPrimesReasoning(
-            input: input, modelConfiguration: context.configuration,
-            tokenizer: context.tokenizer))
+        reasoningPrimedInside: reasoningPrimedInside)
     return stream
 }
 
@@ -2215,6 +2216,9 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    // Read the prompt before the iterator queues its prefill, which this would wait for.
+    let reasoningPrimedInside = promptPrimesReasoning(
+        input: input, modelConfiguration: context.configuration, tokenizer: context.tokenizer)
     let iterator = try SpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -2239,12 +2243,7 @@ public func generate(
             tools: tools,
             toolCallPolicy: parameters.toolCallPolicy,
             reasoning: context.configuration.reasoningConfig.map {
-                (
-                    config: $0,
-                    primedInside: promptPrimesReasoning(
-                        input: input, modelConfiguration: context.configuration,
-                        tokenizer: context.tokenizer)
-                )
+                (config: $0, primedInside: reasoningPrimedInside)
             }
         )
     )
@@ -2544,6 +2543,9 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    // Read the prompt before the iterator queues its prefill, which this would wait for.
+    let reasoningPrimedInside = promptPrimesReasoning(
+        input: input, modelConfiguration: context.configuration, tokenizer: context.tokenizer)
     let iterator = try MTPSpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
@@ -2566,12 +2568,7 @@ public func generate(
             tools: tools,
             toolCallPolicy: parameters.toolCallPolicy,
             reasoning: context.configuration.reasoningConfig.map {
-                (
-                    config: $0,
-                    primedInside: promptPrimesReasoning(
-                        input: input, modelConfiguration: context.configuration,
-                        tokenizer: context.tokenizer)
-                )
+                (config: $0, primedInside: reasoningPrimedInside)
             }
         )
     )
