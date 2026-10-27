@@ -72,8 +72,9 @@ replay. GPT-OSS and Onyx deliberately do not replay their reasoning channels.
 When both reasoning delimiters are single tokens in the model's tokenizer, they are
 matched by token id. The same characters written out as ordinary text, for example
 when a model explains its own format, stay in the stream they appear in. A tag that
-ends a thought without closing it, such as Qwen's `<tool_call>`, is matched the same
-way when it is a single token. The tool-call parser itself still reads text.
+ends a thought without closing it, such as `<tool_call>` for Qwen or `<|tool_call>`
+for Gemma 4, is matched the same way when it is a single token. The tool-call parser
+itself still reads text.
 
 ## Task-Handle Pattern for Early Stop
 

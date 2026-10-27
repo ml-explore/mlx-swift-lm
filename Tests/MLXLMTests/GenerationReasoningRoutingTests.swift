@@ -141,19 +141,22 @@ struct GenerationReasoningRoutingTests {
 
     // MARK: - Interaction with the tool-call parser
 
-    @Test("Tool syntax inside a thought channel does not become a tool call")
-    func toolSyntaxInsideReasoningIsNotPromoted() {
+    @Test("A tool call opened inside a thought channel ends the thought, as Qwen's does")
+    func toolCallInsideReasoningEndsTheThought() {
+        // The model may not close the channel before calling. A later stray close is
+        // swallowed.
         let result = run(
             [
                 "<|channel>", "thought\n",
                 #"maybe <|tool_call>call:search{q:<|"|>x<|"|>}<tool_call|>"#,
-                "<channel|>", "I will not call it.",
+                "<channel|>", "Done.",
             ],
             format: .gemma4,
             reasoning: (config: .gemma4, primedInside: false))
 
-        #expect(result.toolCalls.isEmpty)
-        #expect(result.responseText == "I will not call it.")
+        #expect(result.reasoningText == "maybe")
+        #expect(result.toolCalls.map(\.function.name) == ["search"])
+        #expect(result.responseText == "Done.")
     }
 
     @Test("Qwen's implicit end delimiter exits reasoning and still opens a tool call")

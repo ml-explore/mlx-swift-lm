@@ -231,9 +231,10 @@ struct ReasoningChannelTests {
         #expect(segments == [.reasoning("notes"), .response("answer")])
     }
 
-    /// Adversarial rather than observed: no Gemma 4 template puts tool syntax inside
-    /// a channel. But if a model ever writes it there, that text must not reach the
-    /// answer, and therefore must not reach the tool-call parser.
+    /// A channel config that declares no implicit end keeps tool syntax inside a
+    /// thought as reasoning, so it never reaches the tool-call parser. The shipped
+    /// ``ReasoningConfig/gemma4`` preset does declare `<|tool_call>` as one, and
+    /// `GenerationReasoningRoutingTests` pins that path.
     @Test func toolSyntaxInsideThoughtStaysReasoning() {
         let segments = run(["<|channel>thought\nI could emit <|tool_call>here<channel|>Hi"])
         #expect(reasoningText(segments) == "I could emit <|tool_call>here")
@@ -397,6 +398,7 @@ struct ReasoningChannelTests {
         #expect(config.channel == .gemma4)
         #expect(config.isSpecialToken)
         #expect(config.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: false))
+        #expect(config.implicitEndDelimiters == ["<|tool_call>"])
     }
 
     /// The trailing whitespace of a thought channel is held until the close, as for

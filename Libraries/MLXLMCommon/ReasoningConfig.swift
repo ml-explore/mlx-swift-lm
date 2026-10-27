@@ -216,9 +216,13 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// suppresses the generation prompt entirely after a tool call or tool response.
     /// The model then opens the channel itself, so without this config its delimiters
     /// reach the caller as literal text.
+    ///
+    /// A tool call opened inside a thought channel ends it, since the model does not
+    /// always close the channel first.
     public static let gemma4 = ReasoningConfig(
         startDelimiter: "<|channel>", endDelimiter: "<channel|>",
         promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: false),
         isSpecialToken: true,
+        implicitEndDelimiters: ["<|tool_call>"],
         channel: .gemma4)
 }

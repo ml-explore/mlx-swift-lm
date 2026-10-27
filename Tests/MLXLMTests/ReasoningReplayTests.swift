@@ -182,6 +182,43 @@ struct ReasoningReplayTests {
         #expect(events.filter { $0 == .decode(prompt) }.count == 1)
         #expect(events[..<firstForward].contains(.decode(prompt)))
     }
+
+    // MARK: - Gemma 4 tool call inside an unclosed thought channel
+
+    @Test("A Gemma 4 tool call inside an unclosed thought channel ends the thought")
+    func gemma4ToolCallInsideUnclosedChannel() {
+        let result = runDecoder([
+            "<|channel>", "thought\n", "I need the weather",
+            #"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}<tool_call|>"#,
+        ])
+
+        #expect(result.toolCalls.map(\.function.name) == ["get_weather"])
+        #expect(result.reasoning == "I need the weather")
+        #expect(result.response.isEmpty)
+    }
+
+    @Test("A Gemma 4 tool call after the channel closes is parsed")
+    func gemma4ToolCallAfterClosedChannel() {
+        let result = runDecoder([
+            "<|channel>", "thought\n", "I need the weather", "<channel|>",
+            #"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}<tool_call|>"#,
+        ])
+
+        #expect(result.toolCalls.map(\.function.name) == ["get_weather"])
+        #expect(result.reasoning == "I need the weather")
+    }
+
+    @Test("A Gemma 4 tool call token inside an unclosed thought channel ends the thought")
+    func gemma4ToolCallTokenInsideUnclosedChannel() {
+        // Every delimiter is its own token here, so all are matched by id.
+        let result = runDecoder([
+            "<|channel>", "thought\n", "I need the weather", "<|tool_call>",
+            #"call:get_weather{city:<|"|>Paris<|"|>}"#, "<tool_call|>", "<channel|>",
+        ])
+
+        #expect(result.toolCalls.map(\.function.name) == ["get_weather"])
+        #expect(result.reasoning == "I need the weather")
+    }
 }
 
 // MARK: - Helpers
