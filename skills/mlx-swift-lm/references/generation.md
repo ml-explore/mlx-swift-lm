@@ -45,8 +45,8 @@ for await event in stream {
     case .chunk(let text):
         print(text, terminator: "")
     case .reasoning(let text):
-        // Thinking, with the protocol's delimiters removed. Keep it out of any
-        // history you replay: these families' own chat templates drop it.
+        // Thinking, with the protocol's delimiters removed. Keep it out of the
+        // content you replay; ChatSession records it beside the message instead.
         print(text, terminator: "")
     case .toolCall(let call):
         print("\nTool requested: \(call.function.name)")
@@ -65,8 +65,9 @@ Harmony, Onyx). Everything else streams as `.chunk` exactly as before.
 
 `ChatSession.streamResponse` yields the answer only; use `streamDetails` to observe
 `.reasoning` alongside tool calls. The session records the answer as the assistant
-message. It keeps a finished thought beside that message, and only a model whose
-chat template replays reasoning (Qwen3-VL's `reasoning_content`) sends it back.
+message. It keeps a finished thought beside that message, and the message generators
+pass it to the chat template as `reasoning_content`, which Qwen and Gemma 4 templates
+replay. GPT-OSS and Onyx deliberately do not replay their reasoning channels.
 
 When both reasoning delimiters are single tokens in the model's tokenizer, they are
 matched by token id. The same characters written out as ordinary text, for example

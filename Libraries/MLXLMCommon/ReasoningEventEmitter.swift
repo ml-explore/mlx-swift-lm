@@ -89,6 +89,10 @@ public struct ReasoningEventEmitter: Sendable {
     /// ``ReasoningChannel/maxLabelLength`` bounds.
     private var pendingPrefix: String = ""
 
+    /// A thought's trailing whitespace, which precedes `pendingPrefix`. Held until it
+    /// is known whether the thought closes, and kept apart so it is never rescanned.
+    private var heldWhitespace: String = ""
+
     /// When set, the next non-empty emission has its leading whitespace trimmed.
     /// Set after consuming any delimiter, so the template newline(s) immediately
     /// following `<think>`/`</think>` are dropped (mirrors `unwrapToolCallMarkers`).
@@ -244,15 +248,34 @@ public struct ReasoningEventEmitter: Sendable {
                 state = resolved
 
             case .outside, .inside:
+                // Only set while inside a thought, and it comes before all of `working`.
+                var held = heldWhitespace
+                heldWhitespace = ""
                 let watched = watchedDelimiters
                 guard let hit = earliestMatch(in: working, of: watched) else {
                     // No full delimiter. Hold back any suffix that could begin one
                     // on the next chunk; emit the rest in the current mode.
-                    let tail = heldBackTailLength(working, delimiters: watched)
-                    let splitIndex = working.index(working.endIndex, offsetBy: -tail)
-                    appendSegment(
-                        String(working[working.startIndex ..< splitIndex]),
-                        trimmingTrailing: false, into: &output)
+                    let splitIndex = working.index(
+                        working.endIndex,
+                        offsetBy: -heldBackTailLength(working, delimiters: watched))
+                    // Also hold a thought's trailing whitespace, which a close would trim,
+                    // so the recorded thought does not depend on how tokens split it.
+                    var holdIndex = splitIndex
+                    if case .inside(.reasoning) = state {
+                        while holdIndex > working.startIndex,
+                            working[working.index(before: holdIndex)].isWhitespace
+                        {
+                            holdIndex = working.index(before: holdIndex)
+                        }
+                    }
+                    if holdIndex > working.startIndex {
+                        appendSegment(
+                            held + working[working.startIndex ..< holdIndex],
+                            trimmingTrailing: false, into: &output)
+                        held = ""
+                    }
+                    held += working[holdIndex ..< splitIndex]
+                    heldWhitespace = held
                     pendingPrefix = String(working[splitIndex...])
                     break scan
                 }
@@ -260,7 +283,7 @@ public struct ReasoningEventEmitter: Sendable {
                 // Text before the marker belongs to the current mode; trim the
                 // whitespace immediately preceding the marker.
                 appendSegment(
-                    String(working[working.startIndex ..< hit.range.lowerBound]),
+                    held + working[working.startIndex ..< hit.range.lowerBound],
                     trimmingTrailing: true, into: &output)
 
                 // An implicit end delimiter is answer/tool content rather than
@@ -326,9 +349,10 @@ public struct ReasoningEventEmitter: Sendable {
             // channel is still open, so route what is left to reasoning.
             state = .inside(.reasoning)
         }
-        if !pendingPrefix.isEmpty {
-            let leftover = pendingPrefix
+        if !pendingPrefix.isEmpty || !heldWhitespace.isEmpty {
+            let leftover = heldWhitespace + pendingPrefix
             pendingPrefix = ""
+            heldWhitespace = ""
             appendSegment(leftover, trimmingTrailing: true, into: &output)
         }
         return output

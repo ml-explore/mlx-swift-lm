@@ -48,6 +48,7 @@ struct ReasoningTokenCollectorTests {
         20: "<think></think>",  // empty block in a single token
         30: "a", 31: "b", 32: "c",
         40: "\nthought\n",  // template-style newlines
+        41: " \n",  // whitespace as its own token
     ]
     private static let tok = MapTokenizer(map: vocab)
     private static let textTok = MapTokenizer(map: vocab, resolvesTokens: false)
@@ -170,5 +171,17 @@ struct ReasoningTokenCollectorTests {
         #expect(ids == [1, 40, 4])
         #expect(reasoningText(segs).contains("thought"))
         #expect(!leaksMarker(segs))
+    }
+
+    /// A thought's trailing whitespace is held until the close token decides whether
+    /// it is trimmed, and is kept when the thought goes on instead.
+    @Test func holdsThoughtWhitespaceUntilTheCloseToken() {
+        let closed = drive([1, 2, 41, 4, 5])
+        #expect(closed.stopped)
+        #expect(reasoningText(closed.segments) == "reason")
+
+        let continued = drive([1, 2, 41, 3, 4, 5])
+        #expect(continued.stopped)
+        #expect(reasoningText(continued.segments) == "reason \ning")
     }
 }

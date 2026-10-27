@@ -137,10 +137,9 @@ struct ReasoningChannelTests {
     /// widths that land inside both 10-character markers and inside the label - and
     /// requires the same text on the same side every time.
     ///
-    /// Whitespace is normalized before comparing, and only whitespace: trimming
-    /// around a delimiter is position-dependent (text before a marker loses its
-    /// trailing whitespace only when both land in the same chunk), which is a
-    /// pre-existing property of the pair path, not something the label state adds.
+    /// Whitespace is normalized before comparing, and only whitespace: answer text
+    /// before a marker loses its trailing whitespace only when both land in the same
+    /// chunk. A thought holds its trailing whitespace, so it does not vary.
     @Test func chunkingNeverChangesClassification() {
         let corpus = [
             "<|channel>thought\nreasoning<channel|>answer",
@@ -398,6 +397,13 @@ struct ReasoningChannelTests {
         #expect(config.channel == .gemma4)
         #expect(config.isSpecialToken)
         #expect(config.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: false))
+    }
+
+    /// The trailing whitespace of a thought channel is held until the close, as for
+    /// a delimiter pair, so the recorded thought does not depend on the chunking.
+    @Test func thoughtChannelHoldsTrailingWhitespaceAcrossChunks() {
+        let segments = run(["<|channel>thought\n", "a", " \n", "<channel|>", "b"])
+        #expect(segments == [.reasoning("a"), .response("b")])
     }
 
     /// The delimiter-pair presets keep a `nil` channel, so adding the channel shape

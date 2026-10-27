@@ -163,9 +163,10 @@ final class QwenReasoningHistoryTests: XCTestCase {
         XCTAssertEqual(raw["reasoning_content"] as? String, "thought")
         XCTAssertEqual(try text(in: raw), "answer")
 
+        // Other generators replay it too; templates that do not read the key ignore it.
         let other = DefaultMessageGenerator().generate(message: retained)
         XCTAssertEqual(other["content"] as? String, "answer")
-        XCTAssertNil(other["reasoning_content"])
+        XCTAssertEqual(other["reasoning_content"] as? String, "thought")
     }
 
     func testRecordedReasoningWinsOverTagsInTheAnswer() throws {

@@ -2154,6 +2154,7 @@ public struct Gemma4MessageGenerator: MessageGenerator {
                 "content": contentParts(for: message, layout: .imagesThenVideosThenText),
             ]
         }
+        addReasoning(to: &dictionary, for: message)
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
     }

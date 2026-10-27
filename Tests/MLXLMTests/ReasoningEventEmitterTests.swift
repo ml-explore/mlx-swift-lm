@@ -181,6 +181,40 @@ struct ReasoningEventEmitterTests {
         #expect(responseText(segments) == "Answer")
     }
 
+    @Test func trimsThoughtTrailingWhitespaceAcrossChunks() {
+        let closed = run(primedInside: true, ["a", "  ", "b", " \n", "\n</think>answer"])
+        #expect(closed == [.reasoning("a"), .reasoning("  b"), .response("answer")])
+        let unclosed = run(primedInside: true, ["thought", " \n"])
+        #expect(unclosed == [.reasoning("thought")])
+    }
+
+    @Test func heldThoughtWhitespaceIsTrimmedAtAnImplicitEnd() {
+        let segments = run(
+            config: Self.thinkThenToolConfig, primedInside: true,
+            ["thought", " \n", "<tool_call>{}"])
+        #expect(segments == [.reasoning("thought"), .response("<tool_call>{}")])
+    }
+
+    /// Whitespace held before a partial delimiter is still the thought's text when
+    /// the stream ends: only the trailing run is dropped.
+    @Test func heldThoughtWhitespaceFlushesBeforeAPartialDelimiter() {
+        let segments = run(primedInside: true, ["thought", " <"])
+        #expect(segments == [.reasoning("thought"), .reasoning(" <")])
+    }
+
+    /// Held whitespace must not be rescanned on every chunk, or a model stuck emitting
+    /// newlines makes each chunk cost more than the last.
+    @Test func longWhitespaceRunInThoughtStaysLinear() {
+        var emitter = ReasoningEventEmitter(
+            config: Self.thinkThenToolConfig, primedInside: true)
+        let start = ContinuousClock.now
+        var segments = emitter.process("thought")
+        for _ in 0 ..< 20_000 { segments += emitter.process("\n") }
+        segments += emitter.process("</think>answer")
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(segments == [.reasoning("thought"), .response("answer")])
+    }
+
     // MARK: - Custom delimiters (registry-extensible families)
 
     @Test func customDelimitersRouteIndependently() {
