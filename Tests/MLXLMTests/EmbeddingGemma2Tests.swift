@@ -164,8 +164,13 @@ struct EmbeddingGemma2Tests {
             at: poolingDirectory, withIntermediateDirectories: true)
         try Data(#"{"word_embedding_dimension":12,"pooling_mode_mean_tokens":true}"#.utf8)
             .write(to: poolingDirectory.appendingPathComponent("config.json"))
+        let recorder = ModelLoadProgressTests.Recorder()
         let context = try await EmbedderModelFactory.shared.load(
-            from: directory, using: TestTokenizerLoader())
+            from: directory, using: TestTokenizerLoader(),
+            progress: .weights { recorder.record($0) })
+        #expect(recorder.fractions.contains { $0 < 1 })
+        #expect(recorder.fractions.last == 1)
+        #expect(recorder.fractions == recorder.fractions.sorted())
         #expect((context.model as? MLXLMCommon.EmbeddingGemma2) != nil)
         #expect(context.model.maxPositionEmbeddings == 8192)
         #expect(context.pooling.strategy == .none)

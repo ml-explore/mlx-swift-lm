@@ -62,14 +62,14 @@ private struct StubTokenizer: MLXLMCommon.Tokenizer {
 
 // MARK: - Model Construction (no download)
 
-/// A `ContainerLoader` backed by the stub downloader/tokenizer: no network, no
+/// A `ProgressContainerLoader` backed by the stub downloader/tokenizer: no network, no
 /// real weights. For construction / capability / gate tests.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-func stubLoad() -> MLXLanguageModel.ContainerLoader {
+func stubLoad() -> MLXLanguageModel.ProgressContainerLoader {
     { configuration, progress in
         try await loadModelContainer(
             from: StubDownloader(), using: StubTokenizerLoader(),
-            configuration: configuration, progressHandler: progress)
+            configuration: configuration, progress: progress)
     }
 }
 

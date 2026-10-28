@@ -82,7 +82,8 @@ public macro huggingFaceLoadModelContainer(
 ) -> ModelContainer =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContainerMacro")
 
-/// Load a `ModelContainer` using default hub client and tokenizer loader with progress.
+/// Load a `ModelContainer` using default hub client and tokenizer loader with
+/// download progress.
 ///
 /// ```swift
 /// import MLXHuggingFace
@@ -90,13 +91,23 @@ public macro huggingFaceLoadModelContainer(
 /// import Tokenizers
 ///
 /// let model = try await huggingFaceLoadModelContainer(
-///     configuration: modelConfiguration
-/// ) { progres in ... }
+///     configuration: modelConfiguration,
+///     progressHandler: { progress in ... })
 /// ```
 @freestanding(expression)
+@available(*, deprecated, message: "Use progress: .download { progress in ... }")
 public macro huggingFaceLoadModelContainer(
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void
+) -> ModelContainer =
+    #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContainerMacro")
+
+/// Load a `ModelContainer` using default hub services with phase-specific model-load
+/// progress.
+@freestanding(expression)
+public macro huggingFaceLoadModelContainer(
+    configuration: ModelConfiguration,
+    progress: LoadProgressHandlers
 ) -> ModelContainer =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContainerMacro")
 
@@ -117,7 +128,8 @@ public macro huggingFaceLoadModel(
 ) -> ModelContext =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContextMacro")
 
-/// Load a `ModelContext` using default hub client and tokenizer loader with progress.
+/// Load a `ModelContext` using default hub client and tokenizer loader with download
+/// progress.
 ///
 /// ```swift
 /// import MLXHuggingFace
@@ -125,13 +137,23 @@ public macro huggingFaceLoadModel(
 /// import Tokenizers
 ///
 /// let modelContext = try await huggingFaceLoadModel(
-///     configuration: modelConfiguration
-/// ) { progres in ... }
+///     configuration: modelConfiguration,
+///     progressHandler: { progress in ... })
 /// ```
 @freestanding(expression)
+@available(*, deprecated, message: "Use progress: .download { progress in ... }")
 public macro huggingFaceLoadModel(
     configuration: ModelConfiguration,
     progressHandler: @Sendable @escaping (Progress) -> Void
+) -> ModelContext =
+    #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContextMacro")
+
+/// Load a `ModelContext` using default hub services with phase-specific model-load
+/// progress.
+@freestanding(expression)
+public macro huggingFaceLoadModel(
+    configuration: ModelConfiguration,
+    progress: LoadProgressHandlers
 ) -> ModelContext =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LoadContextMacro")
 

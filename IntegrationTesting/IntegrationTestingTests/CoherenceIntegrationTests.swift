@@ -15,6 +15,17 @@ private let models = IntegrationTestModels(
     tokenizerLoader: #huggingFaceTokenizerLoader()
 )
 
+private final class WeightProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Double] = []
+
+    func record(_ progress: Progress) {
+        lock.withLock { values.append(progress.fractionCompleted) }
+    }
+
+    var fractions: [Double] { lock.withLock { values } }
+}
+
 /// Load `configuration`, run the planets coherence check, then release the
 /// model. Each coherence test uses a distinct model exactly once, so we evict
 /// it from the shared cache and clear the GPU buffer pool afterwards: loading
@@ -45,6 +56,18 @@ struct CoherenceIntegrationTests {
 
     @Test func llama3_2_1B() async throws {
         try await runCoherence(LLMRegistry.llama3_2_1B_4bit)
+    }
+
+    @Test func weightProgressLoadsAndGenerates() async throws {
+        let recorder = WeightProgressRecorder()
+        let container = try await LLMModelFactory.shared.loadContainer(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: LLMRegistry.llama3_2_1B_4bit,
+            progress: .weights { recorder.record($0) })
+        #expect(recorder.fractions.contains { $0 > 0 && $0 < 1 })
+        #expect(recorder.fractions.last == 1)
+        #expect(recorder.fractions == recorder.fractions.sorted())
+        try await ChatSessionTests.planetsCoherence(container: container)
     }
 
     @Test func qwen3_1_7B() async throws {
