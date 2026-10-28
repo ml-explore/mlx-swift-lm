@@ -126,7 +126,8 @@ jobs:
       - name: Run Tests (Xcode, macOS)
         shell: sh
         run: |
-          xcrun xctest ~/Library/Developer/Xcode/DerivedData/mlx-swift-lm-*/Build/Products/Debug/MLXLMTests.xctest
+          xcodebuild test -skipPackagePluginValidation -scheme mlx-swift-lm-Package \
+            -destination 'platform=macOS' -resultBundlePath MLXSwiftLMTests.xcresult
 
       - name: Upload test results
         if: failure()
@@ -134,8 +135,7 @@ jobs:
         with:
           name: test-results
           path: |
-            ~/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
-            /Users/runner/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+            MLXSwiftLMTests.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
 

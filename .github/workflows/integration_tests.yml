@@ -36,28 +36,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode 26
-        shell: bash
-        run: |
-          # This job runs on Xcode 26 only. The MLXFoundationModels adapter and its
-          # integration tests are gated on canImport(FoundationModels, _version: 2)
-          # (macOS 27 SDK), so on Xcode 26 they compile out and only the SDK-agnostic
-          # suites (MTP, Qwen3VL/Qwen3.5 vision, Coherence, Gemma4, tool calls, masks)
-          # build and run — i.e. exactly the tests that compile on this SDK.
-          # Fail loudly if no Xcode 26 is installed rather than fall through to a 27
-          # toolchain (which would fail to compile against a moving FoundationModels beta).
-          version_of() { "$1/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1; }
-          dev=""
-          for app in $(ls -d /Applications/Xcode_26*.app /Applications/Xcode-26*.app /Applications/Xcode.app 2>/dev/null | sort -Vr); do
-            case "$(version_of "$app")" in "Xcode 26"*) dev="$app/Contents/Developer"; break ;; esac
-          done
-          if [ -z "$dev" ]; then
-            echo "::error::Xcode 26 not found on this runner."
-            exit 1
-          fi
-          echo "Selected $(version_of "$(dirname "$(dirname "$dev")")") at $dev"
-          echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
-
       - name: Verify MetalToolchain installed
         shell: bash
         run: xcodebuild -showComponent MetalToolchain
