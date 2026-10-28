@@ -6,7 +6,7 @@ import MLXLMCommon
 import MLXNN
 import Testing
 
-@testable import MLXLLM
+@testable @_spi(GemmaEncoder) import MLXLLM
 @testable import MLXVLM
 
 // Tests that Gemma 3 configs read the global-layer RoPE scaling from `rope_parameters`, which
