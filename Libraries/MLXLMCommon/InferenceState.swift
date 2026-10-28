@@ -15,8 +15,7 @@ package struct InferenceStatePreparationReport {
     package var succeeded: Bool { failures.isEmpty }
 }
 
-private let inferenceStateLogger = Logger(
-    subsystem: "mlx-swift-lm", category: "inference-state")
+private let inferenceStateLogger = MLXLogger(label: "inference-state")
 
 /// Prepare a language model after checkpoint loading or an explicit topology
 /// update.

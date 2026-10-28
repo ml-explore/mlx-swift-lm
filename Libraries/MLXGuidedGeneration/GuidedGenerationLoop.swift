@@ -20,10 +20,7 @@ import MLXLMCommon
 /// KV cache.
 public enum GuidedGenerationLoop {
 
-    private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX",
-        category: "GuidedGenerationLoop"
-    )
+    private static let logger = MLXLogger(label: "GuidedGenerationLoop")
 
     /// Result of a single generation step.
     enum StepResult {

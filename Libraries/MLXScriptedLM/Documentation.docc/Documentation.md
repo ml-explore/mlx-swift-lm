@@ -17,6 +17,12 @@ provides pieces you control instead.
   word, and there is no end-of-sequence token, so generation runs until `maxTokens`.
 - term ``ScriptedChatTemplate``: The chat template protocol. ``MinimalChatTemplate``
   keeps prompts short and readable; ``ChatMLTemplate`` renders plain ChatML.
+- term ``Transcript``: The conversation to script, written in code or loaded from JSON.
+- term ``ScriptedLogitsModel``: Wraps a small random-weight model and boosts the scripted
+  token in its logits, so generation follows the transcript while the cache, samplers, and
+  processors stay real.
+- term ``ScriptedScenario``: Builds the tokenizer, model, and `ModelContext` from a
+  transcript.
 
 ```swift
 import MLXScriptedLM
@@ -43,6 +49,17 @@ let prompt = try tokenizer.applyChatTemplate(
 - ``ChatMLTemplate``
 - ``ScriptedTemplateMessage``
 - ``ScriptedTemplateError``
+
+### Scripted Models
+
+- ``ScriptedScenario``
+- ``Transcript``
+- ``ScriptedLogitsModel``
+- ``TurnScripts``
+- ``ForwardCallLog``
+- ``ForwardCall``
+- ``ForwardingLanguageModel``
+- ``ScriptedInputProcessor``
 
 ### Model Support
 

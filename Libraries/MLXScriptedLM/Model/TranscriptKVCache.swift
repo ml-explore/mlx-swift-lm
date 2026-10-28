@@ -16,7 +16,7 @@ import MLXLMCommon
 ///
 /// Note: this KVCache should not be used for any production use.
 /// Its performance is O(n^2) or worse and is strictly meant as
-/// a mechanism that a `ScriptedModel` could use.
+/// a mechanism that a `ScriptedLogitsModel` could use.
 public final class TranscriptKVCache: BaseKVCache, AuxiliaryKVCache {
 
     public override static var serializedClassName: String? { "MLXScriptedLM.TranscriptKVCache" }

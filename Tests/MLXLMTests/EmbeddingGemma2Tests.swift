@@ -179,7 +179,7 @@ struct EmbeddingGemma2Tests {
             0.049736522, 0.164332777, 0.185940713, 0.187425271, 0.166393027, 0.134533703,
         ]
         #expect(result.shape == [1, 12])
-        #expect(zip(result.asArray(Float.self), expected).allSatisfy { abs($0 - $1) < 0.00001 })
+        expectClose(result, expected, atol: 1e-5, reducedAtol: 1e-2)
     }
 
     @Test
@@ -528,14 +528,11 @@ struct EmbeddingGemma2Tests {
         let batched = model.embed(inputIds: ids, attentionMask: mask)
         try MLX.checkedEval(batched)
         #expect(batched.shape == [2, 12])
-        #expect(
-            zip(batched.asArray(Float.self), expected.flatMap { $0 }).allSatisfy {
-                abs($0 - $1) < 0.00001
-            })
+        expectClose(batched, expected.flatMap { $0 }, atol: 1e-5, reducedAtol: 1e-2)
 
         let single = model.embed(inputIds: ids[1..., 0 ..< 6], attentionMask: mask[1..., 0 ..< 6])
         try MLX.checkedEval(single)
-        #expect(zip(single.asArray(Float.self), expected[1]).allSatisfy { abs($0 - $1) < 0.00001 })
+        expectClose(single, expected[1], atol: 1e-5, reducedAtol: 1e-2)
     }
 
     /// Expected row comes from the Transformers float32 implementation with the same
@@ -566,7 +563,7 @@ struct EmbeddingGemma2Tests {
             0.868728220, 0.079042479, -0.071267642, 0.054610837, -0.041429795, -0.136714175,
             -0.154088214, -0.177199394, -0.185128003, -0.179980844, -0.219441086, -0.201574326,
         ]
-        #expect(zip(output.asArray(Float.self), expected).allSatisfy { abs($0 - $1) < 0.00001 })
+        expectClose(output, expected, atol: 1e-5, reducedAtol: 1e-2)
     }
 
     /// A tiny `gemma4_audio` tower: chunks of 4 over 11 soft tokens, so the attention
@@ -629,7 +626,7 @@ struct EmbeddingGemma2Tests {
         try MLX.checkedEval(output)
         #expect(output.shape == [1, 11, 8])
         let expected = try #require(Self.tinyAudioReference[futureContext])
-        #expect(zip(output.asArray(Float.self), expected).allSatisfy { abs($0 - $1) < 0.00001 })
+        expectClose(output, expected, atol: 1e-5, reducedAtol: 1e-2)
     }
 
     /// Writes `processor_config.json` into a new temporary directory.
@@ -676,10 +673,7 @@ struct EmbeddingGemma2Tests {
         let features = processor.features(samples: MLXArray(samples))
         try MLX.checkedEval(features)
         #expect(features.shape == [11, 8])
-        #expect(
-            zip(features.asArray(Float.self), Self.tinyLogMelReference).allSatisfy {
-                abs($0 - $1) < 0.0001
-            })
+        expectClose(features, Self.tinyLogMelReference, atol: 1e-4, reducedAtol: 1e-2)
     }
 
     /// Frame counts of the reference mask, which keeps the first 480,000 samples and

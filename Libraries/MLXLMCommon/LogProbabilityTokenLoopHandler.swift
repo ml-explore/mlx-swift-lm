@@ -7,6 +7,11 @@ public enum LogProbabilityGeneration<Output: Sendable>: Sendable {
 
     /// Log probabilities for one token, emitted before the wrapped handler's events.
     case probability(GenerateTokenLogProbabilities)
+
+    /// One token's log probabilities; `nil` for an event from the wrapped handler.
+    public var logProbabilities: GenerateTokenLogProbabilities? {
+        if case .probability(let values) = self { values } else { nil }
+    }
 }
 
 /// Adds per-token log probabilities to another handler's output.

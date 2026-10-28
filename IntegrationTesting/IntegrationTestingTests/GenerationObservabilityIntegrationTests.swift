@@ -79,4 +79,58 @@ struct GenerationObservabilityIntegrationTests {
             }
         }
     }
+
+    @Test(arguments: [
+        "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        "mlx-community/Qwen3.5-4B-4bit",
+    ])
+    func cachedSessionObservationPreservesGeneration(_ modelID: String) async throws {
+        let container = try await models.llmContainer(for: ModelConfiguration(id: modelID))
+        let parameters = GenerateParameters(maxTokens: 24, temperature: 0)
+        let plain = ChatSession(
+            container, generateParameters: parameters,
+            additionalContext: ["enable_thinking": false])
+        let observed = ChatSession(
+            container, generateParameters: parameters,
+            additionalContext: ["enable_thinking": false])
+        for prompt in ["What is 2 + 2? Answer in one sentence.", "Now add 1 to that answer."] {
+            var expected = ""
+            var expectedInfo: GenerateCompletionInfo?
+            for try await event in plain.streamDetails(to: prompt) {
+                if let text = event.chunk { expected += text }
+                if let info = event.info { expectedInfo = info }
+            }
+            var probabilities: [GenerateTokenLogProbabilities] = []
+            var actual = ""
+            var actualInfo: GenerateCompletionInfo?
+            for try await event in observed.observe(
+                to: prompt, using: .logProbabilities(topCount: 4))
+            {
+                if let value = event.logProbabilities { probabilities.append(value) }
+                if let generation = event.generation {
+                    if let text = generation.chunk { actual += text }
+                    if let info = generation.info { actualInfo = info }
+                }
+            }
+            let expectedCompletion = try #require(expectedInfo)
+            let actualCompletion = try #require(actualInfo)
+            #expect(!expected.isEmpty)
+            #expect(actual == expected)
+            #expect(
+                actualCompletion.generationTokenCount == expectedCompletion.generationTokenCount)
+            #expect(
+                actualCompletion.cachedPromptTokenCount == expectedCompletion.cachedPromptTokenCount
+            )
+            #expect(probabilities.count == actualCompletion.generationTokenCount)
+            #expect(
+                probabilities.allSatisfy {
+                    $0.chosen.logProbability.isFinite && $0.chosen.logProbability <= 0
+                        && $0.topLogProbabilities.count == 4
+                })
+            print(
+                "ChatSession observation: \(modelID), cached tokens \(actualCompletion.cachedPromptTokenCount), generated tokens \(actualCompletion.generationTokenCount)"
+            )
+        }
+    }
+
 }

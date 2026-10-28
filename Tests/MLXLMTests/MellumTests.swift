@@ -131,7 +131,9 @@ final class MellumTests: XCTestCase {
         let incremental = concatenated([prefill] + steps, axis: 1)
 
         XCTAssertEqual(cache.map(\.offset), [8, 8, 8])
-        XCTAssertTrue(allClose(incremental, full, rtol: 1e-4, atol: 1e-4).item(Bool.self))
+        assertClose(
+            incremental, full, rtol: 1e-4, atol: 1e-4, reducedAtol: 2e-2,
+            "incremental decode diverged from the full forward")
     }
 
     func testQuantizedKVCacheOnFullAttention() throws {

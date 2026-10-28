@@ -2,7 +2,7 @@
 
 import Foundation
 import MLX
-@_spi(GemmaEncoder) import MLXLLM
+@_spi(GemmaEncoder) @_spi(Testing) import MLXLLM
 import MLXNN
 import Testing
 
@@ -22,16 +22,8 @@ import Testing
 struct Gemma3EncoderAccessTests {
 
     private static func makeModel() -> Gemma3TextModel {
-        let config = Gemma3TextConfiguration(
-            modelType: "text",
-            hiddenSize: 64, hiddenLayers: 8, intermediateSize: 64, attentionHeads: 4,
-            headDim: 64,
-            rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 4,
-            ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000,
-            ropeTraditional: false, queryPreAttnScalar: 256,
-            slidingWindow: 512, slidingWindowPattern: 6,
-            maxPositionEmbeddings: 32768
-        )
+        let config = Gemma3TextConfiguration.smallConfiguration(
+            vocabularySize: 100)
         let model = Gemma3TextModel(config)
         eval(model)
         return model
