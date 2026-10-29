@@ -33,6 +33,9 @@ jobs:
     timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
+      # xcodebuild does not forward DEVELOPER_DIR to xctest. MLX's CPU JIT runs g++
+      # from inside the tests, so pass it with the TEST_RUNNER_ prefix.
+      TEST_RUNNER_DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
         with:
