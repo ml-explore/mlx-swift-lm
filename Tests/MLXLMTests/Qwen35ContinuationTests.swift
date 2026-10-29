@@ -285,4 +285,95 @@ final class Qwen35ContinuationTests: XCTestCase {
     func testWindowedImagePrefillMatchesSingleShot() throws {
         try continuation.assertWindowedImagePrefill(try makeTinyModel())
     }
+
+    /// With a capacity-limited cache, the attention mask must span the keys
+    /// the cache still presents, not the absolute offset: eviction begins once
+    /// the prompt exceeds `maxTokens`, and a warm multi-token continuation is
+    /// the flow that then builds a mask. Asserted on the attention caches only
+    /// — the linear-attention layers keep recurrent Mamba caches.
+    func testWarmContinuationAfterCacheRotationMatchesDecode() throws {
+        for (capacity, suffixLength) in [(16, 6), (16, 1), (16, 23), (1, 6)] {
+            let model = try makeTinyModel()
+            let parameters = GenerateParameters(
+                kvCache: KVCacheConfiguration(
+                    capacity: try .init(maxTokens: capacity, preservedPrefixTokens: 0)))
+            let cache = try model.newCache(parameters: parameters)
+            let (_, initialState) = try lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: textTokens(capacity))), cache: cache, state: nil,
+                    prefill: .init(chunking: .unchunked)))
+            var state = initialState
+            let decoded = textTokens(5, seed: 3)
+            for index in 0 ..< decoded.dim(1) {
+                let output = model(
+                    .init(tokens: decoded[0..., index ..< index + 1]), cache: cache, state: state)
+                eval(output.logits)
+                state = output.state
+            }
+            let rotating = cache.compactMap { $0 as? RotatingKVCache }
+            XCTAssertFalse(rotating.isEmpty)
+            XCTAssertTrue(rotating.allSatisfy { $0.offset == capacity + 5 })
+
+            let referenceCache = cache.map { $0.copy() }
+            let suffix = textTokens(suffixLength, seed: 9)
+            var referenceState = state
+            var expected = [MLXArray]()
+            for index in 0 ..< suffix.dim(1) {
+                let output = model(
+                    .init(tokens: suffix[0..., index ..< index + 1]), cache: referenceCache,
+                    state: referenceState)
+                eval(output.logits)
+                expected.append(output.logits)
+                referenceState = output.state
+            }
+
+            let result = try model.prepare(
+                LMInput(text: .init(tokens: suffix)), cache: cache, state: state,
+                prefill: .init(chunking: .unchunked))
+            guard case .logits(let output) = result else {
+                return XCTFail("expected logits from warm continuation")
+            }
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(output.logits, concatenated(expected, axis: 1)),
+                MatmulPrecision.splitTolerance)
+            XCTAssertTrue(rotating.allSatisfy { $0.offset == capacity + 5 + suffixLength })
+        }
+    }
+
+    /// Windowed prefill past the cache capacity must agree with token-by-token
+    /// decode: each chunk's mask is cut to the retained window, so queries see
+    /// the same sliding context eviction gives the decode path.
+    func testWindowedPrefillBeyondCacheCapacityMatchesDecode() throws {
+        let model = try makeTinyModel()
+        let parameters = GenerateParameters(
+            kvCache: KVCacheConfiguration(
+                capacity: try .init(maxTokens: 16, preservedPrefixTokens: 0)))
+        let tokens = textTokens(40)
+        let referenceCache = try model.newCache(parameters: parameters)
+        let (_, initialState) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: tokens[0..., 0 ..< 1])), cache: referenceCache,
+                state: nil, prefill: .init()))
+        var state = initialState
+        var expected = MLXArray(0)
+        for index in 1 ..< tokens.dim(1) {
+            let output = model(
+                .init(tokens: tokens[0..., index ..< index + 1]), cache: referenceCache,
+                state: state)
+            expected = output.logits[0..., -1, 0...]
+            eval(expected)
+            state = output.state
+        }
+
+        let cache = try model.newCache(parameters: parameters)
+        let (actual, _) = try lastLogits(
+            model.prepare(
+                LMInput(text: .init(tokens: tokens)), cache: cache, state: nil,
+                prefill: .init(stepSize: 7)))
+        XCTAssertLessThanOrEqual(maxAbsDiff(actual, expected), MatmulPrecision.splitTolerance)
+        let rotating = cache.compactMap { $0 as? RotatingKVCache }
+        XCTAssertFalse(rotating.isEmpty)
+        XCTAssertTrue(rotating.allSatisfy { $0.offset == 40 })
+        XCTAssertEqual(rotating.first?.state.first?.dim(2), 16)
+    }
 }

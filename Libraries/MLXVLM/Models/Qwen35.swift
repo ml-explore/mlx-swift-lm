@@ -436,30 +436,24 @@ public enum Qwen35Language {
             var queries = initialQueries
             var keys = initialKeys
 
-            var kvSeqLen = keys.dim(-2)
             var positionIds = providedPositionIds
 
             if positionIds == nil {
                 let offset = cache?.offset ?? 0
-                kvSeqLen += offset + 1
                 var base = MLXArray(stride(from: offset, to: offset + L, by: 1)).asType(.int32)
                 base = tiled(base[.newAxis, 0...], repetitions: [B, 1])
                 positionIds = base[.newAxis, 0..., 0...]
                 positionIds = tiled(positionIds!, repetitions: [3, 1, 1])
-            } else if let cache {
-                kvSeqLen += cache.offset + 1
             }
 
             let (cosValues, sinValues) = rotaryEmbedding(x: values, positionIds: positionIds!)
             (queries, keys) = applyMultimodalRotaryPosEmb(
                 q: queries, k: keys, cos: cosValues, sin: sinValues)
 
-            let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
-            if let mask {
-                attentionMask = .array(mask[.ellipsis, 0 ..< kvSeqLen])
-            } else {
-                attentionMask = .none
-            }
+            // The mask is sized for the keys the cache presents; slicing it to
+            // an offset-derived length would misalign it after eviction.
+            let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode =
+                mask.map { .array($0) } ?? .none
 
             return attentionWithCacheUpdate(
                 queries: queries,

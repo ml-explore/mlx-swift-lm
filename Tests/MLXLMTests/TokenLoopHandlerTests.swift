@@ -162,6 +162,7 @@ final class TokenLoopHandlerTests: XCTestCase {
             case .generation(let generation):
                 switch generation {
                 case .chunk(let text): response += text
+                case .reasoning: XCTFail("no reasoning protocol is configured")
                 case .toolCall(let call): calls.append(call.function)
                 case .rejectedToolCall: XCTFail("valid tool call was rejected")
                 case .info(let info): completion = info

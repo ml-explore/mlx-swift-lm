@@ -292,7 +292,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             switch event {
             case .info(let info): completion = info
-            case .chunk, .toolCall, .rejectedToolCall: break
+            case .chunk, .reasoning, .toolCall, .rejectedToolCall: break
             }
         }
 
