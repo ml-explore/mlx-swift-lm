@@ -139,8 +139,11 @@ jobs:
       - name: Run Tests (Xcode, macOS)
         shell: sh
         run: |
+          # Keep the result bundle outside the package root. xcodebuild re-resolves
+          # the package graph when files there change, and the resolve can crash it.
+          rm -rf "$RUNNER_TEMP/MLXSwiftLMTests.xcresult"
           xcodebuild test -skipPackagePluginValidation -scheme mlx-swift-lm-Package \
-            -destination 'platform=macOS' -resultBundlePath MLXSwiftLMTests.xcresult
+            -destination 'platform=macOS' -resultBundlePath "$RUNNER_TEMP/MLXSwiftLMTests.xcresult"
 
       - name: Upload test results
         if: failure()
@@ -148,6 +151,6 @@ jobs:
         with:
           name: test-results
           path: |
-            MLXSwiftLMTests.xcresult
+            ${{ runner.temp }}/MLXSwiftLMTests.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7

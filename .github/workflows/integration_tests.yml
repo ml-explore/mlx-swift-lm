@@ -53,13 +53,16 @@ jobs:
           # Model-dependent tests must run in a single xctest worker: concurrent
           # workers race on the shared on-disk Hugging Face cache. Disable parallel
           # testing (see IntegrationTestingTests/.../Support/FMTestHelpers.swift).
+          # Keep the result bundle outside the package root. xcodebuild re-resolves
+          # the package graph when files there change, and the resolve can crash it.
+          rm -rf "$RUNNER_TEMP/IntegrationTesting.xcresult"
           xcodebuild test \
             -project IntegrationTesting/IntegrationTesting.xcodeproj \
             -scheme IntegrationTesting \
             -destination 'platform=macOS' \
             -parallel-testing-enabled NO \
             -skipPackagePluginValidation \
-            -resultBundlePath IntegrationTesting.xcresult
+            -resultBundlePath "$RUNNER_TEMP/IntegrationTesting.xcresult"
 
       - name: Upload test results
         if: failure()
@@ -67,7 +70,7 @@ jobs:
         with:
           name: integration-test-results
           path: |
-            IntegrationTesting.xcresult
+            ${{ runner.temp }}/IntegrationTesting.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
 
