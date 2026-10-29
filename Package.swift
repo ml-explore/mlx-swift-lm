@@ -331,6 +331,7 @@ let package = Package(
                 "MLXGuidedGeneration",
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
             ],
             path: "Tests/MLXGuidedGenerationTests"
         ),
