@@ -200,10 +200,15 @@ public final class ChatSession {
                 uncommittedTokens.removeAll()
             }
 
+            // A turn that produced only reasoning appends an empty assistant message.
+            // That is deliberate: it keeps user/assistant alternation for strict
+            // templates and keeps the user's turn in the transcript.
             var message = Chat.Message.assistant(
                 assistant.content,
                 toolCalls: assistant.toolCalls.isEmpty ? nil : assistant.toolCalls)
             message.prefilledReasoningStartDelimiter = assistant.prefilledReasoningStartDelimiter
+            message.reasoning =
+                assistant.finishedReasoning.isEmpty ? nil : assistant.finishedReasoning
             messages.append(message)
             return true
         }
@@ -217,16 +222,39 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
+        /// Whether any `.reasoning` arrived.
+        ///
+        /// Reasoning stays out of ``content``. It is tracked so a turn that produced
+        /// only thinking, such as one that hit `maxTokens` mid-thought, is not mistaken
+        /// for an empty generation and rolled back along with the user's message.
+        var producedReasoning = false
+
+        /// Reasoning the model finished: an answer or a tool call followed it.
+        /// Recorded beside the message for templates that replay it.
+        var finishedReasoning = ""
+
+        /// Reasoning with nothing after it yet. A turn that ends here was cut off
+        /// mid-thought, and replaying it would present the thought as complete.
+        var openReasoning = ""
+
         var shouldRecord: Bool {
-            (!content.isEmpty || !toolCalls.isEmpty)
+            (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
         }
 
         mutating func consume(_ item: Generation) {
+            if item.chunk != nil || item.toolCall != nil {
+                finishedReasoning += openReasoning
+                openReasoning = ""
+            }
             if let chunk = item.chunk {
                 content += chunk
+            }
+            if let reasoning = item.reasoning {
+                producedReasoning = true
+                openReasoning += reasoning
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -237,24 +265,6 @@ public final class ChatSession {
             if let info = item.info {
                 stopReason = info.stopReason
             }
-        }
-    }
-
-    private static func prefilledReasoningStartDelimiter(
-        in promptTokens: [Int], config: ReasoningConfig?, tokenizer: any Tokenizer
-    ) -> String? {
-        guard let delimiter = config?.startDelimiter, !delimiter.isEmpty else { return nil }
-
-        // Decode a tail, expanding when trailing whitespace could hide the delimiter.
-        var count = min(64, promptTokens.count)
-        while true {
-            let tail = tokenizer.decode(
-                tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            if tail.count >= delimiter.count || count == promptTokens.count {
-                return tail.hasSuffix(delimiter) ? delimiter : nil
-            }
-            count = min(promptTokens.count, count * 2)
         }
     }
 
@@ -1187,6 +1197,11 @@ public final class ChatSession {
                             pendingOnDemandComponents(
                                 of: model, among: ModelComponent.needed(by: preparedInput)))
                         var input = preparedInput
+                        // The whole prompt, not `input`: the cache may leave less than the
+                        // prefill to prefill. Read before the prefill is queued.
+                        let reasoningPrimedInside = promptPrimesReasoning(
+                            input: preparedInput, modelConfiguration: modelConfiguration,
+                            tokenizer: tokenizer)
                         var prefilledReasoningStartDelimiter: String?
                         pendingMessages.removeAll()
 
@@ -1219,10 +1234,10 @@ public final class ChatSession {
                             || preparedInput.audio != nil
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
-                            prefilledReasoningStartDelimiter =
-                                ChatSession.prefilledReasoningStartDelimiter(
-                                    in: promptTokenIds, config: modelConfiguration.reasoningConfig,
-                                    tokenizer: tokenizer)
+                            if reasoningPrimedInside {
+                                prefilledReasoningStartDelimiter =
+                                    modelConfiguration.reasoningConfig?.startDelimiter
+                            }
                             let cachedTokenIds = currentConversation.cachedTokens
                             assert(
                                 kvCache.nativeAttentionOffsetsAreAligned,
@@ -1395,7 +1410,10 @@ public final class ChatSession {
                                 stopStrings: modelConfiguration.effectiveStopStrings,
                                 format: modelConfiguration.toolCallFormat ?? .json,
                                 tools: toolValidationSchemas,
-                                toolCallPolicy: generateParameters.toolCallPolicy)
+                                toolCallPolicy: generateParameters.toolCallPolicy,
+                                reasoning: modelConfiguration.reasoningConfig.map {
+                                    (config: $0, primedInside: reasoningPrimedInside)
+                                })
                             base.cachedPromptTokenCount = cachedPromptTokenCount
                             return MLXLMCommon.generateTaskRecordingTokens(
                                 promptTokenCount: input.text.tokens.size,

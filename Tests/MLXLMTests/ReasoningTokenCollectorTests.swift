@@ -20,12 +20,15 @@ struct ReasoningTokenCollectorTests {
     /// strings with no separator, so callers control the decoded stream exactly.
     private struct MapTokenizer: Tokenizer {
         let map: [Int: String]
+        /// When false, no text resolves to a token id, as with a tokenizer whose
+        /// delimiters are several tokens. The collector then scans the decoded text.
+        var resolvesTokens = true
         func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
         func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
             tokenIds.map { map[$0] ?? "" }.joined()
         }
         func convertTokenToId(_ token: String) -> Int? {
-            map.first { $0.value == token }?.key
+            resolvesTokens ? map.first { $0.value == token }?.key : nil
         }
         func convertIdToToken(_ id: Int) -> String? { map[id] }
         var bosToken: String? { nil }
@@ -45,17 +48,22 @@ struct ReasoningTokenCollectorTests {
         20: "<think></think>",  // empty block in a single token
         30: "a", 31: "b", 32: "c",
         40: "\nthought\n",  // template-style newlines
+        41: " \n",  // whitespace as its own token
     ]
     private static let tok = MapTokenizer(map: vocab)
+    private static let textTok = MapTokenizer(map: vocab, resolvesTokens: false)
 
     /// Feeds tokens until the collector signals stop (mirroring Phase 1's break),
     /// else consumes all and finalizes. Returns routed segments, whether it
     /// stopped, and the accumulated token IDs.
-    private func drive(primedInside: Bool = false, _ tokens: [Int])
+    private func drive(
+        primedInside: Bool = false, delimitersAreTokens: Bool = true, _ tokens: [Int]
+    )
         -> (segments: [Segment], stopped: Bool, tokenIDs: [Int])
     {
         var collector = ReasoningTokenCollector(
-            config: Self.thinkConfig, primedInside: primedInside, tokenizer: Self.tok)
+            config: Self.thinkConfig, primedInside: primedInside,
+            tokenizer: delimitersAreTokens ? Self.tok : Self.textTok)
         var segments: [Segment] = []
         var stopped = false
         for token in tokens {
@@ -115,7 +123,7 @@ struct ReasoningTokenCollectorTests {
     /// reads false before AND after, but `hasClosedReasoning` latches, so Phase 1
     /// correctly stops and hands off to the constrained phase.
     @Test func emptyBlockInOneChunkStillStops() {
-        let (segs, stopped, ids) = drive([20, 5, 6])
+        let (segs, stopped, ids) = drive(delimitersAreTokens: false, [20, 5, 6])
         #expect(stopped)
         #expect(ids == [20])
         #expect(reasoningText(segs).isEmpty)  // no reasoning content
@@ -127,7 +135,7 @@ struct ReasoningTokenCollectorTests {
     /// A `</think>` split across two tokens closes only once the full delimiter
     /// arrives — the collector stops on the second token, not the first.
     @Test func splitClosingDelimiterStopsOnCompletion() {
-        let (segs, stopped, ids) = drive([1, 2, 12, 13, 5])
+        let (segs, stopped, ids) = drive(delimitersAreTokens: false, [1, 2, 12, 13, 5])
         #expect(stopped)
         #expect(ids == [1, 2, 12, 13])  // stopped on 13, not 12
         #expect(reasoningText(segs) == "reason")
@@ -163,5 +171,17 @@ struct ReasoningTokenCollectorTests {
         #expect(ids == [1, 40, 4])
         #expect(reasoningText(segs).contains("thought"))
         #expect(!leaksMarker(segs))
+    }
+
+    /// A thought's trailing whitespace is held until the close token decides whether
+    /// it is trimmed, and is kept when the thought goes on instead.
+    @Test func holdsThoughtWhitespaceUntilTheCloseToken() {
+        let closed = drive([1, 2, 41, 4, 5])
+        #expect(closed.stopped)
+        #expect(reasoningText(closed.segments) == "reason")
+
+        let continued = drive([1, 2, 41, 3, 4, 5])
+        #expect(continued.stopped)
+        #expect(reasoningText(continued.segments) == "reason \ning")
     }
 }

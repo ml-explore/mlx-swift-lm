@@ -132,21 +132,49 @@ final class QwenReasoningHistoryTests: XCTestCase {
         XCTAssertNil(qwen2["reasoning_content"])
     }
 
-    func testSessionRetainsPromptPrimingAndLeavesStreamedTextUnchanged() async throws {
+    func testSessionRetainsPromptPrimingAndKeepsReasoningBesideTheAnswer() async throws {
         let output = "thought</think>\n\nanswer"
         for whitespace in [
             "\n \t", String(repeating: " ", count: 61), String(repeating: " ", count: 130),
         ] {
+            // The stream delivers reasoning apart from the answer, so the session
+            // returns and retains the answer alone and keeps the thought beside it.
             let retained = try await retainedAssistant(
-                promptTail: "<think>" + whitespace, output: output)
-            XCTAssertEqual(retained.content, output)
+                promptTail: "<think>" + whitespace, output: output, visibleOutput: "answer")
+            XCTAssertEqual(retained.content, "answer")
+            XCTAssertEqual(retained.reasoning, "thought")
             XCTAssertEqual(
                 retained.prefilledReasoningStartDelimiter, "<think>",
                 "Trailing whitespace length: \(whitespace.count)")
             let raw = Qwen3VLMessageGenerator().generate(message: retained)
             XCTAssertEqual(raw["reasoning_content"] as? String, "thought")
-            XCTAssertEqual(try text(in: raw), "\n\nanswer")
+            XCTAssertEqual(try text(in: raw), "answer")
         }
+    }
+
+    func testSessionKeepsGeneratedReasoningBesideTheAnswer() async throws {
+        // Not primed: the model opens the thought itself.
+        let retained = try await retainedAssistant(
+            promptTail: "", output: "<think>thought</think>answer", visibleOutput: "answer")
+        XCTAssertEqual(retained.content, "answer")
+        XCTAssertEqual(retained.reasoning, "thought")
+        XCTAssertNil(retained.prefilledReasoningStartDelimiter)
+        let raw = Qwen3VLMessageGenerator().generate(message: retained)
+        XCTAssertEqual(raw["reasoning_content"] as? String, "thought")
+        XCTAssertEqual(try text(in: raw), "answer")
+
+        // Other generators replay it too; templates that do not read the key ignore it.
+        let other = DefaultMessageGenerator().generate(message: retained)
+        XCTAssertEqual(other["content"] as? String, "answer")
+        XCTAssertEqual(other["reasoning_content"] as? String, "thought")
+    }
+
+    func testRecordedReasoningWinsOverTagsInTheAnswer() throws {
+        var message = Chat.Message.assistant("write <think>x</think> to think")
+        message.reasoning = "thought"
+        let raw = Qwen3VLMessageGenerator().generate(message: message)
+        XCTAssertEqual(raw["reasoning_content"] as? String, "thought")
+        XCTAssertEqual(try text(in: raw), message.content)
     }
 
     func testSessionDoesNotInferPrimingFromEarlierOrClosedTags() async throws {
@@ -170,28 +198,90 @@ final class QwenReasoningHistoryTests: XCTestCase {
             promptTail: "<think>\n", output: "thought</think>", reasoning: custom)
         XCTAssertNil(mismatched.prefilledReasoningStartDelimiter)
 
+        // Primed with the custom delimiter and never closed: all of it is reasoning.
         let matching = try await retainedAssistant(
-            promptTail: "<reason>\n", output: "literal</think>", reasoning: custom)
+            promptTail: "<reason>\n", output: "literal</think>", visibleOutput: "",
+            reasoning: custom)
         XCTAssertEqual(matching.prefilledReasoningStartDelimiter, "<reason>")
+        XCTAssertNil(matching.reasoning)
         let raw = Qwen3VLMessageGenerator().generate(message: matching)
         XCTAssertNil(raw["reasoning_content"])
         XCTAssertEqual(try text(in: raw), matching.content)
     }
 
     func testLengthLimitedOpenReasoningIsNotCompletedByTheGenerator() async throws {
+        // A thought cut off by the length limit is streamed as reasoning but not
+        // retained: replaying it would present it as a finished thought.
         let retained = try await retainedAssistant(
-            promptTail: "<think>\n", output: "unfinished", maxTokens: 4)
-        XCTAssertEqual(retained.content, "unfi")
+            promptTail: "<think>\n", output: "unfinished", visibleOutput: "", maxTokens: 4)
+        XCTAssertEqual(retained.content, "")
+        XCTAssertNil(retained.reasoning)
         XCTAssertEqual(retained.prefilledReasoningStartDelimiter, "<think>")
         let raw = Qwen3VLMessageGenerator().generate(message: retained)
         XCTAssertNil(raw["reasoning_content"])
-        XCTAssertEqual(try text(in: raw), "unfi")
+        XCTAssertEqual(try text(in: raw), "")
+    }
+
+    /// A regenerated prompt can extend the cache by no more than its prefill, as
+    /// when thinking is switched on after a thinking-off turn. Priming must be
+    /// read from the whole prompt, not from the suffix the cache leaves to prefill.
+    func testPrimingIsReadFromTheWholePromptNotTheUncachedSuffix() async throws {
+        let tokenizer = ByteTokenizer()
+        let output = "thought</think>answer"
+        let outputTokens = tokenizer.encode(text: output, addSpecialTokens: false) + [256]
+        let processor = TailProcessor(
+            tails: ["<think>\n\n</think>\n\n", "<think>\n "], tokenizer: tokenizer)
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "reasoning-priming-test", eosTokenIds: [256],
+                reasoningConfig: QwenReasoningProtocol.tagged),
+            model: ScriptedModel(output: outputTokens), processor: processor, tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: outputTokens.count, temperature: 0))
+
+        // Thinking off: the prompt closed its block, so the stray close is answer text.
+        let first = try await session.respond(to: "first")
+        XCTAssertEqual(first, output)
+
+        // Thinking on: the prompt shares everything up to `<think>\n` with the cache
+        // and adds one token, so only that token is prefilled. It is still primed.
+        let second = try await session.respond(to: "second")
+        XCTAssertEqual(second, "answer")
+    }
+
+    /// Renders a generation prompt alone, with a different tail on each call.
+    private struct TailProcessor: UserInputProcessor {
+        let tails: [String]
+        let tokenizer: ByteTokenizer
+        let calls = CallCounter()
+
+        func prepare(input: UserInput) throws -> LMInput {
+            let tail = tails[min(calls.next(), tails.count - 1)]
+            return LMInput(
+                tokens: MLXArray(
+                    tokenizer.encode(text: "assistant:\n" + tail, addSpecialTokens: false)))
+        }
+    }
+
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            let value = count
+            count += 1
+            return value
+        }
     }
 
     private struct RecordedMessage: Sendable {
         let role: Chat.Message.Role
         let content: String
         let prefilledReasoningStartDelimiter: String?
+        let reasoning: String?
     }
 
     private struct RecordingProcessor: UserInputProcessor {
@@ -207,7 +297,8 @@ final class QwenReasoningHistoryTests: XCTestCase {
                 messages.map {
                     RecordedMessage(
                         role: $0.role, content: $0.content,
-                        prefilledReasoningStartDelimiter: $0.prefilledReasoningStartDelimiter)
+                        prefilledReasoningStartDelimiter: $0.prefilledReasoningStartDelimiter,
+                        reasoning: $0.reasoning)
                 })
             let transcript = messages.map { "\($0.role.rawValue): \($0.content)\n" }.joined()
             let prompt = transcript + "assistant:\n" + promptTail
@@ -277,7 +368,7 @@ final class QwenReasoningHistoryTests: XCTestCase {
     }
 
     private func retainedAssistant(
-        promptTail: String, output: String,
+        promptTail: String, output: String, visibleOutput: String? = nil,
         reasoning: ReasoningConfig? = QwenReasoningProtocol.tagged,
         maxTokens: Int? = nil
     ) async throws -> Chat.Message {
@@ -295,7 +386,8 @@ final class QwenReasoningHistoryTests: XCTestCase {
             generateParameters: GenerateParameters(
                 maxTokens: maxTokens ?? outputTokens.count, temperature: 0))
         let firstOutput = try await session.respond(to: "first")
-        XCTAssertEqual(firstOutput, String(output.prefix(maxTokens ?? output.count)))
+        XCTAssertEqual(
+            firstOutput, visibleOutput ?? String(output.prefix(maxTokens ?? output.count)))
         _ = try await session.respond(to: "second")
         continuation.finish()
         var calls: [[RecordedMessage]] = []
@@ -304,6 +396,7 @@ final class QwenReasoningHistoryTests: XCTestCase {
         let assistant = try XCTUnwrap(calls.last?.first { $0.role == .assistant })
         var message = Chat.Message.assistant(assistant.content)
         message.prefilledReasoningStartDelimiter = assistant.prefilledReasoningStartDelimiter
+        message.reasoning = assistant.reasoning
         return message
     }
 }

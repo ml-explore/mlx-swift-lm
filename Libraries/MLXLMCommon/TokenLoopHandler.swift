@@ -75,11 +75,12 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
         tools: [[String: any Sendable]]? = nil,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     public var additionalStopTokenIDs: Set<Int> { decoder.additionalStopTokenIDs }
@@ -146,10 +147,10 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         emit: (sending Generation) -> Bool
     ) -> TokenLoopDisposition {
         switch event {
-        case .reasoning:
-            // The public Generation stream intentionally exposes only response
-            // text and tool calls. Protocol-aware clients consume reasoning via
-            // the package-level TokenStreamDecoder contract.
+        case .reasoning(let reasoning):
+            if !emit(.reasoning(reasoning)) {
+                return .cancelled
+            }
             return .more
 
         case .response(let response):

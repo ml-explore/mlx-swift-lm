@@ -440,6 +440,9 @@ public enum ChatSessionTests {
             case .chunk(let text):
                 print(text, terminator: "")
                 responseText += text
+            case .reasoning:
+                // Thinking is not the answer these checks assert on.
+                break
             case .toolCall(let toolCall):
                 toolCalls.append(toolCall)
             case .rejectedToolCall(let rejection):
@@ -522,6 +525,8 @@ public enum ChatSessionTests {
             switch generation {
             case .chunk(let text):
                 followUpText += text
+            case .reasoning:
+                break
             case .toolCall(let call):
                 followUpCalls.append(call)
             case .rejectedToolCall(let rejection):
@@ -1261,6 +1266,8 @@ public enum ToolCallTests {
                 switch generation {
                 case .chunk(let chunk):
                     text += chunk
+                case .reasoning:
+                    break
                 case .toolCall(let toolCall):
                     toolCalls.append(toolCall)
                 case .rejectedToolCall(let rejection):

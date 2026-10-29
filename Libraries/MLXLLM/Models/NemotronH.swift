@@ -503,17 +503,25 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     @ModuleInfo(key: "gate") var gate: NemotronHMoEGate
     @ModuleInfo(key: "switch_mlp") var switchMLP: NemotronHSwitchMLP
     @ModuleInfo(key: "shared_experts") var sharedExperts: NemotronHMLP?
+    @ModuleInfo(key: "fc1_latent_proj") var fc1LatentProj: Linear?
+    @ModuleInfo(key: "fc2_latent_proj") var fc2LatentProj: Linear?
 
     init(_ args: NemotronHConfiguration) {
         self.numExpertsPerTok = args.numExpertsPerTok
         self.hasSharedExperts = args.nSharedExperts != nil && args.nSharedExperts! > 0
 
         self._gate.wrappedValue = NemotronHMoEGate(args)
+        // With a latent size, routed experts run in the smaller latent space.
         self._switchMLP.wrappedValue = NemotronHSwitchMLP(
-            inputDims: args.hiddenSize,
+            inputDims: args.moeLatentSize ?? args.hiddenSize,
             hiddenDims: args.moeIntermediateSize,
             numExperts: args.nRoutedExperts
         )
+
+        if let latent = args.moeLatentSize {
+            self._fc1LatentProj.wrappedValue = Linear(args.hiddenSize, latent, bias: args.mlpBias)
+            self._fc2LatentProj.wrappedValue = Linear(latent, args.hiddenSize, bias: args.mlpBias)
+        }
 
         if hasSharedExperts {
             self._sharedExperts.wrappedValue = NemotronHMLP(
@@ -527,8 +535,12 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
-        var y = switchMLP(x, inds)
+        let expertInput = fc1LatentProj.map { $0(x) } ?? x
+        var y = switchMLP(expertInput, inds)
         y = weightedExpertSum(y, scores).asType(y.dtype)
+        if let fc2LatentProj {
+            y = fc2LatentProj(y)
+        }
 
         if let sharedExperts {
             y = y + sharedExperts(x)
@@ -618,7 +630,9 @@ private class NemotronHBackbone: Module {
             embeddingCount: args.vocabSize, dimensions: args.hiddenSize)
 
         let pattern = Array(args.hybridOverridePattern)
-        self._layers.wrappedValue = pattern.map { NemotronHBlock(args, blockType: $0) }
+        self._layers.wrappedValue = pattern.enumerated().map { index, blockType in
+            NemotronHBlock(args.layerConfiguration(index), blockType: blockType)
+        }
 
         self._normF.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.layerNormEpsilon)
 
@@ -759,7 +773,7 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
 
         for (key, value) in filterLMHeadWeights(
             from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
-        {
+        where !key.hasPrefix("mtp.") {
             var finalValue = value
 
             // Handle conv1d weight axis swap
@@ -773,9 +787,10 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
         // Stack experts: backbone.layers.{l}.mixer.experts.{e}.{proj}.weight -> backbone.layers.{l}.mixer.switch_mlp.{proj}.weight
         for l in 0 ..< configuration.numHiddenLayers {
             let prefix = "backbone.layers.\(l).mixer"
+            let numExperts = configuration.layerConfiguration(l).nRoutedExperts
             for (m, n) in [("down_proj", "fc2"), ("up_proj", "fc1")] {
                 if sanitized["\(prefix).experts.0.\(m).weight"] != nil {
-                    let toJoin = (0 ..< configuration.nRoutedExperts).compactMap { e in
+                    let toJoin = (0 ..< numExperts).compactMap { e in
                         sanitized.removeValue(forKey: "\(prefix).experts.\(e).\(m).weight")
                     }
                     if !toJoin.isEmpty {
@@ -788,6 +803,8 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
         return sanitized
     }
 
+    public var excludedCheckpointNamespaces: [String] { ["mtp"] }
+
     /// Predicate for casting: some parameters should stay in float32
     public var castPredicate: ((String) -> Bool)? {
         { key in
@@ -797,6 +814,21 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
 }
 
 // MARK: - Configuration
+
+/// Per-layer overrides from `block_configs` (Nemotron 3.5 `nemotron_h_puzzle` models).
+public struct NemotronHBlockConfig: Codable, Sendable {
+    public var blockType: String
+    public var moeIntermediateSize: Int?
+    public var nRoutedExperts: Int?
+    public var numExpertsPerTok: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case blockType = "block_type"
+        case moeIntermediateSize = "moe_intermediate_size"
+        case nRoutedExperts = "n_routed_experts"
+        case numExpertsPerTok = "num_experts_per_tok"
+    }
+}
 
 public struct NemotronHConfiguration: Codable, Sendable {
     public var modelType: String = "nemotron_h"
@@ -818,7 +850,9 @@ public struct NemotronHConfiguration: Codable, Sendable {
     public var nRoutedExperts: Int
     public var nSharedExperts: Int?
     public var numExpertsPerTok: Int
+    public var moeLatentSize: Int?
     public var hybridOverridePattern: String
+    public var blockConfigs: [NemotronHBlockConfig]?
     public var layerNormEpsilon: Float
     public var mlpBias: Bool
     public var useBias: Bool
@@ -853,7 +887,9 @@ public struct NemotronHConfiguration: Codable, Sendable {
         case nRoutedExperts = "n_routed_experts"
         case nSharedExperts = "n_shared_experts"
         case numExpertsPerTok = "num_experts_per_tok"
+        case moeLatentSize = "moe_latent_size"
         case hybridOverridePattern = "hybrid_override_pattern"
+        case blockConfigs = "block_configs"
         case layerNormEpsilon = "layer_norm_epsilon"
         case mlpBias = "mlp_bias"
         case useBias = "use_bias"
@@ -869,13 +905,18 @@ public struct NemotronHConfiguration: Codable, Sendable {
         case timeStepLimitMax = "time_step_limit_max"
     }
 
+    /// Decode-only keys that name the layer stack in Nemotron 3.5 configs.
+    private enum LayerListKeys: String, CodingKey {
+        case layersBlockType = "layers_block_type"
+        case layerTypes = "layer_types"
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "nemotron_h"
         vocabSize = try container.decode(Int.self, forKey: .vocabSize)
         hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
-        numHiddenLayers = try container.decode(Int.self, forKey: .numHiddenLayers)
         numAttentionHeads = try container.decode(Int.self, forKey: .numAttentionHeads)
         numKeyValueHeads = try container.decode(Int.self, forKey: .numKeyValueHeads)
         attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
@@ -885,7 +926,7 @@ public struct NemotronHConfiguration: Codable, Sendable {
         ssmStateSize = try container.decode(Int.self, forKey: .ssmStateSize)
         convKernel = try container.decode(Int.self, forKey: .convKernel)
         nGroups = try container.decode(Int.self, forKey: .nGroups)
-        intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
+        intermediateSize = try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 0
         // Dense Nemotron-H checkpoints (e.g. NVIDIA-Nemotron-3-Nano-4B) have no "E"
         // layers in hybrid_override_pattern and ship no MoE keys at all, so these
         // are only required when an MoE layer will actually be built.
@@ -898,6 +939,7 @@ public struct NemotronHConfiguration: Codable, Sendable {
         nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts)
         numExpertsPerTok =
             try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 0
+        moeLatentSize = try container.decodeIfPresent(Int.self, forKey: .moeLatentSize)
         layerNormEpsilon =
             try container.decodeIfPresent(Float.self, forKey: .layerNormEpsilon) ?? 1e-5
         mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) ?? false
@@ -913,18 +955,42 @@ public struct NemotronHConfiguration: Codable, Sendable {
         routedScalingFactor =
             try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.0
 
-        // Handle hybrid_override_pattern - can be string or array of strings
+        let layerLists = try decoder.container(keyedBy: LayerListKeys.self)
+        blockConfigs = try container.decodeIfPresent(
+            [NemotronHBlockConfig].self, forKey: .blockConfigs)
+
+        // The layer stack is a hybrid_override_pattern string (or array of chars) in
+        // Nemotron-H 1–3 configs, and a list of block names in Nemotron 3.5 configs.
         if let patternString = try? container.decode(String.self, forKey: .hybridOverridePattern) {
             hybridOverridePattern = patternString
         } else if let patternArray = try? container.decode(
             [String].self, forKey: .hybridOverridePattern)
         {
             hybridOverridePattern = patternArray.joined()
+        } else if let names = try layerLists.decodeIfPresent(
+            [String].self, forKey: .layersBlockType)
+            ?? layerLists.decodeIfPresent([String].self, forKey: .layerTypes)
+            ?? blockConfigs?.map(\.blockType)
+        {
+            hybridOverridePattern = try String(
+                names.map { name in
+                    guard let char = Self.blockTypeChars[name] else {
+                        throw DecodingError.dataCorruptedError(
+                            forKey: .layersBlockType, in: layerLists,
+                            debugDescription: "Unsupported Nemotron-H block type: \(name)")
+                    }
+                    return char
+                })
         } else {
             throw DecodingError.dataCorruptedError(
                 forKey: .hybridOverridePattern, in: container,
-                debugDescription: "hybrid_override_pattern must be string or array of strings")
+                debugDescription:
+                    "Config needs hybrid_override_pattern, layers_block_type or block_configs")
         }
+        // Nemotron 3.5 configs may omit num_hidden_layers; the stack length is the source.
+        numHiddenLayers =
+            try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers)
+            ?? hybridOverridePattern.count
 
         // Handle time_step_limit - can be array [min, max] or separate fields
         if let limits = try? container.decode([Float].self, forKey: .timeStepLimitMin) {
@@ -938,6 +1004,23 @@ public struct NemotronHConfiguration: Codable, Sendable {
                 try container.decodeIfPresent(Float.self, forKey: .timeStepLimitMax)
                 ?? Float.infinity
         }
+    }
+
+    private static let blockTypeChars: [String: Character] = [
+        "mamba": "M", "linear_attention": "M", "conv": "M",
+        "attention": "*", "full_attention": "*",
+        "moe": "E", "mlp": "-",
+    ]
+
+    /// The configuration for layer `index`, with any `block_configs` overrides applied.
+    public func layerConfiguration(_ index: Int) -> NemotronHConfiguration {
+        guard let blockConfigs, index < blockConfigs.count else { return self }
+        let block = blockConfigs[index]
+        var layer = self
+        layer.moeIntermediateSize = block.moeIntermediateSize ?? moeIntermediateSize
+        layer.nRoutedExperts = block.nRoutedExperts ?? nRoutedExperts
+        layer.numExpertsPerTok = block.numExpertsPerTok ?? numExpertsPerTok
+        return layer
     }
 
     /// Memberwise initializer for testing
@@ -1015,4 +1098,12 @@ public struct NemotronHConfiguration: Codable, Sendable {
 
 extension NemotronHModel {
     public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+
+    /// Nemotron 3 and 3.5 templates open `<think>` in the generation prompt unless
+    /// `enable_thinking` is false. Their tokenizers don't mark `<think>` as special.
+    public var reasoningConfig: ReasoningConfig? {
+        ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true))
+    }
 }
