@@ -36,7 +36,7 @@ struct ForkIndependenceTests {
         "fork of a matcher diverges from parent on independent commits",
         .disabled(
             """
-            xgrammar matcher Fork()/clone() requires xgrammar >= v0.1.34; the vendored \
+            xgrammar matcher Fork()/clone() requires xgrammar >= v0.1.33; the vendored \
             version (v0.1.30) does not provide it. Production handles its absence \
             gracefully — makeConstraint() catches forkFailed and recompiles a fresh \
             constraint — so this is a perf-only optimization, not a correctness gap. \
