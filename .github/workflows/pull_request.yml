@@ -103,10 +103,22 @@ jobs:
     needs: lint
     if: github.repository == 'ml-explore/mlx-swift-lm'
     runs-on: [self-hosted, macos]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+
+      - name: Xcode and Swift versions
+        shell: sh
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+          swift --version
+          ls -l /Applications/Xcode-latest.app
+          ls /Applications | grep -i xcode
 
       - name: "Infra: verify MetalToolchain installed"
         shell: bash
@@ -118,8 +130,6 @@ jobs:
       - name: Build (Xcode, macOS)
         shell: sh
         run: |
-          xcodebuild -version
-          swift --version
           rm -rf ~/Library/Developer/Xcode/DerivedData/*
           xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'
 

@@ -31,6 +31,8 @@ jobs:
     if: github.repository == 'ml-explore/mlx-swift-lm'
     runs-on: [self-hosted, macos]
     timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
         with:
