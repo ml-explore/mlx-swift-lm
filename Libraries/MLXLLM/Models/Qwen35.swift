@@ -639,9 +639,6 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
     @ModuleInfo(key: "shared_expert") var sharedExpert: Qwen3NextMLP
     @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
-    /// When false, decode runs `switchMLP` outside compiled traces; see `Qwen35TextModel.tracesRoutedExperts`.
-    var tracesRoutedExperts = true
-
     init(_ args: Qwen35TextConfiguration) {
         self.normTopkProb = args.normTopkProb
         self.numExperts = args.numExperts
@@ -665,33 +662,15 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         // Decode (S == 1) runs through a compiled trace: fusion merges the
         // elementwise chains into fewer kernels, bit-identically. Prefill
         // stays unfused — it is GEMM-bound and would pay a trace per shape.
-        if x.dim(1) != 1 {
+        if x.dim(1) != 1 || routesExpertsEagerly {
             return forward(x)
         }
-        return tracesRoutedExperts ? compiledForward(self, x) : forwardRoutedExpertsUntraced(x)
+        return compiledForward(self, x)
     }
 
-    private let compiledRouter = CompiledTrace<Qwen35SparseMoeBlock> { block, arguments in
-        let gates = MLX.softmax(block.gate(arguments[0]), axis: -1, precise: true)
-        let (inds, scores) = moeRouterTopK(gates, k: block.topK, normalize: block.normTopkProb)
-        return [inds, scores]
-    }
-
-    private let compiledSharedExpert = CompiledTrace<Qwen35SparseMoeBlock> { block, arguments in
-        let x = arguments[0]
-        return [sigmoid(block.sharedExpertGate(x)) * block.sharedExpert(x) + arguments[1]]
-    }
-
-    /// Decode with the router and shared expert traced and `switchMLP` run between them.
-    func forwardRoutedExpertsUntraced(_ x: MLXArray) -> MLXArray {
-        let routed = compiledRouter(self, [x])
-        let tokenCount = x.size / x.dim(-1)
-        let combined = switchMLP.callAndWeightedReduce(
-            x.reshaped(tokenCount, x.dim(-1)), routed[0].reshaped(tokenCount, topK),
-            weights: routed[1].reshaped(tokenCount, topK), fuseSortedReduction: true
-        ).reshaped(x.shape)
-        return compiledSharedExpert(self, [x, combined])[0]
-    }
+    /// The routed experts cannot be traced (see ``UntraceableModule``), so decode
+    /// runs them eagerly between traces.
+    var routesExpertsEagerly: Bool { switchMLP is UntraceableModule }
 
     /// The body stays inside this block, so the trace's default state (the
     /// block's own weights) is complete.
@@ -702,24 +681,27 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
     /// The uncompiled body; an enclosing layer trace inlines it rather than
     /// nesting this block's own compiled wrapper.
     func forward(_ x: MLXArray) -> MLXArray {
-        var gates = gate(x)
-        gates = MLX.softmax(gates, axis: -1, precise: true)
+        let (inds, scores) = route(x)
+        return routedExperts(x, indices: inds, scores: scores) + sharedExperts(x)
+    }
 
-        let (inds, scores) = moeRouterTopK(
-            gates, k: topK, normalize: normTopkProb)
+    /// Router top-k expert ids and weights.
+    func route(_ x: MLXArray) -> (MLXArray, MLXArray) {
+        let gates = MLX.softmax(gate(x), axis: -1, precise: true)
+        return moeRouterTopK(gates, k: topK, normalize: normTopkProb)
+    }
 
+    /// The weighted sum of the selected routed experts.
+    func routedExperts(_ x: MLXArray, indices: MLXArray, scores: MLXArray) -> MLXArray {
         let tokenCount = x.size / x.dim(-1)
-        let flatX = x.reshaped(tokenCount, x.dim(-1))
-        let flatIndices = inds.reshaped(tokenCount, topK)
-        let flatScores = scores.reshaped(tokenCount, topK)
-        let combined = switchMLP.callAndWeightedReduce(
-            flatX, flatIndices, weights: flatScores, fuseSortedReduction: true
+        return switchMLP.callAndWeightedReduce(
+            x.reshaped(tokenCount, x.dim(-1)), indices.reshaped(tokenCount, topK),
+            weights: scores.reshaped(tokenCount, topK), fuseSortedReduction: true
         ).reshaped(x.shape)
+    }
 
-        var sharedY = sharedExpert(x)
-        sharedY = sigmoid(sharedExpertGate(x)) * sharedY
-
-        return combined + sharedY
+    func sharedExperts(_ x: MLXArray) -> MLXArray {
+        sigmoid(sharedExpertGate(x)) * sharedExpert(x)
     }
 }
 
@@ -779,7 +761,7 @@ final class Qwen35DecoderLayer: Module {
         // Single-token unmasked decode runs the layer as one traced function
         // (two for full attention, split at the KV write). Everything else
         // takes the general body below.
-        if x.dim(1) == 1, ssmMask == nil {
+        if x.dim(1) == 1, ssmMask == nil, !routesExpertsEagerly {
             if isLinear, let mambaCache = cache as? MambaCache {
                 return decodeLinearLayer(x, cache: mambaCache)
             }
@@ -834,13 +816,6 @@ final class Qwen35DecoderLayer: Module {
         let convState = cache[0] ?? zero.conv
         let recState = cache[1] ?? zero.rec
 
-        if let moe = untracedMoE {
-            let out = compiledLinearMixer(self, [x, convState, recState])
-            cache[0] = out[2]
-            cache[1] = out[3]
-            cache.advance(1)
-            return out[0] + moe.forwardRoutedExpertsUntraced(out[1])
-        }
         let out = compiledLinearLayer(self, [x, convState, recState])
         cache[0] = out[1]
         cache[1] = out[2]
@@ -857,33 +832,7 @@ final class Qwen35DecoderLayer: Module {
         let attention = attentionCacheStep(
             queries: projected[0], keys: projected[2], values: projected[3],
             cache: cache, mask: mask)
-        if let moe = untracedMoE {
-            let out = compiledAttentionMixerPost(self, [x, attention, projected[1]])
-            return out[0] + moe.forwardRoutedExpertsUntraced(out[1])
-        }
         return compiledAttentionPost(self, [x, attention, projected[1]])[0]
-    }
-
-    /// The MoE block when its routed experts must stay outside traces.
-    var untracedMoE: Qwen35SparseMoeBlock? {
-        (mlp as? Qwen35SparseMoeBlock).flatMap { $0.tracesRoutedExperts ? nil : $0 }
-    }
-
-    // Mixer + residual + post-norm only; the caller runs the MoE.
-    private let compiledLinearMixer = CompiledTrace<Qwen35DecoderLayer>(
-        state: { [$0] + ($0.linearAttn?.fusedProjectionTraceState ?? []) },
-        body: { layer, arguments in
-            let (r, newConvState, newRecState, _) = layer.linearAttn!.forward(
-                layer.inputLayerNorm(arguments[0]), convState: arguments[1],
-                recState: arguments[2], mask: nil)
-            let h = arguments[0] + r
-            return [h, layer.postAttentionLayerNorm(h), newConvState, newRecState]
-        })
-
-    private let compiledAttentionMixerPost = CompiledTrace<Qwen35DecoderLayer> { layer, arguments in
-        let r = layer.selfAttn!.mergeHeadsAndProject(attention: arguments[1], gate: arguments[2])
-        let h = arguments[0] + r
-        return [h, layer.postAttentionLayerNorm(h)]
     }
 
     /// The part of a full-attention decode step that cannot be traced: rope
@@ -910,10 +859,18 @@ final class Qwen35DecoderLayer: Module {
     func linearLayerBody(x: MLXArray, convState: MLXArray, recState: MLXArray) -> (
         MLXArray, MLXArray, MLXArray
     ) {
+        let (h, newConvState, newRecState) = linearMixerBody(
+            x: x, convState: convState, recState: recState)
+        return (h + mlpForward(postAttentionLayerNorm(h)), newConvState, newRecState)
+    }
+
+    /// The GDN token mixer and its residual, without the MLP.
+    func linearMixerBody(x: MLXArray, convState: MLXArray, recState: MLXArray) -> (
+        MLXArray, MLXArray, MLXArray
+    ) {
         let (r, newConvState, newRecState, _) = linearAttn!.forward(
             inputLayerNorm(x), convState: convState, recState: recState, mask: nil)
-        let h = x + r
-        return (h + mlpForward(postAttentionLayerNorm(h)), newConvState, newRecState)
+        return (x + r, newConvState, newRecState)
     }
 
     func attentionPreBody(x: MLXArray) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
@@ -922,9 +879,31 @@ final class Qwen35DecoderLayer: Module {
 
     /// `x` is the layer input — the residual branch around the attention block.
     func attentionPostBody(x: MLXArray, attention: MLXArray, gate: MLXArray) -> MLXArray {
-        let r = selfAttn!.mergeHeadsAndProject(attention: attention, gate: gate)
-        let h = x + r
+        let h = attentionMixerBody(x: x, attention: attention, gate: gate)
         return h + mlpForward(postAttentionLayerNorm(h))
+    }
+
+    /// The attention output projection and its residual, without the MLP.
+    func attentionMixerBody(x: MLXArray, attention: MLXArray, gate: MLXArray) -> MLXArray {
+        x + selfAttn!.mergeHeadsAndProject(attention: attention, gate: gate)
+    }
+
+    var routesExpertsEagerly: Bool { (mlp as? Qwen35SparseMoeBlock)?.routesExpertsEagerly ?? false }
+
+    /// The MoE block up to its router: `[expertsInput, indices, scores]`.
+    func expertsHeadBody(_ h: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
+        let x = postAttentionLayerNorm(h)
+        let (indices, scores) = (mlp as! Qwen35SparseMoeBlock).route(x)
+        return (x, indices, scores)
+    }
+
+    /// The rest of the layer once its routed experts have run.
+    func expertsTailBody(h: MLXArray, expertsInput x: MLXArray, routed: MLXArray) -> MLXArray {
+        h + (routed + (mlp as! Qwen35SparseMoeBlock).sharedExperts(x))
+    }
+
+    func routedExperts(_ x: MLXArray, indices: MLXArray, scores: MLXArray) -> MLXArray {
+        (mlp as! Qwen35SparseMoeBlock).routedExperts(x, indices: indices, scores: scores)
     }
 
     private func mlpForward(_ x: MLXArray) -> MLXArray {
@@ -964,10 +943,20 @@ public class Qwen35TextModelInner: Module {
         self.ssmIdx = layers.firstIndex(where: { $0.isLinear })
         self.faIdx = layers.firstIndex(where: { !$0.isLinear })
 
+        let eager = layers.map(\.routesExpertsEagerly)
         let segments = CompiledDecodeSegment.schedule(
-            linearLayers: layers.map(\.isLinear))
+            linearLayers: layers.map(\.isLinear), eagerExperts: eager)
+        self.scheduledEagerExperts = eager
         self.decodeSegments = segments
-        self.compiledSegments = CompiledDecodeSegmentCache(
+        self.compiledSegments = Self.segmentCache(segments)
+
+        super.init()
+    }
+
+    private static func segmentCache(_ segments: [CompiledDecodeSegment])
+        -> CompiledDecodeSegmentCache<Qwen35TextModelInner>
+    {
+        CompiledDecodeSegmentCache(
             count: segments.count,
             state: { model, index in
                 // Everything `segmentBody` reads: the layers it runs (with a
@@ -985,8 +974,20 @@ public class Qwen35TextModelInner: Module {
             body: { model, index, arguments in
                 model.segmentBody(at: index, arguments)
             })
+    }
 
-        super.init()
+    /// Rebuilds the schedule when the set of untraceable routed experts changes,
+    /// e.g. after `switch_mlp` was replaced.
+    private func refreshDecodeSchedule() {
+        let eager = layers.map(\.routesExpertsEagerly)
+        scheduleLock.withLock {
+            guard eager != scheduledEagerExperts else { return }
+            let segments = CompiledDecodeSegment.schedule(
+                linearLayers: layers.map(\.isLinear), eagerExperts: eager)
+            scheduledEagerExperts = eager
+            decodeSegments = segments
+            compiledSegments = Self.segmentCache(segments)
+        }
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache?]? = nil) -> MLXArray {
@@ -1043,21 +1044,36 @@ public class Qwen35TextModelInner: Module {
     /// One traced piece of a decode step: the tail of the previous
     /// full-attention layer, a run of GDN layers, then the head of the next
     /// one (whose SDPA runs between this segment and the next).
-    private let decodeSegments: [CompiledDecodeSegment]
-    private let compiledSegments: CompiledDecodeSegmentCache<Qwen35TextModelInner>
+    private var scheduledEagerExperts: [Bool]
+    private var decodeSegments: [CompiledDecodeSegment]
+    private var compiledSegments: CompiledDecodeSegmentCache<Qwen35TextModelInner>
+    private let scheduleLock = NSLock()
 
     var compiledDecodeSegmentCount: Int { compiledSegments.compiledCount }
 
     /// Flat argument/result lists because `compile` takes `[MLXArray]`.
     /// In: `[x]` (token ids for segment 0), then `[attention, gate]` when
-    /// opening with a full-attention tail, then `[convState, recState]` per
-    /// GDN layer. Out: `[x]`, then `[newConvState, newRecState]` per GDN
-    /// layer, then `[queries, gate, keys, values]` when closing with a head.
+    /// opening with a full-attention tail or `[expertsInput, routed]` when
+    /// opening with an experts tail, then `[convState, recState]` per GDN
+    /// layer. Out: `[x]`, then `[newConvState, newRecState]` per GDN layer,
+    /// then `[queries, gate, keys, values]` when closing with an attention head
+    /// or `[expertsInput, indices, scores]` when closing with an experts head.
     private func segmentBody(at index: Int, _ args: [MLXArray]) -> [MLXArray] {
         let segment = decodeSegments[index]
         var hiddenStates = index == 0 ? embedTokens(args[0]) : args[0]
 
+        if let tail = segment.expertsTailLayer {
+            hiddenStates = layers[tail].expertsTailBody(
+                h: hiddenStates, expertsInput: args[1], routed: args[2])
+        }
+
         if let post = segment.attentionPostLayer {
+            if segment.expertsHeadLayer == post {
+                hiddenStates = layers[post].attentionMixerBody(
+                    x: hiddenStates, attention: args[1], gate: args[2])
+                let (x, indices, scores) = layers[post].expertsHeadBody(hiddenStates)
+                return [hiddenStates, x, indices, scores]
+            }
             hiddenStates = layers[post].attentionPostBody(
                 x: hiddenStates, attention: args[1], gate: args[2])
         }
@@ -1065,6 +1081,12 @@ public class Qwen35TextModelInner: Module {
         var states: [MLXArray] = []
         for (i, layerIndex) in segment.linearLayers.enumerated() {
             let slot = segment.stateInputOffset + 2 * i
+            if layerIndex == segment.expertsHeadLayer {
+                let (out, newConvState, newRecState) = layers[layerIndex].linearMixerBody(
+                    x: hiddenStates, convState: args[slot], recState: args[slot + 1])
+                let (x, indices, scores) = layers[layerIndex].expertsHeadBody(out)
+                return [out] + states + [newConvState, newRecState, x, indices, scores]
+            }
             let (out, newConvState, newRecState) = layers[layerIndex].linearLayerBody(
                 x: hiddenStates, convState: args[slot], recState: args[slot + 1])
             hiddenStates = out
@@ -1100,8 +1122,8 @@ public class Qwen35TextModelInner: Module {
     /// everything else on a decode step is static-shaped, so the segments
     /// compile concretely.
     private func decodeStep(_ inputs: MLXArray, _ cache: [KVCache?]) -> MLXArray? {
-        guard !layers.contains(where: { $0.untracedMoE != nil }) else { return nil }
         guard cache.count == layers.count else { return nil }
+        refreshDecodeSchedule()
         // The schedule is only valid when the masks the general path would
         // build both come out empty.
         if let ssmIdx,
@@ -1132,10 +1154,13 @@ public class Qwen35TextModelInner: Module {
         }
 
         var carry = inputs
-        var pendingAttention: [MLXArray] = []
+        var pending: [MLXArray] = []
+        let (decodeSegments, compiledSegments) = scheduleLock.withLock {
+            (self.decodeSegments, self.compiledSegments)
+        }
 
         for (segmentIndex, segment) in decodeSegments.enumerated() {
-            var args: [MLXArray] = [carry] + pendingAttention
+            var args: [MLXArray] = [carry] + pending
             for layerIndex in segment.linearLayers {
                 let mambaCache = mambaCaches[layerIndex]!
                 args.append(mambaCache[0]!)
@@ -1152,13 +1177,19 @@ public class Qwen35TextModelInner: Module {
                 mambaCache.advance(1)
             }
 
-            pendingAttention = []
+            pending = []
             if let pre = segment.attentionPreLayer {
                 let head = segment.attentionOutputOffset
                 let attention = layers[pre].attentionCacheStep(
                     queries: outputs[head], keys: outputs[head + 2],
                     values: outputs[head + 3], cache: cache[pre]!, mask: .none)
-                pendingAttention = [attention, outputs[head + 1]]
+                pending = [attention, outputs[head + 1]]
+            }
+            if let experts = segment.expertsHeadLayer {
+                let head = segment.attentionOutputOffset
+                let routed = layers[experts].routedExperts(
+                    outputs[head], indices: outputs[head + 1], scores: outputs[head + 2])
+                pending = [outputs[head], routed]
             }
         }
 
@@ -1175,19 +1206,6 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let configuration: Qwen35TextConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
-
-    /// Whether single-token decode compiles the routed-expert step (`switchMLP`) with the rest of the layer.
-    ///
-    /// Set to `false` when `switchMLP` has been replaced by a module that cannot run inside a compiled trace,
-    /// e.g. one that reads expert ids on the CPU. Decode then keeps everything else compiled. Default `true`.
-    public var tracesRoutedExperts: Bool {
-        get { !model.layers.contains { $0.untracedMoE != nil } }
-        set {
-            for layer in model.layers {
-                (layer.mlp as? Qwen35SparseMoeBlock)?.tracesRoutedExperts = newValue
-            }
-        }
-    }
 
     public init(_ args: Qwen35TextConfiguration) {
         self.configuration = args
@@ -1377,12 +1395,6 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
 
     /// The text backbone's geometry.
     public var configuration: Qwen35TextConfiguration { languageModel.configuration }
-
-    /// See ``Qwen35TextModel/tracesRoutedExperts``.
-    public var tracesRoutedExperts: Bool {
-        get { languageModel.tracesRoutedExperts }
-        set { languageModel.tracesRoutedExperts = newValue }
-    }
 
     public init(_ args: Qwen35Configuration) {
         let textModel = Qwen35TextModel(args.textConfig)

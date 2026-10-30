@@ -7,7 +7,7 @@ import XCTest
 @testable import MLXLLM
 
 /// Reads the expert ids on the CPU, as a module that pages experts in would. Illegal inside a compiled trace.
-private final class HostReadSwitchGLU: SwitchGLU {
+private final class HostReadSwitchGLU: SwitchGLU, UntraceableModule {
     var hostReads = 0
 
     override func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
@@ -60,33 +60,80 @@ final class Qwen35RoutedExpertTracingTests: XCTestCase {
         return steps
     }
 
-    func testDecodeWithUntracedRoutedExpertsMatchesTracedDecode() throws {
+    private func replaceExperts(
+        in model: Qwen35TextModel, _ make: (SwitchGLU) throws -> SwitchGLU
+    ) throws -> [SwitchGLU] {
+        var replacements: [SwitchGLU] = []
+        for layer in model.model.layers {
+            guard let moe = layer.mlp as? Qwen35SparseMoeBlock else { continue }
+            let replacement = try make(moe.switchMLP)
+            moe.update(modules: ModuleChildren.unflattened(["switch_mlp": replacement]))
+            replacements.append(replacement)
+        }
+        return replacements
+    }
+
+    private func assertSameLogits(
+        _ a: [MLXArray], _ b: [MLXArray], file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertEqual(a.count, b.count, file: file, line: line)
+        for (x, y) in zip(a, b) {
+            XCTAssertTrue(
+                allClose(x, y, rtol: 1e-5, atol: 1e-5).item(Bool.self), file: file, line: line)
+        }
+    }
+
+    func testUntraceableExpertsSplitTheCompiledDecodeStep() throws {
         MLXRandom.seed(11)
         let configuration = try configuration()
         let model = Qwen35TextModel(configuration)
         eval(model)
-        XCTAssertTrue(model.tracesRoutedExperts)
         let traced = try decodeLogits(model)
+        XCTAssertEqual(model.model.compiledDecodeSegmentCount, 2)
 
-        var replacements: [HostReadSwitchGLU] = []
-        for layer in model.model.layers {
-            guard let moe = layer.mlp as? Qwen35SparseMoeBlock else { continue }
+        let stock = model.model.layers.compactMap { ($0.mlp as? Qwen35SparseMoeBlock)?.switchMLP }
+        let paging = try replaceExperts(in: model) { original in
             let replacement = HostReadSwitchGLU(
                 inputDims: configuration.hiddenSize,
                 hiddenDims: configuration.moeIntermediateSize,
                 numExperts: configuration.numExperts)
-            try replacement.update(parameters: moe.switchMLP.parameters(), verify: .all)
-            moe.update(modules: ModuleChildren.unflattened(["switch_mlp": replacement]))
-            replacements.append(replacement)
+            try replacement.update(parameters: original.parameters(), verify: .all)
+            return replacement
         }
-        model.tracesRoutedExperts = false
-        XCTAssertFalse(model.tracesRoutedExperts)
         let untraced = try decodeLogits(model)
 
-        XCTAssertEqual(replacements.count, 2)
-        XCTAssertTrue(replacements.allSatisfy { $0.hostReads > 0 })
-        for (a, b) in zip(traced, untraced) {
-            XCTAssertTrue(allClose(a, b, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        // Both MoE blocks became boundaries: 4 compiled segments instead of 2,
+        // with the routed experts run eagerly between them.
+        XCTAssertEqual(model.model.compiledDecodeSegmentCount, 4)
+        XCTAssertTrue(paging.allSatisfy { ($0 as! HostReadSwitchGLU).hostReads > 0 })
+        assertSameLogits(traced, untraced)
+
+        // Swapping the stock experts back rebuilds the schedule instead of reusing stale traces.
+        var index = 0
+        _ = try replaceExperts(in: model) { _ in
+            defer { index += 1 }
+            return stock[index]
         }
+        let restored = try decodeLogits(model)
+        XCTAssertEqual(model.model.compiledDecodeSegmentCount, 2)
+        assertSameLogits(traced, restored)
+    }
+
+    func testScheduleClosesAtEagerExperts() {
+        let stock = CompiledDecodeSegment.schedule(linearLayers: [true, false])
+        XCTAssertEqual(
+            CompiledDecodeSegment.schedule(
+                linearLayers: [true, false], eagerExperts: [false, false]),
+            stock)
+
+        XCTAssertEqual(
+            CompiledDecodeSegment.schedule(
+                linearLayers: [true, false], eagerExperts: [true, true]),
+            [
+                CompiledDecodeSegment(linearLayers: [0], expertsHeadLayer: 0),
+                CompiledDecodeSegment(expertsTailLayer: 0, attentionPreLayer: 1),
+                CompiledDecodeSegment(attentionPostLayer: 1, expertsHeadLayer: 1),
+                CompiledDecodeSegment(expertsTailLayer: 1),
+            ])
     }
 }
