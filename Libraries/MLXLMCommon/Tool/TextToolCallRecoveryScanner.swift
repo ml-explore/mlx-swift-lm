@@ -117,6 +117,9 @@ struct TextToolCallRecoveryScanner: Sendable {
     private let allowedToolNames: Set<String>
     private let allowedToolNamesByLength: [String]
     private let signals: [Signal]
+    /// Markers that open a tool-call attempt (the selected format's own and,
+    /// when recovery is enabled, the explicit alternate dialects).
+    private let callOpeningMarkers: [String]
     private let potentialSignalPrefixes: Set<String>
     private let maximumPotentialSignalPrefixLength: Int
     private let potentialPrefixEndCharacters: Set<Character>
@@ -135,6 +138,15 @@ struct TextToolCallRecoveryScanner: Sendable {
 
     private var buffer = ""
     private var context: Context = .response
+    /// Whether the current reasoning span has carried only whitespace so far.
+    private var reasoningSpanIsBlank = false
+    /// A reasoning span opened directly on a tool-call marker and hasn't closed.
+    /// Qwen3 sometimes opens `<think>` and goes straight to `<tool_call>`, never
+    /// closing the span. The span is held: a close later in the stream makes it
+    /// ordinary reasoning (inert, as any call inside a closed span is); reaching
+    /// EOS still open means there was no reasoning, only the call, and the
+    /// buffered text is released as response text to the native parser.
+    private var blankReasoningCallPending = false
     private var previousSourceCharacter: Character?
     private var pendingCandidate: PendingCandidate?
 
@@ -205,6 +217,12 @@ struct TextToolCallRecoveryScanner: Sendable {
         signals.append(Signal(text: "~", kind: .codeTilde))
 
         self.signals = signals
+        self.callOpeningMarkers = signals.compactMap { signal in
+            switch signal.kind {
+            case .nativeFrame, .nativeUntilEOS, .nativeInlineJSON, .explicit: signal.text
+            default: nil
+            }
+        }
 
         // Prefix lookup replaces an O(tool count) suffix search on every text
         // fragment. Declared names are consulted only after `[ARGS]` is present.
@@ -280,6 +298,34 @@ struct TextToolCallRecoveryScanner: Sendable {
         scanLoop: while !buffer.isEmpty {
             switch context {
             case .reasoning(let close):
+                if reasoningSpanIsBlank {
+                    // See `blankReasoningCallPending`. Any other first content
+                    // keeps the span protected exactly as before.
+                    let content = buffer.drop { $0.isWhitespace }
+                    if content.isEmpty {
+                        appendProtectedText(buffer, to: &output)
+                        buffer.removeAll(keepingCapacity: true)
+                        break scanLoop
+                    }
+                    if callOpeningMarkers.contains(where: { content.hasPrefix($0) }) {
+                        appendProtectedText(String(buffer[..<content.startIndex]), to: &output)
+                        buffer = String(content)
+                        reasoningSpanIsBlank = false
+                        blankReasoningCallPending = true
+                    } else if callOpeningMarkers.contains(where: { $0.hasPrefix(content) }) {
+                        break scanLoop  // could still become a marker: wait for more
+                    } else {
+                        reasoningSpanIsBlank = false
+                    }
+                }
+                if blankReasoningCallPending {
+                    if buffer.range(of: close) == nil, buffer.utf8.count <= maximumBufferedByteCount
+                    {
+                        break scanLoop  // hold until the span closes or the stream ends
+                    }
+                    // Closed (or past the byte budget): ordinary reasoning after all.
+                    blankReasoningCallPending = false
+                }
                 if let range = buffer.range(of: close) {
                     appendProtectedText(String(buffer[..<range.upperBound]), to: &output)
                     buffer = String(buffer[range.upperBound...])
@@ -441,6 +487,7 @@ struct TextToolCallRecoveryScanner: Sendable {
                     appendProtectedText(match.signal.text, to: &output)
                     buffer.removeFirst(match.signal.text.count)
                     context = .reasoning(close: close)
+                    reasoningSpanIsBlank = true
 
                 case .nativeFrame(let endMarker):
                     // Keep the whole frame buffered; it is emitted verbatim
@@ -624,12 +671,18 @@ struct TextToolCallRecoveryScanner: Sendable {
     /// response text. Native frames alone remain the native parser's own
     /// end-of-stream responsibility.
     mutating func finish() -> [Output] {
+        if blankReasoningCallPending, case .reasoning = context {
+            blankReasoningCallPending = false
+            context = .response
+        }
         var output = process("")
         guard !buffer.isEmpty else {
             // `ToolCallProcessor` supports reuse after EOS. A native opening
             // marker delivered immediately before EOS must not leave recovery
             // shielding every subsequent generation.
             context = .response
+            reasoningSpanIsBlank = false
+            blankReasoningCallPending = false
             previousSourceCharacter = nil
             return output
         }
@@ -637,6 +690,8 @@ struct TextToolCallRecoveryScanner: Sendable {
         defer {
             buffer.removeAll(keepingCapacity: true)
             context = .response
+            reasoningSpanIsBlank = false
+            blankReasoningCallPending = false
             previousSourceCharacter = nil
             pendingCandidate = nil
         }
