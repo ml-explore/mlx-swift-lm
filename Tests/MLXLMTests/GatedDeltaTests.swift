@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 import XCTest
 
 public class GatedDeltaTests: XCTestCase {
@@ -256,6 +257,95 @@ public class GatedDeltaTests: XCTestCase {
             relativeDrift(stateKernel, stateOps), 1e-4,
             "The two paths disagree on the carried recurrent state."
         )
+    }
+
+    func testParallelChunksMatchSequentialValuesAndAllGradients() {
+        for length in [1, 7, 16, 17, 33] {
+            verifySequentialReference(length: length, dtype: .float32)
+        }
+        verifySequentialReference(length: 33, dtype: .float16)
+        verifySequentialReference(length: 33, dtype: .bfloat16)
+    }
+
+    func testParallelChunksHandleZeroDecayAndCarriedState() {
+        verifySequentialReference(length: 33, dtype: .float32, zeroDecay: true)
+    }
+
+    func testMaskedTrainingRetainsSequentialValuesAndGradients() {
+        let mask = MLXArray((0 ..< 66).map { $0 % 5 != 0 }, [2, 33])
+        verifySequentialReference(length: 33, dtype: .float32, mask: mask)
+    }
+
+    private func verifySequentialReference(
+        length: Int, dtype: DType, zeroDecay: Bool = false, mask: MLXArray? = nil
+    ) {
+        let arrays = withRandomState(MLXRandom.RandomState(seed: 17)) {
+            [
+                MLXRandom.uniform(low: -0.1, high: 0.1, [2, length, 1, 48]).asType(dtype),
+                MLXRandom.uniform(low: -0.1, high: 0.1, [2, length, 1, 48]).asType(dtype),
+                MLXRandom.uniform(low: -0.2, high: 0.2, [2, length, 2, 8]).asType(dtype),
+                zeroDecay
+                    ? MLXArray.full([2, length, 2], values: MLXArray(1_000), dtype: dtype)
+                    : MLXRandom.uniform(low: -2, high: 2, [2, length, 2]).asType(dtype),
+                MLXRandom.uniform(low: -2, high: 2, [2, length, 2]).asType(dtype),
+                MLXArray.zeros([2], dtype: dtype),
+                MLXArray.zeros([2], dtype: dtype),
+                MLXRandom.uniform(low: -0.2, high: 0.2, [2, 2, 8, 48]),
+            ]
+        }
+        eval(arrays)
+        let actual: ([MLXArray]) -> [MLXArray] = { inputs in
+            let (output, state) = gatedDeltaUpdate(
+                q: inputs[0], k: inputs[1], v: inputs[2], a: inputs[3], b: inputs[4],
+                aLog: inputs[5], dtBias: inputs[6], state: inputs[7], mask: mask,
+                useKernel: false)
+            return [output, state]
+        }
+        let expected: ([MLXArray]) -> [MLXArray] = { inputs in
+            self.sequentialReference(inputs, mask: mask)
+        }
+        for (left, right) in zip(actual(arrays), expected(arrays)) {
+            let error = abs(left.asType(.float32) - right.asType(.float32)).max().item(Float.self)
+            XCTAssertLessThan(error, dtype == .float32 ? 1e-5 : 2e-3)
+        }
+        let loss: ([MLXArray]) -> [MLXArray] = { outputs in
+            [outputs[0].asType(.float32).square().mean() + outputs[1].square().mean()]
+        }
+        let (_, actualGradients) = valueAndGrad({ loss(actual($0)) }, argumentNumbers: 0 ..< 8)(
+            arrays)
+        let (_, expectedGradients) = valueAndGrad({ loss(expected($0)) }, argumentNumbers: 0 ..< 8)(
+            arrays)
+        for (left, right) in zip(actualGradients, expectedGradients) {
+            let scale = maximum(abs(right.asType(.float32)).max(), MLXArray(1e-6))
+            let error = (abs(left.asType(.float32) - right.asType(.float32)).max() / scale).item(
+                Float.self)
+            XCTAssertTrue(error.isFinite)
+            XCTAssertLessThan(error, dtype == .float32 ? 1e-4 : 0.03)
+        }
+    }
+
+    private func sequentialReference(_ inputs: [MLXArray], mask: MLXArray?) -> [MLXArray] {
+        let q = repeated(inputs[0], count: 2, axis: -2)
+        let k = repeated(inputs[1], count: 2, axis: -2)
+        let v = inputs[2]
+        let g = exp(-exp(inputs[5].asType(.float32)) * MLXNN.softplus(inputs[3] + inputs[6]))
+        let beta = sigmoid(inputs[4]).asType(.float32)
+        var state = inputs[7]
+        var outputs: [MLXArray] = []
+        for index in 0 ..< q.dim(1) {
+            let oldState = state
+            state = state * g[0..., index, 0..., .newAxis, .newAxis]
+            let keys = k[0..., index, 0..., .newAxis, 0...]
+            let memory = (state * keys).sum(axis: -1)
+            let delta = (v[0..., index] - memory) * beta[0..., index, 0..., .newAxis]
+            state = state + keys * delta[0..., 0..., 0..., .newAxis]
+            let output = (state * q[0..., index, 0..., .newAxis, 0...]).sum(axis: -1)
+            if let mask {
+                state = MLX.where(mask[0..., index, .newAxis, .newAxis, .newAxis], state, oldState)
+            }
+            outputs.append(output.asType(q.dtype))
+        }
+        return [MLX.stacked(outputs, axis: 1), state]
     }
 
 }
