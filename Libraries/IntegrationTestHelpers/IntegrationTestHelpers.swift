@@ -449,6 +449,8 @@ public enum ChatSessionTests {
                 throw RejectedToolCallError(rejection)
             case .info(let completionInfo):
                 info = completionInfo
+            case .steering:
+                break
             }
         }
         print()
@@ -525,7 +527,7 @@ public enum ChatSessionTests {
             switch generation {
             case .chunk(let text):
                 followUpText += text
-            case .reasoning:
+            case .reasoning, .steering:
                 break
             case .toolCall(let call):
                 followUpCalls.append(call)
@@ -1266,7 +1268,7 @@ public enum ToolCallTests {
                 switch generation {
                 case .chunk(let chunk):
                     text += chunk
-                case .reasoning:
+                case .reasoning, .steering:
                     break
                 case .toolCall(let toolCall):
                     toolCalls.append(toolCall)

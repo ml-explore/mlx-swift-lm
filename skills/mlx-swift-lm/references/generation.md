@@ -54,6 +54,8 @@ for await event in stream {
         print("\nRejected tool call: \(rejected.reason)")
     case .info(let info):
         print("\nstop=\(info.stopReason) tok/s=\(info.tokensPerSecond)")
+    case .steering:
+        break  // Only ChatSession emits steering outcomes.
     }
 }
 ```
@@ -149,6 +151,8 @@ let (tokenStream, tokenTask) = try generateTokensTask(
 - `.stop`: EOS or stop token encountered.
 - `.length`: `maxTokens` reached.
 - `.cancelled`: task cancellation or early termination path.
+- `.steered`: a `ChatSession` step ended early to apply `steer(...)` input; the
+  response continues with another step.
 
 ## Throwing vs Non-Throwing Behavior
 

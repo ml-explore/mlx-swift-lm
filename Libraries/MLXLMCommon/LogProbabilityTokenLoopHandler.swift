@@ -31,6 +31,7 @@ public struct LogProbabilityTokenLoopHandler<Base: TokenLoopHandler>: TokenLoopH
 
     public var additionalStopTokenIDs: Set<Int> { base.additionalStopTokenIDs }
     public var receivesStopTokens: Bool { base.receivesStopTokens }
+    public var canEndForSteering: Bool { base.canEndForSteering }
 
     public mutating func onToken(
         _ token: Int,

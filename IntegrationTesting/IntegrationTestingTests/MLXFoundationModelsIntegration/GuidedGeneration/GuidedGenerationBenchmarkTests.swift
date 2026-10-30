@@ -427,7 +427,7 @@ struct GuidedGenerationBenchmarkTests {
                 case .chunk(let text):
                     charCount += text.count
                     deltaCount += 1
-                case .info, .toolCall, .rejectedToolCall, .reasoning:
+                case .info, .toolCall, .rejectedToolCall, .reasoning, .steering:
                     break
                 }
             }

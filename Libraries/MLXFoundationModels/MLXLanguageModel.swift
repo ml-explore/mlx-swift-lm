@@ -1546,6 +1546,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     break
                 case .rejectedToolCall(let rejection):
                     throw RejectedToolCallError(rejection)
+                case .steering:
+                    break
                 }
             }
         }

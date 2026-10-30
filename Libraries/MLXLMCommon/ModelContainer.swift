@@ -184,6 +184,7 @@ public final class ModelContainer: Sendable {
     ///     case .info(let info): print(info.tokensPerSecond)
     ///     case .toolCall(let call): handleToolCall(call)
     ///     case .rejectedToolCall(let rejection): handleRejectedToolCall(rejection)
+    ///     case .steering: break
     ///     }
     /// }
     /// ```

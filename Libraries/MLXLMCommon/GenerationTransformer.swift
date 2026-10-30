@@ -4,10 +4,17 @@
 public protocol GenerationProviding: Sendable {
     /// A decoded event or completion; `nil` for an observation-only event.
     var generation: Generation? { get }
+
+    /// Wraps an event the session emits itself, such as a steering outcome.
+    init(generation: Generation)
 }
 
 extension Generation: GenerationProviding {
     public var generation: Generation? { self }
+
+    public init(generation: Generation) {
+        self = generation
+    }
 }
 
 extension LogProbabilityGeneration: GenerationProviding where Output: GenerationProviding {
@@ -16,6 +23,10 @@ extension LogProbabilityGeneration: GenerationProviding where Output: Generation
         case .generation(let output): output.generation
         case .probability: nil
         }
+    }
+
+    public init(generation: Generation) {
+        self = .generation(Output(generation: generation))
     }
 }
 
@@ -33,7 +44,7 @@ public protocol GenerationTransformer: Sendable {
     ///
     /// Forward every base event exactly once and in order, exposing it through
     /// ``GenerationProviding/generation``. Preserve the base's stop-token properties,
-    /// dispositions, end-of-generation output, and completion metadata.
+    /// steering boundary, dispositions, end-of-generation output, and completion metadata.
     /// Automatically dispatched tool-call events are consumed by the session.
     func makeHandler(wrapping base: TextToolTokenLoopHandler) -> Handler
 }
