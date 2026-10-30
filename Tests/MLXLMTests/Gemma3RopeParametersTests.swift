@@ -77,21 +77,19 @@ struct Gemma3RopeParametersTests {
 
     @Test("Global layers apply the rope_parameters factor; sliding layers do not")
     func llmGlobalLayerRope() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let model = Gemma3TextModel(try llmConfig(textConfigJSON(perLayerType)))
-            let x = MLXRandom.normal([1, 2, 3, 8])
-            let offset = 100
+        let model = Gemma3TextModel(try llmConfig(textConfigJSON(perLayerType)))
+        let x = MLXRandom.normal([1, 2, 3, 8])
+        let offset = 100
 
-            let global = model.model.layers[5].selfAttention.rope
-            let expected = RoPE(dimensions: 8, base: 1_000_000, scale: 1 / 8)
-            #expect(
-                allClose(global(x, offset: offset), expected(x, offset: offset)).item(Bool.self))
+        let global = model.model.layers[5].selfAttention.rope
+        let expected = RoPE(dimensions: 8, base: 1_000_000, scale: 1 / 8)
+        #expect(
+            allClose(global(x, offset: offset), expected(x, offset: offset)).item(Bool.self))
 
-            let sliding = model.model.layers[0].selfAttention.rope
-            let unscaled = RoPE(dimensions: 8, base: 10_000)
-            #expect(
-                allClose(sliding(x, offset: offset), unscaled(x, offset: offset)).item(Bool.self))
-        }
+        let sliding = model.model.layers[0].selfAttention.rope
+        let unscaled = RoPE(dimensions: 8, base: 10_000)
+        #expect(
+            allClose(sliding(x, offset: offset), unscaled(x, offset: offset)).item(Bool.self))
     }
 
     @Test("VLM text config reads rope_parameters in both forms")
