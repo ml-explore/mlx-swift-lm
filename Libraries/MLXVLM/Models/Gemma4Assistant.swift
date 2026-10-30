@@ -96,12 +96,8 @@ public final class Gemma4AssistantMaskedEmbedder: Module {
     /// clusters, expand the top-K, score only those tokens against the tied
     /// embedding, and scatter back to full vocab with unselected positions
     /// pushed below the selected minimum so they lose argmax/softmax.
-    /// `tiedEmbedding` is the drafter's tied token embedding *module*, not its
-    /// raw `.weight`: gathering through the module's forward returns dense
-    /// `[N, H]` rows for a plain `Embedding` and dequantized rows for a
-    /// `QuantizedEmbedding` (whose `.weight` is packed `[vocab, H·bits/32]` and
-    /// cannot be reshaped to `H`). Every mlx-community E-series drafter ships
-    /// quantized, so this must handle both.
+    /// `tiedEmbedding` is the embedding *module*, not its `.weight`: a
+    /// `QuantizedEmbedding`'s weight is packed and cannot reshape to `H`.
     public func callAsFunction(_ hiddenStates: MLXArray, tiedEmbedding: Embedding) -> MLXArray {
         let b = hiddenStates.dim(0)
         let l = hiddenStates.dim(1)
@@ -113,23 +109,72 @@ public final class Gemma4AssistantMaskedEmbedder: Module {
 
         // Each cluster owns a contiguous block of canonical token IDs.
         let ordering = tokenOrdering.reshaped([numCentroids, vocabSizePerCentroid])
-        let selectedCanonical = ordering.take(topkIdx, axis: 0)  // [B, L, topK, vsc]
+        let selected = ordering.take(topkIdx, axis: 0)
+            .reshaped([b, l, n])  // [B, L, N] canonical token IDs
 
-        // Gather just those rows from the tied embedding and score them. The
-        // embedding forward dequantizes when the module is quantized.
-        let selectedEmb =
-            tiedEmbedding(selectedCanonical.reshaped([-1]))
-            .reshaped([b, l, n, hiddenSize])  // [B, L, N, H]
-        let selectedLogits = matmul(
-            hiddenStates.expandedDimensions(axis: -2),  // [B, L, 1, H]
-            selectedEmb.swappedAxes(-1, -2)  // [B, L, H, N]
-        ).squeezed(axis: -2)  // [B, L, N]
+        let selectedLogits = score(
+            hidden: hiddenStates, selected: selected, tiedEmbedding: tiedEmbedding)
 
         // Scatter to full vocab; mask_value kept on-device (no .item() sync).
         let maskValue = selectedLogits.min() - 1
         let out = broadcast(maskValue, to: [b, l, vocabSize]).asType(hiddenStates.dtype)
-        let scatterIdx = selectedCanonical.reshaped([b, l, n])
-        return putAlong(out, scatterIdx, values: selectedLogits, axis: -1)
+        return putAlong(out, selected, values: selectedLogits, axis: -1)
+    }
+
+    /// `[B, L, N]` logits of the selected token IDs per input row. Scores
+    /// straight from stored embedding rows (packed rows stay quantized);
+    /// unknown weight layouts fall back to the embedding's forward.
+    private func score(
+        hidden: MLXArray, selected: MLXArray, tiedEmbedding: Embedding
+    ) -> MLXArray {
+        let rows = hidden.dim(0) * hidden.dim(1)
+        let n = selected.dim(-1)
+        // gatherMN output [rows, N, 1, 1] holds one dot product per pair.
+        let lhsIndices = broadcast(
+            MLXArray(0 ..< rows).reshaped([rows, 1]), to: [rows, n])
+        let rhsIndices = selected.reshaped([rows, n])
+        let hiddenRows = hidden.reshaped([rows, 1, hiddenSize])  // [rows] matrices of [1, H]
+
+        let logits: MLXArray
+        if let quantized = tiedEmbedding as? QuantizedEmbedding,
+            quantized.mode == .affine, quantized.biases != nil, quantized.globalScale == nil
+        {
+            // [vocab] matrices of [1, H] rows, packed along H.
+            let packedRows = quantized.weight.reshaped([vocabSize, 1, quantized.weight.dim(-1)])
+            logits = MLX.gatherQuantizedMM(
+                hiddenRows, packedRows,
+                scales: quantized.scales.reshaped([vocabSize, 1, -1]),
+                biases: quantized.biases!.reshaped([vocabSize, 1, -1]),
+                lhsIndices: lhsIndices, rhsIndices: rhsIndices,
+                transpose: true, groupSize: quantized.groupSize, bits: quantized.bits,
+                mode: quantized.mode)
+        } else if type(of: tiedEmbedding) == Embedding.self {
+            // [vocab] matrices of [H, 1] columns, one per embedding row.
+            let weightColumns = tiedEmbedding.weight.reshaped([vocabSize, hiddenSize, 1])
+            logits = MLX.gatherMM(
+                hiddenRows, weightColumns, lhsIndices: lhsIndices, rhsIndices: rhsIndices)
+        } else {
+            return scoreThroughEmbeddingForward(
+                hidden: hidden, selected: selected, tiedEmbedding: tiedEmbedding)
+        }
+        return logits.squeezed(axes: [-2, -1]).reshaped(hidden.dim(0), hidden.dim(1), n)
+    }
+
+    /// Fallback: gather dequantized rows through the embedding's forward and
+    /// dot them against the hidden rows.
+    private func scoreThroughEmbeddingForward(
+        hidden: MLXArray, selected: MLXArray, tiedEmbedding: Embedding
+    ) -> MLXArray {
+        let b = hidden.dim(0)
+        let l = hidden.dim(1)
+        let n = selected.dim(-1)
+        let selectedEmb =
+            tiedEmbedding(selected.reshaped([-1]))
+            .reshaped([b, l, n, hiddenSize])  // [B, L, N, H]
+        return matmul(
+            hidden.expandedDimensions(axis: -2),  // [B, L, 1, H]
+            selectedEmb.swappedAxes(-1, -2)  // [B, L, H, N]
+        ).squeezed(axis: -2)  // [B, L, N]
     }
 }
 
